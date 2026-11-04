@@ -25,7 +25,7 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 | Area | Threat | Mitigation Strategy |
 | :--- | :--- | :--- |
 | **SSH Connections** | Man-in-the-Middle (MitM) & Host-key substitution | Enforce strict host-key verification against known-hosts; prohibit silent bypass. |
-| **Terminal Emulator** | Malicious escape sequences / clipboard hijack | Defense-in-depth parsing; restrict OSC commands, hyperlink clicks, and clipboard write permissions. |
+| **Terminal Emulator** | Malicious escape sequences / clipboard hijack | Defense-in-depth parsing; OSC sequence sanitization strips ASCII control characters and clamps titles to 256 characters; configurable scrollback capacity prevents memory exhaustion; clipboard writes require explicit user action. |
 | **Process Execution** | Command injection via crafted arguments | Arguments are passed as discrete vectors without shell evaluation; delimiter `--` separates options from target hostnames. |
 | **Cloud Sync** | Data compromise via stolen sync files or account breach | Client-side AEAD encryption envelopes derived via Argon2id; provider receives ciphertext only. |
 | **Local Storage** | Unauthorized database access | Metadata database is stored in user app data; credentials are kept in OS keychain or encrypted vaults. |
@@ -34,6 +34,7 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 | **Team Collaboration** | Unauthorized vault modification, privilege escalation, or stale member access | Role hierarchy (`Owner`, `Administrator`, `Editor`, `Viewer`) gating administrative and write capabilities; cryptographic epoch key rotation upon member revocation; append-only audit trail for all vault and membership events. |
 | **Multiplayer Terminal** | Concurrent keystroke race conditions or rogue participant commands | Single-active-writer keystroke arbitration; non-controlling participants are strictly read-only; session host retains instantaneous override/revocation control. |
 | **Cloud & Infrastructure Integrations** | Credential leakage in logs or diagnostics; unauthorized inventory overwrite | Sensitive provider credentials (AWS secret keys, Azure secrets, DigitalOcean tokens) are redacted in summaries and encrypted in storage; non-destructive `InventoryMergeEngine` preserves existing user tags and notes during dynamic discovery; foreign keys link discovered records to inventory hosts. |
+| **System Health & Integrity** | Cryptographic degradation or compromised local environment | Automated runtime health diagnostics (`DiagnosticsRunner`, CLI `doctor`, desktop Diagnostics Modal) actively verify CSPRNG entropy, AES-256-GCM AEAD round-trip encryption, OpenSSH binary discovery, and loopback socket binding; CI/CD release workflow generates CycloneDX SBOMs and SHA-256 checksums. |
 
 For detailed analysis, see [docs/security/threat-model.md](docs/security/threat-model.md).
 

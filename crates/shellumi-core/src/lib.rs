@@ -4,6 +4,7 @@ pub mod batch;
 pub mod collaboration;
 pub mod credential;
 pub mod csv;
+pub mod diagnostics;
 pub mod group;
 pub mod identity;
 pub mod infrastructure;
@@ -32,6 +33,10 @@ pub use credential::{
     EncryptedFileCredentialStore, EphemeralCredentialStore, SecretString,
 };
 pub use csv::{export_csv, parse_csv};
+pub use diagnostics::{
+    DiagnosticCategory, DiagnosticCheck, DiagnosticSeverity, DiagnosticStatus, DiagnosticsReport,
+    DiagnosticsRunner,
+};
 pub use group::{resolve_effective_destination, resolve_effective_tags, GroupError, HostGroup};
 pub use identity::{
     compute_sha256_fingerprint, encode_openssh_public_key, generate_ed25519_key, AuthMethod,

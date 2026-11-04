@@ -67,6 +67,11 @@ impl Terminal {
         self.grid.resize(rows, cols);
     }
 
+    /// Sets the maximum scrollback capacity.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.grid.set_scrollback_limit(limit);
+    }
+
     /// Converts visible screen content to a formatted string.
     pub fn screen_to_string(&self) -> String {
         self.grid.screen_to_string()
@@ -215,6 +220,53 @@ mod tests {
         let mut term = Terminal::new(5, 20);
         term.process_str("\x1b]0;Shellumi Session\x07");
         assert_eq!(term.title(), Some("Shellumi Session"));
+    }
+
+    #[test]
+    fn sanitizes_window_title_osc_sequences() {
+        let mut term = Terminal::new(5, 20);
+        // Title with non-printable control characters (BEL, ESC) and long content
+        let long_title = "A".repeat(300);
+        term.process_str(&format!("\x1b]0;Valid\x01\x02Title {long_title}\x07"));
+        let title = term.title().expect("should have title");
+        assert!(title.starts_with("ValidTitle "));
+        assert_eq!(title.len(), 256); // Capped to 256
+        assert!(!title.contains('\x01'));
+        assert!(!title.contains('\x02'));
+    }
+
+    #[test]
+    fn handles_unicode_cjk_and_emoji_output() {
+        let mut term = Terminal::new(5, 40);
+        term.process_str("Shell: 你好世界 🚀 [OK]\r\n");
+        term.process_str("Box: ┌─┬─┐ │ │\r\n");
+        let line0 = term.grid().line_to_string(0).unwrap();
+        assert!(line0.contains("你好世界"));
+        assert!(line0.contains("🚀"));
+        assert!(line0.contains("[OK]"));
+
+        let line1 = term.grid().line_to_string(1).unwrap();
+        assert!(line1.contains("┌─┬─┐"));
+    }
+
+    #[test]
+    fn handles_large_output_workload_and_scrollback_capacity() {
+        let mut term = Terminal::new(24, 80);
+        term.set_scrollback_limit(500);
+        // Simulate massive 2,000 line command stream
+        for i in 1..=2000 {
+            term.process_str(&format!(
+                "Log stream row {i}: status=OK payload_bytes=1024\r\n"
+            ));
+        }
+        // Verify scrollback limit is strictly respected
+        assert_eq!(term.grid().scrollback().len(), 500);
+        // Verify cursor bounds
+        assert!(term.grid().cursor().row < 24);
+        assert!(term.grid().cursor().col < 80);
+        // Verify latest visible lines
+        let last_line = term.grid().line_to_string(23).unwrap();
+        assert!(last_line.contains("Log stream row 2000") || last_line.is_empty());
     }
 
     #[test]

@@ -1721,3 +1721,50 @@ web01.internal ansible_host=10.0.1.10 ansible_port=2222 ansible_user=deployer
     let del_out = String::from_utf8(del_res.stdout).unwrap();
     assert!(del_out.contains("Deleted cloud provider"));
 }
+
+#[test]
+fn supports_system_diagnostics_doctor_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("doctor_test.db");
+
+    // 1. Standalone doctor
+    let out_plain = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg("doctor")
+        .output()
+        .unwrap();
+    assert!(out_plain.status.success());
+    let str_plain = String::from_utf8(out_plain.stdout).unwrap();
+    assert!(str_plain.contains("Shellumi System Diagnostics"));
+    assert!(str_plain.contains("Total Checks:"));
+    assert!(str_plain.contains("Platform:"));
+
+    // 2. JSON output
+    let out_json = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    assert!(out_json.status.success());
+    let str_json = String::from_utf8(out_json.stdout).unwrap();
+    assert!(str_json.contains("\"shellumi_version\": \"0.1.0\""));
+    assert!(str_json.contains("\"checks\":"));
+
+    // 3. Markdown output
+    let out_md = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["doctor", "--markdown"])
+        .output()
+        .unwrap();
+    assert!(out_md.status.success());
+    let str_md = String::from_utf8(out_md.stdout).unwrap();
+    assert!(str_md.contains("# Shellumi System Diagnostics Report"));
+    assert!(str_md.contains("| Category | Check | Status |"));
+
+    // 4. Database-targeted doctor
+    let out_db = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .arg("doctor")
+        .output()
+        .unwrap();
+    assert!(out_db.status.success());
+    let str_db = String::from_utf8(out_db.stdout).unwrap();
+    assert!(str_db.contains("Metadata Database"));
+}

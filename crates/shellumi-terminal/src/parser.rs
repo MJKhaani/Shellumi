@@ -303,7 +303,13 @@ impl<'a> Perform for TerminalHandler<'a> {
             let command = params[0];
             if command == b"0" || command == b"2" {
                 if let Ok(title) = std::str::from_utf8(params[1]) {
-                    *self.title = Some(title.to_string());
+                    // Sanitize non-printable control characters and cap title length to 256 characters
+                    let sanitized: String = title
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(256)
+                        .collect();
+                    *self.title = Some(sanitized);
                 }
             }
         }

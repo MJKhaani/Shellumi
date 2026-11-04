@@ -10,11 +10,12 @@ use shellumi_core::{
     check_dangerous_command, list_local_directory, validate_jump_host, AnsibleInventoryEngine,
     AuditAction, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget,
     BatchPolicy, BatchRunner, BroadcastManager, BroadcastSafetyCheck, CloudProviderConfig,
-    CloudProviderKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol, FileEntry,
-    FileKind, HostExportItem, MoshConfig, MultiplayerSession, PaletteAction, PaletteCategory,
-    PaletteCommand, PaletteRegistry, PathUtils, SerialConfig, SharedVault, SharingAuditRecord,
-    SshDestination, SyncEntityType, TeamMember, TeamRole, TelnetConfig, TransferDirection,
-    TransferQueue, TransferStatus, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    CloudProviderKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol,
+    DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry, FileKind, HostExportItem,
+    MoshConfig, MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand,
+    PaletteRegistry, PathUtils, SerialConfig, SharedVault, SharingAuditRecord, SshDestination,
+    SyncEntityType, TeamMember, TeamRole, TelnetConfig, TransferDirection, TransferQueue,
+    TransferStatus, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedWorkspace,
@@ -147,6 +148,12 @@ struct InfraModalState {
     is_loading: bool,
 }
 
+struct DiagnosticsModalState {
+    report: Option<DiagnosticsReport>,
+    is_running: bool,
+    error: Option<String>,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -173,6 +180,7 @@ struct Shellumi {
     sync_scheduler: shellumi_core::SyncScheduler,
     team_modal: Option<TeamModalState>,
     infra_modal: Option<InfraModalState>,
+    diagnostics_modal: Option<DiagnosticsModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -399,6 +407,7 @@ impl Shellumi {
             sync_scheduler: shellumi_core::SyncScheduler::default(),
             team_modal: None,
             infra_modal: None,
+            diagnostics_modal: None,
         };
         if app.database.is_some() {
             app.load_hosts(cx);
@@ -2575,6 +2584,9 @@ impl Shellumi {
             PaletteAction::ExportAnsibleInventory => {
                 self.export_ansible_inventory_file(false, cx);
             }
+            PaletteAction::RunDiagnostics => {
+                self.open_diagnostics_modal(cx);
+            }
         }
     }
 
@@ -3774,6 +3786,55 @@ impl Shellumi {
         .detach();
     }
 
+    // =========================================================================
+    // System Diagnostics & Health Check Engine
+    // =========================================================================
+
+    fn open_diagnostics_modal(&mut self, cx: &mut Context<Self>) {
+        self.diagnostics_modal = Some(DiagnosticsModalState {
+            report: None,
+            is_running: true,
+            error: None,
+        });
+        cx.notify();
+        self.run_diagnostics_checks(cx);
+    }
+
+    fn dismiss_diagnostics_modal(&mut self, cx: &mut Context<Self>) {
+        self.diagnostics_modal = None;
+        cx.notify();
+    }
+
+    fn run_diagnostics_checks(&mut self, cx: &mut Context<Self>) {
+        let db_opt = self.database.clone();
+
+        if let Some(ref mut m) = self.diagnostics_modal {
+            m.is_running = true;
+            m.error = None;
+        }
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let mut runner = DiagnosticsRunner::new();
+            if let Some(ref path) = db_opt {
+                runner = runner.with_database_path(path);
+            }
+            runner.run_all()
+        });
+
+        cx.spawn(async move |app, cx| {
+            let report = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(m) = &mut app.diagnostics_modal {
+                    m.is_running = false;
+                    m.report = Some(report);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn render_conflict_modal(
         &self,
         modal: &ConflictModalState,
@@ -4939,6 +5000,7 @@ impl Shellumi {
                     PaletteCategory::Workspace => (rgb(0x312e81), rgb(0xc7d2fe)),
                     PaletteCategory::Collaboration => (rgb(0x4338ca), rgb(0xe0e7ff)),
                     PaletteCategory::Infrastructure => (rgb(0x0e7490), rgb(0xcffafe)),
+                    PaletteCategory::Diagnostics => (rgb(0x0f766e), rgb(0xccfbf1)),
                 };
 
                 let action = mat.command.action.clone();
@@ -6404,6 +6466,255 @@ impl Shellumi {
                     );
                 modal_box = modal_box.child(ansible_section);
             }
+        }
+
+        overlay.child(modal_box)
+    }
+
+    fn render_diagnostics_modal(
+        &self,
+        modal: &DiagnosticsModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("diagnostics-modal-overlay")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000cc))
+            .flex()
+            .items_center()
+            .justify_center();
+
+        let mut modal_box = div()
+            .id("diagnostics-modal-box")
+            .w(px(740.0))
+            .max_h(px(580.0))
+            .p_6()
+            .rounded_xl()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child("🩺 System Diagnostics & Production Health Check"),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-diagnostics-modal-btn")
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_diagnostics_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        if modal.is_running {
+            let loading = div()
+                .p_8()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    div()
+                        .text_lg()
+                        .text_color(rgb(0x38bdf8))
+                        .child("⏳ Running system diagnostic checks..."),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child("Testing OpenSSH binary, CSPRNG, AEAD ciphers, network loopback, and storage integrity..."),
+                );
+            modal_box = modal_box.child(loading);
+        } else if let Some(ref report) = modal.report {
+            let (passed, warnings, failures) = report.counts();
+
+            // Status Banner
+            let (banner_bg, banner_fg, banner_text) = if failures > 0 {
+                (
+                    rgb(0x7f1d1d),
+                    rgb(0xfecaca),
+                    format!("❌ Action Required: {failures} critical check(s) failed."),
+                )
+            } else if warnings > 0 {
+                (
+                    rgb(0x78350f),
+                    rgb(0xfde68a),
+                    format!("⚠️ Degraded: All critical tests passed, but {warnings} warning(s) detected."),
+                )
+            } else {
+                (
+                    rgb(0x065f46),
+                    rgb(0xa7f3d0),
+                    "✅ All Systems Ready: All production environment prerequisites passed."
+                        .to_string(),
+                )
+            };
+
+            let status_strip = div()
+                .px_4()
+                .py_2p5()
+                .rounded_md()
+                .bg(banner_bg)
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(banner_fg)
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(banner_text)
+                .child(format!(
+                    "Passed: {passed} | Warnings: {warnings} | Failed: {failures}"
+                ));
+            modal_box = modal_box.child(status_strip);
+
+            // Checks list
+            let mut checks_list = div()
+                .id("diagnostics-checks-list")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .overflow_y_scroll()
+                .max_h(px(320.0));
+
+            for (c_idx, check) in report.checks.iter().enumerate() {
+                let (badge_bg, badge_fg) = match check.status {
+                    DiagnosticStatus::Passed => (rgb(0x065f46), rgb(0xa7f3d0)),
+                    DiagnosticStatus::Warning => (rgb(0x78350f), rgb(0xfde68a)),
+                    DiagnosticStatus::Failed => (rgb(0x7f1d1d), rgb(0xfecaca)),
+                };
+
+                let mut row = div()
+                    .id(("diag-check-row", c_idx))
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x0f172a))
+                    .border_1()
+                    .border_color(rgb(0x334155))
+                    .flex()
+                    .flex_col()
+                    .gap_1p5();
+
+                let row_header = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().child(check.category.icon()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xf8fafc))
+                                    .child(check.name.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x64748b))
+                                    .child(format!("{}ms", check.duration_ms)),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(badge_bg)
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(badge_fg)
+                                    .child(check.status.badge()),
+                            ),
+                    );
+                row = row.child(row_header);
+
+                let row_msg = div()
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .child(check.message.clone());
+                row = row.child(row_msg);
+
+                if let Some(ref rem) = check.remediation {
+                    let row_rem = div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(rgb(0x1e293b))
+                        .text_xs()
+                        .text_color(rgb(0x38bdf8))
+                        .child(format!("↳ Remediation: {rem}"));
+                    row = row.child(row_rem);
+                }
+
+                checks_list = checks_list.child(row);
+            }
+            modal_box = modal_box.child(checks_list);
+
+            // Footer controls
+            let footer = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(0x334155))
+                .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
+                    "Platform: {} [{}]",
+                    report.os_platform, report.os_arch
+                )))
+                .child(
+                    div()
+                        .id("rerun-diagnostics-btn")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(rgb(0x0f766e))
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.run_diagnostics_checks(cx);
+                        }))
+                        .child("🔄 Re-run Checks"),
+                );
+            modal_box = modal_box.child(footer);
         }
 
         overlay.child(modal_box)
@@ -7968,6 +8279,9 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.infra_modal {
                     result = result.child(self.render_infra_modal(modal, cx));
                 }
+                if let Some(modal) = &self.diagnostics_modal {
+                    result = result.child(self.render_diagnostics_modal(modal, cx));
+                }
                 return result;
             }
         }
@@ -8317,6 +8631,20 @@ impl Render for Shellumi {
                             app.open_infra_modal(cx);
                         }))
                         .child("☁️ Cloud & Infra"),
+                )
+                .child(
+                    div()
+                        .id("diagnostics-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x0f766e))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.open_diagnostics_modal(cx);
+                        }))
+                        .child("🩺 Health Check"),
                 );
 
             if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
@@ -8554,6 +8882,9 @@ impl Render for Shellumi {
         }
         if let Some(modal) = &self.infra_modal {
             result = result.child(self.render_infra_modal(modal, cx));
+        }
+        if let Some(modal) = &self.diagnostics_modal {
+            result = result.child(self.render_diagnostics_modal(modal, cx));
         }
         result
     }
@@ -9803,5 +10134,58 @@ mod tests {
         };
         assert_eq!(disc_rec.external_id, "i-0123456789abcdef0");
         assert!(disc_rec.imported_host_id.is_none());
+    }
+
+    #[test]
+    fn verifies_diagnostics_modal_and_palette_integration() {
+        use shellumi_core::{
+            DiagnosticCategory, DiagnosticCheck, DiagnosticStatus, DiagnosticsReport,
+            PaletteAction, PaletteCategory, PaletteRegistry,
+        };
+
+        let registry = PaletteRegistry::with_static_actions();
+        let diag_cmd = registry
+            .commands()
+            .iter()
+            .find(|c| c.action == PaletteAction::RunDiagnostics)
+            .expect("should register diagnostics command");
+
+        assert_eq!(diag_cmd.category, PaletteCategory::Diagnostics);
+        assert_eq!(diag_cmd.title, "Run System Diagnostics & Health Check");
+        assert!(diag_cmd.keywords.contains(&"doctor".to_string()));
+
+        let mock_report = DiagnosticsReport {
+            timestamp: "2026-11-05T00:00:00Z".into(),
+            shellumi_version: "0.1.0".into(),
+            os_platform: "macos".into(),
+            os_arch: "aarch64".into(),
+            checks: vec![
+                DiagnosticCheck {
+                    id: "chk_1".into(),
+                    name: "OpenSSH".into(),
+                    category: DiagnosticCategory::OpenSsh,
+                    status: DiagnosticStatus::Passed,
+                    message: "OpenSSH 9.8p1 detected".into(),
+                    remediation: None,
+                    duration_ms: 12,
+                },
+                DiagnosticCheck {
+                    id: "chk_2".into(),
+                    name: "Loopback".into(),
+                    category: DiagnosticCategory::Network,
+                    status: DiagnosticStatus::Passed,
+                    message: "Loopback listener bound".into(),
+                    remediation: None,
+                    duration_ms: 2,
+                },
+            ],
+        };
+
+        assert!(mock_report.is_healthy());
+        assert!(!mock_report.has_failures());
+        let (passed, warnings, failures) = mock_report.counts();
+        assert_eq!(passed, 2);
+        assert_eq!(warnings, 0);
+        assert_eq!(failures, 0);
     }
 }

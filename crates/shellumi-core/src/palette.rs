@@ -13,6 +13,7 @@ pub enum PaletteCategory {
     Workspace,
     Collaboration,
     Infrastructure,
+    Diagnostics,
 }
 
 impl PaletteCategory {
@@ -28,6 +29,7 @@ impl PaletteCategory {
             Self::Workspace => "Workspaces",
             Self::Collaboration => "Collaboration",
             Self::Infrastructure => "Infrastructure",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 
@@ -43,6 +45,7 @@ impl PaletteCategory {
             Self::Workspace => "📐",
             Self::Collaboration => "👥",
             Self::Infrastructure => "☁️",
+            Self::Diagnostics => "🩺",
         }
     }
 }
@@ -91,6 +94,7 @@ pub enum PaletteAction {
     SyncCloudInfrastructure,
     ImportAnsibleInventory,
     ExportAnsibleInventory,
+    RunDiagnostics,
 }
 
 /// A searchable command palette item.
@@ -371,6 +375,26 @@ impl PaletteRegistry {
 
         self.register(
             PaletteCommand::new(
+                "action:diagnostics",
+                "Run System Diagnostics & Health Check",
+                "Validate OpenSSH, CSPRNG, AEAD, network loopback, and storage integrity",
+                PaletteCategory::Diagnostics,
+                PaletteAction::RunDiagnostics,
+            )
+            .with_shortcut("Cmd+Shift+D")
+            .with_keywords([
+                "doctor",
+                "health",
+                "diagnostics",
+                "check",
+                "audit",
+                "system",
+                "verify",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
                 "action:trigger_sync",
                 "Trigger Cloud Sync Now",
                 "Initiate immediate zero-knowledge Google Drive vault synchronization",
@@ -615,6 +639,24 @@ mod tests {
         assert!(sync_results
             .iter()
             .any(|r| r.command.category == PaletteCategory::Sync));
+
+        // Keyword "doctor" -> "Run System Diagnostics & Health Check"
+        let doctor_results = registry.search("doctor");
+        assert!(!doctor_results.is_empty());
+        assert_eq!(
+            doctor_results[0].command.title,
+            "Run System Diagnostics & Health Check"
+        );
+        assert_eq!(
+            doctor_results[0].command.category,
+            PaletteCategory::Diagnostics
+        );
+        assert_eq!(
+            doctor_results[0].command.action,
+            PaletteAction::RunDiagnostics
+        );
+        assert_eq!(PaletteCategory::Diagnostics.as_str(), "Diagnostics");
+        assert_eq!(PaletteCategory::Diagnostics.badge_icon(), "🩺");
     }
 
     #[test]

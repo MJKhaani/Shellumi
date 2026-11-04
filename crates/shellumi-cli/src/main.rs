@@ -4,9 +4,9 @@ use shellumi_core::{
     list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
     render_preview, AnsibleInventoryEngine, AuditAction, AwsEc2Parser, AzureVmParser,
     BatchExecutionPlan, BatchHostTarget, BatchPolicy, CloudProviderConfig, CloudProviderKind,
-    ConnectionProtocol, DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry,
-    HostExportItem, HostGroup, MoshConfig, MoshPredictMode, MultiplayerSession, OpenFlags,
-    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PortForwardRule,
+    ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType,
+    HostConfigEntry, HostExportItem, HostGroup, MoshConfig, MoshPredictMode, MultiplayerSession,
+    OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PortForwardRule,
     ProtocolError, SerialConfig, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
     SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
     TransferQueue,
@@ -86,7 +86,8 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> export-ssh-config
   shellumi-cli <database-path> import-csv <csv-path>
   shellumi-cli <database-path> export-csv
-  shellumi-cli keygen [--comment <comment>]";
+  shellumi-cli keygen [--comment <comment>]
+  shellumi-cli doctor [--json] [--markdown] [--db <path>]";
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -196,6 +197,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
             for p in ports {
                 println!("  {p}");
             }
+        }
+        return Ok(());
+    }
+
+    if args[0] == "doctor" {
+        let is_json = args.iter().any(|a| a == "--json");
+        let is_markdown = args.iter().any(|a| a == "--markdown");
+        let db_path = extract_flag(&args[1..], "--db");
+
+        let mut runner = DiagnosticsRunner::new();
+        if let Some(db) = db_path {
+            runner = runner.with_database_path(db);
+        }
+        let report = runner.run_all();
+
+        if is_json {
+            println!("{}", report.to_json()?);
+        } else if is_markdown {
+            println!("{}", report.format_markdown_report());
+        } else {
+            print!("{}", report.format_terminal_summary());
+        }
+
+        if report.has_failures() {
+            std::process::exit(1);
         }
         return Ok(());
     }
@@ -530,7 +556,29 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
         }
+        "doctor" => {}
         _ => return Err(invalid(USAGE).into()),
+    }
+
+    if command == "doctor" {
+        let is_json = args.iter().any(|a| a == "--json");
+        let is_markdown = args.iter().any(|a| a == "--markdown");
+
+        let runner = DiagnosticsRunner::new().with_database_path(db_path);
+        let report = runner.run_all();
+
+        if is_json {
+            println!("{}", report.to_json()?);
+        } else if is_markdown {
+            println!("{}", report.format_markdown_report());
+        } else {
+            print!("{}", report.format_terminal_summary());
+        }
+
+        if report.has_failures() {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     let mut store = HostStore::open(db_path).await?;

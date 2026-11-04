@@ -79,6 +79,19 @@ impl TerminalGrid {
         &self.scrollback
     }
 
+    /// Updates the maximum scrollback capacity and trims excess history if necessary.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.scrollback_limit = limit;
+        while self.scrollback.len() > self.scrollback_limit {
+            self.scrollback.pop_front();
+        }
+    }
+
+    /// Returns the current maximum scrollback line limit.
+    pub fn scrollback_limit(&self) -> usize {
+        self.scrollback_limit
+    }
+
     fn active_screen(&self) -> &Grid<Cell> {
         if self.is_alt_screen {
             self.alt_screen.as_ref().unwrap_or(&self.primary_screen)

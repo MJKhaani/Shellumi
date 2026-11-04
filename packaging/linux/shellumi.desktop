@@ -1,0 +1,22 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Shellumi
+GenericName=SSH Client and Remote Infrastructure Manager
+Comment=Free, open-source, local-first SSH client and remote infrastructure manager built in Rust with GPUI
+Exec=shellumi-app %u
+Icon=shellumi
+Terminal=false
+Categories=Network;Utility;RemoteAccess;TerminalEmulator;
+Keywords=ssh;terminal;infrastructure;cloud;sftp;mosh;telnet;serial;ansible;
+StartupWMClass=shellumi-app
+MimeType=x-scheme-handler/ssh;x-scheme-handler/sftp;x-scheme-handler/telnet;
+Actions=NewSession;Doctor;
+
+[Desktop Action NewSession]
+Name=New Local Terminal
+Exec=shellumi-app --local
+
+[Desktop Action Doctor]
+Name=Run System Diagnostics
+Exec=shellumi-cli doctor

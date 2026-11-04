@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*"
+             Name="Shellumi"
+             Language="1033"
+             Version="0.1.0"
+             Manufacturer="Shellumi Contributors"
+             UpgradeCode="87A24D4B-3914-4B3B-8C9B-975DE1F00E4A">
+
+        <Package InstallerVersion="500"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 Platform="x64"
+                 Description="Free and Open-Source SSH Client and Infrastructure Manager" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Feature Id="ProductFeature" Title="Shellumi" Level="1">
+            <ComponentGroupRef Id="ProductComponents" />
+            <ComponentRef Id="ApplicationShortcut" />
+        </Feature>
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="Shellumi" />
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Shellumi" />
+            </Directory>
+        </Directory>
+
+        <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+            <Component Id="ShellumiAppExe" Guid="98C6D1F2-7264-44FA-A8D7-1A848CD1F001" Win64="yes">
+                <File Id="ShellumiAppFile" Source="target\release\shellumi-app.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="ShellumiCliExe" Guid="98C6D1F2-7264-44FA-A8D7-1A848CD1F002" Win64="yes">
+                <File Id="ShellumiCliFile" Source="target\release\shellumi-cli.exe" KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <DirectoryRef Id="ApplicationProgramsFolder">
+            <Component Id="ApplicationShortcut" Guid="98C6D1F2-7264-44FA-A8D7-1A848CD1F003">
+                <Shortcut Id="ApplicationStartMenuShortcut"
+                          Name="Shellumi"
+                          Description="Free and Open-Source SSH Client"
+                          Target="[INSTALLFOLDER]shellumi-app.exe"
+                          WorkingDirectory="INSTALLFOLDER" />
+                <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\Shellumi" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+    </Product>
+</Wix>
