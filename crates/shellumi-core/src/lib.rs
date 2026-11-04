@@ -1,6 +1,7 @@
 //! UI-independent connection definitions. No network connections are made here.
 
 pub mod batch;
+pub mod collaboration;
 pub mod credential;
 pub mod csv;
 pub mod group;
@@ -18,6 +19,10 @@ pub mod workspace;
 pub use batch::{
     BatchExecutionPlan, BatchExecutionSummary, BatchHostResult, BatchHostStatus, BatchHostTarget,
     BatchPolicy, BatchRunner,
+};
+pub use collaboration::{
+    AuditAction, CollaborationError, LogBookmark, LogComment, MultiplayerParticipant,
+    MultiplayerSession, SharedSessionLog, SharedVault, SharingAuditRecord, TeamMember, TeamRole,
 };
 #[cfg(target_os = "macos")]
 pub use credential::MacOsKeychainStore;

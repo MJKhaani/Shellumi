@@ -1,13 +1,16 @@
 //! Local Turso storage. Credentials are never stored in this database.
 use shellumi_core::{
-    resolve_effective_destination, resolve_effective_tags, validate_jump_host, DestinationError,
-    ForwardingType, GroupError, HostGroup, PortForwardRule, Snippet, SnippetError, SnippetVariable,
-    SshDestination, TransferDirection, TunnelError, WorkspaceError, WorkspaceSession,
+    resolve_effective_destination, resolve_effective_tags, validate_jump_host, AuditAction,
+    CollaborationError, DestinationError, ForwardingType, GroupError, HostGroup, LogBookmark,
+    LogComment, PortForwardRule, SharedSessionLog, SharedVault, SharingAuditRecord, Snippet,
+    SnippetError, SnippetVariable, SshDestination, TeamMember, TeamRole, TransferDirection,
+    TunnelError, WorkspaceError, WorkspaceSession,
 };
 use std::fmt;
+use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -24,6 +27,7 @@ pub enum StorageError {
     InvalidTransferPath,
     InvalidSnippet(SnippetError),
     InvalidWorkspace(WorkspaceError),
+    InvalidCollaboration(CollaborationError),
     Serialization(String),
     InvalidSync(shellumi_core::SyncError),
     SnapshotNotFound(String),
@@ -48,6 +52,9 @@ impl fmt::Display for StorageError {
             Self::InvalidTransferPath => f.write_str("transfer paths must not be empty"),
             Self::InvalidSnippet(error) => write!(f, "invalid snippet: {error}"),
             Self::InvalidWorkspace(error) => write!(f, "invalid workspace: {error}"),
+            Self::InvalidCollaboration(error) => {
+                write!(f, "invalid collaboration operation: {error}")
+            }
             Self::Serialization(error) => write!(f, "serialization error: {error}"),
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
             Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
@@ -85,6 +92,12 @@ impl From<TunnelError> for StorageError {
 impl From<SnippetError> for StorageError {
     fn from(error: SnippetError) -> Self {
         Self::InvalidSnippet(error)
+    }
+}
+
+impl From<CollaborationError> for StorageError {
+    fn from(error: CollaborationError) -> Self {
+        Self::InvalidCollaboration(error)
     }
 }
 
@@ -256,6 +269,8 @@ pub struct ImportVaultSummary {
     pub tunnels_imported: usize,
     pub snippets_imported: usize,
     pub workspaces_imported: usize,
+    pub shared_vaults_imported: usize,
+    pub team_members_imported: usize,
     pub errors: Vec<String>,
 }
 
@@ -447,7 +462,64 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 10", ()).await?;
+            tx.execute(
+                "CREATE TABLE shared_vaults (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    current_epoch INTEGER NOT NULL DEFAULT 1 CHECK(current_epoch >= 1),
+                    owner_id TEXT NOT NULL CHECK(length(trim(owner_id)) > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE team_members (
+                    id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
+                    display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
+                    public_key TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    enrolled_at TEXT NOT NULL,
+                    invited_by TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE sharing_audit_log (
+                    id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    target_id TEXT,
+                    details TEXT,
+                    timestamp_utc TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE shared_session_logs (
+                    id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                    host_name TEXT NOT NULL,
+                    author_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    retention_days INTEGER NOT NULL DEFAULT 30,
+                    comments_json TEXT NOT NULL DEFAULT '[]',
+                    bookmarks_json TEXT NOT NULL DEFAULT '[]'
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 11", ()).await?;
         } else if version == 1 {
             // Migrate schema version 1 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
@@ -974,6 +1046,68 @@ impl HostStore {
             tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
                 .await?;
             tx.execute("PRAGMA user_version = 10", ()).await?;
+        }
+
+        if version > 0 && version < 11 {
+            // Migrate schema to version 11: Shared Vaults & Team Collaboration
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS shared_vaults (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    current_epoch INTEGER NOT NULL DEFAULT 1 CHECK(current_epoch >= 1),
+                    owner_id TEXT NOT NULL CHECK(length(trim(owner_id)) > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS team_members (
+                    id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
+                    display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
+                    public_key TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    enrolled_at TEXT NOT NULL,
+                    invited_by TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS sharing_audit_log (
+                    id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    target_id TEXT,
+                    details TEXT,
+                    timestamp_utc TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS shared_session_logs (
+                    id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                    host_name TEXT NOT NULL,
+                    author_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    retention_days INTEGER NOT NULL DEFAULT 30,
+                    comments_json TEXT NOT NULL DEFAULT '[]',
+                    bookmarks_json TEXT NOT NULL DEFAULT '[]'
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 11", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
@@ -2026,6 +2160,376 @@ impl HostStore {
         .await
     }
 
+    // =========================================================================
+    // Team Collaboration & Shared Vault Operations
+    // =========================================================================
+
+    pub async fn create_shared_vault(&mut self, vault: &SharedVault) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO shared_vaults (id, name, description, current_epoch, owner_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (
+                    vault.id.clone(),
+                    vault.name.clone(),
+                    vault.description.clone(),
+                    vault.current_epoch as i64,
+                    vault.owner_id.clone(),
+                    vault.created_at.clone(),
+                    vault.updated_at.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_shared_vault(&self, id: &str) -> Result<Option<SharedVault>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, description, current_epoch, owner_id, created_at, updated_at FROM shared_vaults WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let description: Option<String> = row.get(2)?;
+            let epoch: i64 = row.get(3)?;
+            let owner_id: String = row.get(4)?;
+            let created_at: String = row.get(5)?;
+            let updated_at: String = row.get(6)?;
+
+            Ok(Some(SharedVault {
+                id,
+                name,
+                description,
+                current_epoch: epoch as u64,
+                owner_id,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_shared_vaults(&self) -> Result<Vec<SharedVault>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, description, current_epoch, owner_id, created_at, updated_at FROM shared_vaults ORDER BY name ASC",
+                (),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let description: Option<String> = row.get(2)?;
+            let epoch: i64 = row.get(3)?;
+            let owner_id: String = row.get(4)?;
+            let created_at: String = row.get(5)?;
+            let updated_at: String = row.get(6)?;
+
+            list.push(SharedVault {
+                id,
+                name,
+                description,
+                current_epoch: epoch as u64,
+                owner_id,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(list)
+    }
+
+    pub async fn update_shared_vault_epoch(
+        &mut self,
+        id: &str,
+        new_epoch: u64,
+        updated_at: &str,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE shared_vaults SET current_epoch = ?1, updated_at = ?2 WHERE id = ?3",
+                (new_epoch as i64, updated_at, id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    pub async fn delete_shared_vault(&mut self, id: &str) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute("DELETE FROM shared_vaults WHERE id = ?1", (id,))
+            .await?;
+        Ok(rows > 0)
+    }
+
+    pub async fn add_team_member(&mut self, member: &TeamMember) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO team_members (id, vault_id, user_id, display_name, public_key, role, enrolled_at, invited_by, revoked, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (
+                    member.id.clone(),
+                    member.vault_id.clone(),
+                    member.user_id.clone(),
+                    member.display_name.clone(),
+                    member.public_key.clone(),
+                    member.role.to_string(),
+                    member.enrolled_at.clone(),
+                    member.invited_by.clone(),
+                    if member.revoked { 1i64 } else { 0i64 },
+                    member.revoked_at.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_team_member(&self, id: &str) -> Result<Option<TeamMember>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, vault_id, user_id, display_name, public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let vault_id: String = row.get(1)?;
+            let user_id: String = row.get(2)?;
+            let display_name: String = row.get(3)?;
+            let public_key: String = row.get(4)?;
+            let role_str: String = row.get(5)?;
+            let enrolled_at: String = row.get(6)?;
+            let invited_by: String = row.get(7)?;
+            let revoked_int: i64 = row.get(8)?;
+            let revoked_at: Option<String> = row.get(9)?;
+
+            let role = TeamRole::from_str(&role_str).unwrap_or(TeamRole::Viewer);
+
+            Ok(Some(TeamMember {
+                id,
+                vault_id,
+                user_id,
+                display_name,
+                public_key,
+                role,
+                enrolled_at,
+                invited_by,
+                revoked: revoked_int != 0,
+                revoked_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_team_members(&self, vault_id: &str) -> Result<Vec<TeamMember>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, vault_id, user_id, display_name, public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
+                (vault_id,),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let vault_id: String = row.get(1)?;
+            let user_id: String = row.get(2)?;
+            let display_name: String = row.get(3)?;
+            let public_key: String = row.get(4)?;
+            let role_str: String = row.get(5)?;
+            let enrolled_at: String = row.get(6)?;
+            let invited_by: String = row.get(7)?;
+            let revoked_int: i64 = row.get(8)?;
+            let revoked_at: Option<String> = row.get(9)?;
+
+            let role = TeamRole::from_str(&role_str).unwrap_or(TeamRole::Viewer);
+
+            list.push(TeamMember {
+                id,
+                vault_id,
+                user_id,
+                display_name,
+                public_key,
+                role,
+                enrolled_at,
+                invited_by,
+                revoked: revoked_int != 0,
+                revoked_at,
+            });
+        }
+        Ok(list)
+    }
+
+    pub async fn update_team_member_role(
+        &mut self,
+        id: &str,
+        new_role: TeamRole,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE team_members SET role = ?1 WHERE id = ?2",
+                (new_role.to_string(), id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    pub async fn revoke_team_member(
+        &mut self,
+        id: &str,
+        revoked_at: &str,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE team_members SET revoked = 1, revoked_at = ?1 WHERE id = ?2",
+                (revoked_at, id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    pub async fn log_audit_event(
+        &mut self,
+        record: &SharingAuditRecord,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO sharing_audit_log (id, vault_id, action, actor_id, target_id, details, timestamp_utc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (
+                    record.id.clone(),
+                    record.vault_id.clone(),
+                    record.action.to_string(),
+                    record.actor_id.clone(),
+                    record.target_id.clone(),
+                    record.details.clone(),
+                    record.timestamp_utc.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_audit_log(
+        &self,
+        vault_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<SharingAuditRecord>, StorageError> {
+        let lim = limit.unwrap_or(100) as i64;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, vault_id, action, actor_id, target_id, details, timestamp_utc FROM sharing_audit_log WHERE vault_id = ?1 ORDER BY timestamp_utc DESC LIMIT ?2",
+                (vault_id, lim),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let vault_id: String = row.get(1)?;
+            let action_str: String = row.get(2)?;
+            let actor_id: String = row.get(3)?;
+            let target_id: Option<String> = row.get(4)?;
+            let details: Option<String> = row.get(5)?;
+            let timestamp_utc: String = row.get(6)?;
+
+            let action = AuditAction::from_str(&action_str).unwrap_or(AuditAction::RecordShared);
+
+            list.push(SharingAuditRecord {
+                id,
+                vault_id,
+                action,
+                actor_id,
+                target_id,
+                details,
+                timestamp_utc,
+            });
+        }
+        Ok(list)
+    }
+
+    pub async fn create_shared_session_log(
+        &mut self,
+        log: &SharedSessionLog,
+    ) -> Result<(), StorageError> {
+        let comments_raw = serde_json::to_string(&log.comments)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bookmarks_raw = serde_json::to_string(&log.bookmarks)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        self.connection
+            .execute(
+                "INSERT INTO shared_session_logs (id, vault_id, host_name, author_id, started_at, ended_at, retention_days, comments_json, bookmarks_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (
+                    log.id.clone(),
+                    log.vault_id.clone(),
+                    log.host_name.clone(),
+                    log.author_id.clone(),
+                    log.started_at.clone(),
+                    log.ended_at.clone(),
+                    log.retention_days as i64,
+                    comments_raw,
+                    bookmarks_raw,
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_shared_session_logs(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<SharedSessionLog>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, vault_id, host_name, author_id, started_at, ended_at, retention_days, comments_json, bookmarks_json FROM shared_session_logs WHERE vault_id = ?1 ORDER BY started_at DESC",
+                (vault_id,),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let vault_id: String = row.get(1)?;
+            let host_name: String = row.get(2)?;
+            let author_id: String = row.get(3)?;
+            let started_at: String = row.get(4)?;
+            let ended_at: Option<String> = row.get(5)?;
+            let retention: i64 = row.get(6)?;
+            let comments_raw: String = row.get(7)?;
+            let bookmarks_raw: String = row.get(8)?;
+
+            let comments: Vec<LogComment> = serde_json::from_str(&comments_raw).unwrap_or_default();
+            let bookmarks: Vec<LogBookmark> =
+                serde_json::from_str(&bookmarks_raw).unwrap_or_default();
+
+            list.push(SharedSessionLog {
+                id,
+                vault_id,
+                host_name,
+                author_id,
+                started_at,
+                ended_at,
+                retention_days: retention as u32,
+                comments,
+                bookmarks,
+            });
+        }
+        Ok(list)
+    }
+
     /// Exports all hosts, groups, tunnels, and snippets into an encrypted `SyncVault` using default KDF iterations.
     pub async fn export_vault(
         &self,
@@ -2188,6 +2692,45 @@ impl HostStore {
                 now,
                 envelope,
             ));
+        }
+
+        // Export shared vaults and team members
+        let shared_vaults = self.list_shared_vaults().await?;
+        for sv in &shared_vaults {
+            let envelope = shellumi_core::encrypt_entity_with_iterations(
+                passphrase,
+                "shared_vault",
+                &sv.id,
+                sv,
+                iterations,
+            )?;
+            vault.records.push(shellumi_core::SyncRecord::new(
+                sv.id.clone(),
+                shellumi_core::SyncEntityType::SharedVault,
+                sv.current_epoch,
+                device_id,
+                now,
+                envelope,
+            ));
+
+            let members = self.list_team_members(&sv.id).await?;
+            for member in members {
+                let envelope = shellumi_core::encrypt_entity_with_iterations(
+                    passphrase,
+                    "team_member",
+                    &member.id,
+                    &member,
+                    iterations,
+                )?;
+                vault.records.push(shellumi_core::SyncRecord::new(
+                    member.id.clone(),
+                    shellumi_core::SyncEntityType::TeamMember,
+                    1,
+                    device_id,
+                    now,
+                    envelope,
+                ));
+            }
         }
 
         let _ = self.archive_snapshot(&vault.vault_id, &vault, 3).await;
@@ -2375,6 +2918,43 @@ impl HostStore {
                         Err(e) => summary
                             .errors
                             .push(format!("Workspace {}: {e}", record.object_id)),
+                    }
+                }
+                shellumi_core::SyncEntityType::SharedVault => {
+                    match shellumi_core::decrypt_entity::<SharedVault>(passphrase, envelope) {
+                        Ok(vault) => {
+                            if self.get_shared_vault(&vault.id).await?.is_none() {
+                                let _ = self.create_shared_vault(&vault).await;
+                            }
+                            summary.shared_vaults_imported += 1;
+                        }
+                        Err(e) => summary
+                            .errors
+                            .push(format!("SharedVault {}: {e}", record.object_id)),
+                    }
+                }
+                shellumi_core::SyncEntityType::TeamMember => {
+                    match shellumi_core::decrypt_entity::<TeamMember>(passphrase, envelope) {
+                        Ok(member) => {
+                            if self.get_team_member(&member.id).await?.is_none() {
+                                let _ = self.add_team_member(&member).await;
+                            }
+                            summary.team_members_imported += 1;
+                        }
+                        Err(e) => summary
+                            .errors
+                            .push(format!("TeamMember {}: {e}", record.object_id)),
+                    }
+                }
+                shellumi_core::SyncEntityType::AuditRecord => {
+                    match shellumi_core::decrypt_entity::<SharingAuditRecord>(passphrase, envelope)
+                    {
+                        Ok(audit) => {
+                            let _ = self.log_audit_event(&audit).await;
+                        }
+                        Err(e) => summary
+                            .errors
+                            .push(format!("AuditRecord {}: {e}", record.object_id)),
                     }
                 }
             }
@@ -3912,5 +4492,140 @@ mod tests {
         assert_eq!(updated_host.name, "Cisco Switch Upgraded");
         assert_eq!(updated_host.protocol, "ssh");
         assert!(updated_host.is_ssh());
+    }
+
+    #[tokio::test]
+    async fn manages_shared_vaults_and_team_collaboration() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // 1. Create shared vault
+        let vault = SharedVault::new(
+            "v-101",
+            "Core SRE Vault",
+            Some("Infrastructure team secrets".into()),
+            "alice@corp.internal",
+            "2026-11-05T00:00:00Z",
+        )
+        .unwrap();
+
+        store.create_shared_vault(&vault).await.unwrap();
+        let fetched_vault = store.get_shared_vault("v-101").await.unwrap().unwrap();
+        assert_eq!(fetched_vault.name, "Core SRE Vault");
+        assert_eq!(fetched_vault.current_epoch, 1);
+        assert_eq!(fetched_vault.owner_id, "alice@corp.internal");
+
+        let vaults = store.list_shared_vaults().await.unwrap();
+        assert_eq!(vaults.len(), 1);
+
+        // 2. Add team members
+        let member1 = TeamMember::new(
+            "m-1",
+            "v-101",
+            "alice@corp.internal",
+            "Alice",
+            "alice_pubkey_hex",
+            TeamRole::Owner,
+            "2026-11-05T00:00:00Z",
+            "alice@corp.internal",
+        );
+        let member2 = TeamMember::new(
+            "m-2",
+            "v-101",
+            "bob@corp.internal",
+            "Bob",
+            "bob_pubkey_hex",
+            TeamRole::Editor,
+            "2026-11-05T00:05:00Z",
+            "alice@corp.internal",
+        );
+
+        store.add_team_member(&member1).await.unwrap();
+        store.add_team_member(&member2).await.unwrap();
+
+        let members = store.list_team_members("v-101").await.unwrap();
+        assert_eq!(members.len(), 2);
+
+        // 3. Update member role and revoke
+        assert!(store
+            .update_team_member_role("m-2", TeamRole::Administrator)
+            .await
+            .unwrap());
+        let updated_m2 = store.get_team_member("m-2").await.unwrap().unwrap();
+        assert_eq!(updated_m2.role, TeamRole::Administrator);
+
+        assert!(store
+            .revoke_team_member("m-2", "2026-11-05T01:00:00Z")
+            .await
+            .unwrap());
+        let revoked_m2 = store.get_team_member("m-2").await.unwrap().unwrap();
+        assert!(revoked_m2.revoked);
+        assert_eq!(
+            revoked_m2.revoked_at.as_deref(),
+            Some("2026-11-05T01:00:00Z")
+        );
+
+        // 4. Log audit events
+        let audit = SharingAuditRecord::new(
+            "a-1",
+            "v-101",
+            AuditAction::MemberRevoked,
+            "alice@corp.internal",
+            Some("bob@corp.internal".into()),
+            Some("revoked access and rotating key".into()),
+            "2026-11-05T01:00:01Z",
+        );
+        store.log_audit_event(&audit).await.unwrap();
+
+        let audits = store.list_audit_log("v-101", Some(10)).await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, AuditAction::MemberRevoked);
+
+        // 5. Rotate key (increment epoch)
+        assert!(store
+            .update_shared_vault_epoch("v-101", 2, "2026-11-05T01:00:02Z")
+            .await
+            .unwrap());
+        let rotated_vault = store.get_shared_vault("v-101").await.unwrap().unwrap();
+        assert_eq!(rotated_vault.current_epoch, 2);
+
+        // 6. Shared session logs
+        let mut session_log = SharedSessionLog::new(
+            "log-100",
+            "v-101",
+            "prod-k8s-master",
+            "alice@corp.internal",
+            "2026-11-05T01:10:00Z",
+            30,
+        );
+        session_log.add_bookmark(LogBookmark {
+            id: "b-1".into(),
+            line_number: 120,
+            label: "etcd leader election".into(),
+            created_at: "2026-11-05T01:12:00Z".into(),
+        });
+        session_log.add_comment(LogComment {
+            id: "c-1".into(),
+            author_id: "alice@corp.internal".into(),
+            line_number: 120,
+            comment: "Confirmed leader election resolved within 50ms".into(),
+            created_at: "2026-11-05T01:15:00Z".into(),
+        });
+
+        store.create_shared_session_log(&session_log).await.unwrap();
+        let logs = store.list_shared_session_logs("v-101").await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].host_name, "prod-k8s-master");
+        assert_eq!(logs[0].bookmarks.len(), 1);
+        assert_eq!(logs[0].comments.len(), 1);
+
+        // 7. Delete vault cascade
+        assert!(store.delete_shared_vault("v-101").await.unwrap());
+        assert_eq!(store.list_shared_vaults().await.unwrap().len(), 0);
+        assert_eq!(store.list_team_members("v-101").await.unwrap().len(), 0);
+        assert_eq!(store.list_audit_log("v-101", None).await.unwrap().len(), 0);
+        assert_eq!(
+            store.list_shared_session_logs("v-101").await.unwrap().len(),
+            0
+        );
     }
 }

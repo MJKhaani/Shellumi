@@ -31,6 +31,8 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 | **Local Storage** | Unauthorized database access | Metadata database is stored in user app data; credentials are kept in OS keychain or encrypted vaults. |
 | **Telnet Connections** | Cleartext credential and traffic sniffing | Prohibit silent usage; enforce prominent warning badges in CLI and desktop UI; default port 23; gate SSH-exclusive capabilities (SFTP, port forwarding) away from Telnet. |
 | **Serial Connections** | Unauthorized local device access / device misconfiguration | Strict validation of port paths, baud rates, parity, stop bits; isolate from remote network tunnels and prevent automated command injection. |
+| **Team Collaboration** | Unauthorized vault modification, privilege escalation, or stale member access | Role hierarchy (`Owner`, `Administrator`, `Editor`, `Viewer`) gating administrative and write capabilities; cryptographic epoch key rotation upon member revocation; append-only audit trail for all vault and membership events. |
+| **Multiplayer Terminal** | Concurrent keystroke race conditions or rogue participant commands | Single-active-writer keystroke arbitration; non-controlling participants are strictly read-only; session host retains instantaneous override/revocation control. |
 
 For detailed analysis, see [docs/security/threat-model.md](docs/security/threat-model.md).
 

@@ -11,6 +11,7 @@ pub enum PaletteCategory {
     Sync,
     Terminal,
     Workspace,
+    Collaboration,
 }
 
 impl PaletteCategory {
@@ -24,6 +25,7 @@ impl PaletteCategory {
             Self::Sync => "Cloud Sync",
             Self::Terminal => "Terminal",
             Self::Workspace => "Workspaces",
+            Self::Collaboration => "Collaboration",
         }
     }
 
@@ -37,6 +39,7 @@ impl PaletteCategory {
             Self::Sync => "☁",
             Self::Terminal => "⌨",
             Self::Workspace => "📐",
+            Self::Collaboration => "👥",
         }
     }
 }
@@ -79,6 +82,8 @@ pub enum PaletteAction {
     AddNewTunnel,
     NavigateToHosts,
     SwitchToTab(usize),
+    OpenTeamCollaboration,
+    ToggleMultiplayerCollaboration,
 }
 
 /// A searchable command palette item.
@@ -273,6 +278,35 @@ impl PaletteRegistry {
             )
             .with_shortcut("Cmd+Shift+S")
             .with_keywords(["workspace", "save", "layout", "preset", "snapshot"]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:team_collaboration",
+                "Open Team Collaboration",
+                "Manage shared vaults, enroll team members, and review audit logs",
+                PaletteCategory::Collaboration,
+                PaletteAction::OpenTeamCollaboration,
+            )
+            .with_keywords([
+                "team",
+                "vault",
+                "collaboration",
+                "members",
+                "share",
+                "audit",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:toggle_multiplayer",
+                "Toggle Multiplayer Terminal Collaboration",
+                "Start or end real-time multiplayer sharing for the active session",
+                PaletteCategory::Collaboration,
+                PaletteAction::ToggleMultiplayerCollaboration,
+            )
+            .with_keywords(["multiplayer", "collaborate", "share", "writer", "peer"]),
         );
 
         self.register(
@@ -594,5 +628,26 @@ mod tests {
         let ws_results = registry.search("SRE Cluster");
         assert!(!ws_results.is_empty());
         assert_eq!(ws_results[0].command.category, PaletteCategory::Workspace);
+    }
+
+    #[test]
+    fn verifies_collaboration_palette_actions() {
+        let registry = PaletteRegistry::with_static_actions();
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::OpenTeamCollaboration));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::ToggleMultiplayerCollaboration));
+
+        let results = registry.search("multiplayer");
+        assert!(!results.is_empty());
+        assert_eq!(
+            results[0].command.action,
+            PaletteAction::ToggleMultiplayerCollaboration
+        );
+        assert_eq!(results[0].command.category, PaletteCategory::Collaboration);
     }
 }

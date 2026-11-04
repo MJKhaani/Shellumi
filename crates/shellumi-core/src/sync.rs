@@ -287,6 +287,9 @@ pub enum SyncEntityType {
     Tunnel,
     Snippet,
     Workspace,
+    SharedVault,
+    TeamMember,
+    AuditRecord,
 }
 
 impl fmt::Display for SyncEntityType {
@@ -297,6 +300,9 @@ impl fmt::Display for SyncEntityType {
             Self::Tunnel => f.write_str("tunnel"),
             Self::Snippet => f.write_str("snippet"),
             Self::Workspace => f.write_str("workspace"),
+            Self::SharedVault => f.write_str("shared_vault"),
+            Self::TeamMember => f.write_str("team_member"),
+            Self::AuditRecord => f.write_str("audit_record"),
         }
     }
 }
@@ -932,6 +938,36 @@ pub fn format_record_summary(passphrase: Option<&str>, record: &SyncRecord) -> S
                             .and_then(|v| v.as_str())
                             .unwrap_or("single");
                         format!("Workspace: {name} ({layout})")
+                    }
+                    SyncEntityType::SharedVault => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let epoch = obj
+                            .get("current_epoch")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1);
+                        format!("{name} (Shared Vault, Epoch {epoch})")
+                    }
+                    SyncEntityType::TeamMember => {
+                        let name = obj
+                            .get("display_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("member");
+                        format!("{name} ({role})")
+                    }
+                    SyncEntityType::AuditRecord => {
+                        let action = obj
+                            .get("action")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("audit");
+                        let actor = obj
+                            .get("actor_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("actor");
+                        format!("{action} by {actor}")
                     }
                 }
             } else {

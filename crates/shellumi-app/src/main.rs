@@ -7,12 +7,13 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    check_dangerous_command, list_local_directory, validate_jump_host, BatchExecutionPlan,
-    BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner,
-    BroadcastManager, BroadcastSafetyCheck, ConflictItemView, ConflictResolutionChoice,
-    ConnectionProtocol, FileEntry, FileKind, MoshConfig, PaletteAction, PaletteCategory,
-    PaletteCommand, PaletteRegistry, PathUtils, SerialConfig, SshDestination, SyncEntityType,
-    TelnetConfig, TransferDirection, TransferQueue, TransferStatus, WorkspaceLayout,
+    check_dangerous_command, list_local_directory, validate_jump_host, AuditAction,
+    BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy,
+    BatchRunner, BroadcastManager, BroadcastSafetyCheck, ConflictItemView,
+    ConflictResolutionChoice, ConnectionProtocol, FileEntry, FileKind, MoshConfig,
+    MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PathUtils,
+    SerialConfig, SharedVault, SharingAuditRecord, SshDestination, SyncEntityType, TeamMember,
+    TeamRole, TelnetConfig, TransferDirection, TransferQueue, TransferStatus, WorkspaceLayout,
     WorkspaceSession, WorkspaceSessionKind,
 };
 use shellumi_storage::{HostStore, SavedHost, SavedSnippet, SavedWorkspace};
@@ -96,6 +97,29 @@ struct CommandPaletteState {
     selected_idx: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TeamModalTab {
+    Vaults,
+    Members,
+    AuditLog,
+}
+
+struct TeamModalState {
+    active_tab: TeamModalTab,
+    vaults: Vec<SharedVault>,
+    selected_vault_id: Option<String>,
+    members: Vec<TeamMember>,
+    audit_records: Vec<SharingAuditRecord>,
+    new_vault_name: Entity<TextInput>,
+    new_vault_desc: Entity<TextInput>,
+    invite_user_id: Entity<TextInput>,
+    invite_name: Entity<TextInput>,
+    invite_role: TeamRole,
+    error: Option<String>,
+    status_message: Option<String>,
+    is_loading: bool,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -120,6 +144,7 @@ struct Shellumi {
     batch_modal: Option<BatchModalState>,
     command_palette: Option<CommandPaletteState>,
     sync_scheduler: shellumi_core::SyncScheduler,
+    team_modal: Option<TeamModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -215,6 +240,7 @@ struct SessionTab {
     active_pane_idx: usize,
     split: Option<SplitDirection>,
     sftp_state: Option<SftpBrowserState>,
+    multiplayer: Option<MultiplayerSession>,
 }
 
 struct HostForm {
@@ -343,6 +369,7 @@ impl Shellumi {
             batch_modal: None,
             command_palette: None,
             sync_scheduler: shellumi_core::SyncScheduler::default(),
+            team_modal: None,
         };
         if app.database.is_some() {
             app.load_hosts(cx);
@@ -526,6 +553,7 @@ impl Shellumi {
             active_pane_idx: 0,
             split: None,
             sftp_state,
+            multiplayer: None,
         });
         self.active_tab_idx = Some(self.tabs.len() - 1);
         window.focus(&self.focus);
@@ -1108,6 +1136,17 @@ impl Shellumi {
             .is_none()
         {
             return;
+        }
+
+        if let Some(mp) = &tab.multiplayer {
+            if mp.is_active
+                && mp.current_controller.as_deref() != Some("local_user")
+                && mp.owner_id != "local_user"
+            {
+                // Keystrokes suppressed: another participant holds exclusive writer control.
+                cx.stop_propagation();
+                return;
+            }
         }
 
         let broadcast = self.broadcast_manager.is_enabled();
@@ -1734,6 +1773,7 @@ impl Shellumi {
             active_pane_idx: 0,
             split,
             sftp_state: None,
+            multiplayer: None,
         };
 
         self.tabs.push(tab);
@@ -2488,6 +2528,12 @@ impl Shellumi {
                     cx.notify();
                 }
             }
+            PaletteAction::OpenTeamCollaboration => {
+                self.open_team_modal(cx);
+            }
+            PaletteAction::ToggleMultiplayerCollaboration => {
+                self.toggle_multiplayer_on_active_tab(cx);
+            }
         }
     }
 
@@ -2517,6 +2563,668 @@ impl Shellumi {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn open_team_modal(&mut self, cx: &mut Context<Self>) {
+        let new_vault_name =
+            cx.new(|cx| TextInput::new(cx, "", "Team vault name (e.g. Platform Team)"));
+        let new_vault_desc = cx.new(|cx| TextInput::new(cx, "", "Description (optional)"));
+        let invite_user_id =
+            cx.new(|cx| TextInput::new(cx, "", "Collaborator user ID (e.g. dev@corp)"));
+        let invite_name =
+            cx.new(|cx| TextInput::new(cx, "", "Display name (e.g. Alice Developer)"));
+
+        self.team_modal = Some(TeamModalState {
+            active_tab: TeamModalTab::Vaults,
+            vaults: Vec::new(),
+            selected_vault_id: None,
+            members: Vec::new(),
+            audit_records: Vec::new(),
+            new_vault_name,
+            new_vault_desc,
+            invite_user_id,
+            invite_name,
+            invite_role: TeamRole::Editor,
+            error: None,
+            status_message: None,
+            is_loading: true,
+        });
+        cx.notify();
+        self.load_team_vaults(cx);
+    }
+
+    fn dismiss_team_modal(&mut self, cx: &mut Context<Self>) {
+        self.team_modal = None;
+        cx.notify();
+    }
+
+    fn load_team_vaults(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            if let Some(m) = &mut self.team_modal {
+                m.is_loading = false;
+                m.error = Some(
+                    "No database path configured. Team vaults require a local database.".into(),
+                );
+            }
+            cx.notify();
+            return;
+        };
+
+        if let Some(m) = &mut self.team_modal {
+            m.is_loading = true;
+            m.error = None;
+        }
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let vaults = store
+                    .list_shared_vaults()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(vaults)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    modal.is_loading = false;
+                    match result {
+                        Ok(vaults) => {
+                            let first_id = vaults.first().map(|v| v.id.clone());
+                            modal.vaults = vaults;
+                            if modal.selected_vault_id.is_none() {
+                                modal.selected_vault_id = first_id;
+                            }
+                            if let Some(vid) = modal.selected_vault_id.clone() {
+                                app.refresh_team_modal_vault(&vid, cx);
+                            } else {
+                                cx.notify();
+                            }
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_team_modal_vault(&mut self, vault_id: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let vid = vault_id.to_string();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let members = store
+                    .list_team_members(&vid)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let audit = store
+                    .list_audit_log(&vid, Some(50))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok((members, audit))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    match result {
+                        Ok((members, audit)) => {
+                            modal.members = members;
+                            modal.audit_records = audit;
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn create_team_vault(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let Some(modal) = &mut self.team_modal else {
+            return;
+        };
+
+        let name = modal.new_vault_name.read(cx).value().trim().to_string();
+        let desc = modal.new_vault_desc.read(cx).value().trim().to_string();
+        let desc_opt = if desc.is_empty() { None } else { Some(desc) };
+
+        if name.is_empty() {
+            modal.error = Some("Vault name cannot be empty".into());
+            cx.notify();
+            return;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs();
+        let now_nanos = now.subsec_nanos();
+        let vault_id = format!("vlt-{now_secs}-{now_nanos}");
+        let now_iso = format!("{now_secs}");
+
+        let vault = match SharedVault::new(&vault_id, &name, desc_opt, "local_owner", &now_iso) {
+            Ok(v) => v,
+            Err(e) => {
+                modal.error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        let audit = SharingAuditRecord::new(
+            format!("aud-{now_secs}-{now_nanos}"),
+            &vault_id,
+            AuditAction::VaultCreated,
+            "local_owner",
+            None,
+            Some(format!("Created vault '{name}'")),
+            &now_iso,
+        );
+
+        modal.is_loading = true;
+        modal.error = None;
+        modal.status_message = Some(format!("Creating vault '{name}'…"));
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .create_shared_vault(&vault)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .log_audit_event(&audit)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    modal.is_loading = false;
+                    match result {
+                        Ok(()) => {
+                            modal.status_message = Some("Vault created successfully.".into());
+                            modal
+                                .new_vault_name
+                                .update(cx, |input, cx| input.set_value("", cx));
+                            modal
+                                .new_vault_desc
+                                .update(cx, |input, cx| input.set_value("", cx));
+                            modal.selected_vault_id = Some(vault_id.clone());
+                            app.load_team_vaults(cx);
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn rotate_team_vault_key(&mut self, vault_id: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let vid = vault_id.to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs();
+        let now_nanos = now.subsec_nanos();
+        let now_iso = format!("{now_secs}");
+
+        let current_epoch = self
+            .team_modal
+            .as_ref()
+            .and_then(|m| m.vaults.iter().find(|v| v.id == vid))
+            .map(|v| v.current_epoch)
+            .unwrap_or(1);
+        let new_epoch = current_epoch + 1;
+
+        let audit = SharingAuditRecord::new(
+            format!("aud-{now_secs}-{now_nanos}"),
+            &vid,
+            AuditAction::KeyRotated,
+            "local_owner",
+            None,
+            Some(format!("Rotated key to epoch {new_epoch}")),
+            &now_iso,
+        );
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .update_shared_vault_epoch(&vid, new_epoch, &now_iso)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .log_audit_event(&audit)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    match result {
+                        Ok(()) => {
+                            modal.status_message =
+                                Some(format!("Vault key rotated to epoch {new_epoch}."));
+                            app.load_team_vaults(cx);
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn delete_team_vault(&mut self, vault_id: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let vid = vault_id.to_string();
+        let vid_task = vid.clone();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .delete_shared_vault(&vid_task)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    match result {
+                        Ok(()) => {
+                            modal.status_message = Some("Vault deleted.".into());
+                            if modal.selected_vault_id.as_deref() == Some(&vid) {
+                                modal.selected_vault_id = None;
+                                modal.members.clear();
+                                modal.audit_records.clear();
+                            }
+                            app.load_team_vaults(cx);
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn invite_team_member(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let Some(modal) = &mut self.team_modal else {
+            return;
+        };
+        let Some(vid) = modal.selected_vault_id.clone() else {
+            modal.error = Some("Please select a shared vault first".into());
+            cx.notify();
+            return;
+        };
+
+        let user_id = modal.invite_user_id.read(cx).value().trim().to_string();
+        let display_name = modal.invite_name.read(cx).value().trim().to_string();
+        let role = modal.invite_role;
+
+        if user_id.is_empty() || display_name.is_empty() {
+            modal.error = Some("User ID and display name are required".into());
+            cx.notify();
+            return;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs();
+        let now_nanos = now.subsec_nanos();
+        let member_id = format!("mem-{now_secs}-{now_nanos}");
+        let now_iso = format!("{now_secs}");
+
+        let member = TeamMember::new(
+            &member_id,
+            &vid,
+            &user_id,
+            &display_name,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleSharedPublicKey",
+            role,
+            &now_iso,
+            "local_owner",
+        );
+
+        let audit = SharingAuditRecord::new(
+            format!("aud-{now_secs}-{now_nanos}"),
+            &vid,
+            AuditAction::MemberInvited,
+            "local_owner",
+            Some(user_id.clone()),
+            Some(format!("Invited '{display_name}' as {role}")),
+            &now_iso,
+        );
+
+        modal.is_loading = true;
+        modal.error = None;
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .add_team_member(&member)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .log_audit_event(&audit)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    modal.is_loading = false;
+                    match result {
+                        Ok(()) => {
+                            modal.status_message =
+                                Some(format!("Invited member '{display_name}' as {role}."));
+                            modal
+                                .invite_user_id
+                                .update(cx, |input, cx| input.set_value("", cx));
+                            modal
+                                .invite_name
+                                .update(cx, |input, cx| input.set_value("", cx));
+                            app.refresh_team_modal_vault(&vid, cx);
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn update_member_role(&mut self, member_id: &str, new_role: TeamRole, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let mid = member_id.to_string();
+        let Some(modal) = &self.team_modal else {
+            return;
+        };
+        let Some(vid) = modal.selected_vault_id.clone() else {
+            return;
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs();
+        let now_nanos = now.subsec_nanos();
+        let now_iso = format!("{now_secs}");
+
+        let audit = SharingAuditRecord::new(
+            format!("aud-{now_secs}-{now_nanos}"),
+            &vid,
+            AuditAction::MemberRoleUpdated,
+            "local_owner",
+            Some(mid.clone()),
+            Some(format!("Updated role to {new_role}")),
+            &now_iso,
+        );
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .update_team_member_role(&mid, new_role)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .log_audit_event(&audit)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    match result {
+                        Ok(()) => {
+                            modal.status_message =
+                                Some(format!("Updated member role to {new_role}."));
+                            app.refresh_team_modal_vault(&vid, cx);
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn revoke_team_member(&mut self, member_id: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let mid = member_id.to_string();
+        let Some(modal) = &self.team_modal else {
+            return;
+        };
+        let Some(vid) = modal.selected_vault_id.clone() else {
+            return;
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs();
+        let now_nanos = now.subsec_nanos();
+        let now_iso = format!("{now_secs}");
+
+        let audit = SharingAuditRecord::new(
+            format!("aud-{now_secs}-{now_nanos}"),
+            &vid,
+            AuditAction::MemberRevoked,
+            "local_owner",
+            Some(mid.clone()),
+            Some("Access revoked".into()),
+            &now_iso,
+        );
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .revoke_team_member(&mid, &now_iso)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .log_audit_event(&audit)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.team_modal {
+                    match result {
+                        Ok(()) => {
+                            modal.status_message =
+                                Some("Member revoked. Recommend rotating vault key next.".into());
+                            app.refresh_team_modal_vault(&vid, cx);
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_multiplayer_on_active_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+
+        if tab.multiplayer.is_some() {
+            tab.multiplayer = None;
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let session_id = format!("collab-{}", tab.id);
+            tab.multiplayer = Some(MultiplayerSession::new(
+                session_id,
+                None,
+                "local_user",
+                format!("{now}"),
+            ));
+        }
+        cx.notify();
+    }
+
+    fn grant_multiplayer_control(&mut self, target_user: &str, cx: &mut Context<Self>) {
+        let Some(idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        if let Some(session) = &mut tab.multiplayer {
+            let requester = session.owner_id.clone();
+            let _ = session.grant_keyboard_control(&requester, target_user);
+            cx.notify();
+        }
+    }
+
+    fn revoke_multiplayer_control(&mut self, cx: &mut Context<Self>) {
+        let Some(idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        if let Some(session) = &mut tab.multiplayer {
+            let requester = session.owner_id.clone();
+            let _ = session.revoke_keyboard_control(&requester);
+            cx.notify();
+        }
+    }
+
+    fn add_multiplayer_demo_participant(&mut self, cx: &mut Context<Self>) {
+        let Some(idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        if let Some(session) = &mut tab.multiplayer {
+            let count = session.participants.len();
+            let user_id = format!("teammate_{count}");
+            let name = format!("Collaborator {count}");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = session.add_participant(&user_id, &name, format!("{now}"));
+            cx.notify();
         }
     }
 
@@ -3683,6 +4391,7 @@ impl Shellumi {
                     PaletteCategory::Sftp => (rgb(0x14532d), rgb(0xbbf7d0)),
                     PaletteCategory::Navigation => (rgb(0x374151), rgb(0xf3f4f6)),
                     PaletteCategory::Workspace => (rgb(0x312e81), rgb(0xc7d2fe)),
+                    PaletteCategory::Collaboration => (rgb(0x4338ca), rgb(0xe0e7ff)),
                 };
 
                 let action = mat.command.action.clone();
@@ -3786,6 +4495,757 @@ impl Shellumi {
                     .child(format!("{} actions available", matches.len())),
             );
         modal_box = modal_box.child(footer);
+
+        overlay.child(modal_box)
+    }
+
+    fn render_team_modal(
+        &self,
+        modal: &TeamModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("team-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgb(0x0a0f1d))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut modal_box = div()
+            .id("team-modal-container")
+            .w(px(780.0))
+            .max_h(px(680.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x6366f1))
+            .rounded_lg()
+            .p_5()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child("👥 Team Collaboration & Shared Vaults"),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-team-modal-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_team_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Navigation Tabs: Vaults, Members, AuditLog
+        let mut tab_strip = div().flex().items_center().gap_2();
+
+        let is_vaults = modal.active_tab == TeamModalTab::Vaults;
+        tab_strip = tab_strip.child(
+            div()
+                .id("team-tab-vaults")
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .bg(if is_vaults {
+                    rgb(0x4338ca)
+                } else {
+                    rgb(0x334155)
+                })
+                .text_sm()
+                .font_weight(if is_vaults {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    if let Some(m) = &mut app.team_modal {
+                        m.active_tab = TeamModalTab::Vaults;
+                        cx.notify();
+                    }
+                }))
+                .child(format!("📁 Shared Vaults ({})", modal.vaults.len())),
+        );
+
+        let is_members = modal.active_tab == TeamModalTab::Members;
+        tab_strip = tab_strip.child(
+            div()
+                .id("team-tab-members")
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .bg(if is_members {
+                    rgb(0x4338ca)
+                } else {
+                    rgb(0x334155)
+                })
+                .text_sm()
+                .font_weight(if is_members {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    if let Some(m) = &mut app.team_modal {
+                        m.active_tab = TeamModalTab::Members;
+                        cx.notify();
+                    }
+                }))
+                .child(format!("👥 Members ({})", modal.members.len())),
+        );
+
+        let is_audit = modal.active_tab == TeamModalTab::AuditLog;
+        tab_strip = tab_strip.child(
+            div()
+                .id("team-tab-audit")
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .bg(if is_audit {
+                    rgb(0x4338ca)
+                } else {
+                    rgb(0x334155)
+                })
+                .text_sm()
+                .font_weight(if is_audit {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    if let Some(m) = &mut app.team_modal {
+                        m.active_tab = TeamModalTab::AuditLog;
+                        cx.notify();
+                    }
+                }))
+                .child(format!("📜 Audit Log ({})", modal.audit_records.len())),
+        );
+
+        modal_box = modal_box.child(tab_strip);
+
+        // Status or Error notifications
+        if let Some(msg) = &modal.status_message {
+            modal_box = modal_box.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x064e3b))
+                    .border_1()
+                    .border_color(rgb(0x059669))
+                    .text_xs()
+                    .text_color(rgb(0xa7f3d0))
+                    .child(format!("✓ {msg}")),
+            );
+        }
+        if let Some(err) = &modal.error {
+            modal_box = modal_box.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x450a0a))
+                    .border_1()
+                    .border_color(rgb(0x991b1b))
+                    .text_xs()
+                    .text_color(rgb(0xfecaca))
+                    .child(format!("⚠ {err}")),
+            );
+        }
+
+        // Tab Content
+        match modal.active_tab {
+            TeamModalTab::Vaults => {
+                let mut list = div()
+                    .id("vaults-list")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .max_h(px(260.0))
+                    .overflow_y_scroll();
+
+                if modal.vaults.is_empty() {
+                    list = list.child(
+                        div()
+                            .p_4()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .text_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .child("No shared team vaults found. Create one below to collaborate."),
+                    );
+                } else {
+                    for (v_idx, v) in modal.vaults.iter().enumerate() {
+                        let vid = v.id.clone();
+                        let is_selected = modal.selected_vault_id.as_deref() == Some(&v.id);
+                        let epoch = v.current_epoch;
+                        let vid_rotate = v.id.clone();
+                        let vid_del = v.id.clone();
+
+                        let mut card = div()
+                            .id(("vault-card", v_idx))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_3()
+                            .rounded_md()
+                            .bg(if is_selected {
+                                rgb(0x1e1b4b)
+                            } else {
+                                rgb(0x0f172a)
+                            })
+                            .border_1()
+                            .border_color(if is_selected {
+                                rgb(0x6366f1)
+                            } else {
+                                rgb(0x1e293b)
+                            });
+
+                        let left = div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xf1f5f9))
+                                            .child(v.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(0x312e81))
+                                            .text_xs()
+                                            .text_color(rgb(0xc7d2fe))
+                                            .child(format!("Epoch {epoch}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x94a3b8))
+                                            .child(format!("Owner: {}", v.owner_id)),
+                                    ),
+                            )
+                            .child(
+                                div().text_xs().text_color(rgb(0x64748b)).child(
+                                    v.description
+                                        .clone()
+                                        .unwrap_or_else(|| "No description".into()),
+                                ),
+                            );
+
+                        let mut right = div().flex().items_center().gap_2();
+                        if !is_selected {
+                            let vid_sel = vid.clone();
+                            right = right.child(
+                                div()
+                                    .id(("select-vault-btn", v_idx))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgb(0x4338ca))
+                                    .text_xs()
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        if let Some(m) = &mut app.team_modal {
+                                            m.selected_vault_id = Some(vid_sel.clone());
+                                        }
+                                        app.refresh_team_modal_vault(&vid_sel, cx);
+                                    }))
+                                    .child("Select"),
+                            );
+                        } else {
+                            right = right.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgb(0x065f46))
+                                    .text_xs()
+                                    .text_color(rgb(0xa7f3d0))
+                                    .child("Active"),
+                            );
+                        }
+
+                        right = right.child(
+                            div()
+                                .id(("rotate-key-btn", v_idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(rgb(0x374151))
+                                .text_xs()
+                                .text_color(rgb(0xe5e7eb))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.rotate_team_vault_key(&vid_rotate, cx);
+                                }))
+                                .child("🔄 Rotate Key"),
+                        );
+
+                        right = right.child(
+                            div()
+                                .id(("delete-vault-btn", v_idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(rgb(0x7f1d1d))
+                                .text_xs()
+                                .text_color(rgb(0xfecaca))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.delete_team_vault(&vid_del, cx);
+                                }))
+                                .child("🗑"),
+                        );
+
+                        card = card.child(left).child(right);
+                        list = list.child(card);
+                    }
+                }
+                modal_box = modal_box.child(list);
+
+                // Create Vault Form
+                let create_form = div()
+                    .id("create-vault-box")
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x0f172a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x94a3b8))
+                            .child("CREATE NEW SHARED VAULT"),
+                    )
+                    .child(modal.new_vault_name.clone())
+                    .child(modal.new_vault_desc.clone())
+                    .child(
+                        div().flex().justify_end().child(
+                            div()
+                                .id("create-vault-submit-btn")
+                                .px_4()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(rgb(0x4338ca))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.create_team_vault(cx);
+                                }))
+                                .child("+ Create Vault"),
+                        ),
+                    );
+                modal_box = modal_box.child(create_form);
+            }
+            TeamModalTab::Members => {
+                let Some(selected_vid) = &modal.selected_vault_id else {
+                    modal_box = modal_box.child(
+                        div()
+                            .p_4()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .text_sm()
+                            .text_color(rgb(0xf59e0b))
+                            .child(
+                                "⚠️ Please select a shared vault from the 'Shared Vaults' tab first.",
+                            ),
+                    );
+                    return overlay.child(modal_box);
+                };
+
+                let selected_vault_name = modal
+                    .vaults
+                    .iter()
+                    .find(|v| &v.id == selected_vid)
+                    .map(|v| v.name.as_str())
+                    .unwrap_or("Selected Vault");
+
+                modal_box = modal_box.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child(format!("Enrolled Collaborators for: {selected_vault_name}")),
+                );
+
+                let mut members_list = div()
+                    .id("team-members-list")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .max_h(px(220.0))
+                    .overflow_y_scroll();
+
+                if modal.members.is_empty() {
+                    members_list = members_list.child(
+                        div().p_3().rounded_md().bg(rgb(0x0f172a)).text_xs().text_color(
+                            rgb(0x64748b),
+                        ).child(
+                            "No additional collaborators enrolled yet. Invite team members below.",
+                        ),
+                    );
+                } else {
+                    for (m_idx, m) in modal.members.iter().enumerate() {
+                        let mid_revoke = m.id.clone();
+                        let mid_role = m.id.clone();
+                        let is_revoked = m.revoked;
+
+                        let mut card = div()
+                            .id(("member-card", m_idx))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .border_1()
+                            .border_color(if is_revoked {
+                                rgb(0x450a0a)
+                            } else {
+                                rgb(0x1e293b)
+                            });
+
+                        let (badge_bg, badge_fg) = match m.role {
+                            TeamRole::Owner => (rgb(0x78350f), rgb(0xfde68a)),
+                            TeamRole::Administrator => (rgb(0x1e3a8a), rgb(0xbfdbfe)),
+                            TeamRole::Editor => (rgb(0x064e3b), rgb(0xa7f3d0)),
+                            TeamRole::Viewer => (rgb(0x374151), rgb(0xd1d5db)),
+                        };
+
+                        let left = div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(if is_revoked {
+                                                rgb(0x94a3b8)
+                                            } else {
+                                                rgb(0xf8fafc)
+                                            })
+                                            .child(m.display_name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(badge_bg)
+                                            .text_xs()
+                                            .text_color(badge_fg)
+                                            .child(m.role.badge_label()),
+                                    )
+                                    .child({
+                                        if is_revoked {
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(rgb(0x7f1d1d))
+                                                .text_xs()
+                                                .text_color(rgb(0xfecaca))
+                                                .child("⛔ Revoked")
+                                        } else {
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(rgb(0x065f46))
+                                                .text_xs()
+                                                .text_color(rgb(0xa7f3d0))
+                                                .child("Active")
+                                        }
+                                    }),
+                            )
+                            .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
+                                "User: {} • Invited by {}",
+                                m.user_id, m.invited_by
+                            )));
+
+                        let mut right = div().flex().items_center().gap_2();
+                        if !is_revoked && m.role != TeamRole::Owner {
+                            let next_role = match m.role {
+                                TeamRole::Viewer => TeamRole::Editor,
+                                TeamRole::Editor => TeamRole::Administrator,
+                                TeamRole::Administrator => TeamRole::Viewer,
+                                TeamRole::Owner => TeamRole::Owner,
+                            };
+                            let role_label = format!("Set {}", next_role.as_str());
+                            right = right.child(
+                                div()
+                                    .id(("toggle-role-btn", m_idx))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgb(0x374151))
+                                    .text_xs()
+                                    .text_color(rgb(0xe2e8f0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.update_member_role(&mid_role, next_role, cx);
+                                    }))
+                                    .child(role_label),
+                            );
+
+                            right = right.child(
+                                div()
+                                    .id(("revoke-member-btn", m_idx))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgb(0x7f1d1d))
+                                    .text_xs()
+                                    .text_color(rgb(0xfecaca))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.revoke_team_member(&mid_revoke, cx);
+                                    }))
+                                    .child("⛔ Revoke"),
+                            );
+                        }
+
+                        card = card.child(left).child(right);
+                        members_list = members_list.child(card);
+                    }
+                }
+                modal_box = modal_box.child(members_list);
+
+                // Invite Member Form
+                let current_role = modal.invite_role;
+                let invite_form = div()
+                    .id("invite-member-box")
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x0f172a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x94a3b8))
+                            .child("INVITE COLLABORATOR"),
+                    )
+                    .child(modal.invite_user_id.clone())
+                    .child(modal.invite_name.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Role:"))
+                                    .child(
+                                        div()
+                                            .id("invite-role-viewer")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(if current_role == TeamRole::Viewer {
+                                                rgb(0x4338ca)
+                                            } else {
+                                                rgb(0x374151)
+                                            })
+                                            .text_xs()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                if let Some(m) = &mut app.team_modal {
+                                                    m.invite_role = TeamRole::Viewer;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child("Viewer"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("invite-role-editor")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(if current_role == TeamRole::Editor {
+                                                rgb(0x4338ca)
+                                            } else {
+                                                rgb(0x374151)
+                                            })
+                                            .text_xs()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                if let Some(m) = &mut app.team_modal {
+                                                    m.invite_role = TeamRole::Editor;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child("Editor"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("invite-role-admin")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(if current_role == TeamRole::Administrator {
+                                                rgb(0x4338ca)
+                                            } else {
+                                                rgb(0x374151)
+                                            })
+                                            .text_xs()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                if let Some(m) = &mut app.team_modal {
+                                                    m.invite_role = TeamRole::Administrator;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child("Admin"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("invite-submit-btn")
+                                    .px_4()
+                                    .py_1p5()
+                                    .rounded_md()
+                                    .bg(rgb(0x4338ca))
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.invite_team_member(cx);
+                                    }))
+                                    .child("✉️ Invite Member"),
+                            ),
+                    );
+                modal_box = modal_box.child(invite_form);
+            }
+            TeamModalTab::AuditLog => {
+                let Some(selected_vid) = &modal.selected_vault_id else {
+                    modal_box = modal_box.child(
+                        div()
+                            .p_4()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .text_sm()
+                            .text_color(rgb(0xf59e0b))
+                            .child(
+                                "⚠️ Please select a shared vault from the 'Shared Vaults' tab first.",
+                            ),
+                    );
+                    return overlay.child(modal_box);
+                };
+
+                let selected_vault_name = modal
+                    .vaults
+                    .iter()
+                    .find(|v| &v.id == selected_vid)
+                    .map(|v| v.name.as_str())
+                    .unwrap_or("Selected Vault");
+
+                modal_box = modal_box.child(div().text_xs().text_color(rgb(0x94a3b8)).child(
+                    format!("Tamper-Evident Audit Trail for: {selected_vault_name}"),
+                ));
+
+                let mut audit_list = div()
+                    .id("team-audit-list")
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .max_h(px(380.0))
+                    .overflow_y_scroll();
+
+                if modal.audit_records.is_empty() {
+                    audit_list = audit_list.child(
+                        div()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("No audit records logged yet for this vault."),
+                    );
+                } else {
+                    for record in &modal.audit_records {
+                        let formatted = record.format_entry();
+                        let row = div()
+                            .px_3()
+                            .py_1p5()
+                            .rounded_sm()
+                            .bg(rgb(0x0f172a))
+                            .border_1()
+                            .border_color(rgb(0x1e293b))
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(rgb(0xc7d2fe))
+                            .child(formatted);
+                        audit_list = audit_list.child(row);
+                    }
+                }
+                modal_box = modal_box.child(audit_list);
+            }
+        }
 
         overlay.child(modal_box)
     }
@@ -4714,6 +6174,33 @@ impl Render for Shellumi {
                                     );
                                 }
 
+                                if !is_sftp_dual_pane {
+                                    let mp_active = tab.multiplayer.is_some();
+                                    actions_bar = actions_bar.child(
+                                        div()
+                                            .id("toggle-multiplayer-btn")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if mp_active {
+                                                rgb(0x059669)
+                                            } else {
+                                                rgb(0x374151)
+                                            })
+                                            .text_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.toggle_multiplayer_on_active_tab(cx);
+                                            }))
+                                            .child(if mp_active {
+                                                "👥 Multiplayer (Active)"
+                                            } else {
+                                                "👥 Collaborate"
+                                            }),
+                                    );
+                                }
+
                                 actions_bar = actions_bar.child(
                                     div()
                                         .id("terminal-palette-btn")
@@ -4747,6 +6234,149 @@ impl Render for Shellumi {
                                 )
                             }),
                     );
+
+                if let Some(multiplayer) = &tab.multiplayer {
+                    let controller = multiplayer.current_controller.as_deref().unwrap_or("None");
+                    let owner = &multiplayer.owner_id;
+                    let participants_count = multiplayer.participants.len();
+
+                    let mut mp_strip = div()
+                        .id("multiplayer-control-strip")
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x1e1b4b))
+                        .border_1()
+                        .border_color(rgb(0x6366f1));
+
+                    let mut info_left = div().flex().items_center().gap_3();
+                    info_left = info_left.child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xa5b4fc))
+                            .child(format!("👥 Session: {}", multiplayer.session_id)),
+                    );
+                    info_left = info_left.child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(0x312e81))
+                            .text_xs()
+                            .text_color(rgb(0xe0e7ff))
+                            .child(format!("Host: @{owner}")),
+                    );
+                    info_left = info_left.child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if controller == "local_user" {
+                                rgb(0x065f46)
+                            } else {
+                                rgb(0x854d0e)
+                            })
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(format!("✍️ Active Writer: @{controller}")),
+                    );
+                    info_left = info_left.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child(format!("{participants_count} participant(s)")),
+                    );
+
+                    mp_strip = mp_strip.child(info_left);
+
+                    let mut mp_actions = div().flex().items_center().gap_2();
+
+                    if participants_count > 1 {
+                        let next_target = multiplayer
+                            .participants
+                            .iter()
+                            .find(|p| Some(&p.user_id) != multiplayer.current_controller.as_ref())
+                            .map(|p| p.user_id.clone())
+                            .unwrap_or_else(|| owner.clone());
+                        let target_label = next_target.clone();
+
+                        mp_actions = mp_actions.child(
+                            div()
+                                .id("transfer-writer-btn")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(rgb(0x4338ca))
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.grant_multiplayer_control(&next_target, cx);
+                                }))
+                                .child(format!("Grant Control to @{target_label}")),
+                        );
+                    }
+
+                    if multiplayer.current_controller.as_deref() != Some(owner) {
+                        mp_actions = mp_actions.child(
+                            div()
+                                .id("revoke-writer-btn")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(rgb(0xb45309))
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.revoke_multiplayer_control(cx);
+                                }))
+                                .child("⛔ Revoke to Host"),
+                        );
+                    }
+
+                    mp_actions = mp_actions.child(
+                        div()
+                            .id("add-demo-collaborator-btn")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x374151))
+                            .text_xs()
+                            .text_color(rgb(0xd1d5db))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.add_multiplayer_demo_participant(cx);
+                            }))
+                            .child("+ Add Teammate"),
+                    );
+
+                    mp_actions = mp_actions.child(
+                        div()
+                            .id("end-multiplayer-session-btn")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x7f1d1d))
+                            .text_xs()
+                            .text_color(rgb(0xfecaca))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.toggle_multiplayer_on_active_tab(cx);
+                            }))
+                            .child("✕ End"),
+                    );
+
+                    mp_strip = mp_strip.child(mp_actions);
+                    body = body.child(mp_strip);
+                }
 
                 if !is_sftp_dual_pane && self.snippets_panel_open {
                     let mut snippets_bar = div()
@@ -5173,6 +6803,9 @@ impl Render for Shellumi {
                 if let Some(palette) = &self.command_palette {
                     result = result.child(self.render_command_palette(palette, cx));
                 }
+                if let Some(modal) = &self.team_modal {
+                    result = result.child(self.render_team_modal(modal, cx));
+                }
                 return result;
             }
         }
@@ -5494,6 +7127,20 @@ impl Render for Shellumi {
                             }
                         }))
                         .child(self.sync_status.label()),
+                )
+                .child(
+                    div()
+                        .id("team-collab-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x4338ca))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.open_team_modal(cx);
+                        }))
+                        .child("👥 Team Vaults"),
                 );
 
             if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
@@ -5725,6 +7372,9 @@ impl Render for Shellumi {
         }
         if let Some(palette) = &self.command_palette {
             result = result.child(self.render_command_palette(palette, cx));
+        }
+        if let Some(modal) = &self.team_modal {
+            result = result.child(self.render_team_modal(modal, cx));
         }
         result
     }
@@ -6784,5 +8434,98 @@ mod tests {
         let warning = TelnetConfig::security_warning();
         assert!(warning.contains("UNENCRYPTED PROTOCOL"));
         assert!(warning.contains("cleartext"));
+    }
+
+    #[test]
+    fn verifies_team_collaboration_roles_and_badge_presentation() {
+        use shellumi_core::TeamRole;
+
+        assert_eq!(TeamRole::Owner.badge_label(), "👑 Owner");
+        assert_eq!(TeamRole::Administrator.badge_label(), "🛡️ Admin");
+        assert_eq!(TeamRole::Editor.badge_label(), "✏️ Editor");
+        assert_eq!(TeamRole::Viewer.badge_label(), "👁️ Viewer");
+
+        assert!(TeamRole::Owner.can_manage_roles());
+        assert!(!TeamRole::Administrator.can_manage_roles());
+        assert!(TeamRole::Administrator.can_manage_members());
+        assert!(!TeamRole::Editor.can_manage_members());
+
+        assert!(TeamRole::Editor.can_edit_records());
+        assert!(!TeamRole::Viewer.can_edit_records());
+        assert!(TeamRole::Viewer.can_view_records());
+
+        assert!(TeamRole::Owner.can_rotate_key());
+        assert!(TeamRole::Administrator.can_rotate_key());
+        assert!(!TeamRole::Editor.can_rotate_key());
+    }
+
+    #[test]
+    fn verifies_multiplayer_terminal_session_state_transitions() {
+        use shellumi_core::MultiplayerSession;
+
+        let mut session = MultiplayerSession::new("test-session-1", None, "host_alice", "1000");
+        assert_eq!(session.owner_id, "host_alice");
+        assert_eq!(session.current_controller.as_deref(), Some("host_alice"));
+        assert!(session.is_active);
+
+        // Add collaborator
+        session
+            .add_participant("collab_bob", "Bob Developer", "1005")
+            .expect("should enroll collaborator");
+        assert_eq!(session.participants.len(), 2);
+
+        // Transfer keyboard control to Bob
+        session
+            .grant_keyboard_control("host_alice", "collab_bob")
+            .expect("owner can grant control");
+        assert_eq!(session.current_controller.as_deref(), Some("collab_bob"));
+
+        // Host revokes keyboard control
+        session
+            .revoke_keyboard_control("host_alice")
+            .expect("host can revoke control");
+        assert_eq!(session.current_controller.as_deref(), Some("host_alice"));
+
+        // Remove participant while they hold control - control must fall back to host
+        session
+            .grant_keyboard_control("host_alice", "collab_bob")
+            .unwrap();
+        assert_eq!(session.current_controller.as_deref(), Some("collab_bob"));
+        assert!(session.remove_participant("collab_bob"));
+        assert_eq!(session.current_controller.as_deref(), Some("host_alice"));
+    }
+
+    #[test]
+    fn verifies_shared_vault_and_audit_trail_formatting() {
+        use shellumi_core::{AuditAction, SharedVault, SharingAuditRecord};
+
+        let mut vault = SharedVault::new(
+            "vlt-1",
+            "Infrastructure Team",
+            Some("Shared production infra".into()),
+            "alice",
+            "1000",
+        )
+        .expect("valid vault");
+
+        assert_eq!(vault.current_epoch, 1);
+        let new_epoch = vault.rotate_key("1100");
+        assert_eq!(new_epoch, 2);
+        assert_eq!(vault.current_epoch, 2);
+
+        let audit = SharingAuditRecord::new(
+            "aud-1",
+            "vlt-1",
+            AuditAction::KeyRotated,
+            "alice",
+            None,
+            Some("Rotated key to epoch 2".into()),
+            "1100",
+        );
+        let log_entry = audit.format_entry();
+        assert!(log_entry.contains("[1100]"));
+        assert!(log_entry.contains("key_rotated"));
+        assert!(log_entry.contains("actor=alice"));
+        assert!(log_entry.contains("Rotated key to epoch 2"));
     }
 }

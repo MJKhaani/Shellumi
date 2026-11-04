@@ -140,8 +140,22 @@ been checked on macOS.
     protocol badges on host cards, SFTP action isolation (hidden for non-SSH hosts), multi-protocol terminal session tabs
     (`SessionKind::Ssh`, `Mosh`, `Telnet`, `Serial`, `Local`, `Sftp`) with protocol prefixes in titles, and persistent
     `[⚠️ UNENCRYPTED TELNET]` badge in terminal view header. 165 workspace tests passing.
-    Next: implement cryptographic Team Collaboration (Phase 8: shared vaults, role management, encrypted data sharing, multiplayer terminal).
-13. Continue the remaining phases in PROJECT.md (Collaboration, Infrastructure Integrations, Production Hardening),
+13. Team Collaboration and Shared Vaults (Phase 8): Implemented team collaboration domain models in `shellumi-core::collaboration`
+    (`TeamRole` [Owner, Administrator, Editor, Viewer] with granular capability queries, `TeamMember` enrollment, revocation,
+    and role management, `SharedVault` cryptographic epochs and key rotation, `SharingAuditRecord` tamper-evident audit logging
+    with `AuditAction`, `MultiplayerSession` and `MultiplayerParticipant` state machines enforcing single-active-writer semantics
+    with immediate session owner revocation, and `SharedSessionLog` with comments and bookmarks). Expanded `SyncEntityType` with
+    `SharedVault`, `TeamMember`, and `AuditRecord` for zero-knowledge end-to-end sync. Expanded `PaletteCategory::Collaboration` (`👥`)
+    and registered collaboration actions (`PaletteAction::OpenTeamCollaboration`, `ToggleMultiplayerCollaboration`). Implemented Turso database
+    schema version 11 with transactional migrations from versions 1..10 (`shared_vaults`, `team_members`, `sharing_audit_log`, `shared_session_logs` tables),
+    CRUD methods on `HostStore`, and encrypted vault export/import serialization. Implemented CLI `team` subcommands (`team vault create/list/show/rotate-key/delete`,
+    `team member invite/list/role/revoke`, `team audit`, `team session start/join/grant/revoke/status`). Implemented GPUI desktop integration
+    in `shellumi-app`: `[👥 Team Vaults]` top toolbar action, interactive Team Collaboration Modal (`TeamModalState`) with tabbed browsing
+    for Shared Vaults, Members with role badges, and Audit Log, vault creation, member invitations with role picker, member revocation,
+    key rotation, and multiplayer terminal collaboration strip on active session tabs with single-writer enforcement, control delegation,
+    and revocation to host. 177 workspace tests passing.
+    Next: implement Phase 9: Infrastructure Integrations (Cloud providers: AWS, Azure, DigitalOcean host discovery; Ansible inventory synchronization).
+14. Continue the remaining phases in PROJECT.md (Infrastructure Integrations, Production Hardening),
     with acceptance tests and platform verification for each capability.
 
 Reference research: [upstream GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui),

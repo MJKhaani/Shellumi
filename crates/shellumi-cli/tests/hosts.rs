@@ -1456,3 +1456,134 @@ fn supports_multi_protocol_cli_and_serial_ports() {
     let bad_err = String::from_utf8(bad_proto.stderr).unwrap();
     assert!(bad_err.contains("Invalid connection protocol"));
 }
+
+#[test]
+fn supports_team_collaboration_and_shared_vault_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("team.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Create team shared vault
+    let create_vault = run(&[
+        "team",
+        "vault",
+        "create",
+        "SRE Core Vault",
+        "--desc",
+        "Cloud production infrastructure",
+        "--owner",
+        "alice@corp.internal",
+    ]);
+    assert!(create_vault.status.success());
+    let create_out = String::from_utf8(create_vault.stdout).unwrap();
+    assert!(create_out.contains("Created shared team vault: SRE Core Vault"));
+
+    // Extract vault id
+    let vault_id = create_out
+        .split('(')
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(")\n")
+        .trim()
+        .to_string();
+
+    // 2. List vaults
+    let list_vaults = run(&["team", "vault", "list"]);
+    assert!(list_vaults.status.success());
+    let list_out = String::from_utf8(list_vaults.stdout).unwrap();
+    assert!(list_out.contains("SRE Core Vault"));
+    assert!(list_out.contains("alice@corp.internal"));
+
+    // 3. Show vault
+    let show_vault = run(&["team", "vault", "show", &vault_id]);
+    assert!(show_vault.status.success());
+    let show_out = String::from_utf8(show_vault.stdout).unwrap();
+    assert!(show_out.contains("Epoch:       1"));
+
+    // 4. Enroll team member
+    let invite_res = run(&[
+        "team",
+        "member",
+        "invite",
+        &vault_id,
+        "bob@corp.internal",
+        "Bob",
+        "editor",
+        "--invited-by",
+        "alice@corp.internal",
+    ]);
+    assert!(invite_res.status.success());
+    let invite_out = String::from_utf8(invite_res.stdout).unwrap();
+    assert!(
+        invite_out.contains("Enrolled team member 'Bob' (bob@corp.internal) with role 'editor'")
+    );
+
+    // 5. List team members
+    let list_members = run(&["team", "member", "list", &vault_id]);
+    assert!(list_members.status.success());
+    let members_out = String::from_utf8(list_members.stdout).unwrap();
+    assert!(members_out.contains("bob@corp.internal"));
+    assert!(members_out.contains("editor"));
+    assert!(members_out.contains("ACTIVE"));
+
+    // Extract member ID
+    let member_id = members_out
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // 6. Update role
+    let role_res = run(&["team", "member", "role", &vault_id, &member_id, "admin"]);
+    assert!(role_res.status.success());
+
+    // 7. Revoke member
+    let revoke_res = run(&["team", "member", "revoke", &vault_id, &member_id]);
+    assert!(revoke_res.status.success());
+    let revoke_out = String::from_utf8(revoke_res.stdout).unwrap();
+    assert!(revoke_out.contains("Revoked member"));
+
+    // 8. Rotate key
+    let rotate_res = run(&["team", "vault", "rotate-key", &vault_id]);
+    assert!(rotate_res.status.success());
+    let rotate_out = String::from_utf8(rotate_res.stdout).unwrap();
+    assert!(rotate_out.contains("New epoch: 2"));
+
+    // 9. Inspect audit log
+    let audit_res = run(&["team", "audit", &vault_id]);
+    assert!(audit_res.status.success());
+    let audit_out = String::from_utf8(audit_res.stdout).unwrap();
+    assert!(audit_out.contains("member_invited"));
+    assert!(audit_out.contains("member_revoked"));
+    assert!(audit_out.contains("key_rotated"));
+
+    // 10. Real-time multiplayer session CLI commands
+    let session_start = run(&["team", "session", "start", "sess-100", "alice"]);
+    assert!(session_start.status.success());
+    let start_out = String::from_utf8(session_start.stdout).unwrap();
+    assert!(start_out.contains("Started multiplayer terminal session 'sess-100'"));
+
+    let session_join = run(&["team", "session", "join", "sess-100", "bob", "Bob"]);
+    assert!(session_join.status.success());
+
+    let session_grant = run(&["team", "session", "grant", "sess-100", "alice", "bob"]);
+    assert!(session_grant.status.success());
+
+    let session_revoke = run(&["team", "session", "revoke", "sess-100", "alice"]);
+    assert!(session_revoke.status.success());
+
+    let session_status = run(&["team", "session", "status", "sess-100"]);
+    assert!(session_status.status.success());
+    let status_out = String::from_utf8(session_status.stdout).unwrap();
+    assert!(status_out.contains("Single-writer with immediate host revocation"));
+}
