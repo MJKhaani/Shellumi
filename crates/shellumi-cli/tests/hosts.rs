@@ -21,7 +21,7 @@ fn manages_hosts_across_processes() {
     assert!(listed.status.success());
     assert_eq!(
         String::from_utf8(listed.stdout).unwrap(),
-        format!("{id}\tNew\texample.net\tbob\t2222\t-\t-\t-\n")
+        format!("{id}\tNew\texample.net\tbob\t2222\t-\t-\t-\t-\n")
     );
     assert!(run(&["delete", &id]).status.success());
     assert!(!run(&["delete", &id]).status.success());
@@ -1076,4 +1076,87 @@ fn supports_command_palette_search_and_batch_snippet_execution() {
     assert!(batch_exec_out.contains("web-prod-01\tSucceeded\texit:0"));
     assert!(batch_exec_out.contains("web-prod-02\tSucceeded\texit:0"));
     assert!(batch_exec_out.contains("Summary: Total=2, Succeeded=2, Failed=0, Cancelled=0"));
+}
+
+#[test]
+fn supports_host_startup_snippets_and_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let db_str = db.to_str().unwrap();
+
+    let run = |args: &[&str]| {
+        let mut full_args = vec![db_str];
+        full_args.extend_from_slice(args);
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .args(&full_args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Add snippet
+    let add_snip = run(&[
+        "snippet",
+        "add",
+        "Motd",
+        "uname -a && uptime",
+        "--description",
+        "Print system info on login",
+    ]);
+    assert!(add_snip.status.success());
+    let snip_id = String::from_utf8(add_snip.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // 2. Add host with startup snippet
+    let add_host = run(&[
+        "add",
+        "BastionProd",
+        "bastion.example.com",
+        "ops",
+        "2222",
+        "--tags",
+        "prod,bastion",
+        "--startup-snippet",
+        &snip_id,
+    ]);
+    assert!(add_host.status.success());
+    let host_id = String::from_utf8(add_host.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // 3. Show host
+    let show_res = run(&["show", &host_id]);
+    assert!(show_res.status.success());
+    let show_out = String::from_utf8(show_res.stdout).unwrap();
+    assert!(show_out.contains("Name:            BastionProd"));
+    assert!(show_out.contains("Destination:     ops@bastion.example.com:2222"));
+    assert!(show_out.contains("Tags:            prod,bastion"));
+    assert!(show_out.contains(&format!("Startup Snippet: {snip_id} (Motd)")));
+
+    // 4. List hosts includes snippet column
+    let list_res = run(&["list"]);
+    assert!(list_res.status.success());
+    let list_out = String::from_utf8(list_res.stdout).unwrap();
+    assert!(list_out.contains(&format!(
+        "{host_id}\tBastionProd\tbastion.example.com\tops\t2222\t-\tprod,bastion\t-\t{snip_id}"
+    )));
+
+    // 5. Update host startup snippet
+    let update_res = run(&[
+        "update",
+        &host_id,
+        "BastionProdUpdated",
+        "bastion.example.com",
+        "ops",
+        "2222",
+        "--tags",
+        "prod",
+    ]);
+    assert!(update_res.status.success());
+    let show_updated = run(&["show", &host_id]);
+    let show_up_out = String::from_utf8(show_updated.stdout).unwrap();
+    assert!(show_up_out.contains("Name:            BastionProdUpdated"));
+    assert!(show_up_out.contains("Startup Snippet: -"));
 }

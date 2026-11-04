@@ -53,6 +53,10 @@ pub enum PaletteAction {
         snippet_id: i64,
         snippet_name: String,
     },
+    ExecuteBatchSnippet {
+        snippet_id: i64,
+        snippet_name: String,
+    },
     QuickConnect,
     TriggerSync,
     OpenConflictResolver,
@@ -107,6 +111,20 @@ impl PaletteCommand {
     pub fn with_keywords(mut self, keywords: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.keywords = keywords.into_iter().map(Into::into).collect();
         self
+    }
+
+    pub fn batch_from_snippet(snippet_id: i64, snippet_name: &str) -> Self {
+        Self::new(
+            format!("batch_snippet_{snippet_id}"),
+            format!("Batch Run Snippet: {snippet_name}"),
+            format!("Execute snippet '{snippet_name}' across multiple remote hosts"),
+            PaletteCategory::Snippet,
+            PaletteAction::ExecuteBatchSnippet {
+                snippet_id,
+                snippet_name: snippet_name.to_string(),
+            },
+        )
+        .with_keywords(["batch", "multi-host", "parallel", "cluster", snippet_name])
     }
 }
 

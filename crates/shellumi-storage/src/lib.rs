@@ -7,7 +7,7 @@ use shellumi_core::{
 use std::fmt;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -92,6 +92,7 @@ pub struct SavedHost {
     pub group_name: Option<String>,
     pub tags: Vec<String>,
     pub jump_host: Option<String>,
+    pub startup_snippet_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +160,8 @@ pub struct SyncHostPayload {
     pub group_name: Option<String>,
     pub tags: Vec<String>,
     pub jump_host: Option<String>,
+    #[serde(default)]
+    pub startup_snippet_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -286,6 +289,20 @@ impl HostStore {
         }
         if version == 0 {
             tx.execute(
+                "CREATE TABLE snippets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(name) > 0),
+                    command TEXT NOT NULL CHECK(length(command) > 0),
+                    description TEXT,
+                    tags TEXT NOT NULL DEFAULT '',
+                    variables TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
                 "CREATE TABLE hosts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL CHECK(length(name) > 0),
@@ -294,7 +311,8 @@ impl HostStore {
                     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
                     group_name TEXT,
                     tags TEXT NOT NULL DEFAULT '',
-                    jump_host TEXT
+                    jump_host TEXT,
+                    startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL
                 )",
                 (),
             )
@@ -344,20 +362,6 @@ impl HostStore {
             )
             .await?;
             tx.execute(
-                "CREATE TABLE snippets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL CHECK(length(name) > 0),
-                    command TEXT NOT NULL CHECK(length(command) > 0),
-                    description TEXT,
-                    tags TEXT NOT NULL DEFAULT '',
-                    variables TEXT NOT NULL DEFAULT '[]',
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-                )",
-                (),
-            )
-            .await?;
-            tx.execute(
                 "CREATE TABLE sync_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
@@ -368,9 +372,9 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         } else if version == 1 {
-            // Migrate schema version 1 to 7
+            // Migrate schema version 1 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
                 .await?;
             tx.execute(
@@ -449,9 +453,14 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         } else if version == 2 {
-            // Migrate schema version 2 to 7
+            // Migrate schema version 2 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN jump_host TEXT", ())
                 .await?;
             tx.execute(
@@ -523,9 +532,14 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         } else if version == 3 {
-            // Migrate schema version 3 to 7
+            // Migrate schema version 3 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN jump_host TEXT", ())
                 .await?;
             tx.execute(
@@ -587,9 +601,14 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         } else if version == 4 {
-            // Migrate schema version 4 to 7
+            // Migrate schema version 4 to 8
             tx.execute(
                 "CREATE TABLE transfer_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -633,9 +652,14 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         } else if version == 5 {
-            // Migrate schema version 5 to 7
+            // Migrate schema version 5 to 8
             tx.execute(
                 "CREATE TABLE snippets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -661,9 +685,14 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         } else if version == 6 {
-            // Migrate schema version 6 to 7
+            // Migrate schema version 6 to 8
             tx.execute(
                 "CREATE TABLE sync_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -675,7 +704,20 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 7", ()).await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
+        } else if version == 7 {
+            // Migrate schema version 7 to 8
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 8", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
@@ -691,6 +733,7 @@ impl HostStore {
         group_name: Option<&str>,
         tags: &[String],
         jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
     ) -> Result<i64, StorageError> {
         let name = validated_name(name)?;
         let group = validated_group(group_name)?;
@@ -699,7 +742,7 @@ impl HostStore {
 
         self.connection
             .execute(
-                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 (
                     name,
                     destination.host(),
@@ -708,6 +751,7 @@ impl HostStore {
                     group,
                     tags_serialized,
                     jump,
+                    startup_snippet_id,
                 ),
             )
             .await?;
@@ -715,6 +759,7 @@ impl HostStore {
     }
 
     /// Update an existing host, returning false if its ID is not present.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &mut self,
         id: i64,
@@ -723,6 +768,7 @@ impl HostStore {
         group_name: Option<&str>,
         tags: &[String],
         jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
     ) -> Result<bool, StorageError> {
         let name = validated_name(name)?;
         let group = validated_group(group_name)?;
@@ -732,7 +778,7 @@ impl HostStore {
         Ok(self
             .connection
             .execute(
-                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7 WHERE id = ?8",
+                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8 WHERE id = ?9",
                 (
                     name,
                     destination.host(),
@@ -741,6 +787,7 @@ impl HostStore {
                     group,
                     tags_serialized,
                     jump,
+                    startup_snippet_id,
                     id,
                 ),
             )
@@ -752,7 +799,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host FROM hosts ORDER BY id",
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id FROM hosts ORDER BY id",
                 (),
             )
             .await?;
@@ -766,6 +813,7 @@ impl HostStore {
             let group_name: Option<String> = row.get(5)?;
             let tags_str: String = row.get(6).unwrap_or_default();
             let jump_host: Option<String> = row.get(7)?;
+            let startup_snippet_id: Option<i64> = row.get(8)?;
 
             if name.trim().is_empty() || name.chars().any(char::is_control) {
                 return Err(StorageError::InvalidName);
@@ -781,9 +829,50 @@ impl HostStore {
                 group_name,
                 tags: parse_tags(&tags_str),
                 jump_host,
+                startup_snippet_id,
             });
         }
         Ok(hosts)
+    }
+
+    pub async fn get_host(&self, id: i64) -> Result<Option<SavedHost>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id FROM hosts WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let host: String = row.get(2)?;
+            let username: String = row.get(3)?;
+            let port: i64 = row.get(4)?;
+            let group_name: Option<String> = row.get(5)?;
+            let tags_str: String = row.get(6).unwrap_or_default();
+            let jump_host: Option<String> = row.get(7)?;
+            let startup_snippet_id: Option<i64> = row.get(8)?;
+
+            if name.trim().is_empty() || name.chars().any(char::is_control) {
+                return Err(StorageError::InvalidName);
+            }
+            let port = u16::try_from(port).map_err(|_| StorageError::InvalidPort(port))?;
+            let destination = SshDestination::new(&host, &username, port)
+                .map_err(StorageError::InvalidDestination)?;
+
+            Ok(Some(SavedHost {
+                id,
+                name,
+                destination,
+                group_name,
+                tags: parse_tags(&tags_str),
+                jump_host,
+                startup_snippet_id,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn list_by_group(&self, group: &str) -> Result<Vec<SavedHost>, StorageError> {
@@ -1320,6 +1409,12 @@ impl HostStore {
     }
 
     pub async fn delete_snippet(&mut self, id: i64) -> Result<bool, StorageError> {
+        self.connection
+            .execute(
+                "UPDATE hosts SET startup_snippet_id = NULL WHERE startup_snippet_id = ?1",
+                (id,),
+            )
+            .await?;
         let rows = self
             .connection
             .execute("DELETE FROM snippets WHERE id = ?1", (id,))
@@ -1499,6 +1594,7 @@ impl HostStore {
                 group_name: host.group_name.clone(),
                 tags: host.tags.clone(),
                 jump_host: host.jump_host.clone(),
+                startup_snippet_id: host.startup_snippet_id,
             };
             let object_id = format!("{}:{}", host.name, host.destination.host());
             let envelope = shellumi_core::encrypt_entity_with_iterations(
@@ -1632,6 +1728,7 @@ impl HostStore {
                                             payload.group_name.as_deref(),
                                             &payload.tags,
                                             payload.jump_host.as_deref(),
+                                            payload.startup_snippet_id,
                                         )
                                         .await;
                                 } else {
@@ -1642,6 +1739,7 @@ impl HostStore {
                                             payload.group_name.as_deref(),
                                             &payload.tags,
                                             payload.jump_host.as_deref(),
+                                            payload.startup_snippet_id,
                                         )
                                         .await;
                                 }
@@ -1842,7 +1940,7 @@ mod tests {
         let mut store = HostStore::open(path).await.unwrap();
         let destination = SshDestination::new("example.org", "alice", 22).unwrap();
         store
-            .add("Server", &destination, None, &[], None)
+            .add("Server", &destination, None, &[], None, None)
             .await
             .unwrap();
         drop(store);
@@ -1861,7 +1959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_from_schema_versions_1_to_6_to_version_7() {
+    async fn migrates_from_schema_versions_1_to_7_to_version_8() {
         let dir = tempfile::tempdir().unwrap();
         let path1 = dir.path().join("v1.db");
         let path1_str = path1.to_str().unwrap();
@@ -1891,7 +1989,7 @@ mod tests {
         drop(conn);
         drop(db);
 
-        // Open with HostStore and verify migration from v1 to v7
+        // Open with HostStore and verify migration from v1 to v8
         let mut store = HostStore::open(path1_str).await.unwrap();
         let hosts = store.list().await.unwrap();
         assert_eq!(hosts.len(), 1);
@@ -1899,6 +1997,7 @@ mod tests {
         assert_eq!(hosts[0].group_name, None);
         assert_eq!(hosts[0].tags, Vec::<String>::new());
         assert_eq!(hosts[0].jump_host, None);
+        assert_eq!(hosts[0].startup_snippet_id, None);
 
         // Verify group operations, tunnel operations, transfer logging, and snippets work on migrated store
         let group = HostGroup::new("Infra", Some("ops"), Some(2200), &["cloud".into()]).unwrap();
@@ -2054,11 +2153,27 @@ mod tests {
         assert_eq!(store4.list_transfers(None, None).await.unwrap().len(), 1);
         assert!(store4.list_snapshot_history().await.unwrap().is_empty());
 
-        // Test migration from v5 to v7
+        // Test migration from v5 to v8
         let path5 = dir.path().join("v5.db");
         let path5_str = path5.to_str().unwrap();
         let db5 = Builder::new_local(path5_str).build().await.unwrap();
         let conn5 = db5.connect().unwrap();
+        conn5
+            .execute(
+                "CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                username TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                group_name TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                jump_host TEXT
+            )",
+                (),
+            )
+            .await
+            .unwrap();
         conn5
             .execute(
                 "CREATE TABLE transfer_history (
@@ -2179,6 +2294,92 @@ mod tests {
 
         let store6 = HostStore::open(path6_str).await.unwrap();
         assert!(store6.list_snapshot_history().await.unwrap().is_empty());
+
+        // Test migration from v7 to v8
+        let path7 = dir.path().join("v7.db");
+        let path7_str = path7.to_str().unwrap();
+        let db7 = Builder::new_local(path7_str).build().await.unwrap();
+        let conn7 = db7.connect().unwrap();
+        conn7
+            .execute(
+                "CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                username TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                group_name TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                jump_host TEXT
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn7
+            .execute(
+                "INSERT INTO hosts (name, hostname, username, port) VALUES ('V7Host', 'v7.example.com', 'deploy', 22)",
+                (),
+            )
+            .await
+            .unwrap();
+        conn7
+            .execute(
+                "CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                description TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                variables TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn7
+            .execute(
+                "CREATE TABLE sync_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL,
+                vault_json TEXT NOT NULL,
+                record_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn7.execute("PRAGMA user_version = 7", ()).await.unwrap();
+        drop(conn7);
+        drop(db7);
+
+        let mut store7 = HostStore::open(path7_str).await.unwrap();
+        let hosts7 = store7.list().await.unwrap();
+        assert_eq!(hosts7.len(), 1);
+        assert_eq!(hosts7[0].name, "V7Host");
+        assert_eq!(hosts7[0].startup_snippet_id, None);
+
+        // Add a snippet and assign it as startup snippet to V7Host
+        let snip = Snippet::new("Login MOTD", "uname -a", None, &[]).unwrap();
+        let snip_id = store7.add_snippet(&snip).await.unwrap();
+        let dest = SshDestination::new("v7.example.com", "deploy", 22).unwrap();
+        assert!(store7
+            .update(
+                hosts7[0].id,
+                "V7Host",
+                &dest,
+                None,
+                &[],
+                None,
+                Some(snip_id)
+            )
+            .await
+            .unwrap());
+        let fetched = store7.get_host(hosts7[0].id).await.unwrap().unwrap();
+        assert_eq!(fetched.startup_snippet_id, Some(snip_id));
     }
 
     #[tokio::test]
@@ -2186,7 +2387,14 @@ mod tests {
         let mut store = HostStore::open(":memory:").await.unwrap();
         let destination = SshDestination::new("db.internal", "postgres", 5432).unwrap();
         let h_id = store
-            .add("ProductionDB", &destination, None, &["db".into()], None)
+            .add(
+                "ProductionDB",
+                &destination,
+                None,
+                &["db".into()],
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(h_id > 0);
@@ -2311,10 +2519,24 @@ mod tests {
         assert_eq!(store.search_snippets("nginx").await.unwrap().len(), 1);
         assert_eq!(store.search_snippets("nonexistent").await.unwrap().len(), 0);
 
+        // Startup snippet linkage and foreign key nullification
+        let dest_host = SshDestination::new("10.0.0.99", "admin", 22).unwrap();
+        let host_with_snippet = store
+            .add("LinkedHost", &dest_host, None, &[], None, Some(id2))
+            .await
+            .unwrap();
+        let fetched_host = store.get_host(host_with_snippet).await.unwrap().unwrap();
+        assert_eq!(fetched_host.startup_snippet_id, Some(id2));
+
+        // When snippet is deleted, startup_snippet_id is set to None
+        assert!(store.delete_snippet(id2).await.unwrap());
+        let fetched_after_delete = store.get_host(host_with_snippet).await.unwrap().unwrap();
+        assert_eq!(fetched_after_delete.startup_snippet_id, None);
+
         // Delete snippet
         assert!(store.delete_snippet(id1).await.unwrap());
         assert!(!store.delete_snippet(id1).await.unwrap());
-        assert_eq!(store.list_snippets().await.unwrap().len(), 1);
+        assert_eq!(store.list_snippets().await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -2322,7 +2544,7 @@ mod tests {
         let mut store = HostStore::open(":memory:").await.unwrap();
         let dest = SshDestination::new("10.0.0.1", "root", 22).unwrap();
         let host_id = store
-            .add("TargetHost", &dest, None, &[], None)
+            .add("TargetHost", &dest, None, &[], None, None)
             .await
             .unwrap();
 
@@ -2495,6 +2717,7 @@ mod tests {
                 Some("Production"),
                 &["web".into(), "prod".into()],
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2533,6 +2756,7 @@ mod tests {
                 Some(" Production "),
                 &tags,
                 Some("jump.example.org"),
+                None,
             )
             .await
             .unwrap();
@@ -2545,6 +2769,7 @@ mod tests {
                 group_name: Some("Production".into()),
                 tags: tags.clone(),
                 jump_host: Some("jump.example.org".into()),
+                startup_snippet_id: None,
             }]
         );
 
@@ -2589,17 +2814,19 @@ mod tests {
         let mut store = HostStore::open(path).await.unwrap();
         let original = SshDestination::new("example.org", "alice", 22).unwrap();
         let id = store
-            .add("Server", &original, Some("Staging"), &[], None)
+            .add("Server", &original, Some("Staging"), &[], None, None)
             .await
             .unwrap();
         let updated = SshDestination::new("2001:db8::1", "bob", 2222).unwrap();
         assert!(matches!(
-            store.update(id, "\0", &updated, None, &[], None).await,
+            store
+                .update(id, "\0", &updated, None, &[], None, None)
+                .await,
             Err(StorageError::InvalidName)
         ));
         assert_eq!(store.list().await.unwrap()[0].destination, original);
         assert!(!store
-            .update(id + 1, "Other", &updated, None, &[], None)
+            .update(id + 1, "Other", &updated, None, &[], None, None)
             .await
             .unwrap());
         assert!(store
@@ -2610,6 +2837,7 @@ mod tests {
                 Some("Prod"),
                 &["web".to_string()],
                 Some("bastion.corp"),
+                None,
             )
             .await
             .unwrap());
@@ -2624,6 +2852,7 @@ mod tests {
                 group_name: Some("Prod".into()),
                 tags: vec!["web".to_string()],
                 jump_host: Some("bastion.corp".into()),
+                startup_snippet_id: None,
             }]
         );
     }
@@ -2632,7 +2861,10 @@ mod tests {
     async fn manages_tunnels_lifecycle() {
         let mut store = HostStore::open(":memory:").await.unwrap();
         let dest = SshDestination::new("10.0.0.1", "admin", 22).unwrap();
-        let host_id = store.add("Host1", &dest, None, &[], None).await.unwrap();
+        let host_id = store
+            .add("Host1", &dest, None, &[], None, None)
+            .await
+            .unwrap();
 
         // Local tunnel
         let rule_local =
@@ -2705,6 +2937,7 @@ mod tests {
                 &dest,
                 Some("CloudServers"),
                 &["nginx".into()],
+                None,
                 None,
             )
             .await

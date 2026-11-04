@@ -7,9 +7,11 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    list_local_directory, validate_jump_host, ConflictItemView, ConflictResolutionChoice,
-    FileEntry, FileKind, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
-    PathUtils, SshDestination, SyncEntityType, TransferDirection, TransferQueue, TransferStatus,
+    list_local_directory, validate_jump_host, BatchExecutionPlan, BatchExecutionSummary,
+    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, ConflictItemView,
+    ConflictResolutionChoice, FileEntry, FileKind, PaletteAction, PaletteCategory, PaletteCommand,
+    PaletteRegistry, PathUtils, SshDestination, SyncEntityType, TransferDirection, TransferQueue,
+    TransferStatus,
 };
 use shellumi_storage::{HostStore, SavedHost, SavedSnippet};
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
@@ -50,6 +52,42 @@ struct SnippetModalState {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BatchHostItem {
+    id: i64,
+    name: String,
+    destination: SshDestination,
+    group: Option<String>,
+    tags: Vec<String>,
+    selected: bool,
+    status: BatchHostStatus,
+    exit_code: Option<i32>,
+    output: String,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BatchExecutionPolicyChoice {
+    Sequential,
+    Parallel,
+}
+
+struct BatchModalState {
+    snippet_id: i64,
+    snippet_name: String,
+    command_template: String,
+    policy: BatchExecutionPolicyChoice,
+    concurrency: usize,
+    variables: Vec<SnippetModalVariable>,
+    hosts: Vec<BatchHostItem>,
+    search_input: Entity<TextInput>,
+    dry_run: bool,
+    is_running: bool,
+    summary: Option<BatchExecutionSummary>,
+    error: Option<String>,
+    expanded_host_output: Option<i64>,
+}
+
 struct CommandPaletteState {
     input: Entity<TextInput>,
     registry: PaletteRegistry,
@@ -74,6 +112,7 @@ struct Shellumi {
     sync_status: AppSyncStatus,
     conflict_modal: Option<ConflictModalState>,
     snippet_modal: Option<SnippetModalState>,
+    batch_modal: Option<BatchModalState>,
     command_palette: Option<CommandPaletteState>,
     sync_scheduler: shellumi_core::SyncScheduler,
 }
@@ -178,6 +217,7 @@ struct HostForm {
     group: Entity<TextInput>,
     tags: Entity<TextInput>,
     jump_host: Entity<TextInput>,
+    startup_snippet: Entity<TextInput>,
 }
 
 fn format_endpoint(username: &str, hostname: &str, port: u16) -> String {
@@ -286,6 +326,7 @@ impl Shellumi {
             sync_status: AppSyncStatus::LocalOnly,
             conflict_modal: None,
             snippet_modal: None,
+            batch_modal: None,
             command_palette: None,
             sync_scheduler: shellumi_core::SyncScheduler::default(),
         };
@@ -368,6 +409,18 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_session_with_startup(name, kind, command, None, window, cx);
+    }
+
+    fn start_session_with_startup(
+        &mut self,
+        name: String,
+        kind: SessionKind,
+        command: TerminalCommand,
+        startup_command: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.saving {
             return;
         }
@@ -380,7 +433,7 @@ impl Shellumi {
         let session = Session::start(command);
         let events = session.events.clone();
         let search_input = cx.new(|cx| TextInput::new(cx, "", "Search output…"));
-        let pane = TerminalPane {
+        let mut pane = TerminalPane {
             id: pane_id,
             name: name.clone(),
             kind,
@@ -393,6 +446,15 @@ impl Shellumi {
             search_matches: Vec::new(),
             current_match_idx: None,
         };
+
+        if let Some(cmd) = startup_command {
+            let mut bytes = cmd.into_bytes();
+            bytes.push(b'\n');
+            if let Some(s) = &pane.session {
+                let _ = s.input(bytes);
+            }
+            pane.message = Some("Startup snippet executed.".into());
+        }
 
         let sftp_state = if kind == SessionKind::Sftp {
             let local_path = std::env::current_dir()
@@ -635,7 +697,47 @@ impl Shellumi {
         if let Some(jump) = &host.jump_host {
             command = command.args(["-J", jump]);
         }
-        self.start_session(host.name.clone(), SessionKind::Ssh, command, window, cx);
+        let startup_cmd = if let Some(snip_id) = host.startup_snippet_id {
+            if let Some(snip) = self.snippets.iter().find(|s| s.id == snip_id) {
+                let mut vars = std::collections::HashMap::new();
+                vars.insert("host.id".to_string(), host.id.to_string());
+                vars.insert("host.name".to_string(), host.name.clone());
+                vars.insert(
+                    "host.hostname".to_string(),
+                    host.destination.host().to_string(),
+                );
+                vars.insert(
+                    "host.username".to_string(),
+                    host.destination.username().to_string(),
+                );
+                vars.insert(
+                    "host.user".to_string(),
+                    host.destination.username().to_string(),
+                );
+                vars.insert(
+                    "host.port".to_string(),
+                    host.destination.port().get().to_string(),
+                );
+                vars.insert(
+                    "host.group".to_string(),
+                    host.group_name.clone().unwrap_or_default(),
+                );
+                vars.insert("host.tags".to_string(), host.tags.join(","));
+                shellumi_core::render_command(&snip.command, &vars).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.start_session_with_startup(
+            host.name.clone(),
+            SessionKind::Ssh,
+            command,
+            startup_cmd,
+            window,
+            cx,
+        );
     }
 
     fn connect_sftp(&mut self, host: &SavedHost, window: &mut Window, cx: &mut Context<Self>) {
@@ -968,7 +1070,8 @@ impl Shellumi {
         if self.saving {
             return;
         }
-        let (id, name, hostname, username, port, group, tags, jump_host) = match host {
+        let (id, name, hostname, username, port, group, tags, jump_host, startup_snip) = match host
+        {
             Some(host) => (
                 Some(host.id),
                 host.name.clone(),
@@ -978,6 +1081,9 @@ impl Shellumi {
                 host.group_name.clone().unwrap_or_default(),
                 host.tags.join(", "),
                 host.jump_host.clone().unwrap_or_default(),
+                host.startup_snippet_id
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
             ),
             None => (
                 None,
@@ -985,6 +1091,7 @@ impl Shellumi {
                 String::new(),
                 String::new(),
                 "22".into(),
+                String::new(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -1001,6 +1108,8 @@ impl Shellumi {
                 .new(|cx| TextInput::new(cx, &tags, "Tags (comma-separated, e.g. web, us-east)")),
             jump_host: cx
                 .new(|cx| TextInput::new(cx, &jump_host, "Jump host (e.g. jump.corp:2222)")),
+            startup_snippet: cx
+                .new(|cx| TextInput::new(cx, &startup_snip, "Startup snippet ID (optional)")),
         });
         self.form_error = None;
         cx.notify();
@@ -1039,6 +1148,20 @@ impl Shellumi {
                 Ok(j) => Some(j),
                 Err(err) => {
                     self.form_error = Some(format!("Invalid jump host: {err}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let snip_raw = form.startup_snippet.read(cx).value().trim().to_string();
+        let startup_snippet_id = if snip_raw.is_empty() {
+            None
+        } else {
+            match snip_raw.parse::<i64>() {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    self.form_error =
+                        Some("Startup snippet must be a numeric ID (or empty).".into());
                     cx.notify();
                     return;
                 }
@@ -1087,6 +1210,7 @@ impl Shellumi {
                                 group.as_deref(),
                                 &tags,
                                 jump_host.as_deref(),
+                                startup_snippet_id,
                             )
                             .await
                             .map_err(|error| error.to_string())?
@@ -1102,6 +1226,7 @@ impl Shellumi {
                                 group.as_deref(),
                                 &tags,
                                 jump_host.as_deref(),
+                                startup_snippet_id,
                             )
                             .await
                             .map_err(|error| error.to_string())?;
@@ -1522,6 +1647,284 @@ impl Shellumi {
         }
     }
 
+    fn open_batch_modal(&mut self, snippet_id: i64, cx: &mut Context<Self>) {
+        let Some(snippet) = self.snippets.iter().find(|s| s.id == snippet_id).cloned() else {
+            return;
+        };
+
+        let variables = snippet
+            .variables
+            .iter()
+            .map(|v| {
+                let default_val = v.default_value.clone();
+                let initial_val = default_val.clone().unwrap_or_default();
+                let placeholder = default_val.as_deref().unwrap_or("Value required");
+                let input = cx.new(|cx| TextInput::new(cx, &initial_val, placeholder));
+                SnippetModalVariable {
+                    name: v.name.clone(),
+                    is_secret: v.is_secret,
+                    default_value: default_val,
+                    input,
+                }
+            })
+            .collect();
+
+        let hosts = match &self.hosts {
+            HostState::Loaded(saved_hosts) => saved_hosts
+                .iter()
+                .map(|h| BatchHostItem {
+                    id: h.id,
+                    name: h.name.clone(),
+                    destination: h.destination.clone(),
+                    group: h.group_name.clone(),
+                    tags: h.tags.clone(),
+                    selected: true,
+                    status: BatchHostStatus::Queued,
+                    exit_code: None,
+                    output: String::new(),
+                    duration_ms: None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let search_input = cx
+            .new(|cx| TextInput::new(cx, "", "Filter target hosts by name, tag, or destination…"));
+
+        self.batch_modal = Some(BatchModalState {
+            snippet_id: snippet.id,
+            snippet_name: snippet.name,
+            command_template: snippet.command,
+            policy: BatchExecutionPolicyChoice::Parallel,
+            concurrency: 5,
+            variables,
+            hosts,
+            search_input,
+            dry_run: false,
+            is_running: false,
+            summary: None,
+            error: None,
+            expanded_host_output: None,
+        });
+        cx.notify();
+    }
+
+    fn dismiss_batch_modal(&mut self, cx: &mut Context<Self>) {
+        self.batch_modal = None;
+        cx.notify();
+    }
+
+    fn toggle_batch_host_selection(&mut self, host_id: i64, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.batch_modal {
+            if let Some(item) = modal.hosts.iter_mut().find(|h| h.id == host_id) {
+                item.selected = !item.selected;
+                cx.notify();
+            }
+        }
+    }
+
+    fn batch_select_all_hosts(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.batch_modal {
+            for h in &mut modal.hosts {
+                h.selected = selected;
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_batch_dry_run(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.batch_modal {
+            modal.dry_run = !modal.dry_run;
+            cx.notify();
+        }
+    }
+
+    fn set_batch_policy(&mut self, policy: BatchExecutionPolicyChoice, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.batch_modal {
+            modal.policy = policy;
+            cx.notify();
+        }
+    }
+
+    fn toggle_batch_host_output(&mut self, host_id: i64, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.batch_modal {
+            if modal.expanded_host_output == Some(host_id) {
+                modal.expanded_host_output = None;
+            } else {
+                modal.expanded_host_output = Some(host_id);
+            }
+            cx.notify();
+        }
+    }
+
+    fn execute_batch(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = &mut self.batch_modal else {
+            return;
+        };
+        if modal.is_running {
+            return;
+        }
+
+        let mut global_variables = std::collections::HashMap::new();
+        for var in &modal.variables {
+            let val = var.input.read(cx).value().trim().to_string();
+            if !val.is_empty() {
+                global_variables.insert(var.name.clone(), val);
+            }
+        }
+
+        let selected_targets: Vec<BatchHostTarget> = modal
+            .hosts
+            .iter()
+            .filter(|h| h.selected)
+            .map(|h| {
+                let mut target = BatchHostTarget::new(h.id, h.name.clone(), h.destination.clone())
+                    .with_tags(h.tags.clone());
+                if let Some(grp) = &h.group {
+                    target = target.with_group(grp.clone());
+                }
+                target
+            })
+            .collect();
+
+        if selected_targets.is_empty() {
+            modal.error = Some("No hosts selected for batch execution.".into());
+            cx.notify();
+            return;
+        }
+
+        let plan_policy = match modal.policy {
+            BatchExecutionPolicyChoice::Sequential => BatchPolicy::Sequential,
+            BatchExecutionPolicyChoice::Parallel => BatchPolicy::Parallel {
+                max_concurrency: modal.concurrency,
+            },
+        };
+
+        let plan = BatchExecutionPlan::new(
+            modal.snippet_id,
+            &modal.snippet_name,
+            &modal.command_template,
+            selected_targets,
+        )
+        .with_policy(plan_policy)
+        .with_global_variables(global_variables);
+
+        if modal.dry_run {
+            let previews = plan.preview_all();
+            for (target, rendered_res) in previews {
+                if let Some(item) = modal.hosts.iter_mut().find(|h| h.id == target.id) {
+                    match rendered_res {
+                        Ok(cmd) => {
+                            item.status = BatchHostStatus::Succeeded;
+                            item.output = format!("[DRY RUN PREVIEW]\n$ {cmd}");
+                            item.exit_code = Some(0);
+                            item.duration_ms = Some(0);
+                        }
+                        Err(err) => {
+                            item.status = BatchHostStatus::Failed;
+                            item.output = format!("[DRY RUN ERROR] {err}");
+                            item.exit_code = Some(1);
+                            item.duration_ms = Some(0);
+                        }
+                    }
+                }
+            }
+            let total = modal.hosts.iter().filter(|h| h.selected).count();
+            let succeeded = modal
+                .hosts
+                .iter()
+                .filter(|h| h.selected && h.status == BatchHostStatus::Succeeded)
+                .count();
+            let failed = modal
+                .hosts
+                .iter()
+                .filter(|h| h.selected && h.status == BatchHostStatus::Failed)
+                .count();
+            modal.summary = Some(BatchExecutionSummary {
+                total,
+                succeeded,
+                failed,
+                cancelled: 0,
+                in_progress: 0,
+                queued: 0,
+                is_complete: true,
+                total_duration_ms: 0,
+            });
+            modal.is_running = false;
+            modal.error = None;
+            cx.notify();
+            return;
+        }
+
+        modal.is_running = true;
+        modal.error = None;
+        for h in &mut modal.hosts {
+            if h.selected {
+                h.status = BatchHostStatus::InProgress;
+                h.output = "Executing snippet...".into();
+            }
+        }
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let mut runner = BatchRunner::new(plan);
+            let summary = runner.execute_sync(|target, cmd| {
+                let mut proc = std::process::Command::new("ssh");
+                proc.args(target.destination.openssh_arguments());
+                proc.arg(cmd);
+                match proc.output() {
+                    Ok(output) => {
+                        let code = output.status.code().unwrap_or(-1);
+                        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                        Ok((code, stdout, stderr))
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
+            });
+            (runner.results().to_vec(), summary)
+        });
+
+        cx.spawn(async move |app, cx| {
+            let (results, summary) = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.batch_modal {
+                    modal.is_running = false;
+                    modal.summary = Some(summary);
+                    for res in results {
+                        if let Some(h) = modal.hosts.iter_mut().find(|h| h.id == res.host_id) {
+                            h.status = res.status;
+                            h.exit_code = res.exit_code;
+                            h.duration_ms = Some(res.duration_ms);
+                            let mut full_output = String::new();
+                            if !res.command_rendered.is_empty() {
+                                full_output.push_str(&format!("$ {}\n", res.command_rendered));
+                            }
+                            if !res.stdout.is_empty() {
+                                full_output.push_str(&res.stdout);
+                            }
+                            if !res.stderr.is_empty() {
+                                if !full_output.is_empty() && !full_output.ends_with('\n') {
+                                    full_output.push('\n');
+                                }
+                                full_output.push_str(&format!("[stderr]\n{}", res.stderr));
+                            }
+                            if let Some(err) = res.error {
+                                if !full_output.is_empty() && !full_output.ends_with('\n') {
+                                    full_output.push('\n');
+                                }
+                                full_output.push_str(&format!("[error: {}]", err));
+                            }
+                            h.output = full_output;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_command_palette(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let mut registry = PaletteRegistry::with_static_actions();
 
@@ -1580,6 +1983,7 @@ impl Shellumi {
                 )
                 .with_keywords(s.tags.clone()),
             );
+            registry.register(PaletteCommand::batch_from_snippet(s.id, &s.name));
         }
 
         // 3. Tab switching
@@ -1679,6 +2083,9 @@ impl Shellumi {
             }
             PaletteAction::ExecuteSnippet { snippet_id, .. } => {
                 self.insert_snippet(snippet_id, true, cx);
+            }
+            PaletteAction::ExecuteBatchSnippet { snippet_id, .. } => {
+                self.open_batch_modal(snippet_id, cx);
             }
             PaletteAction::QuickConnect => {
                 self.active_tab_idx = None;
@@ -2280,6 +2687,25 @@ impl Shellumi {
             )
             .child(
                 div()
+                    .id("batch-from-snippet-modal-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x7c3aed))
+                    .text_sm()
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener({
+                        let snip_id = modal.snippet_id;
+                        move |app, _, _, cx| {
+                            app.dismiss_snippet_modal(cx);
+                            app.open_batch_modal(snip_id, cx);
+                        }
+                    }))
+                    .child("⚡ Multi-Host"),
+            )
+            .child(
+                div()
                     .id("apply-snippet-btn")
                     .px_4()
                     .py_1()
@@ -2295,6 +2721,520 @@ impl Shellumi {
                     } else {
                         "Paste into Terminal"
                     }),
+            );
+        modal_box = modal_box.child(actions);
+
+        overlay.child(modal_box)
+    }
+
+    fn render_batch_modal(
+        &self,
+        modal: &BatchModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("batch-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgb(0x0a0f1d))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut modal_box = div()
+            .id("batch-modal-container")
+            .w(px(720.0))
+            .max_h(px(640.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0xa855f7))
+            .rounded_lg()
+            .p_5()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child(format!("⚡ Multi-Host Execution: {}", modal.snippet_name)),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-batch-modal-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_batch_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Template card
+        let template_card = div()
+            .p_2()
+            .rounded_md()
+            .bg(rgb(0x0f172a))
+            .border_1()
+            .border_color(rgb(0x1e293b))
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(rgb(0xc084fc))
+                    .child(format!("Template: {}", modal.command_template)),
+            );
+        modal_box = modal_box.child(template_card);
+
+        // Variables fields if any
+        if !modal.variables.is_empty() {
+            let mut vars_list = div()
+                .id("batch-vars-list")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .overflow_y_scroll()
+                .max_h(px(120.0));
+            for var in &modal.variables {
+                let var_header = div().flex().items_center().gap_2().child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xe2e8f0))
+                        .child(var.name.clone()),
+                );
+                let field = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(var_header)
+                    .child(var.input.clone());
+                vars_list = vars_list.child(field);
+            }
+            modal_box = modal_box.child(vars_list);
+        }
+
+        // Policy & Dry-run row
+        let is_parallel = modal.policy == BatchExecutionPolicyChoice::Parallel;
+        let is_dry_run = modal.dry_run;
+        let controls_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Policy:"))
+                    .child(
+                        div()
+                            .id("policy-parallel-btn")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(if is_parallel {
+                                rgb(0x7c3aed)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.set_batch_policy(BatchExecutionPolicyChoice::Parallel, cx);
+                            }))
+                            .child("Parallel (5)"),
+                    )
+                    .child(
+                        div()
+                            .id("policy-sequential-btn")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(if !is_parallel {
+                                rgb(0x7c3aed)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.set_batch_policy(BatchExecutionPolicyChoice::Sequential, cx);
+                            }))
+                            .child("Sequential"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("toggle-dry-run-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(if is_dry_run {
+                        rgb(0x0284c7)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.toggle_batch_dry_run(cx)))
+                    .child(if is_dry_run {
+                        "✔ Dry Run (Preview Only)"
+                    } else {
+                        "Dry Run Mode: Off"
+                    }),
+            );
+        modal_box = modal_box.child(controls_row);
+
+        // Host filter & Selection header
+        let selected_count = modal.hosts.iter().filter(|h| h.selected).count();
+        let total_count = modal.hosts.len();
+        let query = modal.search_input.read(cx).value().trim().to_lowercase();
+
+        let host_selection_bar = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xe2e8f0))
+                    .child(format!(
+                        "Target Hosts ({selected_count}/{total_count} selected):"
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("batch-select-all-btn")
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(0x334155))
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .cursor_pointer()
+                            .on_click(
+                                cx.listener(|app, _, _, cx| app.batch_select_all_hosts(true, cx)),
+                            )
+                            .child("Select All"),
+                    )
+                    .child(
+                        div()
+                            .id("batch-deselect-all-btn")
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(0x334155))
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .cursor_pointer()
+                            .on_click(
+                                cx.listener(|app, _, _, cx| app.batch_select_all_hosts(false, cx)),
+                            )
+                            .child("Deselect All"),
+                    ),
+            );
+        modal_box = modal_box.child(host_selection_bar);
+
+        // Search input
+        modal_box = modal_box.child(modal.search_input.clone());
+
+        // Target hosts scrollable list
+        let mut hosts_list = div()
+            .id("batch-hosts-list")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .overflow_y_scroll()
+            .max_h(px(220.0));
+
+        let filtered_hosts: Vec<&BatchHostItem> = modal
+            .hosts
+            .iter()
+            .filter(|h| {
+                if query.is_empty() {
+                    true
+                } else {
+                    h.name.to_lowercase().contains(&query)
+                        || h.destination.host().to_lowercase().contains(&query)
+                        || h.destination.username().to_lowercase().contains(&query)
+                        || h.tags.iter().any(|t| t.to_lowercase().contains(&query))
+                }
+            })
+            .collect();
+
+        if filtered_hosts.is_empty() {
+            hosts_list = hosts_list.child(
+                div()
+                    .p_3()
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af))
+                    .child("No hosts match the filter criteria."),
+            );
+        } else {
+            for host in filtered_hosts {
+                let hid = host.id;
+                let is_selected = host.selected;
+                let (r, g, b) = host.status.badge_color();
+                let is_expanded = modal.expanded_host_output == Some(hid);
+
+                let mut row = div()
+                    .id(("batch-host-row", hid as usize))
+                    .flex()
+                    .flex_col()
+                    .p_2()
+                    .rounded_md()
+                    .bg(if is_selected {
+                        rgb(0x1e293b)
+                    } else {
+                        rgb(0x0f172a)
+                    })
+                    .border_1()
+                    .border_color(if is_selected {
+                        rgb(0x475569)
+                    } else {
+                        rgb(0x1e293b)
+                    });
+
+                let mut top_line = div().flex().items_center().justify_between().gap_2();
+
+                let left_side = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("batch-host-check", hid as usize))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if is_selected {
+                                rgb(0x7c3aed)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.toggle_batch_host_selection(hid, cx);
+                            }))
+                            .child(if is_selected { "☑" } else { "☐" }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xf8fafc))
+                            .child(host.name.clone()),
+                    )
+                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
+                        "({}@{}:{})",
+                        host.destination.username(),
+                        host.destination.host(),
+                        host.destination.port()
+                    )));
+
+                let mut right_side = div().flex().items_center().gap_2();
+                if let Some(dur) = host.duration_ms {
+                    right_side = right_side.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child(format!("{dur}ms")),
+                    );
+                }
+                right_side = right_side.child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)))
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xffffff))
+                        .child(host.status.as_str()),
+                );
+
+                if !host.output.is_empty() {
+                    right_side = right_side.child(
+                        div()
+                            .id(("toggle-output", hid as usize))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(0x334155))
+                            .text_xs()
+                            .text_color(rgb(0x93c5fd))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.toggle_batch_host_output(hid, cx);
+                            }))
+                            .child(if is_expanded {
+                                "Hide Output"
+                            } else {
+                                "View Output"
+                            }),
+                    );
+                }
+
+                top_line = top_line.child(left_side).child(right_side);
+                row = row.child(top_line);
+
+                if is_expanded && !host.output.is_empty() {
+                    let out_card = div()
+                        .mt_2()
+                        .p_2()
+                        .rounded_sm()
+                        .bg(rgb(0x020617))
+                        .border_1()
+                        .border_color(rgb(0x1e293b))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(rgb(0x94a3b8))
+                                .child(host.output.clone()),
+                        );
+                    row = row.child(out_card);
+                }
+
+                hosts_list = hosts_list.child(row);
+            }
+        }
+        modal_box = modal_box.child(hosts_list);
+
+        // Summary bar if completed
+        if let Some(summary) = &modal.summary {
+            let summary_card = div()
+                .p_2()
+                .rounded_md()
+                .bg(if summary.failed > 0 {
+                    rgb(0x450a0a)
+                } else {
+                    rgb(0x064e3b)
+                })
+                .border_1()
+                .border_color(if summary.failed > 0 {
+                    rgb(0x991b1b)
+                } else {
+                    rgb(0x047857)
+                })
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child(format!(
+                            "Execution Summary: {}/{} succeeded, {} failed ({}ms total)",
+                            summary.succeeded,
+                            summary.total,
+                            summary.failed,
+                            summary.total_duration_ms
+                        )),
+                );
+            modal_box = modal_box.child(summary_card);
+        }
+
+        // Error message if any
+        if let Some(err) = &modal.error {
+            modal_box = modal_box.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x450a0a))
+                    .border_1()
+                    .border_color(rgb(0x991b1b))
+                    .text_xs()
+                    .text_color(rgb(0xfecaca))
+                    .child(format!("⚠ {err}")),
+            );
+        }
+
+        // Action buttons
+        let is_running = modal.is_running;
+        let action_btn_text = if is_running {
+            "Executing on hosts…".to_string()
+        } else if modal.dry_run {
+            format!("⚡ Preview on {selected_count} Hosts")
+        } else {
+            format!("⚡ Execute on {selected_count} Hosts")
+        };
+
+        let actions = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_3()
+            .border_t_1()
+            .border_color(rgb(0x334155))
+            .pt_3()
+            .child(
+                div()
+                    .id("cancel-batch-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_sm()
+                    .text_color(rgb(0xe2e8f0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_batch_modal(cx)))
+                    .child("Close"),
+            )
+            .child(
+                div()
+                    .id("run-batch-btn")
+                    .px_4()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if is_running || selected_count == 0 {
+                        rgb(0x475569)
+                    } else {
+                        rgb(0x7c3aed)
+                    })
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.execute_batch(cx)))
+                    .child(action_btn_text),
             );
         modal_box = modal_box.child(actions);
 
@@ -3477,6 +4417,22 @@ impl Render for Shellumi {
                                             cx.stop_propagation();
                                         }))
                                         .child("Run"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("snippet-batch", snip_id as usize))
+                                        .px_2()
+                                        .py_0p5()
+                                        .bg(rgb(0x7c3aed))
+                                        .text_color(rgb(0xffffff))
+                                        .rounded_sm()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.open_batch_modal(snip_id, cx);
+                                            cx.stop_propagation();
+                                        }))
+                                        .child("⚡ Multi-Host"),
                                 );
                             snippets_bar = snippets_bar.child(item);
                         }
@@ -3735,6 +4691,9 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.snippet_modal {
                     result = result.child(self.render_snippet_modal(modal, cx));
                 }
+                if let Some(modal) = &self.batch_modal {
+                    result = result.child(self.render_batch_modal(modal, cx));
+                }
                 if let Some(palette) = &self.command_palette {
                     result = result.child(self.render_command_palette(palette, cx));
                 }
@@ -3824,6 +4783,24 @@ impl Render for Shellumi {
                                     .text_xs()
                                     .text_color(rgb(0xa7f3d0))
                                     .child(format!("via {jump}")),
+                            );
+                        }
+                        if let Some(snip_id) = host.startup_snippet_id {
+                            let snip_name = self
+                                .snippets
+                                .iter()
+                                .find(|s| s.id == snip_id)
+                                .map(|s| s.name.as_str())
+                                .unwrap_or("Snippet");
+                            title_row = title_row.child(
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(rgb(0x4c1d95))
+                                    .text_xs()
+                                    .text_color(rgb(0xd8b4fe))
+                                    .child(format!("📜 Startup: {snip_name}")),
                             );
                         }
                         card = card.child(title_row);
@@ -4125,6 +5102,8 @@ impl Render for Shellumi {
                 .child(form.group.clone())
                 .child("Jump host (optional, e.g. jump.corp:2222)")
                 .child(form.jump_host.clone())
+                .child("Startup Snippet ID (optional)")
+                .child(form.startup_snippet.clone())
                 .child("Tags (comma-separated, optional)")
                 .child(form.tags.clone());
             if let Some(error) = &self.form_error {
@@ -4179,6 +5158,9 @@ impl Render for Shellumi {
         }
         if let Some(modal) = &self.snippet_modal {
             result = result.child(self.render_snippet_modal(modal, cx));
+        }
+        if let Some(modal) = &self.batch_modal {
+            result = result.child(self.render_batch_modal(modal, cx));
         }
         if let Some(palette) = &self.command_palette {
             result = result.child(self.render_command_palette(palette, cx));
@@ -4392,6 +5374,7 @@ mod tests {
                 group_name: Some("Production".into()),
                 tags: vec!["frontend".into(), "nginx".into()],
                 jump_host: Some("bastion.corp:2222".into()),
+                startup_snippet_id: Some(42),
             },
             SavedHost {
                 id: 2,
@@ -4400,6 +5383,7 @@ mod tests {
                 group_name: Some("Production".into()),
                 tags: vec!["database".into(), "sql".into()],
                 jump_host: None,
+                startup_snippet_id: None,
             },
             SavedHost {
                 id: 3,
@@ -4408,6 +5392,7 @@ mod tests {
                 group_name: Some("Staging".into()),
                 tags: vec!["test".into()],
                 jump_host: None,
+                startup_snippet_id: None,
             },
         ];
 
@@ -4950,5 +5935,129 @@ mod tests {
         let qc_matches = registry.search("qc");
         assert!(!qc_matches.is_empty());
         assert_eq!(qc_matches[0].command.action, PaletteAction::QuickConnect);
+
+        // 5. Batch execution snippet command
+        registry.register(PaletteCommand::batch_from_snippet(77, "Clear Docker Logs"));
+        let batch_matches = registry.search("multi-host");
+        assert!(!batch_matches.is_empty());
+        assert_eq!(
+            batch_matches[0].command.action,
+            PaletteAction::ExecuteBatchSnippet {
+                snippet_id: 77,
+                snippet_name: "Clear Docker Logs".into(),
+            }
+        );
+        assert_eq!(batch_matches[0].command.category, PaletteCategory::Snippet);
+    }
+
+    #[test]
+    fn verifies_batch_execution_runner_plan_and_dry_run_preview() {
+        use shellumi_core::{
+            BatchExecutionPlan, BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner,
+            SshDestination,
+        };
+
+        let target1 = BatchHostTarget::new(
+            1,
+            "web-1",
+            SshDestination::new("192.168.1.10", "deploy", 22).unwrap(),
+        )
+        .with_group("production")
+        .with_tags(["web", "us-east"]);
+
+        let target2 = BatchHostTarget::new(
+            2,
+            "web-2",
+            SshDestination::new("192.168.1.11", "deploy", 22).unwrap(),
+        )
+        .with_group("production")
+        .with_tags(["web", "us-east"]);
+
+        let plan = BatchExecutionPlan::new(
+            10,
+            "Restart Nginx",
+            "sudo systemctl restart nginx # host={{host.name}} ip={{host.hostname}} env={{env}}",
+            vec![target1, target2],
+        )
+        .with_policy(BatchPolicy::Parallel { max_concurrency: 4 })
+        .with_global_variable("env", "prod");
+
+        // Dry-run preview
+        let previews = plan.preview_all();
+        assert_eq!(previews.len(), 2);
+        assert_eq!(
+            previews[0].1.as_ref().unwrap(),
+            "sudo systemctl restart nginx # host=web-1 ip=192.168.1.10 env=prod"
+        );
+        assert_eq!(
+            previews[1].1.as_ref().unwrap(),
+            "sudo systemctl restart nginx # host=web-2 ip=192.168.1.11 env=prod"
+        );
+
+        // Batch runner execution
+        let mut runner = BatchRunner::new(plan);
+        assert_eq!(runner.results().len(), 2);
+        assert_eq!(runner.results()[0].status, BatchHostStatus::Queued);
+
+        let summary = runner.execute_sync(|target, rendered| {
+            assert!(rendered.contains("sudo systemctl restart nginx"));
+            Ok((0, format!("OK from {}", target.name), String::new()))
+        });
+
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.succeeded, 2);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.is_complete);
+        assert_eq!(runner.results()[0].status, BatchHostStatus::Succeeded);
+        assert_eq!(runner.results()[0].exit_code, Some(0));
+        assert_eq!(runner.results()[0].stdout, "OK from web-1");
+    }
+
+    #[test]
+    fn verifies_startup_snippet_variable_resolution() {
+        use shellumi_core::{render_command, SshDestination};
+
+        let host = SavedHost {
+            id: 42,
+            name: "api-server".into(),
+            destination: SshDestination::new("api.corp.internal", "appuser", 2200).unwrap(),
+            group_name: Some("backend".into()),
+            tags: vec!["api".into(), "v2".into()],
+            jump_host: Some("bastion.corp:22".into()),
+            startup_snippet_id: Some(99),
+        };
+
+        let template = "echo 'Welcome {{host.user}} to {{host.name}} ({{host.hostname}}:{{host.port}}) [{{host.group}}] tags: {{host.tags}} id: {{host.id}}'";
+
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("host.id".to_string(), host.id.to_string());
+        vars.insert("host.name".to_string(), host.name.clone());
+        vars.insert(
+            "host.hostname".to_string(),
+            host.destination.host().to_string(),
+        );
+        vars.insert(
+            "host.username".to_string(),
+            host.destination.username().to_string(),
+        );
+        vars.insert(
+            "host.user".to_string(),
+            host.destination.username().to_string(),
+        );
+        vars.insert(
+            "host.port".to_string(),
+            host.destination.port().get().to_string(),
+        );
+        vars.insert(
+            "host.group".to_string(),
+            host.group_name.clone().unwrap_or_default(),
+        );
+        vars.insert("host.tags".to_string(), host.tags.join(","));
+
+        let rendered = render_command(template, &vars).unwrap();
+        assert_eq!(
+            rendered,
+            "echo 'Welcome appuser to api-server (api.corp.internal:2200) [backend] tags: api,v2 id: 42'"
+        );
     }
 }

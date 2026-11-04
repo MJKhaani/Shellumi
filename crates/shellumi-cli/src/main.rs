@@ -12,8 +12,9 @@ use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
 
 const USAGE: &str = "Usage:
   shellumi-cli <database-path> list [--group <group>] [--tag <tag>] [--search <query>]
-  shellumi-cli <database-path> add <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>]
-  shellumi-cli <database-path> update <id> <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>]
+  shellumi-cli <database-path> show <id>
+  shellumi-cli <database-path> add <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>]
+  shellumi-cli <database-path> update <id> <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>]
   shellumi-cli <database-path> delete <id>
   shellumi-cli <database-path> group add <name> [--username <user>] [--port <port>] [--tags <tag1,tag2>]
   shellumi-cli <database-path> group list
@@ -172,7 +173,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .map_err(|_| invalid("ID must be an integer."))?;
             parse_destination(&[args[4].clone(), args[5].clone(), args[6].clone()])?;
         }
-        "delete" | "connect" => {
+        "show" | "delete" | "connect" => {
             if args.len() < 3 {
                 return Err(invalid(USAGE).into());
             }
@@ -321,8 +322,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     host.tags.join(",")
                 };
+                let snippet = host
+                    .startup_snippet_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "-".to_string());
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     host.id,
                     host.name,
                     host.destination.host(),
@@ -330,8 +335,53 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     host.destination.port(),
                     group,
                     tags,
-                    jump
+                    jump,
+                    snippet
                 );
+            }
+        }
+        "show" => {
+            let id: i64 = args[2]
+                .parse()
+                .map_err(|_| invalid("Host ID must be an integer."))?;
+            if let Some(host) = store.get_host(id).await? {
+                println!("ID:              {}", host.id);
+                println!("Name:            {}", host.name);
+                println!(
+                    "Destination:     {}@{}:{}",
+                    host.destination.username(),
+                    host.destination.host(),
+                    host.destination.port()
+                );
+                println!(
+                    "Group:           {}",
+                    host.group_name.as_deref().unwrap_or("-")
+                );
+                println!(
+                    "Tags:            {}",
+                    if host.tags.is_empty() {
+                        "-".into()
+                    } else {
+                        host.tags.join(",")
+                    }
+                );
+                println!(
+                    "Jump Host:       {}",
+                    host.jump_host.as_deref().unwrap_or("-")
+                );
+                let snippet_info = match host.startup_snippet_id {
+                    Some(s_id) => {
+                        if let Some(snip) = store.get_snippet(s_id).await? {
+                            format!("{s_id} ({})", snip.name)
+                        } else {
+                            format!("{s_id}")
+                        }
+                    }
+                    None => "-".to_string(),
+                };
+                println!("Startup Snippet: {}", snippet_info);
+            } else {
+                return Err(invalid("Host ID not found.").into());
             }
         }
         "add" => {
@@ -339,6 +389,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let extra = &args[6..];
             let group = extract_flag(extra, "--group");
             let jump_host = extract_flag(extra, "--jump-host");
+            let startup_snippet: Option<i64> = extract_flag(extra, "--startup-snippet")
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| invalid("Startup snippet ID must be an integer."))
+                })
+                .transpose()?;
             let tags: Vec<String> = extract_flag(extra, "--tags")
                 .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
@@ -351,7 +407,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         &destination,
                         group.as_deref(),
                         &tags,
-                        jump_host.as_deref()
+                        jump_host.as_deref(),
+                        startup_snippet
                     )
                     .await?
             );
@@ -362,6 +419,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let extra = &args[7..];
             let group = extract_flag(extra, "--group");
             let jump_host = extract_flag(extra, "--jump-host");
+            let startup_snippet: Option<i64> = extract_flag(extra, "--startup-snippet")
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| invalid("Startup snippet ID must be an integer."))
+                })
+                .transpose()?;
             let tags: Vec<String> = extract_flag(extra, "--tags")
                 .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
@@ -374,6 +437,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     group.as_deref(),
                     &tags,
                     jump_host.as_deref(),
+                    startup_snippet,
                 )
                 .await?
             {
@@ -395,6 +459,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .find(|host| host.id == id)
                 .ok_or_else(|| invalid("Host ID not found."))?;
             let effective_dest = store.get_effective_destination(&host).await?;
+            if let Some(snip_id) = host.startup_snippet_id {
+                if let Some(snip) = store.get_snippet(snip_id).await? {
+                    eprintln!(
+                        "Connecting with startup snippet: '{}' ({})",
+                        snip.name, snip.command
+                    );
+                }
+            }
             let mut cmd = Command::new("ssh");
             cmd.args(effective_dest.openssh_arguments());
             if let Some(jump) = &host.jump_host {
@@ -1247,7 +1319,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let mut count = 0;
             for entry in &entries {
                 store
-                    .add(&entry.name, &entry.destination, None, &[], None)
+                    .add(&entry.name, &entry.destination, None, &[], None, None)
                     .await?;
                 count += 1;
             }
@@ -1267,7 +1339,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let mut count = 0;
             for entry in &entries {
                 store
-                    .add(&entry.name, &entry.destination, None, &[], None)
+                    .add(&entry.name, &entry.destination, None, &[], None, None)
                     .await?;
                 count += 1;
             }

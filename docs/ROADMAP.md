@@ -29,24 +29,24 @@ been checked on macOS.
    and `list_local_directory`), and a complete Snippet & Automation engine (`Snippet`, `SnippetVariable`,
    variable extraction `{{var}}` and `{{var:-default}}`, POSIX shell escaping `shell_escape`, parameter
    rendering, secret variable detection, preview redaction `render_preview`, and JSON export/import).
-   `shellumi-storage` provides transactional schema migrations (schema version 7 with backward-compatible
-   auto-migration from versions 1, 2, 3, 4, 5, and 6), persistent host groups (`groups` table), jump hosts
-   (`hosts.jump_host`), persistent SSH tunnels (`tunnels` table with local, remote, and dynamic rules),
-   persistent file transfer history (`transfer_history` table), saved snippets and templates (`snippets`
-   table with tags, variables, and parameters), disaster recovery snapshots (`sync_snapshots` table with
-   `archive_snapshot`, `list_snapshot_history`, `get_snapshot_vault`, and `rollback_snapshot`), configuration
-   inheritance (`get_effective_destination`, `get_effective_tags`), tags, group/tag/snippet filtering, and search.
-   `shellumi-cli` manages host metadata with group/tag/search/jump-host filtering, provides dedicated
-   `group add/list/show/delete` and `tunnel add/list/delete` commands, SFTP operations (`sftp local-ls`,
-   `sftp history`, `sftp clear-history`, `sftp log`), snippet operations (`snippet add/list/show/render/delete`),
+   `shellumi-storage` provides transactional schema migrations (schema version 8 with backward-compatible
+   auto-migration from versions 1, 2, 3, 4, 5, 6, and 7), persistent host groups (`groups` table), jump hosts
+   (`hosts.jump_host`), persistent startup snippets (`hosts.startup_snippet_id` foreign key referencing `snippets(id)` ON DELETE SET NULL),
+   persistent SSH tunnels (`tunnels` table with local, remote, and dynamic rules), persistent file transfer history (`transfer_history` table),
+   saved snippets and templates (`snippets` table with tags, variables, and parameters), disaster recovery snapshots (`sync_snapshots` table with
+   `archive_snapshot`, `list_snapshot_history`, `get_snapshot_vault`, and `rollback_snapshot`), configuration inheritance (`get_effective_destination`,
+   `get_effective_tags`), tags, group/tag/snippet filtering, and search.
+   `shellumi-cli` manages host metadata with group/tag/search/jump-host/startup-snippet filtering, provides dedicated
+   `show <id>`, `group add/list/show/delete`, and `tunnel add/list/delete` commands, SFTP operations (`sftp local-ls`,
+   `sftp history`, `sftp clear-history`, `sftp log`), snippet operations (`snippet add/list/show/render/delete/batch`),
    vault disaster recovery commands (`vault export/import/diff/status/oauth-url/history/rollback`), an immediate
    `quick-connect` command, `keygen` for Ed25519 key generation, handles import/export (SSH config, CSV,
-   and JSON snippets), and dispatches connections via system OpenSSH and SFTP with group inheritance and
-   `-J` jump host chaining.
-   The GPUI window supports interactive in-window host creation and editing with group/tag/jump-host
-   inputs, jump host badge indicators, real-time search filtering, an immediate Quick Connect toolbar,
-   host card actions for Connect (SSH), SFTP, and Delete (with automated SyncScheduler debouncing),
-   and an in-terminal Snippets drawer (`📜 Snippets`) for quick parameter pasting and one-click execution.
+   and JSON snippets), and dispatches connections via system OpenSSH and SFTP with group inheritance,
+   `-J` jump host chaining, and startup snippet execution.
+   The GPUI window supports interactive in-window host creation and editing with group/tag/jump-host/startup-snippet
+   inputs, jump host and startup snippet badge indicators (`📜 Startup: <snippet_name>`), real-time search filtering, an immediate Quick Connect toolbar,
+   host card actions for Connect (SSH with startup snippet execution), SFTP, and Delete (with automated SyncScheduler debouncing),
+   an in-terminal Snippets drawer (`📜 Snippets`) for quick parameter pasting and one-click execution, and an interactive Multi-Host Batch Execution Modal.
 3. Terminal engine and PTY integration: `shellumi-terminal` is now
    implemented with VT/ANSI escape parsing (colors, cursor positioning, erase,
    alternate screen, scrollback history), cross-platform native PTY process
@@ -87,20 +87,24 @@ been checked on macOS.
    live transfer queue drawer with visual progress bar, and mode switching between Dual-Pane View and interactive terminal).
    Next: direct remote subsystem wire streaming and recursive directory transfers.
 8. Snippets & Automation (Phase 6): Implemented parameter extraction (`{{var}}`, `{{var:-default}}`), POSIX shell escaping,
-   secret parameter detection and preview redaction, JSON export/import, Turso database schema v6 persistence,
-   CLI `snippet` subcommands, GPUI in-terminal drawer with Paste and Run execution, interactive GPUI Snippet Variable
-   Modal prompt (`SnippetModalState`) with default value rendering, secret input masking, and Run/Paste dispatch.
+   secret parameter detection and preview redaction, JSON export/import, Turso database schema v8 persistence
+   with persistent `startup_snippet_id` foreign keys, CLI `snippet` subcommands, GPUI in-terminal drawer with
+   Paste, Run, and Multi-Host execution, interactive GPUI Snippet Variable Modal prompt (`SnippetModalState`),
+   and automated host startup snippet rendering and dispatch upon connection.
    Implemented Multi-Host Batch Execution engine in `shellumi-core::batch` (`BatchHostTarget`, `BatchPolicy::Parallel`
    and `Sequential`, `BatchExecutionPlan`, `BatchRunner`, `BatchExecutionSummary`) with safe parameter substitution and
-   host property variables (`{{host.name}}`, `{{host.hostname}}`, `{{host.user}}`, `{{host.port}}`), dry-run previews,
-   cancellation tracking, and CLI `snippet batch` subcommands.
+   host property variables (`{{host.id}}`, `{{host.name}}`, `{{host.hostname}}`, `{{host.user}}`, `{{host.port}}`), dry-run previews,
+   cancellation tracking, CLI `snippet batch` subcommands, and desktop GPUI Multi-Host Batch Runner Modal (`BatchModalState`)
+   featuring host filtering, selection controls, policy toggles (Parallel vs Sequential), dry-run command previewing,
+   and background execution with live status and expandable per-host output cards.
    Next: snippet synchronization over Google Drive E2EE sync.
 9. Command Palette (Phase 6 & Section 8.5): Implemented decoupled palette action and scoring engine in `shellumi-core::palette`
    (`PaletteCategory`, `PaletteAction`, `PaletteCommand`, `PaletteRegistry`), featuring fuzzy tokenized matching, title prefix/exact
    bonuses, and acronym resolution (e.g. `qc` for Quick Connect). Integrated CLI `palette search` and full GPUI Desktop
    Command Palette overlay (`CommandPaletteState`) bound globally to `Cmd-K` (macOS) / `Ctrl-K` (Linux/Windows) and accessible
    via top navigation toolbar buttons across Hosts and Terminal views, with arrow-key navigation, Enter execution, Escape dismissal,
-   and direct action dispatch for SSH/SFTP connections, snippet execution, sync triggering, pane splitting, and tab switching.
+   and direct action dispatch for SSH/SFTP connections, snippet execution, multi-host batch execution (`PaletteAction::ExecuteBatchSnippet`),
+   sync triggering, pane splitting, and tab switching.
 10. Google Drive E2EE Sync (Phase 5): Implemented zero-knowledge PBKDF2-HMAC-SHA256 key derivation with
    memory zeroization on drop, AES-256-GCM AEAD envelope sealing with bound associated data, versioned
    `SyncRecord` models with deletion tombstones, three-way sync conflict detection (`determine_sync_action`),
