@@ -446,6 +446,25 @@ impl Default for WindowsCredentialManagerStore {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl CredentialStore for WindowsCredentialManagerStore {
+    fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<(), CredentialError> {
+        Err(CredentialError::Storage(
+            "Windows Credential Manager integration is not implemented".into(),
+        ))
+    }
+    fn get_secret(&self, _: &str, _: &str) -> Result<Option<SecretString>, CredentialError> {
+        Err(CredentialError::Storage(
+            "Windows Credential Manager integration is not implemented".into(),
+        ))
+    }
+    fn delete_secret(&self, _: &str, _: &str) -> Result<bool, CredentialError> {
+        Err(CredentialError::Storage(
+            "Windows Credential Manager integration is not implemented".into(),
+        ))
+    }
+}
+
 /// Linux Secret Service D-Bus credential store.
 #[cfg(target_os = "linux")]
 pub struct LinuxSecretServiceStore;
@@ -461,6 +480,25 @@ impl LinuxSecretServiceStore {
 impl Default for LinuxSecretServiceStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl CredentialStore for LinuxSecretServiceStore {
+    fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<(), CredentialError> {
+        Err(CredentialError::Storage(
+            "Linux Secret Service integration is not implemented".into(),
+        ))
+    }
+    fn get_secret(&self, _: &str, _: &str) -> Result<Option<SecretString>, CredentialError> {
+        Err(CredentialError::Storage(
+            "Linux Secret Service integration is not implemented".into(),
+        ))
+    }
+    fn delete_secret(&self, _: &str, _: &str) -> Result<bool, CredentialError> {
+        Err(CredentialError::Storage(
+            "Linux Secret Service integration is not implemented".into(),
+        ))
     }
 }
 
@@ -613,8 +651,10 @@ mod tests {
     }
 
     #[test]
-    fn default_credential_store_creation() {
+    fn default_credential_store_rejects_invalid_identifiers() {
         let store = default_credential_store();
-        assert_eq!(store.get_secret("default-svc", "user1").unwrap(), None);
+        assert!(store.get_secret("", "user1").is_err());
+        assert!(store.set_secret("svc", "", "secret").is_err());
+        assert!(store.delete_secret("", "user1").is_err());
     }
 }

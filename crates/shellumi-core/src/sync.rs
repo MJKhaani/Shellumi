@@ -286,6 +286,7 @@ pub enum SyncEntityType {
     Group,
     Tunnel,
     Snippet,
+    Workspace,
 }
 
 impl fmt::Display for SyncEntityType {
@@ -295,6 +296,7 @@ impl fmt::Display for SyncEntityType {
             Self::Group => f.write_str("group"),
             Self::Tunnel => f.write_str("tunnel"),
             Self::Snippet => f.write_str("snippet"),
+            Self::Workspace => f.write_str("workspace"),
         }
     }
 }
@@ -919,6 +921,17 @@ pub fn format_record_summary(passphrase: Option<&str>, record: &SyncRecord) -> S
                             cmd.to_string()
                         };
                         format!("{name} (`{short_cmd}`)")
+                    }
+                    SyncEntityType::Workspace => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let layout = obj
+                            .get("layout")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("single");
+                        format!("Workspace: {name} ({layout})")
                     }
                 }
             } else {

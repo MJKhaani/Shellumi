@@ -42,10 +42,10 @@ been checked on macOS.
    vault disaster recovery commands (`vault export/import/diff/status/oauth-url/history/rollback`), an immediate
    `quick-connect` command, `keygen` for Ed25519 key generation, handles import/export (SSH config, CSV,
    and JSON snippets), and dispatches connections via system OpenSSH and SFTP with group inheritance,
-   `-J` jump host chaining, and startup snippet execution.
+   and `-J` jump host chaining. Startup snippets are not executed automatically.
    The GPUI window supports interactive in-window host creation and editing with group/tag/jump-host/startup-snippet
    inputs, jump host and startup snippet badge indicators (`📜 Startup: <snippet_name>`), real-time search filtering, an immediate Quick Connect toolbar,
-   host card actions for Connect (SSH with startup snippet execution), SFTP, and Delete (with automated SyncScheduler debouncing),
+   host card actions for Connect, SFTP, and Delete,
    an in-terminal Snippets drawer (`📜 Snippets`) for quick parameter pasting and one-click execution, and an interactive Multi-Host Batch Execution Modal.
 3. Terminal engine and PTY integration: `shellumi-terminal` is now
    implemented with VT/ANSI escape parsing (colors, cursor positioning, erase,
@@ -71,13 +71,11 @@ been checked on macOS.
    through the PTY session worker and terminal grid. Test the actual GPUI path,
    password and key-passphrase prompts, failure handling, and other platforms;
    evaluate a native Rust backend separately.
-6. OS Keychain and credential management: Implemented core `CredentialStore` trait,
-   in-memory secret zeroization on drop, strict redaction formatting, native OS Keychain
-   integration on macOS (`MacOsKeychainStore` via Apple Security Framework), Windows
-   Credential Manager (`WindowsCredentialManagerStore`), Linux Secret Service
-   (`LinuxSecretServiceStore`), portable `EncryptedFileCredentialStore` (AES-256-GCM AEAD,
-   PBKDF2-HMAC-SHA256, atomic file commits), and `default_credential_store()` platform
-   factory. Next: biometric prompt integration (Touch ID / Windows Hello) for unlocking keys.
+6. OS Keychain and credential management: The core has a `CredentialStore` trait,
+   secret redaction, a macOS Keychain backend, and an encrypted file store. Windows
+   Credential Manager and Linux Secret Service return explicit unavailable errors.
+   Next: implement and validate those native stores and secure secret entry before
+   adding biometric unlock.
 7. SFTP and file transfer: Implemented SFTP core domain models, path breadcrumbs, local directory
    browsing, transfer task progress, transfer history database storage (schema v6), RFC SFTP v3 wire protocol
    encoders and decoders (`SftpPacket`, `StatusCode`, `OpenFlags`, `FileAttributes`, `NameEntry`), stream framing
@@ -90,11 +88,11 @@ been checked on macOS.
    secret parameter detection and preview redaction, JSON export/import, Turso database schema v8 persistence
    with persistent `startup_snippet_id` foreign keys, CLI `snippet` subcommands, GPUI in-terminal drawer with
    Paste, Run, and Multi-Host execution, interactive GPUI Snippet Variable Modal prompt (`SnippetModalState`),
-   and automated host startup snippet rendering and dispatch upon connection.
+   with startup-snippet references. Automatic dispatch is disabled until authentication readiness can be verified.
    Implemented Multi-Host Batch Execution engine in `shellumi-core::batch` (`BatchHostTarget`, `BatchPolicy::Parallel`
    and `Sequential`, `BatchExecutionPlan`, `BatchRunner`, `BatchExecutionSummary`) with safe parameter substitution and
    host property variables (`{{host.id}}`, `{{host.name}}`, `{{host.hostname}}`, `{{host.user}}`, `{{host.port}}`), dry-run previews,
-   cancellation tracking, CLI `snippet batch` subcommands, and desktop GPUI Multi-Host Batch Runner Modal (`BatchModalState`)
+   cancellation tracking, CLI `snippet batch` previews, and desktop GPUI Multi-Host Batch Runner Modal (`BatchModalState`)
    featuring host filtering, selection controls, policy toggles (Parallel vs Sequential), dry-run command previewing,
    and background execution with live status and expandable per-host output cards.
    Next: snippet synchronization over Google Drive E2EE sync.
@@ -116,13 +114,34 @@ been checked on macOS.
    protocol models (`HttpTransport`, `HttpRequest`, `HttpResponse`), Google Drive Application Data folder REST API
    client (`GoogleDriveSyncClient`: token exchange, token refresh, file listing, multipart snapshot upload, snapshot
    download, and update/deletion), conflict-safe sync planner (`plan_sync_cycle`, `SyncPlan`), GPUI in-window
-   Cloud Sync status pill with background execution, explicit conflict resolution strategies (`resolve_record_conflict`,
-   `ConflictResolutionChoice`, `ConflictItemView`), an interactive GPUI Conflict Resolution Modal allowing
-   side-by-side visual diff inspection and granular selection of conflicting records ("Keep Local" vs. "Accept Remote"),
-   automated disaster recovery snapshots (`sync_snapshots` table, schema v7) with snapshot history and rollback,
-   and automated periodic sync timer background scheduler (`SyncScheduler` with 5s local mutation debounce and 300s periodic polling).
-   Next: biometric key unlocking integration.
-11. Continue the remaining phases in PROJECT.md (Workspaces, Mosh/Telnet/Serial, Collaboration),
+   conflict resolution models (`resolve_record_conflict`, `ConflictResolutionChoice`, `ConflictItemView`),
+   and disaster recovery snapshots (`sync_snapshots` table, schema v7) with snapshot history and rollback.
+   Desktop cloud sync and conflict resolution are not integrated; the sync control reports unavailable.
+   Next: implement authenticated end-to-end sync and verify recovery before exposing it as functional.
+11. Workspaces and Broadcast Input (Phase 6): Implemented workspace domain models in `shellumi-core::workspace`
+    (`WorkspaceLayout`, `WorkspaceSessionKind`, `WorkspaceSession`, `Workspace`, `BroadcastManager`, `BroadcastSafetyCheck`,
+    `check_dangerous_command`), Turso database schema version 9 with transactional migrations and encrypted vault backup,
+    CLI `workspace` subcommands (`add`, `list`, `show`, `duplicate`, `delete`), and desktop GPUI integration in `shellumi-app`:
+    header broadcast toggle with receiving pane count (`📡 Broadcast: ON (X/Y)`), pane-level broadcast toggle button
+    (`[📡 Broadcast]` / `[🔇 Excluded]`), keyboard input replication across non-excluded panes, destructive command safety
+    interception with visual warning banner, command palette workspace registration (`PaletteCategory::Workspace`),
+    `ToggleBroadcastInput`, `SaveCurrentLayoutAsWorkspace`, and `LoadWorkspace`.
+12. Multi-Protocol Support (Phase 7): Implemented multi-protocol domain models in `shellumi-core::protocol`
+    (`ConnectionProtocol` [SSH, Mosh, Telnet, Serial, Local], `MoshConfig`, `MoshPredictMode`, RFC 854/1091/1073 `TelnetConfig`
+    stream parser with `IAC IAC` escape handling and unencrypted security warning, `SerialConfig` baud/parity/bits/flow controls,
+    `ProtocolEndpoint`, and `discover_serial_ports()`), Turso database schema version 10 with transactional migrations from versions 1..9,
+    adding `protocol` and `protocol_config` columns to `hosts` table, `SavedHost` helper methods (`is_ssh`, `is_mosh`, `is_telnet`, `is_serial`),
+    `HostStore` (`add_with_protocol`, `update_with_protocol`), and zero-knowledge encrypted vault backup/restore serialization.
+    Implemented CLI enhancements: `--protocol` and `--protocol-config` options for `add` and `update`, protocol display in `show <id>`,
+    protocol-aware connection launcher in `connect <id>` with capability checks and cleartext warnings, and dedicated subcommands:
+    `mosh`, `telnet`, `serial`, and `serial-ports` device discovery.
+    Implemented GPUI desktop integration in `shellumi-app`: interactive protocol selection buttons in `HostForm` (`[🔒 SSH]`, `[⚡ Mosh]`,
+    `[⚠️ Telnet]`, `[🔌 Serial]`) with automatic port defaults (22, 23, 1) and dynamic protocol-specific security/info banners,
+    protocol badges on host cards, SFTP action isolation (hidden for non-SSH hosts), multi-protocol terminal session tabs
+    (`SessionKind::Ssh`, `Mosh`, `Telnet`, `Serial`, `Local`, `Sftp`) with protocol prefixes in titles, and persistent
+    `[⚠️ UNENCRYPTED TELNET]` badge in terminal view header. 165 workspace tests passing.
+    Next: implement cryptographic Team Collaboration (Phase 8: shared vaults, role management, encrypted data sharing, multiplayer terminal).
+13. Continue the remaining phases in PROJECT.md (Collaboration, Infrastructure Integrations, Production Hardening),
     with acceptance tests and platform verification for each capability.
 
 Reference research: [upstream GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui),

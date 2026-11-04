@@ -10,6 +10,7 @@ pub enum PaletteCategory {
     Sftp,
     Sync,
     Terminal,
+    Workspace,
 }
 
 impl PaletteCategory {
@@ -22,6 +23,7 @@ impl PaletteCategory {
             Self::Sftp => "SFTP",
             Self::Sync => "Cloud Sync",
             Self::Terminal => "Terminal",
+            Self::Workspace => "Workspaces",
         }
     }
 
@@ -34,6 +36,7 @@ impl PaletteCategory {
             Self::Sftp => "📂",
             Self::Sync => "☁",
             Self::Terminal => "⌨",
+            Self::Workspace => "📐",
         }
     }
 }
@@ -64,6 +67,12 @@ pub enum PaletteAction {
     SplitVertical,
     SplitHorizontal,
     CloseActiveTab,
+    ToggleBroadcastInput,
+    SaveCurrentLayoutAsWorkspace,
+    LoadWorkspace {
+        workspace_id: i64,
+        workspace_name: String,
+    },
     OpenSnippetsDrawer,
     AddNewHost,
     AddNewSnippet,
@@ -125,6 +134,20 @@ impl PaletteCommand {
             },
         )
         .with_keywords(["batch", "multi-host", "parallel", "cluster", snippet_name])
+    }
+
+    pub fn workspace_from_saved(workspace_id: i64, workspace_name: &str, layout: &str) -> Self {
+        Self::new(
+            format!("workspace_{workspace_id}"),
+            format!("Load Workspace: {workspace_name}"),
+            format!("Restore {layout} layout and launch sessions for '{workspace_name}'"),
+            PaletteCategory::Workspace,
+            PaletteAction::LoadWorkspace {
+                workspace_id,
+                workspace_name: workspace_name.to_string(),
+            },
+        )
+        .with_keywords(["workspace", "layout", "preset", layout, workspace_name])
     }
 }
 
@@ -226,6 +249,30 @@ impl PaletteRegistry {
             )
             .with_shortcut("Cmd+W")
             .with_keywords(["close", "exit", "kill", "terminate"]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:toggle_broadcast",
+                "Toggle Broadcast Input",
+                "Replicate terminal keyboard typing across all active panes simultaneously",
+                PaletteCategory::Terminal,
+                PaletteAction::ToggleBroadcastInput,
+            )
+            .with_shortcut("Cmd+Alt+B")
+            .with_keywords(["broadcast", "sync", "multi-pane", "replicate", "mirror"]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:save_workspace",
+                "Save Current Layout as Workspace",
+                "Persist active split pane session layout as a reusable workspace preset",
+                PaletteCategory::Workspace,
+                PaletteAction::SaveCurrentLayoutAsWorkspace,
+            )
+            .with_shortcut("Cmd+Shift+S")
+            .with_keywords(["workspace", "save", "layout", "preset", "snapshot"]),
         );
 
         self.register(
@@ -512,5 +559,40 @@ mod tests {
         let snippet_search = registry.search("prune");
         assert_eq!(snippet_search.len(), 1);
         assert_eq!(snippet_search[0].command.id, "snippet:42");
+    }
+
+    #[test]
+    fn verifies_workspace_and_broadcast_palette_actions() {
+        let mut registry = PaletteRegistry::with_static_actions();
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::ToggleBroadcastInput));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::SaveCurrentLayoutAsWorkspace));
+
+        let ws_cmd = PaletteCommand::workspace_from_saved(42, "SRE Cluster View", "vertical");
+        assert_eq!(ws_cmd.category, PaletteCategory::Workspace);
+        assert_eq!(
+            ws_cmd.action,
+            PaletteAction::LoadWorkspace {
+                workspace_id: 42,
+                workspace_name: "SRE Cluster View".to_string()
+            }
+        );
+        registry.register(ws_cmd);
+
+        let search_results = registry.search("broadcast");
+        assert!(!search_results.is_empty());
+        assert_eq!(
+            search_results[0].command.action,
+            PaletteAction::ToggleBroadcastInput
+        );
+
+        let ws_results = registry.search("SRE Cluster");
+        assert!(!ws_results.is_empty());
+        assert_eq!(ws_results[0].command.category, PaletteCategory::Workspace);
     }
 }

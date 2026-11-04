@@ -2,12 +2,12 @@
 use shellumi_core::{
     resolve_effective_destination, resolve_effective_tags, validate_jump_host, DestinationError,
     ForwardingType, GroupError, HostGroup, PortForwardRule, Snippet, SnippetError, SnippetVariable,
-    SshDestination, TransferDirection, TunnelError,
+    SshDestination, TransferDirection, TunnelError, WorkspaceError, WorkspaceSession,
 };
 use std::fmt;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -23,6 +23,8 @@ pub enum StorageError {
     InvalidPort(i64),
     InvalidTransferPath,
     InvalidSnippet(SnippetError),
+    InvalidWorkspace(WorkspaceError),
+    Serialization(String),
     InvalidSync(shellumi_core::SyncError),
     SnapshotNotFound(String),
     MissingSchemaVersion,
@@ -45,6 +47,8 @@ impl fmt::Display for StorageError {
             Self::InvalidPort(port) => write!(f, "invalid stored port: {port}"),
             Self::InvalidTransferPath => f.write_str("transfer paths must not be empty"),
             Self::InvalidSnippet(error) => write!(f, "invalid snippet: {error}"),
+            Self::InvalidWorkspace(error) => write!(f, "invalid workspace: {error}"),
+            Self::Serialization(error) => write!(f, "serialization error: {error}"),
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
             Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
             Self::MissingSchemaVersion => f.write_str("database did not return a schema version"),
@@ -93,6 +97,31 @@ pub struct SavedHost {
     pub tags: Vec<String>,
     pub jump_host: Option<String>,
     pub startup_snippet_id: Option<i64>,
+    pub protocol: String,
+    pub protocol_config: Option<String>,
+}
+
+impl SavedHost {
+    pub fn protocol(&self) -> shellumi_core::ConnectionProtocol {
+        shellumi_core::ConnectionProtocol::parse(&self.protocol)
+            .unwrap_or(shellumi_core::ConnectionProtocol::Ssh)
+    }
+
+    pub fn is_ssh(&self) -> bool {
+        self.protocol() == shellumi_core::ConnectionProtocol::Ssh
+    }
+
+    pub fn is_mosh(&self) -> bool {
+        self.protocol() == shellumi_core::ConnectionProtocol::Mosh
+    }
+
+    pub fn is_telnet(&self) -> bool {
+        self.protocol() == shellumi_core::ConnectionProtocol::Telnet
+    }
+
+    pub fn is_serial(&self) -> bool {
+        self.protocol() == shellumi_core::ConnectionProtocol::Serial
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +173,27 @@ pub struct SavedSnippet {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedWorkspace {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub layout: String,
+    pub sessions: Vec<WorkspaceSession>,
+    pub tags: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SyncWorkspacePayload {
+    pub name: String,
+    pub description: Option<String>,
+    pub layout: String,
+    pub sessions: Vec<WorkspaceSession>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotHistoryEntry {
     pub id: i64,
     pub snapshot_id: String,
@@ -162,6 +212,14 @@ pub struct SyncHostPayload {
     pub jump_host: Option<String>,
     #[serde(default)]
     pub startup_snippet_id: Option<i64>,
+    #[serde(default = "default_host_protocol")]
+    pub protocol: String,
+    #[serde(default)]
+    pub protocol_config: Option<String>,
+}
+
+fn default_host_protocol() -> String {
+    "ssh".to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -197,6 +255,7 @@ pub struct ImportVaultSummary {
     pub groups_imported: usize,
     pub tunnels_imported: usize,
     pub snippets_imported: usize,
+    pub workspaces_imported: usize,
     pub errors: Vec<String>,
 }
 
@@ -312,7 +371,9 @@ impl HostStore {
                     group_name TEXT,
                     tags TEXT NOT NULL DEFAULT '',
                     jump_host TEXT,
-                    startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL
+                    startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL,
+                    protocol TEXT NOT NULL DEFAULT 'ssh',
+                    protocol_config TEXT
                 )",
                 (),
             )
@@ -372,7 +433,21 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 1 {
             // Migrate schema version 1 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
@@ -458,7 +533,28 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 2 {
             // Migrate schema version 2 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN jump_host TEXT", ())
@@ -537,7 +633,28 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 3 {
             // Migrate schema version 3 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN jump_host TEXT", ())
@@ -606,7 +723,28 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 4 {
             // Migrate schema version 4 to 8
             tx.execute(
@@ -657,7 +795,28 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 5 {
             // Migrate schema version 5 to 8
             tx.execute(
@@ -690,7 +849,28 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 6 {
             // Migrate schema version 6 to 8
             tx.execute(
@@ -709,21 +889,139 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         } else if version == 7 {
-            // Migrate schema version 7 to 8
+            // Migrate schema version 7 to 9
             tx.execute(
                 "ALTER TABLE hosts ADD COLUMN startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL",
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 8", ()).await?;
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
+        } else if version == 8 {
+            // Migrate schema version 8 to 9
+            tx.execute(
+                "CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
+        } else if version == 9 {
+            // Migrate schema version 9 to 10
+            tx.execute(
+                "ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'",
+                (),
+            )
+            .await?;
+            tx.execute("ALTER TABLE hosts ADD COLUMN protocol_config TEXT", ())
+                .await?;
+            tx.execute("PRAGMA user_version = 10", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
             _database: database,
             connection,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_with_protocol(
+        &mut self,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+    ) -> Result<i64, StorageError> {
+        let name = validated_name(name)?;
+        let group = validated_group(group_name)?;
+        let tags_serialized = validated_tags(tags)?;
+        let jump = validated_jump_host(jump_host)?;
+        let proto = if protocol.trim().is_empty() {
+            "ssh"
+        } else {
+            protocol.trim()
+        };
+
+        self.connection
+            .execute(
+                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (
+                    name,
+                    destination.host(),
+                    destination.username(),
+                    i64::from(destination.port().get()),
+                    group,
+                    tags_serialized,
+                    jump,
+                    startup_snippet_id,
+                    proto,
+                    protocol_config,
+                ),
+            )
+            .await?;
+        Ok(self.connection.last_insert_rowid())
     }
 
     pub async fn add(
@@ -735,14 +1033,47 @@ impl HostStore {
         jump_host: Option<&str>,
         startup_snippet_id: Option<i64>,
     ) -> Result<i64, StorageError> {
+        self.add_with_protocol(
+            name,
+            destination,
+            group_name,
+            tags,
+            jump_host,
+            startup_snippet_id,
+            "ssh",
+            None,
+        )
+        .await
+    }
+
+    /// Update an existing host, returning false if its ID is not present.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_with_protocol(
+        &mut self,
+        id: i64,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+    ) -> Result<bool, StorageError> {
         let name = validated_name(name)?;
         let group = validated_group(group_name)?;
         let tags_serialized = validated_tags(tags)?;
         let jump = validated_jump_host(jump_host)?;
+        let proto = if protocol.trim().is_empty() {
+            "ssh"
+        } else {
+            protocol.trim()
+        };
 
-        self.connection
+        Ok(self
+            .connection
             .execute(
-                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10 WHERE id = ?11",
                 (
                     name,
                     destination.host(),
@@ -752,13 +1083,15 @@ impl HostStore {
                     tags_serialized,
                     jump,
                     startup_snippet_id,
+                    proto,
+                    protocol_config,
+                    id,
                 ),
             )
-            .await?;
-        Ok(self.connection.last_insert_rowid())
+            .await?
+            != 0)
     }
 
-    /// Update an existing host, returning false if its ID is not present.
     #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &mut self,
@@ -770,36 +1103,25 @@ impl HostStore {
         jump_host: Option<&str>,
         startup_snippet_id: Option<i64>,
     ) -> Result<bool, StorageError> {
-        let name = validated_name(name)?;
-        let group = validated_group(group_name)?;
-        let tags_serialized = validated_tags(tags)?;
-        let jump = validated_jump_host(jump_host)?;
-
-        Ok(self
-            .connection
-            .execute(
-                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8 WHERE id = ?9",
-                (
-                    name,
-                    destination.host(),
-                    destination.username(),
-                    i64::from(destination.port().get()),
-                    group,
-                    tags_serialized,
-                    jump,
-                    startup_snippet_id,
-                    id,
-                ),
-            )
-            .await?
-            != 0)
+        self.update_with_protocol(
+            id,
+            name,
+            destination,
+            group_name,
+            tags,
+            jump_host,
+            startup_snippet_id,
+            "ssh",
+            None,
+        )
+        .await
     }
 
     pub async fn list(&self) -> Result<Vec<SavedHost>, StorageError> {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id FROM hosts ORDER BY id",
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config FROM hosts ORDER BY id",
                 (),
             )
             .await?;
@@ -814,6 +1136,8 @@ impl HostStore {
             let tags_str: String = row.get(6).unwrap_or_default();
             let jump_host: Option<String> = row.get(7)?;
             let startup_snippet_id: Option<i64> = row.get(8)?;
+            let protocol: Option<String> = row.get(9)?;
+            let protocol_config: Option<String> = row.get(10)?;
 
             if name.trim().is_empty() || name.chars().any(char::is_control) {
                 return Err(StorageError::InvalidName);
@@ -830,6 +1154,8 @@ impl HostStore {
                 tags: parse_tags(&tags_str),
                 jump_host,
                 startup_snippet_id,
+                protocol: protocol.unwrap_or_else(|| "ssh".to_string()),
+                protocol_config,
             });
         }
         Ok(hosts)
@@ -839,7 +1165,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id FROM hosts WHERE id = ?1",
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config FROM hosts WHERE id = ?1",
                 (id,),
             )
             .await?;
@@ -853,6 +1179,8 @@ impl HostStore {
             let tags_str: String = row.get(6).unwrap_or_default();
             let jump_host: Option<String> = row.get(7)?;
             let startup_snippet_id: Option<i64> = row.get(8)?;
+            let protocol: Option<String> = row.get(9)?;
+            let protocol_config: Option<String> = row.get(10)?;
 
             if name.trim().is_empty() || name.chars().any(char::is_control) {
                 return Err(StorageError::InvalidName);
@@ -869,6 +1197,8 @@ impl HostStore {
                 tags: parse_tags(&tags_str),
                 jump_host,
                 startup_snippet_id,
+                protocol: protocol.unwrap_or_else(|| "ssh".to_string()),
+                protocol_config,
             }))
         } else {
             Ok(None)
@@ -1530,6 +1860,172 @@ impl HostStore {
         Ok(snippets)
     }
 
+    pub async fn add_workspace(
+        &mut self,
+        name: &str,
+        description: Option<&str>,
+        layout: &str,
+        sessions: &[WorkspaceSession],
+        tags: &[String],
+    ) -> Result<i64, StorageError> {
+        let name_trimmed = name.trim();
+        if name_trimmed.is_empty() {
+            return Err(StorageError::InvalidWorkspace(WorkspaceError::InvalidName));
+        }
+        let sessions_json = serde_json::to_string(sessions)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags_serialized = validated_tags(tags)?;
+
+        self.connection
+            .execute(
+                "INSERT INTO workspaces (name, description, layout, sessions_json, tags) VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    name_trimmed,
+                    description,
+                    layout,
+                    sessions_json,
+                    tags_serialized,
+                ),
+            )
+            .await?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    pub async fn update_workspace(
+        &mut self,
+        id: i64,
+        name: &str,
+        description: Option<&str>,
+        layout: &str,
+        sessions: &[WorkspaceSession],
+        tags: &[String],
+    ) -> Result<bool, StorageError> {
+        let name_trimmed = name.trim();
+        if name_trimmed.is_empty() {
+            return Err(StorageError::InvalidWorkspace(WorkspaceError::InvalidName));
+        }
+        let sessions_json = serde_json::to_string(sessions)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags_serialized = validated_tags(tags)?;
+
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE workspaces SET name = ?1, description = ?2, layout = ?3, sessions_json = ?4, tags = ?5, updated_at = datetime('now') WHERE id = ?6",
+                (
+                    name_trimmed,
+                    description,
+                    layout,
+                    sessions_json,
+                    tags_serialized,
+                    id,
+                ),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    pub async fn get_workspace(&self, id: i64) -> Result<Option<SavedWorkspace>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let description: Option<String> = row.get(2)?;
+            let layout: String = row.get(3)?;
+            let sessions_raw: String = row.get(4)?;
+            let tags_raw: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
+            let updated_at: String = row.get(7)?;
+
+            let sessions: Vec<WorkspaceSession> =
+                serde_json::from_str(&sessions_raw).unwrap_or_default();
+            let tags = parse_tags(&tags_raw);
+
+            Ok(Some(SavedWorkspace {
+                id,
+                name,
+                description,
+                layout,
+                sessions,
+                tags,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_workspaces(&self) -> Result<Vec<SavedWorkspace>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces ORDER BY id ASC",
+                (),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let description: Option<String> = row.get(2)?;
+            let layout: String = row.get(3)?;
+            let sessions_raw: String = row.get(4)?;
+            let tags_raw: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
+            let updated_at: String = row.get(7)?;
+
+            let sessions: Vec<WorkspaceSession> =
+                serde_json::from_str(&sessions_raw).unwrap_or_default();
+            let tags = parse_tags(&tags_raw);
+
+            list.push(SavedWorkspace {
+                id,
+                name,
+                description,
+                layout,
+                sessions,
+                tags,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(list)
+    }
+
+    pub async fn delete_workspace(&mut self, id: i64) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute("DELETE FROM workspaces WHERE id = ?1", (id,))
+            .await?;
+        Ok(rows > 0)
+    }
+
+    pub async fn duplicate_workspace(
+        &mut self,
+        id: i64,
+        new_name: &str,
+    ) -> Result<i64, StorageError> {
+        let ws = self
+            .get_workspace(id)
+            .await?
+            .ok_or(StorageError::InvalidWorkspace(WorkspaceError::InvalidName))?;
+        self.add_workspace(
+            new_name,
+            ws.description.as_deref(),
+            &ws.layout,
+            &ws.sessions,
+            &ws.tags,
+        )
+        .await
+    }
+
     /// Exports all hosts, groups, tunnels, and snippets into an encrypted `SyncVault` using default KDF iterations.
     pub async fn export_vault(
         &self,
@@ -1595,6 +2091,8 @@ impl HostStore {
                 tags: host.tags.clone(),
                 jump_host: host.jump_host.clone(),
                 startup_snippet_id: host.startup_snippet_id,
+                protocol: host.protocol.clone(),
+                protocol_config: host.protocol_config.clone(),
             };
             let object_id = format!("{}:{}", host.name, host.destination.host());
             let envelope = shellumi_core::encrypt_entity_with_iterations(
@@ -1665,6 +2163,33 @@ impl HostStore {
             ));
         }
 
+        // Export workspaces
+        let workspaces = self.list_workspaces().await?;
+        for ws in workspaces {
+            let payload = SyncWorkspacePayload {
+                name: ws.name.clone(),
+                description: ws.description.clone(),
+                layout: ws.layout.clone(),
+                sessions: ws.sessions.clone(),
+                tags: ws.tags.clone(),
+            };
+            let envelope = shellumi_core::encrypt_entity_with_iterations(
+                passphrase,
+                "workspace",
+                &ws.name,
+                &payload,
+                iterations,
+            )?;
+            vault.records.push(shellumi_core::SyncRecord::new(
+                ws.name,
+                shellumi_core::SyncEntityType::Workspace,
+                1,
+                device_id,
+                now,
+                envelope,
+            ));
+        }
+
         let _ = self.archive_snapshot(&vault.vault_id, &vault, 3).await;
         Ok(vault)
     }
@@ -1721,7 +2246,7 @@ impl HostStore {
                                 let matched = existing.iter().find(|h| h.name == payload.name);
                                 if let Some(m) = matched {
                                     let _ = self
-                                        .update(
+                                        .update_with_protocol(
                                             m.id,
                                             &payload.name,
                                             &dest,
@@ -1729,17 +2254,21 @@ impl HostStore {
                                             &payload.tags,
                                             payload.jump_host.as_deref(),
                                             payload.startup_snippet_id,
+                                            &payload.protocol,
+                                            payload.protocol_config.as_deref(),
                                         )
                                         .await;
                                 } else {
                                     let _ = self
-                                        .add(
+                                        .add_with_protocol(
                                             &payload.name,
                                             &dest,
                                             payload.group_name.as_deref(),
                                             &payload.tags,
                                             payload.jump_host.as_deref(),
                                             payload.startup_snippet_id,
+                                            &payload.protocol,
+                                            payload.protocol_config.as_deref(),
                                         )
                                         .await;
                                 }
@@ -1811,6 +2340,41 @@ impl HostStore {
                         Err(e) => summary
                             .errors
                             .push(format!("Snippet {}: {e}", record.object_id)),
+                    }
+                }
+                shellumi_core::SyncEntityType::Workspace => {
+                    match shellumi_core::decrypt_entity::<SyncWorkspacePayload>(
+                        passphrase, envelope,
+                    ) {
+                        Ok(payload) => {
+                            let existing = self.list_workspaces().await?;
+                            if let Some(target) = existing.iter().find(|w| w.name == payload.name) {
+                                let _ = self
+                                    .update_workspace(
+                                        target.id,
+                                        &payload.name,
+                                        payload.description.as_deref(),
+                                        &payload.layout,
+                                        &payload.sessions,
+                                        &payload.tags,
+                                    )
+                                    .await;
+                            } else {
+                                let _ = self
+                                    .add_workspace(
+                                        &payload.name,
+                                        payload.description.as_deref(),
+                                        &payload.layout,
+                                        &payload.sessions,
+                                        &payload.tags,
+                                    )
+                                    .await;
+                            }
+                            summary.workspaces_imported += 1;
+                        }
+                        Err(e) => summary
+                            .errors
+                            .push(format!("Workspace {}: {e}", record.object_id)),
                     }
                 }
             }
@@ -1959,7 +2523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_from_schema_versions_1_to_7_to_version_8() {
+    async fn migrates_from_schema_versions_1_to_8_to_version_9() {
         let dir = tempfile::tempdir().unwrap();
         let path1 = dir.path().join("v1.db");
         let path1_str = path1.to_str().unwrap();
@@ -2380,6 +2944,258 @@ mod tests {
             .unwrap());
         let fetched = store7.get_host(hosts7[0].id).await.unwrap().unwrap();
         assert_eq!(fetched.startup_snippet_id, Some(snip_id));
+
+        // Test migration from v8 to v9
+        let path8 = dir.path().join("v8.db");
+        let path8_str = path8.to_str().unwrap();
+        let db8 = Builder::new_local(path8_str).build().await.unwrap();
+        let conn8 = db8.connect().unwrap();
+        conn8
+            .execute(
+                "CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                username TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                group_name TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                jump_host TEXT,
+                startup_snippet_id INTEGER
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn8
+            .execute(
+                "INSERT INTO hosts (name, hostname, username, port) VALUES ('V8Host', 'v8.example.com', 'admin', 22)",
+                (),
+            )
+            .await
+            .unwrap();
+        conn8
+            .execute(
+                "CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                description TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                variables TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn8
+            .execute(
+                "CREATE TABLE sync_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL,
+                vault_json TEXT NOT NULL,
+                record_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn8.execute("PRAGMA user_version = 8", ()).await.unwrap();
+        drop(conn8);
+        drop(db8);
+
+        let mut store8 = HostStore::open(path8_str).await.unwrap();
+        assert_eq!(store8.list().await.unwrap().len(), 1);
+        assert_eq!(store8.list_workspaces().await.unwrap().len(), 0);
+
+        // Can add and retrieve workspaces on migrated database
+        let sess = shellumi_core::WorkspaceSession::new(
+            "Terminal 1",
+            shellumi_core::WorkspaceSessionKind::Local,
+            0,
+        );
+        let ws_id = store8
+            .add_workspace(
+                "Ops Center",
+                Some("Monitoring"),
+                "vertical",
+                &[sess],
+                &["ops".into()],
+            )
+            .await
+            .unwrap();
+        assert!(ws_id > 0);
+        let ws = store8.get_workspace(ws_id).await.unwrap().unwrap();
+        assert_eq!(ws.name, "Ops Center");
+        assert_eq!(ws.layout, "vertical");
+        assert_eq!(ws.sessions.len(), 1);
+
+        // --- Schema version 9 -> 10 migration test ---
+        let dir9 = tempfile::tempdir().unwrap();
+        let path9 = dir9.path().join("v9.db");
+        let path9_str = path9.to_str().unwrap();
+        let db9 = Builder::new_local(path9_str).build().await.unwrap();
+        let conn9 = db9.connect().unwrap();
+        conn9
+            .execute(
+                "CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                username TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                group_name TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                jump_host TEXT,
+                startup_snippet_id INTEGER
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn9
+            .execute(
+                "INSERT INTO hosts (name, hostname, username, port, tags) VALUES ('LegacyV9', 'v9.example.com', 'admin', 22, 'legacy')",
+                (),
+            )
+            .await
+            .unwrap();
+        conn9
+            .execute(
+                "CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                layout TEXT NOT NULL DEFAULT 'single',
+                sessions_json TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn9.execute("PRAGMA user_version = 9", ()).await.unwrap();
+        drop(conn9);
+        drop(db9);
+
+        let mut store9 = HostStore::open(path9_str).await.unwrap();
+        let hosts9 = store9.list().await.unwrap();
+        assert_eq!(hosts9.len(), 1);
+        assert_eq!(hosts9[0].name, "LegacyV9");
+        assert_eq!(hosts9[0].protocol, "ssh");
+        assert_eq!(hosts9[0].protocol_config, None);
+        assert!(hosts9[0].is_ssh());
+
+        // Can add host with non-ssh protocol on migrated database
+        let mosh_dest = SshDestination::new("mosh.example.org", "dev", 22).unwrap();
+        let mosh_id = store9
+            .add_with_protocol(
+                "MoshHost",
+                &mosh_dest,
+                None,
+                &["mosh".into()],
+                None,
+                None,
+                "mosh",
+                Some(r#"{"predict_mode":"adaptive"}"#),
+            )
+            .await
+            .unwrap();
+        let fetched_mosh = store9.get_host(mosh_id).await.unwrap().unwrap();
+        assert_eq!(fetched_mosh.protocol, "mosh");
+        assert!(fetched_mosh.is_mosh());
+        assert_eq!(
+            fetched_mosh.protocol_config.as_deref(),
+            Some(r#"{"predict_mode":"adaptive"}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn manages_workspace_lifecycle() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+        assert!(store.list_workspaces().await.unwrap().is_empty());
+
+        let s1 = shellumi_core::WorkspaceSession::new(
+            "Bastion",
+            shellumi_core::WorkspaceSessionKind::Ssh,
+            0,
+        )
+        .with_host(1)
+        .with_startup_command("uptime");
+
+        let s2 = shellumi_core::WorkspaceSession::new(
+            "Local Shell",
+            shellumi_core::WorkspaceSessionKind::Local,
+            1,
+        )
+        .with_working_directory("/tmp")
+        .with_broadcast_excluded(true);
+
+        let ws_id = store
+            .add_workspace(
+                "Incident Response",
+                Some("Production triage"),
+                "horizontal",
+                &[s1, s2],
+                &["prod".into(), "incident".into()],
+            )
+            .await
+            .unwrap();
+        assert!(ws_id > 0);
+
+        let ws = store.get_workspace(ws_id).await.unwrap().unwrap();
+        assert_eq!(ws.name, "Incident Response");
+        assert_eq!(ws.description.as_deref(), Some("Production triage"));
+        assert_eq!(ws.layout, "horizontal");
+        assert_eq!(ws.sessions.len(), 2);
+        assert_eq!(ws.sessions[0].name, "Bastion");
+        assert_eq!(ws.sessions[0].startup_command.as_deref(), Some("uptime"));
+        assert!(ws.sessions[1].excluded_from_broadcast);
+        assert_eq!(ws.tags, vec!["prod", "incident"]);
+
+        // Update workspace
+        let s_updated = shellumi_core::WorkspaceSession::new(
+            "Bastion Primed",
+            shellumi_core::WorkspaceSessionKind::Ssh,
+            0,
+        );
+        assert!(store
+            .update_workspace(
+                ws_id,
+                "Incident Response Active",
+                Some("Updated desc"),
+                "grid",
+                &[s_updated],
+                &["active".into()],
+            )
+            .await
+            .unwrap());
+
+        let updated_ws = store.get_workspace(ws_id).await.unwrap().unwrap();
+        assert_eq!(updated_ws.name, "Incident Response Active");
+        assert_eq!(updated_ws.layout, "grid");
+        assert_eq!(updated_ws.sessions.len(), 1);
+        assert_eq!(updated_ws.tags, vec!["active"]);
+
+        // Duplicate workspace
+        let dup_id = store
+            .duplicate_workspace(ws_id, "Incident Response (Clone)")
+            .await
+            .unwrap();
+        assert_ne!(dup_id, ws_id);
+        let dup = store.get_workspace(dup_id).await.unwrap().unwrap();
+        assert_eq!(dup.name, "Incident Response (Clone)");
+        assert_eq!(dup.layout, "grid");
+
+        // Delete workspace
+        assert!(store.delete_workspace(ws_id).await.unwrap());
+        assert_eq!(store.get_workspace(ws_id).await.unwrap(), None);
+        assert_eq!(store.list_workspaces().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2770,6 +3586,8 @@ mod tests {
                 tags: tags.clone(),
                 jump_host: Some("jump.example.org".into()),
                 startup_snippet_id: None,
+                protocol: "ssh".into(),
+                protocol_config: None,
             }]
         );
 
@@ -2853,6 +3671,8 @@ mod tests {
                 tags: vec!["web".to_string()],
                 jump_host: Some("bastion.corp".into()),
                 startup_snippet_id: None,
+                protocol: "ssh".into(),
+                protocol_config: None,
             }]
         );
     }
@@ -3012,5 +3832,85 @@ mod tests {
             .unwrap();
         assert_eq!(wrong_summary.hosts_imported, 0);
         assert_eq!(wrong_summary.errors.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn manages_hosts_with_different_protocols() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // 1. Add SSH host
+        let ssh_dest = SshDestination::new("ssh.example.com", "root", 22).unwrap();
+        let ssh_id = store
+            .add("SSH Node", &ssh_dest, None, &[], None, None)
+            .await
+            .unwrap();
+        let host1 = store.get_host(ssh_id).await.unwrap().unwrap();
+        assert_eq!(host1.protocol, "ssh");
+        assert!(host1.is_ssh());
+        assert!(!host1.is_telnet());
+
+        // 2. Add Telnet host
+        let telnet_dest = SshDestination::new("switch.corp", "admin", 23).unwrap();
+        let telnet_id = store
+            .add_with_protocol(
+                "Cisco Switch",
+                &telnet_dest,
+                None,
+                &["network".into()],
+                None,
+                None,
+                "telnet",
+                None,
+            )
+            .await
+            .unwrap();
+        let host2 = store.get_host(telnet_id).await.unwrap().unwrap();
+        assert_eq!(host2.protocol, "telnet");
+        assert!(host2.is_telnet());
+        assert_eq!(host2.destination.port().get(), 23);
+
+        // 3. Add Serial host
+        let serial_dest = SshDestination::new("ttyUSB0", "console", 1).unwrap();
+        let serial_id = store
+            .add_with_protocol(
+                "Router Serial Console",
+                &serial_dest,
+                None,
+                &["serial".into()],
+                None,
+                None,
+                "serial",
+                Some(r#"{"baud_rate":115200,"data_bits":8,"parity":"none","stop_bits":1}"#),
+            )
+            .await
+            .unwrap();
+        let host3 = store.get_host(serial_id).await.unwrap().unwrap();
+        assert_eq!(host3.protocol, "serial");
+        assert!(host3.is_serial());
+        assert_eq!(
+            host3.protocol_config.as_deref(),
+            Some(r#"{"baud_rate":115200,"data_bits":8,"parity":"none","stop_bits":1}"#)
+        );
+
+        // 4. Update host protocol
+        let updated_dest = SshDestination::new("switch.corp", "admin", 22).unwrap();
+        assert!(store
+            .update_with_protocol(
+                telnet_id,
+                "Cisco Switch Upgraded",
+                &updated_dest,
+                None,
+                &["network".into(), "hardened".into()],
+                None,
+                None,
+                "ssh",
+                None,
+            )
+            .await
+            .unwrap());
+        let updated_host = store.get_host(telnet_id).await.unwrap().unwrap();
+        assert_eq!(updated_host.name, "Cisco Switch Upgraded");
+        assert_eq!(updated_host.protocol, "ssh");
+        assert!(updated_host.is_ssh());
     }
 }

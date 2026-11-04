@@ -1,10 +1,11 @@
 use shellumi_core::{
-    build_google_drive_auth_url, diff_sync_records_with_passphrase, export_csv, export_ssh_config,
-    generate_ed25519_key, generate_pkce_challenge, list_local_directory, parse_csv,
-    parse_quick_connect_target, parse_ssh_config, render_command, render_preview,
-    BatchExecutionPlan, BatchHostTarget, BatchPolicy, BatchRunner, FileAttributes, ForwardingType,
-    HostConfigEntry, HostGroup, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand,
-    PaletteRegistry, PortForwardRule, SftpPacket, Snippet, SshDestination, SyncVault,
+    build_google_drive_auth_url, diff_sync_records_with_passphrase, discover_serial_ports,
+    export_csv, export_ssh_config, generate_ed25519_key, generate_pkce_challenge,
+    list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
+    render_preview, BatchExecutionPlan, BatchHostTarget, BatchPolicy, ConnectionProtocol,
+    FileAttributes, ForwardingType, HostConfigEntry, HostGroup, MoshConfig, MoshPredictMode,
+    OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PortForwardRule,
+    ProtocolError, SerialConfig, SftpPacket, Snippet, SshDestination, SyncVault, TelnetConfig,
     TransferDirection, TransferQueue,
 };
 use shellumi_storage::{HostStore, NewTransfer};
@@ -13,8 +14,8 @@ use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
 const USAGE: &str = "Usage:
   shellumi-cli <database-path> list [--group <group>] [--tag <tag>] [--search <query>]
   shellumi-cli <database-path> show <id>
-  shellumi-cli <database-path> add <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>]
-  shellumi-cli <database-path> update <id> <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>]
+  shellumi-cli <database-path> add <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>] [--protocol <ssh|mosh|telnet|serial>] [--protocol-config <config>]
+  shellumi-cli <database-path> update <id> <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>] [--protocol <ssh|mosh|telnet|serial>] [--protocol-config <config>]
   shellumi-cli <database-path> delete <id>
   shellumi-cli <database-path> group add <name> [--username <user>] [--port <port>] [--tags <tag1,tag2>]
   shellumi-cli <database-path> group list
@@ -35,16 +36,25 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> snippet render <id> [--var key=value] [--preview]
   shellumi-cli <database-path> snippet batch <id> --hosts <host1,host2,...> [--var key=value] [--policy <seq|par>] [--concurrency <n>] [--dry-run]
   shellumi-cli <database-path> snippet delete <id>
+  shellumi-cli <database-path> workspace add <name> [--layout <single|vertical|horizontal|grid>] [--desc <description>] [--tags <tag1,tag2>]
+  shellumi-cli <database-path> workspace list
+  shellumi-cli <database-path> workspace show <id>
+  shellumi-cli <database-path> workspace duplicate <id> <new-name>
+  shellumi-cli <database-path> workspace delete <id>
   shellumi-cli <database-path> palette search <query>
-  shellumi-cli <database-path> vault export <output-path> [--passphrase <pass>] [--device-id <id>] [--iterations <n>]
-  shellumi-cli <database-path> vault import <input-path> [--passphrase <pass>]
-  shellumi-cli <database-path> vault diff <input-path> [--passphrase <pass>]
+  shellumi-cli <database-path> vault export <output-path> --passphrase <pass> [--device-id <id>] [--iterations <n>]
+  shellumi-cli <database-path> vault import <input-path> --passphrase <pass>
+  shellumi-cli <database-path> vault diff <input-path> --passphrase <pass>
   shellumi-cli <database-path> vault history
-  shellumi-cli <database-path> vault rollback <snapshot-id> [--passphrase <pass>]
+  shellumi-cli <database-path> vault rollback <snapshot-id> --passphrase <pass>
   shellumi-cli <database-path> vault status
   shellumi-cli <database-path> vault oauth-url [--client-id <id>] [--redirect-uri <uri>]
   shellumi-cli <database-path> connect <id>
   shellumi-cli <database-path> quick-connect <user@host[:port]>
+  shellumi-cli <database-path> mosh <user@host[:port]> [--ssh-port <port>] [--predict <adaptive|always|never|experimental>]
+  shellumi-cli <database-path> telnet <host> [port]
+  shellumi-cli <database-path> serial <port> [--baud <baud>]
+  shellumi-cli serial-ports
   shellumi-cli <database-path> import-ssh-config <config-path>
   shellumi-cli <database-path> export-ssh-config
   shellumi-cli <database-path> import-csv <csv-path>
@@ -140,6 +150,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
         println!("Generated Ed25519 SSH Key Pair:");
         println!("Public Key:  {}", key_meta.public_key);
         println!("Fingerprint: {}", key_meta.fingerprint);
+        return Ok(());
+    }
+
+    if args[0] == "serial-ports" {
+        let ports = discover_serial_ports();
+        if ports.is_empty() {
+            println!("No serial ports detected.");
+        } else {
+            println!("Discovered Serial Ports ({}):", ports.len());
+            for p in ports {
+                println!("  {p}");
+            }
+        }
         return Ok(());
     }
 
@@ -268,6 +291,36 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 _ => return Err(invalid(USAGE).into()),
             }
         }
+        "workspace" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
+            match args[2].as_str() {
+                "list" => {}
+                "add" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                }
+                "show" | "delete" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                    args[3]
+                        .parse::<i64>()
+                        .map_err(|_| invalid("Workspace ID must be an integer."))?;
+                }
+                "duplicate" => {
+                    if args.len() < 5 {
+                        return Err(invalid(USAGE).into());
+                    }
+                    args[3]
+                        .parse::<i64>()
+                        .map_err(|_| invalid("Workspace ID must be an integer."))?;
+                }
+                _ => return Err(invalid(USAGE).into()),
+            }
+        }
         "palette" => {
             if args.len() < 4 || args[2] != "search" {
                 return Err(invalid(USAGE).into());
@@ -292,6 +345,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
             parse_quick_connect_target(&args[2])?;
+        }
+        "mosh" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
+            parse_quick_connect_target(&args[2])?;
+        }
+        "telnet" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
+        }
+        "serial" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
         }
         _ => return Err(invalid(USAGE).into()),
     }
@@ -380,6 +449,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     None => "-".to_string(),
                 };
                 println!("Startup Snippet: {}", snippet_info);
+                println!("Protocol:        {}", host.protocol);
+                if let Some(conf) = &host.protocol_config {
+                    println!("Protocol Config: {}", conf);
+                }
+                if host.is_telnet() {
+                    println!("Security:        {}", TelnetConfig::security_warning());
+                }
             } else {
                 return Err(invalid("Host ID not found.").into());
             }
@@ -398,17 +474,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let tags: Vec<String> = extract_flag(extra, "--tags")
                 .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
+            let protocol = extract_flag(extra, "--protocol").unwrap_or_else(|| "ssh".to_string());
+            let protocol_config = extract_flag(extra, "--protocol-config");
+            let proto: ConnectionProtocol = protocol
+                .parse()
+                .map_err(|e: ProtocolError| invalid(&e.to_string()))?;
 
             println!(
                 "{}",
                 store
-                    .add(
+                    .add_with_protocol(
                         &args[2],
                         &destination,
                         group.as_deref(),
                         &tags,
                         jump_host.as_deref(),
-                        startup_snippet
+                        startup_snippet,
+                        proto.as_str(),
+                        protocol_config.as_deref(),
                     )
                     .await?
             );
@@ -428,9 +511,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let tags: Vec<String> = extract_flag(extra, "--tags")
                 .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
+            let protocol = extract_flag(extra, "--protocol");
+            let protocol_config = extract_flag(extra, "--protocol-config");
+
+            let (final_proto, final_conf) = if let Some(p) = protocol {
+                let parsed: ConnectionProtocol = p
+                    .parse()
+                    .map_err(|e: ProtocolError| invalid(&e.to_string()))?;
+                (parsed.as_str().to_string(), protocol_config)
+            } else if let Some(existing) = store.get_host(id).await? {
+                (
+                    existing.protocol,
+                    protocol_config.or(existing.protocol_config),
+                )
+            } else {
+                ("ssh".to_string(), protocol_config)
+            };
 
             if !store
-                .update(
+                .update_with_protocol(
                     id,
                     &args[3],
                     &destination,
@@ -438,6 +537,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     &tags,
                     jump_host.as_deref(),
                     startup_snippet,
+                    &final_proto,
+                    final_conf.as_deref(),
                 )
                 .await?
             {
@@ -459,22 +560,165 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .find(|host| host.id == id)
                 .ok_or_else(|| invalid("Host ID not found."))?;
             let effective_dest = store.get_effective_destination(&host).await?;
-            if let Some(snip_id) = host.startup_snippet_id {
-                if let Some(snip) = store.get_snippet(snip_id).await? {
-                    eprintln!(
-                        "Connecting with startup snippet: '{}' ({})",
-                        snip.name, snip.command
+            let proto = host.protocol();
+
+            if host.startup_snippet_id.is_some() && !proto.supports_startup_snippet() {
+                eprintln!("Warning: Startup snippets are not supported for {proto} sessions.");
+            } else if host.startup_snippet_id.is_some() {
+                eprintln!("Startup snippets are not run automatically yet; run the snippet after authentication.");
+            }
+
+            match proto {
+                ConnectionProtocol::Ssh => {
+                    let mut cmd = Command::new("ssh");
+                    cmd.args(
+                        effective_dest.openssh_arguments_with_jump(host.jump_host.as_deref())?,
                     );
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(
+                            io::Error::other(format!("OpenSSH exited with {status}")).into()
+                        );
+                    }
+                }
+                ConnectionProtocol::Mosh => {
+                    let mosh_cfg = host
+                        .protocol_config
+                        .as_deref()
+                        .and_then(|c| serde_json::from_str::<MoshConfig>(c).ok())
+                        .unwrap_or_default();
+                    let mosh_args =
+                        mosh_cfg.build_arguments(&effective_dest, host.jump_host.as_deref());
+                    let mut cmd = Command::new("mosh");
+                    cmd.args(mosh_args);
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(io::Error::other(format!("Mosh exited with {status}")).into());
+                    }
+                }
+                ConnectionProtocol::Telnet => {
+                    eprintln!("{}", TelnetConfig::security_warning());
+                    let telnet_cfg = host
+                        .protocol_config
+                        .as_deref()
+                        .and_then(|c| serde_json::from_str::<TelnetConfig>(c).ok())
+                        .unwrap_or_else(|| {
+                            TelnetConfig::new(effective_dest.host(), effective_dest.port().get())
+                                .unwrap_or_default()
+                        });
+                    let telnet_args = telnet_cfg.build_arguments();
+                    let mut cmd = Command::new("telnet");
+                    cmd.args(telnet_args);
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(io::Error::other(format!("Telnet exited with {status}")).into());
+                    }
+                }
+                ConnectionProtocol::Serial => {
+                    let serial_cfg = host
+                        .protocol_config
+                        .as_deref()
+                        .and_then(|c| serde_json::from_str::<SerialConfig>(c).ok())
+                        .unwrap_or_else(|| {
+                            SerialConfig::new(effective_dest.host(), 115200).unwrap_or_default()
+                        });
+                    println!(
+                        "Connecting to serial port {} ({})",
+                        serial_cfg.port,
+                        serial_cfg.summary()
+                    );
+                    let mut cmd = Command::new("screen");
+                    cmd.args(serial_cfg.build_arguments());
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(io::Error::other(format!(
+                            "Serial terminal exited with {status}"
+                        ))
+                        .into());
+                    }
+                }
+                ConnectionProtocol::Local => {
+                    let mut cmd = Command::new(
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+                    );
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(
+                            io::Error::other(format!("Local shell exited with {status}")).into(),
+                        );
+                    }
                 }
             }
-            let mut cmd = Command::new("ssh");
-            cmd.args(effective_dest.openssh_arguments());
-            if let Some(jump) = &host.jump_host {
-                cmd.arg("-J").arg(jump);
-            }
+        }
+        "mosh" => {
+            let target = parse_quick_connect_target(&args[2])?;
+            let extra = &args[3..];
+            let ssh_port: Option<u16> = extract_flag(extra, "--ssh-port")
+                .map(|p| {
+                    p.parse()
+                        .map_err(|_| invalid("SSH port must be between 1 and 65535."))
+                })
+                .transpose()?;
+            let predict = extract_flag(extra, "--predict")
+                .and_then(|p| p.parse::<MoshPredictMode>().ok())
+                .unwrap_or_default();
+            let cfg = MoshConfig {
+                predict_mode: predict,
+                ssh_port,
+                ..Default::default()
+            };
+            let mosh_args = cfg.build_arguments(&target, None);
+            println!(
+                "Launching Mosh to {}@{}:{}...",
+                target.username(),
+                target.host(),
+                target.port()
+            );
+            let mut cmd = Command::new("mosh");
+            cmd.args(mosh_args);
             let status = cmd.status()?;
             if !status.success() {
-                return Err(io::Error::other(format!("OpenSSH exited with {status}")).into());
+                return Err(io::Error::other(format!("Mosh exited with {status}")).into());
+            }
+        }
+        "telnet" => {
+            let host = &args[2];
+            let port: u16 = if args.len() > 3 && !args[3].starts_with('-') {
+                args[3]
+                    .parse()
+                    .map_err(|_| invalid("Telnet port must be between 1 and 65535."))?
+            } else {
+                23
+            };
+            eprintln!("{}", TelnetConfig::security_warning());
+            let cfg = TelnetConfig::new(host, port).map_err(|e| invalid(&e.to_string()))?;
+            println!("Connecting via unencrypted Telnet to {}:{}...", host, port);
+            let mut cmd = Command::new("telnet");
+            cmd.args(cfg.build_arguments());
+            let status = cmd.status()?;
+            if !status.success() {
+                return Err(io::Error::other(format!("Telnet exited with {status}")).into());
+            }
+        }
+        "serial" => {
+            let port = &args[2];
+            let extra = &args[3..];
+            let baud: u32 = extract_flag(extra, "--baud")
+                .map(|b| {
+                    b.parse()
+                        .map_err(|_| invalid("Baud rate must be an integer."))
+                })
+                .transpose()?
+                .unwrap_or(115200);
+            let cfg = SerialConfig::new(port, baud).map_err(|e| invalid(&e.to_string()))?;
+            println!("Connecting to serial port {} ({})...", port, cfg.summary());
+            let mut cmd = Command::new("screen");
+            cmd.args(cfg.build_arguments());
+            let status = cmd.status()?;
+            if !status.success() {
+                return Err(
+                    io::Error::other(format!("Serial terminal exited with {status}")).into(),
+                );
             }
         }
         "group" => {
@@ -1095,47 +1339,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             }
                         }
                     } else {
-                        println!(
-                            "=== Executing Batch Snippet: {} on {} host(s) ===",
-                            snippet.name,
-                            plan.targets.len()
-                        );
-                        let mut runner = BatchRunner::new(plan);
-                        let summary = runner.execute_sync(|target, _cmd| {
-                            println!(
-                                "[DISPATCH] Running on {} ({}@{}:{})...",
-                                target.name,
-                                target.destination.username(),
-                                target.destination.host(),
-                                target.destination.port()
-                            );
-                            Ok((
-                                0,
-                                format!("Execution complete for {}", target.name),
-                                String::new(),
-                            ))
-                        });
-
-                        println!("--------------------------------------------------");
-                        for res in runner.results() {
-                            let status_str = res.status.as_str();
-                            let exit_code_str = res
-                                .exit_code
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "-".into());
-                            println!(
-                                "{}\t{}\texit:{}\t{}ms\t{}",
-                                res.host_name,
-                                status_str,
-                                exit_code_str,
-                                res.duration_ms,
-                                res.command_rendered
-                            );
-                        }
-                        println!(
-                            "Summary: Total={}, Succeeded={}, Failed={}, Cancelled={}",
-                            summary.total, summary.succeeded, summary.failed, summary.cancelled
-                        );
+                        return Err(invalid("CLI batch execution is not implemented; use --dry-run to preview commands.").into());
                     }
                 }
                 "delete" => {
@@ -1148,6 +1352,120 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 _ => unreachable!(),
             }
         }
+        "workspace" => {
+            let sub = args[2].as_str();
+            match sub {
+                "list" => {
+                    let workspaces = store.list_workspaces().await?;
+                    if workspaces.is_empty() {
+                        println!("No workspaces configured.");
+                        return Ok(());
+                    }
+                    println!(
+                        "{:<5} {:<24} {:<12} {:<10} {:<20}",
+                        "ID", "NAME", "LAYOUT", "SESSIONS", "TAGS"
+                    );
+                    for ws in workspaces {
+                        let tags_str = if ws.tags.is_empty() {
+                            "-".to_string()
+                        } else {
+                            ws.tags.join(",")
+                        };
+                        println!(
+                            "{:<5} {:<24} {:<12} {:<10} {:<20}",
+                            ws.id,
+                            ws.name,
+                            ws.layout,
+                            ws.sessions.len(),
+                            tags_str,
+                        );
+                    }
+                }
+                "show" => {
+                    let id: i64 = args[3]
+                        .parse()
+                        .map_err(|_| invalid("Workspace ID must be an integer."))?;
+                    if let Some(ws) = store.get_workspace(id).await? {
+                        println!("Workspace ID:  {}", ws.id);
+                        println!("Name:          {}", ws.name);
+                        println!("Layout:        {}", ws.layout);
+                        if let Some(desc) = &ws.description {
+                            println!("Description:   {}", desc);
+                        }
+                        println!(
+                            "Tags:          {}",
+                            if ws.tags.is_empty() {
+                                "-".to_string()
+                            } else {
+                                ws.tags.join(", ")
+                            }
+                        );
+                        println!("Sessions ({}):", ws.sessions.len());
+                        for (i, s) in ws.sessions.iter().enumerate() {
+                            let excl = if s.excluded_from_broadcast {
+                                " [Excluded from Broadcast]"
+                            } else {
+                                ""
+                            };
+                            let host_info = s
+                                .host_id
+                                .map(|h| format!("(Host ID: {h})"))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{}] {} [{}]{} {}",
+                                i + 1,
+                                s.name,
+                                s.kind.as_str(),
+                                excl,
+                                host_info
+                            );
+                            if let Some(cmd) = &s.startup_command {
+                                println!("      Startup: {}", cmd);
+                            }
+                            if let Some(dir) = &s.working_directory {
+                                println!("      Dir:     {}", dir);
+                            }
+                        }
+                    } else {
+                        return Err(invalid("Workspace not found.").into());
+                    }
+                }
+                "add" => {
+                    let name = &args[3];
+                    let extra = &args[4..];
+                    let layout =
+                        extract_flag(extra, "--layout").unwrap_or_else(|| "single".to_string());
+                    let desc = extract_flag(extra, "--desc");
+                    let tags: Vec<String> = extract_flag(extra, "--tags")
+                        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+                    let id = store
+                        .add_workspace(name, desc.as_deref(), &layout, &[], &tags)
+                        .await?;
+                    println!("{id}");
+                }
+                "duplicate" => {
+                    let id: i64 = args[3]
+                        .parse()
+                        .map_err(|_| invalid("Workspace ID must be an integer."))?;
+                    let new_name = &args[4];
+                    let new_id = store.duplicate_workspace(id, new_name).await?;
+                    println!("{new_id}");
+                }
+                "delete" => {
+                    let id: i64 = args[3]
+                        .parse()
+                        .map_err(|_| invalid("Workspace ID must be an integer."))?;
+                    let deleted = store.delete_workspace(id).await?;
+                    if deleted {
+                        println!("Deleted workspace {id}.");
+                    } else {
+                        return Err(invalid("Workspace not found.").into());
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
         "vault" => {
             let action = args[2].as_str();
             match action {
@@ -1155,7 +1473,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let output_path = &args[3];
                     let extra = &args[4..];
                     let passphrase = extract_flag(extra, "--passphrase")
-                        .unwrap_or_else(|| "default-vault-passphrase".to_string());
+                        .filter(|passphrase| !passphrase.is_empty())
+                        .ok_or_else(|| invalid("A non-empty --passphrase is required."))?;
                     let device_id = extract_flag(extra, "--device-id")
                         .unwrap_or_else(|| "shellumi-cli-device".to_string());
                     let iterations = extract_flag(extra, "--iterations")
@@ -1176,7 +1495,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let input_path = &args[3];
                     let extra = &args[4..];
                     let passphrase = extract_flag(extra, "--passphrase")
-                        .unwrap_or_else(|| "default-vault-passphrase".to_string());
+                        .filter(|passphrase| !passphrase.is_empty())
+                        .ok_or_else(|| invalid("A non-empty --passphrase is required."))?;
 
                     let json = fs::read_to_string(input_path)?;
                     let vault = SyncVault::from_json(&json)?;
@@ -1186,6 +1506,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     println!("  Groups imported:   {}", summary.groups_imported);
                     println!("  Tunnels imported:  {}", summary.tunnels_imported);
                     println!("  Snippets imported: {}", summary.snippets_imported);
+                    println!("  Workspaces imported: {}", summary.workspaces_imported);
                     if !summary.errors.is_empty() {
                         eprintln!("  Errors ({}):", summary.errors.len());
                         for err in summary.errors {
@@ -1198,17 +1519,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let groups = store.list_groups().await?.len();
                     let tunnels = store.list_tunnels().await?.len();
                     let snippets = store.list_snippets().await?.len();
+                    let workspaces = store.list_workspaces().await?.len();
                     println!("Local Vault Status:");
                     println!("  Hosts:    {hosts}");
                     println!("  Groups:   {groups}");
                     println!("  Tunnels:  {tunnels}");
                     println!("  Snippets: {snippets}");
+                    println!("  Workspaces: {workspaces}");
                 }
                 "diff" => {
                     let input_path = &args[3];
                     let extra = &args[4..];
                     let passphrase = extract_flag(extra, "--passphrase")
-                        .unwrap_or_else(|| "default-vault-passphrase".to_string());
+                        .filter(|passphrase| !passphrase.is_empty())
+                        .ok_or_else(|| invalid("A non-empty --passphrase is required."))?;
                     let device_id = extract_flag(extra, "--device-id")
                         .unwrap_or_else(|| "shellumi-cli-device".to_string());
 
@@ -1286,7 +1610,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let snapshot_id = &args[3];
                     let extra = &args[4..];
                     let passphrase = extract_flag(extra, "--passphrase")
-                        .unwrap_or_else(|| "default-vault-passphrase".to_string());
+                        .filter(|passphrase| !passphrase.is_empty())
+                        .ok_or_else(|| invalid("A non-empty --passphrase is required."))?;
 
                     let summary = store.rollback_snapshot(snapshot_id, &passphrase).await?;
                     println!("Rolled back to snapshot {snapshot_id}:");
@@ -1294,6 +1619,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     println!("  Groups imported:   {}", summary.groups_imported);
                     println!("  Tunnels imported:  {}", summary.tunnels_imported);
                     println!("  Snippets imported: {}", summary.snippets_imported);
+                    println!("  Workspaces imported: {}", summary.workspaces_imported);
                     if !summary.errors.is_empty() {
                         eprintln!("  Errors ({}):", summary.errors.len());
                         for err in summary.errors {

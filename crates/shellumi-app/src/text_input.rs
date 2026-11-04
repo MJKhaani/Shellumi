@@ -613,6 +613,12 @@ impl TextInput {
     pub(crate) fn value(&self) -> &str {
         &self.content
     }
+    pub(crate) fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.content = value.to_owned().into();
+        self.selected_range = value.len()..value.len();
+        self.marked_range = None;
+        cx.notify();
+    }
 }
 
 pub(crate) fn bind_keys(cx: &mut App) {

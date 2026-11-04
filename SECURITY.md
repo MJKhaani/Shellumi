@@ -12,9 +12,10 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 
 ## 2. Cryptography and Credential Management
 
-- **AEAD Encryption:** Client-side encryption utilizes standardized AEAD ciphers (XChaCha20-Poly1305 or AES-256-GCM).
-- **Key Derivation:** Vault passphrases are derived using Argon2id with cryptographically secure random salts and memory-hard parameters.
-- **Credential Storage:** Sensitive credentials (passwords, private keys, certificates) are held in platform keystores (macOS Keychain, Windows Credential Manager, Secret Service API on Linux) or encrypted vaults.
+- **AEAD Encryption:** The implemented vault envelope uses AES-256-GCM.
+- **Key Derivation:** The current implementation uses PBKDF2-HMAC-SHA256 with random salts. Argon2id is not implemented.
+- **Credential Storage:** A macOS Keychain backend and encrypted file store exist. Windows Credential Manager and Linux Secret Service are not yet implemented and return errors. End-to-end credential workflows need validation.
+- **Vault passphrases:** CLI vault operations require an explicit passphrase. Arguments can be visible to local processes; secure interactive entry is not yet implemented. Exports made with the former hard-coded default should be replaced.
 - **Buffer Hygiene:** Secret memory buffers should be zeroized upon release where supported by the Rust toolchain.
 
 ---
@@ -28,6 +29,8 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 | **Process Execution** | Command injection via crafted arguments | Arguments are passed as discrete vectors without shell evaluation; delimiter `--` separates options from target hostnames. |
 | **Cloud Sync** | Data compromise via stolen sync files or account breach | Client-side AEAD encryption envelopes derived via Argon2id; provider receives ciphertext only. |
 | **Local Storage** | Unauthorized database access | Metadata database is stored in user app data; credentials are kept in OS keychain or encrypted vaults. |
+| **Telnet Connections** | Cleartext credential and traffic sniffing | Prohibit silent usage; enforce prominent warning badges in CLI and desktop UI; default port 23; gate SSH-exclusive capabilities (SFTP, port forwarding) away from Telnet. |
+| **Serial Connections** | Unauthorized local device access / device misconfiguration | Strict validation of port paths, baud rates, parity, stop bits; isolate from remote network tunnels and prevent automated command injection. |
 
 For detailed analysis, see [docs/security/threat-model.md](docs/security/threat-model.md).
 

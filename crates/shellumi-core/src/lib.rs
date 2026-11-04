@@ -7,11 +7,13 @@ pub mod group;
 pub mod identity;
 pub mod known_hosts;
 pub mod palette;
+pub mod protocol;
 pub mod sftp;
 pub mod snippet;
 pub mod ssh_config;
 pub mod sync;
 pub mod tunnel;
+pub mod workspace;
 
 pub use batch::{
     BatchExecutionPlan, BatchExecutionSummary, BatchHostResult, BatchHostStatus, BatchHostTarget,
@@ -34,6 +36,17 @@ pub use known_hosts::{
     HostKeyVerification, KnownHostEntry, KnownHostsError,
 };
 pub use palette::{PaletteAction, PaletteCategory, PaletteCommand, PaletteMatch, PaletteRegistry};
+pub use protocol::{
+    build_telnet_command, build_telnet_naws, build_telnet_terminal_type_response,
+    parse_telnet_stream, telnet_constants, ConnectionProtocol, MoshConfig, MoshPredictMode,
+    ProtocolEndpoint, ProtocolError, SerialConfig, SerialDataBits, SerialFlowControl, SerialParity,
+    SerialStopBits, TelnetCommandFrame, TelnetConfig,
+};
+
+/// Discovers candidate serial device ports on the local machine.
+pub fn discover_serial_ports() -> Vec<String> {
+    SerialConfig::discover_serial_ports()
+}
 pub use sftp::{
     format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,
     NameEntry, OpenFlags, PathUtils, SftpPacket, SftpProtocolError, StatusCode, TransferDirection,
@@ -69,6 +82,10 @@ pub use sync::{
     OAUTH_TOKEN_SERVICE, SALT_LEN,
 };
 pub use tunnel::{validate_jump_host, ForwardingType, PortForwardRule, TunnelError};
+pub use workspace::{
+    check_dangerous_command, BroadcastManager, BroadcastSafetyCheck, Workspace, WorkspaceError,
+    WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+};
 
 use std::fmt;
 use std::num::NonZeroU16;
@@ -157,6 +174,21 @@ impl SshDestination {
             self.host.clone(),
         ]
     }
+
+    /// Construct OpenSSH arguments with a validated jump chain before the
+    /// destination, so it cannot be interpreted as a remote command.
+    pub fn openssh_arguments_with_jump(
+        &self,
+        jump: Option<&str>,
+    ) -> Result<Vec<String>, TunnelError> {
+        let mut arguments = self.openssh_arguments();
+        if let Some(jump) = jump {
+            let jump = validate_jump_host(jump)?;
+            let destination_index = arguments.len() - 2;
+            arguments.splice(destination_index..destination_index, ["-J".into(), jump]);
+        }
+        Ok(arguments)
+    }
 }
 
 /// Parse a quick-connect string in the format `user@host[:port]` or `user@[ipv6][:port]`.
@@ -193,6 +225,28 @@ pub fn parse_quick_connect_target(target: &str) -> Result<SshDestination, Destin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jump_options_precede_the_destination_and_reject_invalid_chains() {
+        let destination = SshDestination::new("target.example", "alice", 22).unwrap();
+        let args = destination
+            .openssh_arguments_with_jump(Some("bob@jump.example:2222"))
+            .unwrap();
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["-J", "bob@jump.example:2222", "--", "target.example"]
+        );
+        assert_eq!(
+            destination.openssh_arguments_with_jump(None).unwrap(),
+            destination.openssh_arguments()
+        );
+        assert!(destination
+            .openssh_arguments_with_jump(Some("-oProxyCommand=bad"))
+            .is_err());
+        assert!(destination
+            .openssh_arguments_with_jump(Some("jump;bad"))
+            .is_err());
+    }
 
     #[test]
     fn parses_quick_connect_targets() {

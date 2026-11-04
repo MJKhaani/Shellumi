@@ -208,6 +208,103 @@ fn connect_reports_ssh_failure() {
         .contains("OpenSSH exited"));
 }
 
+#[cfg(unix)]
+#[test]
+fn connect_places_jump_before_destination() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let fake_ssh = dir.path().join("ssh");
+    std::fs::write(&fake_ssh, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n").unwrap();
+    std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let added = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args([
+            "add",
+            "Target",
+            "example.org",
+            "alice",
+            "22",
+            "--jump-host",
+            "bob@jump.example:2222",
+        ])
+        .output()
+        .unwrap();
+    assert!(added.status.success());
+    let id = String::from_utf8(added.stdout).unwrap().trim().to_owned();
+    let connected = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["connect", &id])
+        .env("PATH", dir.path())
+        .output()
+        .unwrap();
+    assert!(connected.status.success());
+    let arguments = String::from_utf8(connected.stdout).unwrap();
+    assert!(
+        arguments.ends_with("<-J>\n<bob@jump.example:2222>\n<-->\n<example.org>\n"),
+        "{arguments}"
+    );
+}
+
+#[test]
+fn vault_export_requires_an_explicit_passphrase() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let vault = dir.path().join("vault.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["vault", "export"])
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!vault.exists());
+    assert!(String::from_utf8(result.stderr)
+        .unwrap()
+        .contains("passphrase"));
+}
+
+#[test]
+fn batch_execution_fails_instead_of_claiming_mock_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["add", "Test", "example.org", "alice", "22"])
+        .status
+        .success());
+    let snippet = run(&["snippet", "add", "Whoami", "whoami"]);
+    assert!(snippet.status.success());
+    let output = String::from_utf8(snippet.stdout).unwrap();
+    let id = output
+        .split_whitespace()
+        .find_map(|part| {
+            part.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<i64>()
+                .ok()
+        })
+        .expect("snippet ID");
+    let id = id.to_string();
+    let result = run(&["snippet", "batch", &id, "--hosts", "Test"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8(result.stderr)
+        .unwrap()
+        .contains("not implemented"));
+    assert!(!String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("Execution complete"));
+    assert!(
+        run(&["snippet", "batch", &id, "--hosts", "Test", "--dry-run"])
+            .status
+            .success()
+    );
+}
+
 #[test]
 fn imports_and_exports_ssh_config() {
     let dir = tempfile::tempdir().unwrap();
@@ -1060,7 +1157,7 @@ fn supports_command_palette_search_and_batch_snippet_execution() {
     assert!(batch_dry_out.contains("Node=web-prod-01 IP=10.0.0.1 Env=staging"));
     assert!(batch_dry_out.contains("Node=web-prod-02 IP=10.0.0.2 Env=staging"));
 
-    // 7. Snippet Batch Execution
+    // 7. Non-preview CLI execution must not report simulated success.
     let batch_exec = run(&[
         "snippet",
         "batch",
@@ -1070,12 +1167,10 @@ fn supports_command_palette_search_and_batch_snippet_execution() {
         "--var",
         "cluster_env=staging",
     ]);
-    assert!(batch_exec.status.success());
-    let batch_exec_out = String::from_utf8(batch_exec.stdout).unwrap();
-    assert!(batch_exec_out.contains("Executing Batch Snippet: Cluster Status on 2 host(s)"));
-    assert!(batch_exec_out.contains("web-prod-01\tSucceeded\texit:0"));
-    assert!(batch_exec_out.contains("web-prod-02\tSucceeded\texit:0"));
-    assert!(batch_exec_out.contains("Summary: Total=2, Succeeded=2, Failed=0, Cancelled=0"));
+    assert!(!batch_exec.status.success());
+    assert!(String::from_utf8(batch_exec.stderr)
+        .unwrap()
+        .contains("not implemented"));
 }
 
 #[test]
@@ -1159,4 +1254,205 @@ fn supports_host_startup_snippets_and_show() {
     let show_up_out = String::from_utf8(show_updated.stdout).unwrap();
     assert!(show_up_out.contains("Name:            BastionProdUpdated"));
     assert!(show_up_out.contains("Startup Snippet: -"));
+}
+
+#[test]
+fn supports_workspace_cli_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("workspaces.db");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Initial list is empty
+    let empty_list = run(&["workspace", "list"]);
+    assert!(empty_list.status.success());
+    assert!(String::from_utf8(empty_list.stdout)
+        .unwrap()
+        .contains("No workspaces configured."));
+
+    // 2. Add workspace
+    let add_res = run(&[
+        "workspace",
+        "add",
+        "SRE Ops Center",
+        "--layout",
+        "vertical",
+        "--desc",
+        "Core SRE monitoring layout",
+        "--tags",
+        "sre,ops",
+    ]);
+    assert!(add_res.status.success());
+    let ws_id = String::from_utf8(add_res.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // 3. List contains newly added workspace
+    let list_res = run(&["workspace", "list"]);
+    assert!(list_res.status.success());
+    let list_out = String::from_utf8(list_res.stdout).unwrap();
+    assert!(list_out.contains(&ws_id));
+    assert!(list_out.contains("SRE Ops Center"));
+    assert!(list_out.contains("vertical"));
+    assert!(list_out.contains("sre,ops"));
+
+    // 4. Show workspace
+    let show_res = run(&["workspace", "show", &ws_id]);
+    assert!(show_res.status.success());
+    let show_out = String::from_utf8(show_res.stdout).unwrap();
+    assert!(show_out.contains("Name:          SRE Ops Center"));
+    assert!(show_out.contains("Layout:        vertical"));
+    assert!(show_out.contains("Description:   Core SRE monitoring layout"));
+    assert!(show_out.contains("Tags:          sre, ops"));
+
+    // 5. Duplicate workspace
+    let dup_res = run(&["workspace", "duplicate", &ws_id, "SRE Ops Center Staging"]);
+    assert!(dup_res.status.success());
+    let dup_id = String::from_utf8(dup_res.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_ne!(dup_id, ws_id);
+
+    // 6. Delete original workspace
+    let del_res = run(&["workspace", "delete", &ws_id]);
+    assert!(del_res.status.success());
+    assert!(String::from_utf8(del_res.stdout)
+        .unwrap()
+        .contains(&format!("Deleted workspace {ws_id}.")));
+
+    // 7. List now contains only duplicate
+    let final_list = run(&["workspace", "list"]);
+    let final_out = String::from_utf8(final_list.stdout).unwrap();
+    assert!(!final_out.contains("SRE Ops Center\t"));
+    assert!(final_out.contains("SRE Ops Center Staging"));
+}
+
+#[test]
+fn supports_multi_protocol_cli_and_serial_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("protocols.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Discover serial ports CLI command
+    let sp_res = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg("serial-ports")
+        .output()
+        .unwrap();
+    assert!(sp_res.status.success());
+
+    // 2. Add Mosh host
+    let add_mosh = run(&[
+        "add",
+        "MoshNode",
+        "mosh.example.org",
+        "dev",
+        "22",
+        "--protocol",
+        "mosh",
+        "--protocol-config",
+        r#"{"predict_mode":"adaptive"}"#,
+    ]);
+    assert!(add_mosh.status.success());
+    let mosh_id = String::from_utf8(add_mosh.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let show_mosh = run(&["show", &mosh_id]);
+    assert!(show_mosh.status.success());
+    let show_mosh_str = String::from_utf8(show_mosh.stdout).unwrap();
+    assert!(show_mosh_str.contains("Protocol:        mosh"));
+    assert!(show_mosh_str.contains(r#"Protocol Config: {"predict_mode":"adaptive"}"#));
+
+    // 3. Add Telnet host and verify security warning in show
+    let add_telnet = run(&[
+        "add",
+        "LegacySwitch",
+        "192.168.1.1",
+        "admin",
+        "23",
+        "--protocol",
+        "telnet",
+    ]);
+    assert!(add_telnet.status.success());
+    let telnet_id = String::from_utf8(add_telnet.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let show_telnet = run(&["show", &telnet_id]);
+    assert!(show_telnet.status.success());
+    let show_telnet_str = String::from_utf8(show_telnet.stdout).unwrap();
+    assert!(show_telnet_str.contains("Protocol:        telnet"));
+    assert!(show_telnet_str.contains("UNENCRYPTED PROTOCOL: Telnet transmits all credentials"));
+
+    // 4. Add Serial host
+    let add_serial = run(&[
+        "add",
+        "ConsolePort",
+        "ttyUSB0",
+        "console",
+        "1",
+        "--protocol",
+        "serial",
+        "--protocol-config",
+        r#"{"baud_rate":115200,"data_bits":8,"parity":"none","stop_bits":1}"#,
+    ]);
+    assert!(add_serial.status.success());
+    let serial_id = String::from_utf8(add_serial.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let show_serial = run(&["show", &serial_id]);
+    assert!(show_serial.status.success());
+    let show_serial_str = String::from_utf8(show_serial.stdout).unwrap();
+    assert!(show_serial_str.contains("Protocol:        serial"));
+
+    // 5. Update Telnet host to SSH
+    let update_res = run(&[
+        "update",
+        &telnet_id,
+        "ModernSwitch",
+        "192.168.1.1",
+        "admin",
+        "22",
+        "--protocol",
+        "ssh",
+    ]);
+    assert!(update_res.status.success());
+
+    let show_updated = run(&["show", &telnet_id]);
+    assert!(show_updated.status.success());
+    let show_updated_str = String::from_utf8(show_updated.stdout).unwrap();
+    assert!(show_updated_str.contains("Protocol:        ssh"));
+    assert!(!show_updated_str.contains("cleartext"));
+
+    // 6. Invalid protocol fails
+    let bad_proto = run(&[
+        "add",
+        "BadHost",
+        "example.com",
+        "root",
+        "22",
+        "--protocol",
+        "ftp_unsupported",
+    ]);
+    assert!(!bad_proto.status.success());
+    let bad_err = String::from_utf8(bad_proto.stderr).unwrap();
+    assert!(bad_err.contains("Invalid connection protocol"));
 }

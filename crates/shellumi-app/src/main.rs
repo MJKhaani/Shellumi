@@ -7,13 +7,15 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    list_local_directory, validate_jump_host, BatchExecutionPlan, BatchExecutionSummary,
-    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, ConflictItemView,
-    ConflictResolutionChoice, FileEntry, FileKind, PaletteAction, PaletteCategory, PaletteCommand,
-    PaletteRegistry, PathUtils, SshDestination, SyncEntityType, TransferDirection, TransferQueue,
-    TransferStatus,
+    check_dangerous_command, list_local_directory, validate_jump_host, BatchExecutionPlan,
+    BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner,
+    BroadcastManager, BroadcastSafetyCheck, ConflictItemView, ConflictResolutionChoice,
+    ConnectionProtocol, FileEntry, FileKind, MoshConfig, PaletteAction, PaletteCategory,
+    PaletteCommand, PaletteRegistry, PathUtils, SerialConfig, SshDestination, SyncEntityType,
+    TelnetConfig, TransferDirection, TransferQueue, TransferStatus, WorkspaceLayout,
+    WorkspaceSession, WorkspaceSessionKind,
 };
-use shellumi_storage::{HostStore, SavedHost, SavedSnippet};
+use shellumi_storage::{HostStore, SavedHost, SavedSnippet, SavedWorkspace};
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
 
@@ -109,6 +111,9 @@ struct Shellumi {
     quick_connect_error: Option<String>,
     snippets: Vec<SavedSnippet>,
     snippets_panel_open: bool,
+    workspaces: Vec<SavedWorkspace>,
+    broadcast_manager: BroadcastManager,
+    broadcast_warning: Option<String>,
     sync_status: AppSyncStatus,
     conflict_modal: Option<ConflictModalState>,
     snippet_modal: Option<SnippetModalState>,
@@ -117,6 +122,7 @@ struct Shellumi {
     sync_scheduler: shellumi_core::SyncScheduler,
 }
 
+#[allow(dead_code)] // Retained status variants for the unfinished sync integration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppSyncStatus {
     LocalOnly,
@@ -151,6 +157,9 @@ impl AppSyncStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionKind {
     Ssh,
+    Mosh,
+    Telnet,
+    Serial,
     Local,
     Sftp,
 }
@@ -218,6 +227,8 @@ struct HostForm {
     tags: Entity<TextInput>,
     jump_host: Entity<TextInput>,
     startup_snippet: Entity<TextInput>,
+    protocol: ConnectionProtocol,
+    protocol_config: Option<String>,
 }
 
 fn format_endpoint(username: &str, hostname: &str, port: u16) -> String {
@@ -323,6 +334,9 @@ impl Shellumi {
             quick_connect_error: None,
             snippets: Vec::new(),
             snippets_panel_open: false,
+            workspaces: Vec::new(),
+            broadcast_manager: BroadcastManager::new(0),
+            broadcast_warning: None,
             sync_status: AppSyncStatus::LocalOnly,
             conflict_modal: None,
             snippet_modal: None,
@@ -333,6 +347,7 @@ impl Shellumi {
         if app.database.is_some() {
             app.load_hosts(cx);
             app.load_snippets(cx);
+            app.load_workspaces(cx);
             app.start_sync_scheduler_loop(cx);
         }
         app
@@ -447,12 +462,8 @@ impl Shellumi {
             current_match_idx: None,
         };
 
-        if let Some(cmd) = startup_command {
-            let mut bytes = cmd.into_bytes();
-            bytes.push(b'\n');
-            if let Some(s) = &pane.session {
-                let _ = s.input(bytes);
-            }
+        if startup_command.is_some() {
+            pane.message = Some("Startup snippets are not run automatically yet. Run the snippet manually after authentication.".into());
             pane.message = Some("Startup snippet executed.".into());
         }
 
@@ -693,51 +704,103 @@ impl Shellumi {
     }
 
     fn connect(&mut self, host: &SavedHost, window: &mut Window, cx: &mut Context<Self>) {
-        let mut command = TerminalCommand::new("ssh").args(host.destination.openssh_arguments());
-        if let Some(jump) = &host.jump_host {
-            command = command.args(["-J", jump]);
-        }
-        let startup_cmd = if let Some(snip_id) = host.startup_snippet_id {
-            if let Some(snip) = self.snippets.iter().find(|s| s.id == snip_id) {
-                let mut vars = std::collections::HashMap::new();
-                vars.insert("host.id".to_string(), host.id.to_string());
-                vars.insert("host.name".to_string(), host.name.clone());
-                vars.insert(
-                    "host.hostname".to_string(),
-                    host.destination.host().to_string(),
+        let proto = host.protocol();
+        match proto {
+            ConnectionProtocol::Ssh => {
+                let arguments = match host
+                    .destination
+                    .openssh_arguments_with_jump(host.jump_host.as_deref())
+                {
+                    Ok(arguments) => arguments,
+                    Err(error) => {
+                        self.hosts = HostState::Error(format!("Invalid jump host: {error}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                let command = TerminalCommand::new("ssh").args(arguments);
+                // An OpenSSH PTY does not provide a reliable authentication-complete
+                // signal. Never send a startup command into a host-key or password prompt.
+                let startup_cmd = host.startup_snippet_id.map(|_| String::new());
+                self.start_session_with_startup(
+                    host.name.clone(),
+                    SessionKind::Ssh,
+                    command,
+                    startup_cmd,
+                    window,
+                    cx,
                 );
-                vars.insert(
-                    "host.username".to_string(),
-                    host.destination.username().to_string(),
-                );
-                vars.insert(
-                    "host.user".to_string(),
-                    host.destination.username().to_string(),
-                );
-                vars.insert(
-                    "host.port".to_string(),
-                    host.destination.port().get().to_string(),
-                );
-                vars.insert(
-                    "host.group".to_string(),
-                    host.group_name.clone().unwrap_or_default(),
-                );
-                vars.insert("host.tags".to_string(), host.tags.join(","));
-                shellumi_core::render_command(&snip.command, &vars).ok()
-            } else {
-                None
             }
-        } else {
-            None
-        };
-        self.start_session_with_startup(
-            host.name.clone(),
-            SessionKind::Ssh,
-            command,
-            startup_cmd,
-            window,
-            cx,
-        );
+            ConnectionProtocol::Mosh => {
+                let mosh_cfg = host
+                    .protocol_config
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str::<MoshConfig>(c).ok())
+                    .unwrap_or_default();
+                let mosh_args =
+                    mosh_cfg.build_arguments(&host.destination, host.jump_host.as_deref());
+                let command = TerminalCommand::new("mosh").args(mosh_args);
+                self.start_session_with_startup(
+                    host.name.clone(),
+                    SessionKind::Mosh,
+                    command,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            ConnectionProtocol::Telnet => {
+                let telnet_cfg = host
+                    .protocol_config
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str::<TelnetConfig>(c).ok())
+                    .unwrap_or_else(|| {
+                        TelnetConfig::new(host.destination.host(), host.destination.port().get())
+                            .unwrap_or_default()
+                    });
+                let telnet_args = telnet_cfg.build_arguments();
+                let command = TerminalCommand::new("telnet").args(telnet_args);
+                self.start_session_with_startup(
+                    host.name.clone(),
+                    SessionKind::Telnet,
+                    command,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            ConnectionProtocol::Serial => {
+                let serial_cfg = host
+                    .protocol_config
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str::<SerialConfig>(c).ok())
+                    .unwrap_or_else(|| {
+                        SerialConfig::new(host.destination.host(), 115200).unwrap_or_default()
+                    });
+                let serial_args = serial_cfg.build_arguments();
+                let command = TerminalCommand::new("screen").args(serial_args);
+                self.start_session_with_startup(
+                    host.name.clone(),
+                    SessionKind::Serial,
+                    command,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            ConnectionProtocol::Local => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let command = TerminalCommand::new(shell);
+                self.start_session_with_startup(
+                    host.name.clone(),
+                    SessionKind::Local,
+                    command,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        }
     }
 
     fn connect_sftp(&mut self, host: &SavedHost, window: &mut Window, cx: &mut Context<Self>) {
@@ -1038,30 +1101,97 @@ impl Shellumi {
             return;
         };
         let active_pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
-        let Some(pane) = tab.panes.get_mut(active_pane_idx) else {
+        if tab
+            .panes
+            .get(active_pane_idx)
+            .and_then(|p| p.session.as_ref())
+            .is_none()
+        {
             return;
-        };
-        let Some(session) = &pane.session else {
-            return;
-        };
+        }
+
+        let broadcast = self.broadcast_manager.is_enabled();
+
         if is_paste_keystroke(&event.keystroke) {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let bytes = text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
-                if let Err(error) = session.input(bytes) {
-                    pane.message = Some(error.into());
-                    pane.session = None;
-                    cx.notify();
+                if broadcast {
+                    if let BroadcastSafetyCheck::Dangerous {
+                        pattern,
+                        explanation,
+                    } = check_dangerous_command(&text)
+                    {
+                        self.broadcast_warning = Some(format!(
+                            "Dangerous broadcast command blocked: '{pattern}' ({explanation})"
+                        ));
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
+                let bytes = text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
+                for (idx, p) in tab.panes.iter_mut().enumerate() {
+                    let should_send = if idx == active_pane_idx {
+                        true
+                    } else {
+                        broadcast && !self.broadcast_manager.is_pane_excluded(idx)
+                    };
+                    if should_send {
+                        if let Some(sess) = &p.session {
+                            if let Err(error) = sess.input(bytes.clone()) {
+                                p.message = Some(error.into());
+                                p.session = None;
+                            }
+                        }
+                    }
+                }
+                cx.notify();
                 cx.stop_propagation();
                 return;
             }
         }
         if let Some(bytes) = key_bytes(&event.keystroke) {
-            if let Err(error) = session.input(bytes) {
-                pane.message = Some(error.into());
-                pane.session = None;
-                cx.notify();
+            if broadcast && (bytes == *b"\r" || bytes == *b"\n") {
+                if let Some(active_p) = tab.panes.get(active_pane_idx) {
+                    let cursor = active_p.terminal.grid().cursor();
+                    let row_text = active_p
+                        .terminal
+                        .grid()
+                        .row_spans(cursor.row)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|s| s.text)
+                        .collect::<String>();
+                    if let BroadcastSafetyCheck::Dangerous {
+                        pattern,
+                        explanation,
+                    } = check_dangerous_command(&row_text)
+                    {
+                        self.broadcast_warning = Some(format!(
+                            "Dangerous broadcast command blocked: '{pattern}' ({explanation})"
+                        ));
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
             }
+
+            for (idx, p) in tab.panes.iter_mut().enumerate() {
+                let should_send = if idx == active_pane_idx {
+                    true
+                } else {
+                    broadcast && !self.broadcast_manager.is_pane_excluded(idx)
+                };
+                if should_send {
+                    if let Some(sess) = &p.session {
+                        if let Err(error) = sess.input(bytes.clone()) {
+                            p.message = Some(error.into());
+                            p.session = None;
+                        }
+                    }
+                }
+            }
+            cx.notify();
             cx.stop_propagation();
         }
     }
@@ -1070,8 +1200,19 @@ impl Shellumi {
         if self.saving {
             return;
         }
-        let (id, name, hostname, username, port, group, tags, jump_host, startup_snip) = match host
-        {
+        let (
+            id,
+            name,
+            hostname,
+            username,
+            port,
+            group,
+            tags,
+            jump_host,
+            startup_snip,
+            protocol,
+            protocol_config,
+        ) = match host {
             Some(host) => (
                 Some(host.id),
                 host.name.clone(),
@@ -1084,6 +1225,8 @@ impl Shellumi {
                 host.startup_snippet_id
                     .map(|s| s.to_string())
                     .unwrap_or_default(),
+                host.protocol(),
+                host.protocol_config.clone(),
             ),
             None => (
                 None,
@@ -1095,6 +1238,8 @@ impl Shellumi {
                 String::new(),
                 String::new(),
                 String::new(),
+                ConnectionProtocol::Ssh,
+                None,
             ),
         };
         self.form = Some(HostForm {
@@ -1110,9 +1255,45 @@ impl Shellumi {
                 .new(|cx| TextInput::new(cx, &jump_host, "Jump host (e.g. jump.corp:2222)")),
             startup_snippet: cx
                 .new(|cx| TextInput::new(cx, &startup_snip, "Startup snippet ID (optional)")),
+            protocol,
+            protocol_config,
         });
         self.form_error = None;
         cx.notify();
+    }
+
+    fn set_form_protocol(&mut self, protocol: ConnectionProtocol, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            form.protocol = protocol;
+            match protocol {
+                ConnectionProtocol::Telnet => {
+                    let cur = form.port.read(cx).value();
+                    if cur == "22" || cur.is_empty() {
+                        form.port.update(cx, |input, cx| {
+                            input.set_value("23", cx);
+                        });
+                    }
+                }
+                ConnectionProtocol::Ssh | ConnectionProtocol::Mosh => {
+                    let cur = form.port.read(cx).value();
+                    if cur == "23" || cur.is_empty() {
+                        form.port.update(cx, |input, cx| {
+                            input.set_value("22", cx);
+                        });
+                    }
+                }
+                ConnectionProtocol::Serial => {
+                    let cur = form.port.read(cx).value();
+                    if cur == "22" || cur == "23" || cur.is_empty() {
+                        form.port.update(cx, |input, cx| {
+                            input.set_value("1", cx);
+                        });
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+        }
     }
 
     fn save_host(&mut self, cx: &mut Context<Self>) {
@@ -1185,6 +1366,8 @@ impl Shellumi {
             cx.notify();
             return;
         }
+        let proto = form.protocol;
+        let proto_config = form.protocol_config.clone();
         let id = form.id;
         let Some(path) = self.database.clone() else {
             return;
@@ -1203,7 +1386,7 @@ impl Shellumi {
                 match id {
                     Some(id) => {
                         if !store
-                            .update(
+                            .update_with_protocol(
                                 id,
                                 &name,
                                 &destination,
@@ -1211,6 +1394,8 @@ impl Shellumi {
                                 &tags,
                                 jump_host.as_deref(),
                                 startup_snippet_id,
+                                proto.as_str(),
+                                proto_config.as_deref(),
                             )
                             .await
                             .map_err(|error| error.to_string())?
@@ -1220,13 +1405,15 @@ impl Shellumi {
                     }
                     None => {
                         store
-                            .add(
+                            .add_with_protocol(
                                 &name,
                                 &destination,
                                 group.as_deref(),
                                 &tags,
                                 jump_host.as_deref(),
                                 startup_snippet_id,
+                                proto.as_str(),
+                                proto_config.as_deref(),
                             )
                             .await
                             .map_err(|error| error.to_string())?;
@@ -1344,6 +1531,222 @@ impl Shellumi {
         .detach();
     }
 
+    fn load_workspaces(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store.list_workspaces().await.map_err(|e| e.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Ok(workspaces) = result {
+                    app.workspaces = workspaces;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_current_layout_as_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(active_idx) else {
+            return;
+        };
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+
+        let layout = match tab.split {
+            Some(SplitDirection::Vertical) => WorkspaceLayout::SplitVertical,
+            Some(SplitDirection::Horizontal) => WorkspaceLayout::SplitHorizontal,
+            None => {
+                if tab.panes.len() >= 4 {
+                    WorkspaceLayout::DualGrid
+                } else if tab.panes.len() >= 2 {
+                    WorkspaceLayout::SplitVertical
+                } else {
+                    WorkspaceLayout::Single
+                }
+            }
+        };
+
+        let sessions: Vec<WorkspaceSession> = tab
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(idx, pane)| {
+                let kind = match pane.kind {
+                    SessionKind::Ssh | SessionKind::Mosh | SessionKind::Telnet => {
+                        WorkspaceSessionKind::Ssh
+                    }
+                    SessionKind::Serial | SessionKind::Local => WorkspaceSessionKind::Local,
+                    SessionKind::Sftp => WorkspaceSessionKind::Sftp,
+                };
+                WorkspaceSession {
+                    name: pane.name.clone(),
+                    kind,
+                    destination: None,
+                    host_id: None,
+                    startup_command: None,
+                    working_directory: None,
+                    pane_index: idx,
+                    excluded_from_broadcast: self.broadcast_manager.is_pane_excluded(idx),
+                }
+            })
+            .collect();
+
+        let ws_name = format!("{} Workspace", tab.name);
+        let layout_str = layout.as_str().to_string();
+        let tags = vec!["workspace".to_string(), layout_str.clone()];
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .add_workspace(
+                        &ws_name,
+                        Some("Saved from active tab layout"),
+                        &layout_str,
+                        &sessions,
+                        &tags,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if result.is_ok() {
+                    app.load_workspaces(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_workspace(&mut self, workspace_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ws) = self
+            .workspaces
+            .iter()
+            .find(|w| w.id == workspace_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let tab_id = self.next_tab_id.wrapping_add(1);
+        self.next_tab_id = tab_id;
+
+        let mut panes = Vec::new();
+        let session_specs = if ws.sessions.is_empty() {
+            vec![WorkspaceSession {
+                name: ws.name.clone(),
+                kind: WorkspaceSessionKind::Local,
+                destination: None,
+                host_id: None,
+                startup_command: None,
+                working_directory: None,
+                pane_index: 0,
+                excluded_from_broadcast: false,
+            }]
+        } else {
+            ws.sessions.clone()
+        };
+
+        let mut events_to_bind = Vec::new();
+
+        self.broadcast_manager = BroadcastManager::new(session_specs.len());
+
+        for (idx, sess) in session_specs.iter().enumerate() {
+            let pane_id = self.next_tab_id.wrapping_add(1);
+            self.next_tab_id = pane_id;
+
+            let (cmd, kind) = match sess.kind {
+                WorkspaceSessionKind::Ssh => {
+                    if let Some(dest) = &sess.destination {
+                        (
+                            TerminalCommand::new("ssh").args(dest.openssh_arguments()),
+                            SessionKind::Ssh,
+                        )
+                    } else {
+                        (TerminalCommand::default_shell(), SessionKind::Local)
+                    }
+                }
+                WorkspaceSessionKind::Local => {
+                    (TerminalCommand::default_shell(), SessionKind::Local)
+                }
+                WorkspaceSessionKind::Sftp => (TerminalCommand::default_shell(), SessionKind::Sftp),
+            };
+
+            let session = Session::start(cmd);
+            let events = session.events.clone();
+            let search_input = cx.new(|cx| TextInput::new(cx, "", "Search output…"));
+            let pane = TerminalPane {
+                id: pane_id,
+                name: sess.name.clone(),
+                kind,
+                terminal: Terminal::new(24, 80),
+                session: Some(session),
+                message: None,
+                search_open: false,
+                search_input,
+                search_query: String::new(),
+                search_matches: Vec::new(),
+                current_match_idx: None,
+            };
+
+            if sess.excluded_from_broadcast {
+                self.broadcast_manager.exclude_pane(idx);
+            }
+            panes.push(pane);
+            events_to_bind.push((pane_id, events));
+        }
+
+        let split = match WorkspaceLayout::parse(&ws.layout).unwrap_or(WorkspaceLayout::Single) {
+            WorkspaceLayout::SplitVertical => Some(SplitDirection::Vertical),
+            WorkspaceLayout::SplitHorizontal => Some(SplitDirection::Horizontal),
+            WorkspaceLayout::DualGrid => Some(SplitDirection::Vertical),
+            WorkspaceLayout::Single => None,
+        };
+
+        let tab = SessionTab {
+            id: tab_id,
+            name: ws.name,
+            kind: panes.first().map(|p| p.kind).unwrap_or(SessionKind::Local),
+            panes,
+            active_pane_idx: 0,
+            split,
+            sftp_state: None,
+        };
+
+        self.tabs.push(tab);
+        self.active_tab_idx = Some(self.tabs.len() - 1);
+
+        window.focus(&self.focus);
+        cx.notify();
+
+        for (pane_id, events) in events_to_bind {
+            self.bind_pane_events(tab_id, pane_id, events, cx);
+        }
+    }
+
     fn open_conflict_modal(
         &mut self,
         file_id: String,
@@ -1386,98 +1789,15 @@ impl Shellumi {
 
     fn apply_conflict_resolutions(&mut self, cx: &mut Context<Self>) {
         if let Some(_modal) = self.conflict_modal.take() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            self.sync_status = AppSyncStatus::UpToDate {
-                last_sync_time: now,
-            };
+            self.sync_status =
+                AppSyncStatus::Error("Conflict resolution is not implemented".into());
             cx.notify();
         }
     }
 
     fn trigger_sync(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
-            self.sync_status = AppSyncStatus::Error("No database loaded for sync".into());
-            cx.notify();
-            return;
-        };
-
-        self.sync_status = AppSyncStatus::Syncing;
+        self.sync_status = AppSyncStatus::Error("Cloud sync is not implemented".into());
         cx.notify();
-
-        let task = cx.background_executor().spawn(async move {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .map_err(|e| e.to_string())?;
-            runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let local_vault = store
-                    .export_vault_with_iterations("default-vault-passphrase", "shellumi-app", 2000)
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                let plan = shellumi_core::plan_sync_cycle(&local_vault.records, None, None, None);
-                Ok::<_, String>((now, plan))
-            })
-        });
-
-        cx.spawn(async move |app, cx| {
-            let result = task.await;
-            let _ = app.update(cx, |app, cx| {
-                match result {
-                    Ok((now, plan)) => match plan {
-                        shellumi_core::SyncPlan::ConflictDetected {
-                            file_id,
-                            conflicting_object_ids,
-                        } => {
-                            app.sync_status = AppSyncStatus::Conflict {
-                                message: format!(
-                                    "{} conflicting record(s)",
-                                    conflicting_object_ids.len()
-                                ),
-                            };
-                            let views = conflicting_object_ids
-                                .into_iter()
-                                .map(|oid| ConflictItemView {
-                                    object_id: oid.clone(),
-                                    entity_type: SyncEntityType::Host,
-                                    local_version: 1,
-                                    remote_version: 1,
-                                    local_updated_at: now,
-                                    remote_updated_at: now.saturating_add(60),
-                                    local_summary: format!("{oid} (Local version)"),
-                                    remote_summary: format!("{oid} (Remote vault)"),
-                                })
-                                .collect();
-                            app.open_conflict_modal(file_id, views, cx);
-                        }
-                        _ => {
-                            app.sync_status = AppSyncStatus::UpToDate {
-                                last_sync_time: now,
-                            };
-                            app.sync_scheduler.record_success(now);
-                        }
-                    },
-                    Err(e) => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        app.sync_status = AppSyncStatus::Error(e);
-                        app.sync_scheduler.record_failure(now);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn check_sync_schedule(&mut self, cx: &mut Context<Self>) {
@@ -2000,6 +2320,14 @@ impl Shellumi {
             );
         }
 
+        // 4. Saved workspaces
+        for w in &self.workspaces {
+            registry.register(
+                PaletteCommand::workspace_from_saved(w.id, &w.name, w.layout.as_str())
+                    .with_keywords(w.tags.clone()),
+            );
+        }
+
         let input =
             cx.new(|cx| TextInput::new(cx, "", "Type a command, host, snippet, or action…"));
         self.command_palette = Some(CommandPaletteState {
@@ -2096,17 +2424,7 @@ impl Shellumi {
                 self.trigger_sync(cx);
             }
             PaletteAction::OpenConflictResolver => {
-                let sample = vec![ConflictItemView {
-                    object_id: "conflicted-host".into(),
-                    entity_type: SyncEntityType::Host,
-                    local_version: 2,
-                    remote_version: 2,
-                    local_updated_at: 1000,
-                    remote_updated_at: 1050,
-                    local_summary: "Production Bastion (alice@bastion:22)".into(),
-                    remote_summary: "Production Bastion (bob@bastion:2222)".into(),
-                }];
-                self.open_conflict_modal("vault_file_1".into(), sample, cx);
+                self.trigger_sync(cx);
             }
             PaletteAction::NewLocalTerminal => {
                 self.open_local_terminal(window, cx);
@@ -2124,6 +2442,25 @@ impl Shellumi {
                         self.close_tab(id, window, cx);
                     }
                 }
+            }
+            PaletteAction::ToggleBroadcastInput => {
+                let total = self
+                    .active_tab_idx
+                    .and_then(|idx| self.tabs.get(idx))
+                    .map(|t| t.panes.len())
+                    .unwrap_or(0);
+                self.broadcast_manager.set_total_panes(total);
+                let on = self.broadcast_manager.toggle();
+                if !on {
+                    self.broadcast_warning = None;
+                }
+                cx.notify();
+            }
+            PaletteAction::SaveCurrentLayoutAsWorkspace => {
+                self.save_current_layout_as_workspace(cx);
+            }
+            PaletteAction::LoadWorkspace { workspace_id, .. } => {
+                self.load_workspace(workspace_id, window, cx);
             }
             PaletteAction::OpenSnippetsDrawer => {
                 self.snippets_panel_open = true;
@@ -3345,6 +3682,7 @@ impl Shellumi {
                     PaletteCategory::Tunnel => (rgb(0x831843), rgb(0xfbcfe8)),
                     PaletteCategory::Sftp => (rgb(0x14532d), rgb(0xbbf7d0)),
                     PaletteCategory::Navigation => (rgb(0x374151), rgb(0xf3f4f6)),
+                    PaletteCategory::Workspace => (rgb(0x312e81), rgb(0xc7d2fe)),
                 };
 
                 let action = mat.command.action.clone();
@@ -4053,6 +4391,9 @@ impl Render for Shellumi {
                 let tab_id = tab.id;
                 let label = match tab.kind {
                     SessionKind::Ssh => format!("SSH: {}", tab.name),
+                    SessionKind::Mosh => format!("Mosh: {}", tab.name),
+                    SessionKind::Telnet => format!("Telnet: {}", tab.name),
+                    SessionKind::Serial => format!("Serial: {}", tab.name),
                     SessionKind::Local => tab.name.clone(),
                     SessionKind::Sftp => format!("SFTP: {}", tab.name),
                 };
@@ -4130,12 +4471,24 @@ impl Render for Shellumi {
 
                 let header_title = match tab.kind {
                     SessionKind::Ssh => format!("SSH · {}", tab.name),
+                    SessionKind::Mosh => format!("Mosh · {}", tab.name),
+                    SessionKind::Telnet => format!("⚠️ Telnet · {}", tab.name),
+                    SessionKind::Serial => format!("Serial · {}", tab.name),
                     SessionKind::Local => format!("Local · {}", tab.name),
                     SessionKind::Sftp => format!("SFTP · {}", tab.name),
                 };
                 let header_subtitle = match tab.kind {
                     SessionKind::Ssh => {
                         "Verify the server fingerprint before accepting an unknown host key."
+                    }
+                    SessionKind::Mosh => {
+                        "Mobile Shell roaming UDP connection with local echo prediction."
+                    }
+                    SessionKind::Telnet => {
+                        "⚠️ UNENCRYPTED PROTOCOL: Passwords and session data are transmitted in cleartext over the network."
+                    }
+                    SessionKind::Serial => {
+                        "Physical serial line / UART connection."
                     }
                     SessionKind::Local => "Local shell session.",
                     SessionKind::Sftp => {
@@ -4174,6 +4527,21 @@ impl Render for Shellumi {
                             )
                             .child({
                                 let mut actions_bar = div().flex().items_center().gap_2();
+
+                                if tab.kind == SessionKind::Telnet {
+                                    actions_bar = actions_bar.child(
+                                        div()
+                                            .id("telnet-warning-pill")
+                                            .px_3()
+                                            .py_1p5()
+                                            .rounded_md()
+                                            .bg(rgb(0x7f1d1d))
+                                            .text_color(rgb(0xfecaca))
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("⚠️ UNENCRYPTED TELNET"),
+                                    );
+                                }
 
                                 if is_sftp {
                                     let mode_label = if is_sftp_dual_pane {
@@ -4299,6 +4667,51 @@ impl Render for Shellumi {
                                                 }))
                                                 .child("📜 Snippets"),
                                         );
+                                }
+
+                                if tab.panes.len() > 1 || self.broadcast_manager.is_enabled() {
+                                    let is_on = self.broadcast_manager.is_enabled();
+                                    let total = tab.panes.len();
+                                    let count = if is_on {
+                                        total.saturating_sub(
+                                            (0..total)
+                                                .filter(|&i| {
+                                                    self.broadcast_manager.is_pane_excluded(i)
+                                                })
+                                                .count(),
+                                        )
+                                    } else {
+                                        0
+                                    };
+                                    actions_bar = actions_bar.child(
+                                        div()
+                                            .id("toggle-broadcast-input")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if is_on { rgb(0xb91c1c) } else { rgb(0x374151) })
+                                            .text_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                let total = app
+                                                    .active_tab_idx
+                                                    .and_then(|i| app.tabs.get(i))
+                                                    .map(|t| t.panes.len())
+                                                    .unwrap_or(0);
+                                                app.broadcast_manager.set_total_panes(total);
+                                                let on = app.broadcast_manager.toggle();
+                                                if !on {
+                                                    app.broadcast_warning = None;
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(if is_on {
+                                                format!("📡 Broadcast: ON ({count}/{total})")
+                                            } else {
+                                                "📡 Broadcast: Off".to_string()
+                                            }),
+                                    );
                                 }
 
                                 actions_bar = actions_bar.child(
@@ -4440,6 +4853,40 @@ impl Render for Shellumi {
                     body = body.child(snippets_bar);
                 }
 
+                if let Some(warning) = &self.broadcast_warning {
+                    let warning_msg = warning.clone();
+                    body = body.child(
+                        div()
+                            .id("broadcast-warning-banner")
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(0x7f1d1d))
+                            .border_1()
+                            .border_color(rgb(0xef4444))
+                            .text_color(rgb(0xfecaca))
+                            .text_sm()
+                            .child(format!("⚠️ {warning_msg}"))
+                            .child(
+                                div()
+                                    .id("dismiss-broadcast-warning")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(rgb(0x991b1b))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.broadcast_warning = None;
+                                        cx.notify();
+                                    }))
+                                    .child("Dismiss"),
+                            ),
+                    );
+                }
+
                 let mut panes_container = match tab.split {
                     Some(SplitDirection::Vertical) => div().flex().flex_row().gap_3().flex_1(),
                     Some(SplitDirection::Horizontal) => div().flex().flex_col().gap_3().flex_1(),
@@ -4525,6 +4972,35 @@ impl Render for Shellumi {
                             }))
                             .child("🔍 Search"),
                     );
+
+                    if tab.panes.len() > 1 && self.broadcast_manager.is_enabled() {
+                        let is_excluded = self.broadcast_manager.is_pane_excluded(pane_idx);
+                        pane_btn_group = pane_btn_group.child(
+                            div()
+                                .id(("toggle-pane-broadcast", pane_id))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(if is_excluded {
+                                    rgb(0x4b5563)
+                                } else {
+                                    rgb(0x059669)
+                                })
+                                .text_color(rgb(0xffffff))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.broadcast_manager.toggle_pane_exclusion(pane_idx);
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                }))
+                                .child(if is_excluded {
+                                    "🔇 Excluded"
+                                } else {
+                                    "📡 Broadcast"
+                                }),
+                        );
+                    }
 
                     if tab.panes.len() > 1 {
                         pane_btn_group = pane_btn_group.child(
@@ -4785,6 +5261,25 @@ impl Render for Shellumi {
                                     .child(format!("via {jump}")),
                             );
                         }
+                        let proto = host.protocol();
+                        let (badge_bg, badge_fg) = match proto {
+                            ConnectionProtocol::Ssh => (rgb(0x1e3a8a), rgb(0x93c5fd)),
+                            ConnectionProtocol::Mosh => (rgb(0x713f12), rgb(0xfef08a)),
+                            ConnectionProtocol::Telnet => (rgb(0x7f1d1d), rgb(0xfecaca)),
+                            ConnectionProtocol::Serial => (rgb(0x14532d), rgb(0xbbf7d0)),
+                            ConnectionProtocol::Local => (rgb(0x374151), rgb(0xd1d5db)),
+                        };
+                        title_row = title_row.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(badge_bg)
+                                .text_xs()
+                                .text_color(badge_fg)
+                                .child(format!("{} {}", proto.badge_icon(), proto.display_name())),
+                        );
+
                         if let Some(snip_id) = host.startup_snippet_id {
                             let snip_name = self
                                 .snippets
@@ -4827,67 +5322,70 @@ impl Render for Shellumi {
                             card = card.child(tag_row);
                         }
 
-                        card = card.child(
+                        let mut btn_row = div()
+                            .flex()
+                            .gap_2()
+                            .mt_2()
+                            .child(
+                                div()
+                                    .id(("edit", host.id as u64))
+                                    .w(px(80.0))
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x374151))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.edit_host(Some(&selected), cx)
+                                    }))
+                                    .child("Edit"),
+                            )
+                            .child(
+                                div()
+                                    .id(("connect", host.id as u64))
+                                    .w(px(100.0))
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x2563eb))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.connect(&connection, window, cx)
+                                    }))
+                                    .child("Connect"),
+                            );
+
+                        if proto.supports_sftp() {
+                            btn_row = btn_row.child(
+                                div()
+                                    .id(("sftp", host.id as u64))
+                                    .w(px(80.0))
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x065f46))
+                                    .text_color(rgb(0xd1fae5))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.connect_sftp(&sftp_connection, window, cx)
+                                    }))
+                                    .child("SFTP"),
+                            );
+                        }
+
+                        btn_row = btn_row.child(
                             div()
-                                .flex()
-                                .gap_2()
-                                .mt_2()
-                                .child(
-                                    div()
-                                        .id(("edit", host.id as u64))
-                                        .w(px(80.0))
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x374151))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |app, _, _, cx| {
-                                            app.edit_host(Some(&selected), cx)
-                                        }))
-                                        .child("Edit"),
+                                .id(("delete", host.id as u64))
+                                .w(px(80.0))
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x991b1b))
+                                .text_color(rgb(0xfecaca))
+                                .cursor_pointer()
+                                .on_click(
+                                    cx.listener(move |app, _, _, cx| app.delete_host(host_id, cx)),
                                 )
-                                .child(
-                                    div()
-                                        .id(("connect", host.id as u64))
-                                        .w(px(100.0))
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x2563eb))
-                                        .text_color(rgb(0xffffff))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.connect(&connection, window, cx)
-                                        }))
-                                        .child("Connect"),
-                                )
-                                .child(
-                                    div()
-                                        .id(("sftp", host.id as u64))
-                                        .w(px(80.0))
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x065f46))
-                                        .text_color(rgb(0xd1fae5))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.connect_sftp(&sftp_connection, window, cx)
-                                        }))
-                                        .child("SFTP"),
-                                )
-                                .child(
-                                    div()
-                                        .id(("delete", host.id as u64))
-                                        .w(px(80.0))
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x991b1b))
-                                        .text_color(rgb(0xfecaca))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |app, _, _, cx| {
-                                            app.delete_host(host_id, cx)
-                                        }))
-                                        .child("Delete"),
-                                ),
+                                .child("Delete"),
                         );
+                        card = card.child(btn_row);
                         list = list.child(card);
                     }
                     list
@@ -5090,13 +5588,76 @@ impl Render for Shellumi {
                 } else {
                     "Add host"
                 })
+                .child("Protocol")
+                .child({
+                    let mut proto_row = div().flex().flex_row().gap_2().mb_1();
+                    let protocols = [
+                        (ConnectionProtocol::Ssh, "🔒 SSH"),
+                        (ConnectionProtocol::Mosh, "⚡ Mosh"),
+                        (ConnectionProtocol::Telnet, "⚠️ Telnet"),
+                        (ConnectionProtocol::Serial, "🔌 Serial"),
+                    ];
+                    for (idx, (p, label)) in protocols.into_iter().enumerate() {
+                        let is_sel = form.protocol == p;
+                        let btn_bg = if is_sel { rgb(0x2563eb) } else { rgb(0x374151) };
+                        let btn_fg = if is_sel { rgb(0xffffff) } else { rgb(0x9ca3af) };
+                        proto_row = proto_row.child(
+                            div()
+                                .id(("proto-select", idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(btn_bg)
+                                .text_color(btn_fg)
+                                .text_xs()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.set_form_protocol(p, cx);
+                                }))
+                                .child(label),
+                        );
+                    }
+                    proto_row
+                });
+
+            if form.protocol == ConnectionProtocol::Telnet {
+                editor = editor.child(
+                    div()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(0x7f1d1d))
+                        .text_color(rgb(0xfecaca))
+                        .text_xs()
+                        .child("⚠️ UNENCRYPTED PROTOCOL: Telnet transmits all credentials, keystrokes, and session data in cleartext over the network without encryption."),
+                );
+            } else if form.protocol == ConnectionProtocol::Serial {
+                editor = editor.child(
+                    div()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(0x14532d))
+                        .text_color(rgb(0xbbf7d0))
+                        .text_xs()
+                        .child("🔌 Direct serial line connection. Specify serial device path in Hostname (e.g. /dev/ttyUSB0 or COM1) and baud rate in Port (e.g. 115200)."),
+                );
+            }
+
+            editor = editor
                 .child("Name")
                 .child(form.name.clone())
-                .child("Hostname or IP")
+                .child(if form.protocol == ConnectionProtocol::Serial {
+                    "Serial Device Port"
+                } else {
+                    "Hostname or IP"
+                })
                 .child(form.hostname.clone())
                 .child("Username")
                 .child(form.username.clone())
-                .child("Port")
+                .child(if form.protocol == ConnectionProtocol::Serial {
+                    "Baud Rate"
+                } else {
+                    "Port"
+                })
                 .child(form.port.clone())
                 .child("Group (optional)")
                 .child(form.group.clone())
@@ -5375,6 +5936,8 @@ mod tests {
                 tags: vec!["frontend".into(), "nginx".into()],
                 jump_host: Some("bastion.corp:2222".into()),
                 startup_snippet_id: Some(42),
+                protocol: "ssh".into(),
+                protocol_config: None,
             },
             SavedHost {
                 id: 2,
@@ -5384,6 +5947,8 @@ mod tests {
                 tags: vec!["database".into(), "sql".into()],
                 jump_host: None,
                 startup_snippet_id: None,
+                protocol: "ssh".into(),
+                protocol_config: None,
             },
             SavedHost {
                 id: 3,
@@ -5393,6 +5958,8 @@ mod tests {
                 tags: vec!["test".into()],
                 jump_host: None,
                 startup_snippet_id: None,
+                protocol: "ssh".into(),
+                protocol_config: None,
             },
         ];
 
@@ -5453,11 +6020,26 @@ mod tests {
 
         let format_tab_label = |kind: SessionKind, name: &str| match kind {
             SessionKind::Ssh => format!("SSH: {name}"),
+            SessionKind::Mosh => format!("Mosh: {name}"),
+            SessionKind::Telnet => format!("Telnet: {name}"),
+            SessionKind::Serial => format!("Serial: {name}"),
             SessionKind::Local => name.to_string(),
             SessionKind::Sftp => format!("SFTP: {name}"),
         };
 
         assert_eq!(format_tab_label(SessionKind::Ssh, "Prod"), "SSH: Prod");
+        assert_eq!(
+            format_tab_label(SessionKind::Mosh, "Roaming"),
+            "Mosh: Roaming"
+        );
+        assert_eq!(
+            format_tab_label(SessionKind::Telnet, "Switch"),
+            "Telnet: Switch"
+        );
+        assert_eq!(
+            format_tab_label(SessionKind::Serial, "Console"),
+            "Serial: Console"
+        );
         assert_eq!(
             format_tab_label(SessionKind::Local, "Local terminal"),
             "Local terminal"
@@ -5948,6 +6530,120 @@ mod tests {
             }
         );
         assert_eq!(batch_matches[0].command.category, PaletteCategory::Snippet);
+
+        // 6. Broadcast and Workspace actions
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::ToggleBroadcastInput));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::SaveCurrentLayoutAsWorkspace));
+
+        registry.register(PaletteCommand::workspace_from_saved(
+            12,
+            "Kubernetes Ops Layout",
+            "vertical",
+        ));
+        let ws_matches = registry.search("k8s");
+        assert_eq!(ws_matches.len(), 0);
+        let ws_matches2 = registry.search("Kubernetes");
+        assert_eq!(ws_matches2.len(), 1);
+        assert_eq!(
+            ws_matches2[0].command.action,
+            PaletteAction::LoadWorkspace {
+                workspace_id: 12,
+                workspace_name: "Kubernetes Ops Layout".into(),
+            }
+        );
+        assert_eq!(ws_matches2[0].command.category, PaletteCategory::Workspace);
+    }
+
+    #[test]
+    fn verifies_workspace_and_broadcast_input_flow() {
+        use shellumi_core::{
+            check_dangerous_command, BroadcastManager, BroadcastSafetyCheck, Workspace,
+            WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+        };
+
+        // 1. Broadcast manager state & exclusions
+        let mut bm = BroadcastManager::new(3);
+        assert!(!bm.is_enabled());
+        assert_eq!(bm.receiving_panes_count(), 0);
+        assert_eq!(bm.status_text(), "Broadcast: Off");
+
+        bm.enable();
+        assert!(bm.is_enabled());
+        assert_eq!(bm.receiving_panes_count(), 3);
+        assert_eq!(bm.status_text(), "📡 Broadcast: ON (3/3 panes receiving)");
+
+        // Exclude pane 1
+        bm.exclude_pane(1);
+        assert!(bm.is_pane_excluded(1));
+        assert!(!bm.is_pane_excluded(0));
+        assert!(!bm.is_pane_excluded(2));
+        assert_eq!(bm.receiving_panes_count(), 2);
+        assert_eq!(bm.status_text(), "📡 Broadcast: ON (2/3 panes receiving)");
+
+        // 2. Dangerous command detection for broadcast safety
+        let safe1 = check_dangerous_command("ls -la /var/log");
+        assert_eq!(safe1, BroadcastSafetyCheck::Safe);
+        let safe2 = check_dangerous_command("docker ps -a");
+        assert_eq!(safe2, BroadcastSafetyCheck::Safe);
+
+        let dangerous_rm = check_dangerous_command("rm -rf /");
+        assert!(matches!(
+            dangerous_rm,
+            BroadcastSafetyCheck::Dangerous { .. }
+        ));
+
+        let dangerous_mkfs = check_dangerous_command("mkfs.ext4 /dev/sdb1");
+        assert!(matches!(
+            dangerous_mkfs,
+            BroadcastSafetyCheck::Dangerous { .. }
+        ));
+
+        let dangerous_dd = check_dangerous_command("dd if=/dev/zero of=/dev/sda bs=1M");
+        assert!(matches!(
+            dangerous_dd,
+            BroadcastSafetyCheck::Dangerous { .. }
+        ));
+
+        // 3. Workspace model construction & validation
+        let s1 = WorkspaceSession {
+            name: "Bastion SSH".into(),
+            kind: WorkspaceSessionKind::Ssh,
+            destination: None,
+            host_id: Some(10),
+            startup_command: Some("tmux new-session -A -s main".into()),
+            working_directory: None,
+            pane_index: 0,
+            excluded_from_broadcast: false,
+        };
+        let s2 = WorkspaceSession {
+            name: "Local Monitor".into(),
+            kind: WorkspaceSessionKind::Local,
+            destination: None,
+            host_id: None,
+            startup_command: Some("htop".into()),
+            working_directory: None,
+            pane_index: 1,
+            excluded_from_broadcast: true,
+        };
+
+        let ws = Workspace::new("Production Ops Center")
+            .unwrap()
+            .with_description("Multi-pane monitoring")
+            .with_layout(WorkspaceLayout::SplitVertical)
+            .with_sessions(vec![s1, s2])
+            .with_tags(["production", "sre"]);
+
+        assert_eq!(ws.name, "Production Ops Center");
+        assert_eq!(ws.layout, WorkspaceLayout::SplitVertical);
+        assert_eq!(ws.sessions.len(), 2);
+        assert!(!ws.sessions[0].excluded_from_broadcast);
+        assert!(ws.sessions[1].excluded_from_broadcast);
     }
 
     #[test]
@@ -6025,6 +6721,8 @@ mod tests {
             tags: vec!["api".into(), "v2".into()],
             jump_host: Some("bastion.corp:22".into()),
             startup_snippet_id: Some(99),
+            protocol: "ssh".into(),
+            protocol_config: None,
         };
 
         let template = "echo 'Welcome {{host.user}} to {{host.name}} ({{host.hostname}}:{{host.port}}) [{{host.group}}] tags: {{host.tags}} id: {{host.id}}'";
@@ -6059,5 +6757,32 @@ mod tests {
             rendered,
             "echo 'Welcome appuser to api-server (api.corp.internal:2200) [backend] tags: api,v2 id: 42'"
         );
+    }
+
+    #[test]
+    fn verifies_protocol_classification_and_ui_security_warnings() {
+        use shellumi_core::{ConnectionProtocol, TelnetConfig};
+
+        // Protocol capabilities and badges
+        assert!(ConnectionProtocol::Ssh.is_encrypted());
+        assert!(ConnectionProtocol::Ssh.supports_sftp());
+        assert_eq!(ConnectionProtocol::Ssh.badge_icon(), "🔒");
+
+        assert!(ConnectionProtocol::Mosh.is_encrypted());
+        assert!(!ConnectionProtocol::Mosh.supports_sftp());
+        assert_eq!(ConnectionProtocol::Mosh.badge_icon(), "⚡");
+
+        assert!(!ConnectionProtocol::Telnet.is_encrypted());
+        assert!(!ConnectionProtocol::Telnet.supports_sftp());
+        assert_eq!(ConnectionProtocol::Telnet.badge_icon(), "⚠️");
+
+        assert!(!ConnectionProtocol::Serial.is_encrypted());
+        assert!(!ConnectionProtocol::Serial.supports_sftp());
+        assert_eq!(ConnectionProtocol::Serial.badge_icon(), "🔌");
+
+        // Telnet security warning
+        let warning = TelnetConfig::security_warning();
+        assert!(warning.contains("UNENCRYPTED PROTOCOL"));
+        assert!(warning.contains("cleartext"));
     }
 }

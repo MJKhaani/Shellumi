@@ -5568,6 +5568,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
  "gpui",
+ "serde_json",
  "shellumi-core",
  "shellumi-storage",
  "shellumi-terminal",
@@ -5579,6 +5580,7 @@ dependencies = [
 name = "shellumi-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "shellumi-core",
  "shellumi-storage",
  "tempfile",
