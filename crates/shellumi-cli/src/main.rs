@@ -1,9 +1,9 @@
 use shellumi_core::{
     build_google_drive_auth_url, diff_sync_records_with_passphrase, export_csv, export_ssh_config,
     generate_ed25519_key, generate_pkce_challenge, list_local_directory, parse_csv,
-    parse_quick_connect_target, parse_ssh_config, render_command, render_preview, ForwardingType,
-    HostConfigEntry, HostGroup, PortForwardRule, Snippet, SshDestination, SyncVault,
-    TransferDirection,
+    parse_quick_connect_target, parse_ssh_config, render_command, render_preview, FileAttributes,
+    ForwardingType, HostConfigEntry, HostGroup, OpenFlags, PortForwardRule, SftpPacket, Snippet,
+    SshDestination, SyncVault, TransferDirection, TransferQueue,
 };
 use shellumi_storage::{HostStore, NewTransfer};
 use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
@@ -24,6 +24,8 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> sftp history [--host-id <id>] [--limit <n>]
   shellumi-cli <database-path> sftp clear-history [--host-id <id>]
   shellumi-cli <database-path> sftp log <upload|download> <local-path> <remote-path> <bytes> [--total-bytes <bytes>] [--status <status>] [--host-id <id>]
+  shellumi-cli <database-path> sftp packet <encode-init|decode|encode-open> [...]
+  shellumi-cli <database-path> sftp queue <upload|download> <local-path> <remote-path> <bytes>
   shellumi-cli <database-path> snippet list [--tag <tag>] [--search <query>]
   shellumi-cli <database-path> snippet add <name> <command> [--description <desc>] [--tags <tag1,tag2>]
   shellumi-cli <database-path> snippet show <id>
@@ -63,6 +65,53 @@ fn extract_flag(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    let clean = s.trim().replace("0x", "").replace(' ', "");
+    if !clean.len().is_multiple_of(2) {
+        return Err("Hex string must have an even number of hex characters.".into());
+    }
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&clean[i..i + 2], 16)
+                .map_err(|e| format!("Invalid hex byte at index {i}: {e}"))
+        })
+        .collect()
+}
+
+fn pkt_type_name(t: u8) -> &'static str {
+    match t {
+        1 => "SSH_FXP_INIT",
+        2 => "SSH_FXP_VERSION",
+        3 => "SSH_FXP_OPEN",
+        4 => "SSH_FXP_CLOSE",
+        5 => "SSH_FXP_READ",
+        6 => "SSH_FXP_WRITE",
+        7 => "SSH_FXP_LSTAT",
+        8 => "SSH_FXP_FSTAT",
+        9 => "SSH_FXP_SETSTAT",
+        10 => "SSH_FXP_FSETSTAT",
+        11 => "SSH_FXP_OPENDIR",
+        12 => "SSH_FXP_READDIR",
+        13 => "SSH_FXP_REMOVE",
+        14 => "SSH_FXP_MKDIR",
+        15 => "SSH_FXP_RMDIR",
+        16 => "SSH_FXP_REALPATH",
+        17 => "SSH_FXP_STAT",
+        18 => "SSH_FXP_RENAME",
+        19 => "SSH_FXP_READLINK",
+        20 => "SSH_FXP_SYMLINK",
+        101 => "SSH_FXP_STATUS",
+        102 => "SSH_FXP_HANDLE",
+        103 => "SSH_FXP_DATA",
+        104 => "SSH_FXP_NAME",
+        105 => "SSH_FXP_ATTRS",
+        200 => "SSH_FXP_EXTENDED",
+        201 => "SSH_FXP_EXTENDED_REPLY",
+        _ => "UNKNOWN",
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -175,6 +224,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 }
                 "history" | "clear-history" => {}
                 "log" => {
+                    if args.len() < 7 {
+                        return Err(invalid(USAGE).into());
+                    }
+                }
+                "packet" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                }
+                "queue" => {
                     if args.len() < 7 {
                         return Err(invalid(USAGE).into());
                     }
@@ -625,6 +684,123 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         })
                         .await?;
                     println!("{tid}");
+                }
+                "packet" => {
+                    let action = args[3].as_str();
+                    match action {
+                        "encode-init" => {
+                            let version: u32 = extract_flag(&args[4..], "--version")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(3);
+                            let pkt = SftpPacket::Init { version };
+                            let encoded = pkt.encode();
+                            let hex = encoded
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>();
+                            println!("Packet: Init (version: {version})");
+                            println!("Length: {} bytes", encoded.len());
+                            println!("Hex: {hex}");
+                        }
+                        "decode" => {
+                            if args.len() < 5 {
+                                return Err(invalid("Missing hex string to decode.").into());
+                            }
+                            let hex_str = &args[4];
+                            let raw_bytes = decode_hex(hex_str).map_err(|e| invalid(&e))?;
+                            let decoded = SftpPacket::decode(&raw_bytes)
+                                .map_err(|e| invalid(&format!("SFTP decode error: {e}")))?;
+                            let Some((pkt, consumed)) = decoded else {
+                                return Err(invalid("Incomplete SFTP packet buffer.").into());
+                            };
+                            let req_id_str = pkt
+                                .request_id()
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "-".to_string());
+                            println!(
+                                "Type: {} ({})",
+                                pkt_type_name(pkt.packet_type()),
+                                pkt.packet_type()
+                            );
+                            println!("Length: {consumed} bytes");
+                            println!("Request ID: {req_id_str}");
+                            println!("Packet: {pkt:?}");
+                        }
+                        "encode-open" => {
+                            if args.len() < 6 {
+                                return Err(invalid("Usage: sftp packet encode-open <id> <filename> [--read] [--write] [--create] [--truncate]").into());
+                            }
+                            let id: u32 = args[4]
+                                .parse()
+                                .map_err(|_| invalid("ID must be an integer"))?;
+                            let filename = args[5].clone();
+                            let extra = &args[6..];
+                            let mut flags = 0u32;
+                            if extra.iter().any(|a| a == "--read") {
+                                flags |= OpenFlags::READ;
+                            }
+                            if extra.iter().any(|a| a == "--write") {
+                                flags |= OpenFlags::WRITE;
+                            }
+                            if extra.iter().any(|a| a == "--create") {
+                                flags |= OpenFlags::CREAT;
+                            }
+                            if extra.iter().any(|a| a == "--truncate") {
+                                flags |= OpenFlags::TRUNC;
+                            }
+                            if flags == 0 {
+                                flags = OpenFlags::READ;
+                            }
+                            let pkt = SftpPacket::Open {
+                                id,
+                                filename,
+                                pflags: flags,
+                                attrs: FileAttributes::new(),
+                            };
+                            let encoded = pkt.encode();
+                            let hex = encoded
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>();
+                            println!("Packet: Open (id: {id}, flags: 0x{flags:08x})");
+                            println!("Length: {} bytes", encoded.len());
+                            println!("Hex: {hex}");
+                        }
+                        _ => return Err(invalid(
+                            "Unknown packet action. Available: encode-init, decode, encode-open",
+                        )
+                        .into()),
+                    }
+                }
+                "queue" => {
+                    let dir_str = &args[3];
+                    let local_path = &args[4];
+                    let remote_path = &args[5];
+                    let bytes: u64 = args[6]
+                        .parse()
+                        .map_err(|_| invalid("Bytes must be an integer"))?;
+                    let direction = match dir_str.to_lowercase().as_str() {
+                        "upload" => TransferDirection::Upload,
+                        "download" => TransferDirection::Download,
+                        _ => {
+                            return Err(invalid("Direction must be 'upload' or 'download'.").into())
+                        }
+                    };
+                    let mut queue = TransferQueue::new(2);
+                    let task_id = queue.enqueue(direction, local_path, remote_path, bytes);
+                    let dispatched = queue.dispatch_next();
+                    queue.update_progress(task_id, bytes);
+                    let summary = queue.summary();
+                    println!("Task ID: {task_id}");
+                    println!("Dispatched: {dispatched:?}");
+                    println!(
+                        "Transferred: {}/{} bytes ({:.1}%)",
+                        summary.transferred_bytes, summary.total_bytes, summary.overall_percentage
+                    );
+                    println!(
+                        "Completed: {}/{}",
+                        summary.completed_tasks, summary.total_tasks
+                    );
                 }
                 _ => unreachable!(),
             }

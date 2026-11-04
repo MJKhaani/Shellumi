@@ -548,6 +548,80 @@ fn supports_sftp_local_ls_and_transfer_history() {
 }
 
 #[test]
+fn supports_sftp_packet_codecs_and_transfer_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Encode Init
+    let enc_init = run(&["sftp", "packet", "encode-init", "--version", "3"]);
+    assert!(enc_init.status.success());
+    let init_out = String::from_utf8(enc_init.stdout).unwrap();
+    assert!(init_out.contains("Packet: Init (version: 3)"));
+    assert!(init_out.contains("000000050100000003"));
+
+    // 2. Decode Init hex
+    let dec_init = run(&["sftp", "packet", "decode", "000000050100000003"]);
+    assert!(dec_init.status.success());
+    let dec_out = String::from_utf8(dec_init.stdout).unwrap();
+    assert!(dec_out.contains("Type: SSH_FXP_INIT (1)"));
+    assert!(dec_out.contains("Length: 9 bytes"));
+    assert!(dec_out.contains("Init { version: 3 }"));
+
+    // 3. Encode Open packet
+    let enc_open = run(&[
+        "sftp",
+        "packet",
+        "encode-open",
+        "77",
+        "/var/log/audit.log",
+        "--write",
+        "--create",
+        "--truncate",
+    ]);
+    assert!(enc_open.status.success());
+    let open_out = String::from_utf8(enc_open.stdout).unwrap();
+    assert!(open_out.contains("Packet: Open (id: 77"));
+    assert!(open_out.contains("Hex: "));
+
+    let hex_line = open_out
+        .lines()
+        .find(|l| l.starts_with("Hex: "))
+        .unwrap()
+        .trim_start_matches("Hex: ")
+        .trim();
+
+    // 4. Decode Open packet from its generated hex
+    let dec_open = run(&["sftp", "packet", "decode", hex_line]);
+    assert!(dec_open.status.success());
+    let dec_open_out = String::from_utf8(dec_open.stdout).unwrap();
+    assert!(dec_open_out.contains("Type: SSH_FXP_OPEN (3)"));
+    assert!(dec_open_out.contains("Request ID: 77"));
+    assert!(dec_open_out.contains("/var/log/audit.log"));
+
+    // 5. Transfer queue simulation
+    let q_res = run(&[
+        "sftp",
+        "queue",
+        "upload",
+        "/local/data.tar",
+        "/remote/data.tar",
+        "2048",
+    ]);
+    assert!(q_res.status.success());
+    let q_out = String::from_utf8(q_res.stdout).unwrap();
+    assert!(q_out.contains("Task ID: 1"));
+    assert!(q_out.contains("Transferred: 2048/2048 bytes (100.0%)"));
+    assert!(q_out.contains("Completed: 1/1"));
+}
+
+#[test]
 fn supports_snippet_management_and_variable_rendering() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("hosts.db");

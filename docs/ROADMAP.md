@@ -79,13 +79,18 @@ been checked on macOS.
    PBKDF2-HMAC-SHA256, atomic file commits), and `default_credential_store()` platform
    factory. Next: biometric prompt integration (Touch ID / Windows Hello) for unlocking keys.
 7. SFTP and file transfer: Implemented SFTP core domain models, path breadcrumbs, local directory
-   browsing, transfer task progress, transfer history database storage (schema v6), CLI SFTP
-   commands, and GPUI SFTP session tabs. Next: wire SFTP protocol packets, background transfer
-   queue execution, and dual-pane directory browser view.
+   browsing, transfer task progress, transfer history database storage (schema v6), RFC SFTP v3 wire protocol
+   encoders and decoders (`SftpPacket`, `StatusCode`, `OpenFlags`, `FileAttributes`, `NameEntry`), stream framing
+   with partial-buffer detection, background transfer queue orchestration (`TransferQueue`), CLI commands
+   (`sftp packet encode-init/decode/encode-open` and `sftp queue`), and a full graphical GPUI dual-pane file browser
+   (Local left pane, Remote right pane, breadcrumbs, up-navigation, hidden-files toggling, selection-driven Upload/Download actions,
+   live transfer queue drawer with visual progress bar, and mode switching between Dual-Pane View and interactive terminal).
+   Next: direct remote subsystem wire streaming and recursive directory transfers.
 8. Snippets & Automation: Implemented parameter extraction (`{{var}}`, `{{var:-default}}`), POSIX shell escaping,
    secret parameter detection and preview redaction, JSON export/import, Turso database schema v6 persistence,
-   CLI `snippet` subcommands, and GPUI in-terminal drawer with Paste and Run execution. Next: modal variable input prompt
-   when executing snippets with unresolved variables.
+   CLI `snippet` subcommands, GPUI in-terminal drawer with Paste and Run execution, and interactive GPUI Snippet Variable
+   Modal prompt (`SnippetModalState`) with default value rendering, secret input masking, and Run/Paste dispatch.
+   Next: snippet synchronization over Google Drive E2EE sync.
 9. Google Drive E2EE Sync (Phase 5): Implemented zero-knowledge PBKDF2-HMAC-SHA256 key derivation with
    memory zeroization on drop, AES-256-GCM AEAD envelope sealing with bound associated data, versioned
    `SyncRecord` models with deletion tombstones, three-way sync conflict detection (`determine_sync_action`),
@@ -100,8 +105,9 @@ been checked on macOS.
    Cloud Sync status pill with background execution, explicit conflict resolution strategies (`resolve_record_conflict`,
    `ConflictResolutionChoice`, `ConflictItemView`), an interactive GPUI Conflict Resolution Modal allowing
    side-by-side visual diff inspection and granular selection of conflicting records ("Keep Local" vs. "Accept Remote"),
-   and automated disaster recovery snapshots (`sync_snapshots` table, schema v7) with snapshot history and rollback.
-   Next: automated background periodic sync timer loop in GPUI.
+   automated disaster recovery snapshots (`sync_snapshots` table, schema v7) with snapshot history and rollback,
+   and automated periodic sync timer background scheduler (`SyncScheduler` with 5s local mutation debounce and 300s periodic polling).
+   Next: biometric key unlocking integration.
 10. Continue the remaining phases in PROJECT.md (Workspaces, Mosh/Telnet/Serial, Collaboration),
     with acceptance tests and platform verification for each capability.
 

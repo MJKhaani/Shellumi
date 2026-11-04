@@ -96,12 +96,15 @@ macOS, Control-R elsewhere); Command-R has been verified on macOS, while
 Control-R has not yet been checked on Windows or Linux.
 The current host list, forms, and refresh controls are not yet exposed in the
 macOS accessibility tree observed during testing. The window provides a top tab bar
-for managing multiple concurrent local shells and remote SSH connections alongside
-the Hosts manager. The toolbar provides a "Local terminal" button to open a shell
+for managing multiple concurrent local shells, remote SSH connections, and SFTP file transfers
+alongside the Hosts manager. The toolbar provides a "Local terminal" button to open a shell
 session at any time. When a database is loaded, "Connect" starts an experimental
-OpenSSH session with strict host-key verification. The terminal view provides styled
-text spans (16/256/TrueColor RGB and text attributes), scrollback history, clipboard paste,
-extended ANSI navigation keys, PTY resize support, and a live cursor coordinate status bar.
+OpenSSH session with strict host-key verification, while "SFTP" opens a dedicated file transfer
+session featuring both a full graphical dual-pane browser (Local left pane, Remote right pane,
+clickable breadcrumbs, directory traversal, hidden-files toggling, selection-driven Upload/Download actions,
+and a live transfer queue drawer with visual progress bar) and an interactive raw SFTP terminal mode.
+The terminal view provides styled text spans (16/256/TrueColor RGB and text attributes), scrollback history,
+clipboard paste, extended ANSI navigation keys, PTY resize support, an in-pane search toolbar, and a live cursor coordinate status bar.
 The PTY worker has been tested with an isolated SSH server; full window interaction
 on Linux and Windows has not yet been established.
 macOS, Windows, and Linux are target platforms; successful builds
@@ -133,6 +136,10 @@ cargo run --locked -p shellumi-cli -- ./hosts.db vault diff ./vault.json --passp
 cargo run --locked -p shellumi-cli -- ./hosts.db vault import ./vault.json --passphrase "my-passphrase"
 cargo run --locked -p shellumi-cli -- ./hosts.db vault status
 cargo run --locked -p shellumi-cli -- ./hosts.db vault oauth-url
+cargo run --locked -p shellumi-cli -- ./hosts.db sftp local-ls ./
+cargo run --locked -p shellumi-cli -- ./hosts.db sftp packet encode-init --version 3
+cargo run --locked -p shellumi-cli -- ./hosts.db sftp packet decode 000000050100000003
+cargo run --locked -p shellumi-cli -- ./hosts.db sftp queue upload /local/file /remote/file 1024
 ```
 
 `add` prints the new numeric ID. `list` prints tab-separated ID, name, hostname,
@@ -144,8 +151,10 @@ OpenSSH public key and SHA-256 fingerprint, wiping private key material on drop.
 configurations (`~/.ssh/config`). `import-csv` and `export-csv` support standard
 comma-separated host tables. `vault export`, `vault import`, `vault diff`, `vault status`,
 `vault oauth-url`, `vault history`, and `vault rollback` handle zero-knowledge encrypted envelope backups, diff comparisons,
-RFC 7636 PKCE authorization parameters, and automated disaster recovery rollback. `connect` executes system OpenSSH with
-`-o StrictHostKeyChecking=ask` and `-o ForwardAgent=no`. Run with `--help` to display full
+RFC 7636 PKCE authorization parameters, and automated disaster recovery rollback. `sftp local-ls`,
+`sftp history`, `sftp log`, `sftp packet`, and `sftp queue` provide local filesystem browsing, transfer history auditing,
+RFC-compliant SFTP v3 wire packet inspection/encoding, and concurrent transfer queue orchestration.
+`connect` executes system OpenSSH with `-o StrictHostKeyChecking=ask` and `-o ForwardAgent=no`. Run with `--help` to display full
 command syntax.
 
 ## Tests and development checks

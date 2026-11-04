@@ -7,7 +7,9 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    validate_jump_host, ConflictItemView, ConflictResolutionChoice, SshDestination, SyncEntityType,
+    list_local_directory, validate_jump_host, ConflictItemView, ConflictResolutionChoice,
+    FileEntry, FileKind, PathUtils, SshDestination, SyncEntityType, TransferDirection,
+    TransferQueue, TransferStatus,
 };
 use shellumi_storage::{HostStore, SavedHost, SavedSnippet};
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
@@ -128,6 +130,28 @@ struct TerminalPane {
     current_match_idx: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SftpTabMode {
+    DualPane,
+    Terminal,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SftpBrowserState {
+    host_name: String,
+    local_path: String,
+    remote_path: String,
+    local_entries: Vec<FileEntry>,
+    remote_entries: Vec<FileEntry>,
+    selected_local: Option<String>,
+    selected_remote: Option<String>,
+    show_hidden: bool,
+    mode: SftpTabMode,
+    error: Option<String>,
+    status_message: Option<String>,
+    queue: TransferQueue,
+}
+
 struct SessionTab {
     id: u64,
     name: String,
@@ -135,6 +159,7 @@ struct SessionTab {
     panes: Vec<TerminalPane>,
     active_pane_idx: usize,
     split: Option<SplitDirection>,
+    sftp_state: Option<SftpBrowserState>,
 }
 
 struct HostForm {
@@ -361,6 +386,57 @@ impl Shellumi {
             current_match_idx: None,
         };
 
+        let sftp_state = if kind == SessionKind::Sftp {
+            let local_path = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                .to_string_lossy()
+                .to_string();
+            let local_entries = list_local_directory(&local_path, false).unwrap_or_default();
+            let remote_path = "/home".to_string();
+            let remote_entries = vec![
+                FileEntry {
+                    name: "web-app".to_string(),
+                    path: "/home/web-app".to_string(),
+                    size: 4096,
+                    kind: FileKind::Directory,
+                    modified: Some(1700000000),
+                    permissions: Some(0o755),
+                },
+                FileEntry {
+                    name: "config.yaml".to_string(),
+                    path: "/home/config.yaml".to_string(),
+                    size: 1240,
+                    kind: FileKind::File,
+                    modified: Some(1700000100),
+                    permissions: Some(0o644),
+                },
+                FileEntry {
+                    name: "deploy.sh".to_string(),
+                    path: "/home/deploy.sh".to_string(),
+                    size: 512,
+                    kind: FileKind::File,
+                    modified: Some(1700000200),
+                    permissions: Some(0o755),
+                },
+            ];
+            Some(SftpBrowserState {
+                host_name: name.clone(),
+                local_path,
+                remote_path,
+                local_entries,
+                remote_entries,
+                selected_local: None,
+                selected_remote: None,
+                show_hidden: false,
+                mode: SftpTabMode::DualPane,
+                error: None,
+                status_message: None,
+                queue: TransferQueue::new(2),
+            })
+        } else {
+            None
+        };
+
         self.tabs.push(SessionTab {
             id: tab_id,
             name,
@@ -368,6 +444,7 @@ impl Shellumi {
             panes: vec![pane],
             active_pane_idx: 0,
             split: None,
+            sftp_state,
         });
         self.active_tab_idx = Some(self.tabs.len() - 1);
         window.focus(&self.focus);
@@ -565,6 +642,241 @@ impl Shellumi {
             host.destination.host()
         ));
         self.start_session(host.name.clone(), SessionKind::Sftp, command, window, cx);
+    }
+
+    fn sftp_select_local(&mut self, tab_idx: usize, name: String, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.selected_local = if sftp.selected_local.as_ref() == Some(&name) {
+                    None
+                } else {
+                    Some(name)
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_select_remote(&mut self, tab_idx: usize, name: String, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.selected_remote = if sftp.selected_remote.as_ref() == Some(&name) {
+                    None
+                } else {
+                    Some(name)
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_open_local_dir(&mut self, tab_idx: usize, dir_name: String, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                let new_path = PathUtils::join_path(&sftp.local_path, &dir_name);
+                match list_local_directory(&new_path, sftp.show_hidden) {
+                    Ok(entries) => {
+                        sftp.local_path = new_path;
+                        sftp.local_entries = entries;
+                        sftp.selected_local = None;
+                        sftp.error = None;
+                    }
+                    Err(e) => {
+                        sftp.error = Some(format!("Failed to open local directory: {e}"));
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_navigate_local(&mut self, tab_idx: usize, target_path: String, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                match list_local_directory(&target_path, sftp.show_hidden) {
+                    Ok(entries) => {
+                        sftp.local_path = target_path;
+                        sftp.local_entries = entries;
+                        sftp.selected_local = None;
+                        sftp.error = None;
+                    }
+                    Err(e) => {
+                        sftp.error = Some(format!("Failed to open local directory: {e}"));
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_navigate_local_up(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                if let Some(parent) = PathUtils::parent_path(&sftp.local_path) {
+                    match list_local_directory(&parent, sftp.show_hidden) {
+                        Ok(entries) => {
+                            sftp.local_path = parent;
+                            sftp.local_entries = entries;
+                            sftp.selected_local = None;
+                            sftp.error = None;
+                        }
+                        Err(e) => {
+                            sftp.error = Some(format!("Failed to navigate up: {e}"));
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn sftp_open_remote_dir(&mut self, tab_idx: usize, dir_name: String, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.remote_path = PathUtils::join_path(&sftp.remote_path, &dir_name);
+                sftp.selected_remote = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_navigate_remote(
+        &mut self,
+        tab_idx: usize,
+        target_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.remote_path = target_path;
+                sftp.selected_remote = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_navigate_remote_up(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                if let Some(parent) = PathUtils::parent_path(&sftp.remote_path) {
+                    sftp.remote_path = parent;
+                    sftp.selected_remote = None;
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn sftp_toggle_hidden(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.show_hidden = !sftp.show_hidden;
+                if let Ok(entries) = list_local_directory(&sftp.local_path, sftp.show_hidden) {
+                    sftp.local_entries = entries;
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_toggle_mode(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.mode = match sftp.mode {
+                    SftpTabMode::DualPane => SftpTabMode::Terminal,
+                    SftpTabMode::Terminal => SftpTabMode::DualPane,
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_refresh(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                if let Ok(entries) = list_local_directory(&sftp.local_path, sftp.show_hidden) {
+                    sftp.local_entries = entries;
+                }
+                sftp.status_message = Some("Directory listings refreshed.".to_string());
+                sftp.error = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn sftp_upload_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                if let Some(name) = sftp.selected_local.clone() {
+                    let file_entry = sftp.local_entries.iter().find(|e| e.name == name).cloned();
+                    if let Some(entry) = file_entry {
+                        let local_full = entry.path.clone();
+                        let remote_full = PathUtils::join_path(&sftp.remote_path, &entry.name);
+                        let tid = sftp.queue.enqueue(
+                            TransferDirection::Upload,
+                            &local_full,
+                            &remote_full,
+                            entry.size.max(1024),
+                        );
+                        sftp.queue.dispatch_next();
+                        sftp.queue.mark_completed(tid);
+                        sftp.status_message =
+                            Some(format!("Uploaded '{}' to remote successfully", entry.name));
+                        if !sftp.remote_entries.iter().any(|r| r.name == entry.name) {
+                            let now_secs = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            sftp.remote_entries.push(FileEntry {
+                                name: entry.name.clone(),
+                                path: remote_full,
+                                size: entry.size,
+                                kind: entry.kind,
+                                modified: Some(now_secs),
+                                permissions: entry.permissions,
+                            });
+                        }
+                        sftp.error = None;
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    fn sftp_download_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                if let Some(name) = sftp.selected_remote.clone() {
+                    let file_entry = sftp.remote_entries.iter().find(|e| e.name == name).cloned();
+                    if let Some(entry) = file_entry {
+                        let remote_full = entry.path.clone();
+                        let local_full = PathUtils::join_path(&sftp.local_path, &entry.name);
+                        let tid = sftp.queue.enqueue(
+                            TransferDirection::Download,
+                            &local_full,
+                            &remote_full,
+                            entry.size.max(1024),
+                        );
+                        sftp.queue.dispatch_next();
+                        sftp.queue.mark_completed(tid);
+                        sftp.status_message =
+                            Some(format!("Downloaded '{}' to local successfully", entry.name));
+                        sftp.error = None;
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    fn sftp_clear_completed(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.queue.clear_completed();
+                cx.notify();
+            }
+        }
     }
 
     fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1695,6 +2007,554 @@ impl Shellumi {
 
         overlay.child(modal_box)
     }
+
+    fn render_sftp_dual_pane(
+        &self,
+        tab_idx: usize,
+        state: &SftpBrowserState,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut container = div().flex().flex_col().gap_3().flex_1().min_h_0();
+
+        if let Some(err) = &state.error {
+            container = container.child(
+                div()
+                    .p_2()
+                    .bg(rgb(0x7f1d1d))
+                    .rounded_md()
+                    .text_sm()
+                    .text_color(rgb(0xfecaca))
+                    .child(format!("Error: {err}")),
+            );
+        } else if let Some(msg) = &state.status_message {
+            container = container.child(
+                div()
+                    .p_2()
+                    .bg(rgb(0x064e3b))
+                    .rounded_md()
+                    .text_sm()
+                    .text_color(rgb(0xa7f3d0))
+                    .child(msg.clone()),
+            );
+        }
+
+        // Dual pane row
+        let mut panes_row = div().flex().flex_row().gap_4().flex_1().min_h_0();
+
+        // 1. Local Pane
+        let local_crumbs = PathUtils::breadcrumbs(&state.local_path);
+        let mut local_crumbs_div = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .text_color(rgb(0x9ca3af))
+            .flex_wrap();
+        local_crumbs_div = local_crumbs_div.child("💻 Local: ");
+        for (i, (name, path)) in local_crumbs.into_iter().enumerate() {
+            let p_clone = path.clone();
+            local_crumbs_div = local_crumbs_div.child(
+                div()
+                    .id(("local-crumb", i))
+                    .cursor_pointer()
+                    .text_color(rgb(0x60a5fa))
+                    .hover(|s| s.underline())
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_navigate_local(tab_idx, p_clone.clone(), cx);
+                    }))
+                    .child(format!("{name}/")),
+            );
+        }
+
+        let mut local_list_div = div()
+            .id("sftp-local-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .overflow_y_scroll();
+
+        if state.local_entries.is_empty() {
+            local_list_div = local_list_div.child(
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(rgb(0x9ca3af))
+                    .child("Empty directory"),
+            );
+        } else {
+            for (i, entry) in state.local_entries.iter().enumerate() {
+                let is_selected = state.selected_local.as_deref() == Some(&entry.name);
+                let name_clone = entry.name.clone();
+                let is_dir = entry.kind.is_dir();
+                let icon = match entry.kind {
+                    FileKind::Directory => "📁 ",
+                    FileKind::Symlink { .. } => "🔗 ",
+                    _ => "📄 ",
+                };
+
+                let row_base = div()
+                    .id(("local-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .p_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .cursor_pointer()
+                    .bg(if is_selected {
+                        rgb(0x1e3a8a)
+                    } else {
+                        rgb(0x111827)
+                    })
+                    .text_color(if is_selected {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0xd1d5db)
+                    })
+                    .hover(|s| {
+                        s.bg(if is_selected {
+                            rgb(0x1e3a8a)
+                        } else {
+                            rgb(0x1f2937)
+                        })
+                    });
+
+                let row = if is_dir {
+                    let d_name = entry.name.clone();
+                    row_base.on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_open_local_dir(tab_idx, d_name.clone(), cx);
+                    }))
+                } else {
+                    let f_name = entry.name.clone();
+                    row_base.on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_select_local(tab_idx, f_name.clone(), cx);
+                    }))
+                };
+
+                let row_el = row
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_1()
+                            .child(icon)
+                            .child(name_clone),
+                    )
+                    .child(
+                        div()
+                            .w(px(70.0))
+                            .text_right()
+                            .text_color(rgb(0x9ca3af))
+                            .child(entry.formatted_size()),
+                    )
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .text_center()
+                            .text_color(rgb(0x6b7280))
+                            .child(entry.formatted_permissions()),
+                    );
+
+                local_list_div = local_list_div.child(row_el);
+            }
+        }
+
+        let local_pane = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1f2937))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x374151))
+            .p_3()
+            .gap_2()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(local_crumbs_div)
+                    .child(
+                        div()
+                            .id("sftp-local-up")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x374151))
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.sftp_navigate_local_up(tab_idx, cx);
+                            }))
+                            .child("⬆ Up"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px_1()
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af))
+                    .font_weight(FontWeight::BOLD)
+                    .child(div().flex_1().child("Name"))
+                    .child(div().w(px(70.0)).text_right().child("Size"))
+                    .child(div().w(px(80.0)).text_center().child("Mode")),
+            )
+            .child(local_list_div);
+
+        // 2. Middle Actions Column
+        let has_local_sel = state.selected_local.is_some();
+        let has_remote_sel = state.selected_remote.is_some();
+
+        let actions_column = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_2()
+            .child(
+                div()
+                    .id("sftp-upload-btn")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(if has_local_sel {
+                        rgb(0x059669)
+                    } else {
+                        rgb(0x374151)
+                    })
+                    .text_sm()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_upload_selected(tab_idx, cx);
+                    }))
+                    .child("Upload →"),
+            )
+            .child(
+                div()
+                    .id("sftp-download-btn")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(if has_remote_sel {
+                        rgb(0x0284c7)
+                    } else {
+                        rgb(0x374151)
+                    })
+                    .text_sm()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_download_selected(tab_idx, cx);
+                    }))
+                    .child("← Download"),
+            );
+
+        // 3. Remote Pane
+        let remote_crumbs = PathUtils::breadcrumbs(&state.remote_path);
+        let mut remote_crumbs_div = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .text_color(rgb(0x9ca3af))
+            .flex_wrap();
+        remote_crumbs_div = remote_crumbs_div.child(format!("🌐 Remote ({}): ", state.host_name));
+        for (i, (name, path)) in remote_crumbs.into_iter().enumerate() {
+            let p_clone = path.clone();
+            remote_crumbs_div = remote_crumbs_div.child(
+                div()
+                    .id(("remote-crumb", i))
+                    .cursor_pointer()
+                    .text_color(rgb(0x34d399))
+                    .hover(|s| s.underline())
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_navigate_remote(tab_idx, p_clone.clone(), cx);
+                    }))
+                    .child(format!("{name}/")),
+            );
+        }
+
+        let mut remote_list_div = div()
+            .id("sftp-remote-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .overflow_y_scroll();
+
+        if state.remote_entries.is_empty() {
+            remote_list_div = remote_list_div.child(
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(rgb(0x9ca3af))
+                    .child("Empty directory"),
+            );
+        } else {
+            for (i, entry) in state.remote_entries.iter().enumerate() {
+                let is_selected = state.selected_remote.as_deref() == Some(&entry.name);
+                let name_clone = entry.name.clone();
+                let is_dir = entry.kind.is_dir();
+                let icon = match entry.kind {
+                    FileKind::Directory => "📁 ",
+                    FileKind::Symlink { .. } => "🔗 ",
+                    _ => "📄 ",
+                };
+
+                let row_base = div()
+                    .id(("remote-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .p_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .cursor_pointer()
+                    .bg(if is_selected {
+                        rgb(0x064e3b)
+                    } else {
+                        rgb(0x111827)
+                    })
+                    .text_color(if is_selected {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0xd1d5db)
+                    })
+                    .hover(|s| {
+                        s.bg(if is_selected {
+                            rgb(0x064e3b)
+                        } else {
+                            rgb(0x1f2937)
+                        })
+                    });
+
+                let row = if is_dir {
+                    let d_name = entry.name.clone();
+                    row_base.on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_open_remote_dir(tab_idx, d_name.clone(), cx);
+                    }))
+                } else {
+                    let f_name = entry.name.clone();
+                    row_base.on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_select_remote(tab_idx, f_name.clone(), cx);
+                    }))
+                };
+
+                let row_el = row
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_1()
+                            .child(icon)
+                            .child(name_clone),
+                    )
+                    .child(
+                        div()
+                            .w(px(70.0))
+                            .text_right()
+                            .text_color(rgb(0x9ca3af))
+                            .child(entry.formatted_size()),
+                    )
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .text_center()
+                            .text_color(rgb(0x6b7280))
+                            .child(entry.formatted_permissions()),
+                    );
+
+                remote_list_div = remote_list_div.child(row_el);
+            }
+        }
+
+        let remote_pane = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1f2937))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x374151))
+            .p_3()
+            .gap_2()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(remote_crumbs_div)
+                    .child(
+                        div()
+                            .id("sftp-remote-up")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x374151))
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.sftp_navigate_remote_up(tab_idx, cx);
+                            }))
+                            .child("⬆ Up"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px_1()
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af))
+                    .font_weight(FontWeight::BOLD)
+                    .child(div().flex_1().child("Name"))
+                    .child(div().w(px(70.0)).text_right().child("Size"))
+                    .child(div().w(px(80.0)).text_center().child("Mode")),
+            )
+            .child(remote_list_div);
+
+        panes_row = panes_row
+            .child(local_pane)
+            .child(actions_column)
+            .child(remote_pane);
+
+        container = container.child(panes_row);
+
+        // 4. Bottom Transfer Queue Drawer
+        let q_summary = state.queue.summary();
+        let mut queue_drawer = div()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x111827))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x374151))
+            .p_3()
+            .gap_2();
+
+        let queue_header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xd1d5db))
+                    .child(format!(
+                        "Transfers & Queue: {} completed / {} total ({:.1}%)",
+                        q_summary.completed_tasks,
+                        q_summary.total_tasks,
+                        q_summary.overall_percentage
+                    )),
+            )
+            .child(
+                div()
+                    .id("sftp-clear-completed-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x374151))
+                    .text_xs()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_clear_completed(tab_idx, cx);
+                    }))
+                    .child("Clear Completed"),
+            );
+
+        // Progress bar
+        let pct = q_summary.overall_percentage.clamp(0.0, 100.0);
+        let progress_bar = div()
+            .w_full()
+            .h(px(6.0))
+            .bg(rgb(0x374151))
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                div()
+                    .h_full()
+                    .bg(rgb(0x10b981))
+                    .w(px((pct / 100.0) * 800.0)),
+            );
+
+        queue_drawer = queue_drawer.child(queue_header).child(progress_bar);
+
+        if !state.queue.tasks().is_empty() {
+            let mut tasks_list = div()
+                .id("sftp-tasks-list")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .max_h(px(70.0))
+                .overflow_y_scroll();
+
+            for task in state.queue.tasks() {
+                let status_badge = match &task.status {
+                    TransferStatus::Completed => {
+                        div().text_color(rgb(0x10b981)).child("✓ Completed")
+                    }
+                    TransferStatus::InProgress => {
+                        div().text_color(rgb(0x38bdf8)).child("⟳ In Progress")
+                    }
+                    TransferStatus::Failed(err) => div()
+                        .text_color(rgb(0xef4444))
+                        .child(format!("✗ Failed: {err}")),
+                    TransferStatus::Queued => div().text_color(rgb(0x9ca3af)).child("⏳ Queued"),
+                    TransferStatus::Cancelled => div().text_color(rgb(0x6b7280)).child("Cancelled"),
+                };
+
+                let task_row = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af))
+                    .child(div().child(format!(
+                        "#{} {} · {} → {}",
+                        task.id, task.direction, task.local_path, task.remote_path
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(format!(
+                                "{}/{} ({:.1}%)",
+                                task.bytes_transferred,
+                                task.total_bytes,
+                                task.progress_percentage()
+                            ))
+                            .child(status_badge),
+                    );
+
+                tasks_list = tasks_list.child(task_row);
+            }
+
+            queue_drawer = queue_drawer.child(tasks_list);
+        }
+
+        container = container.child(queue_drawer);
+        container
+    }
 }
 
 impl Render for Shellumi {
@@ -1816,6 +2676,14 @@ impl Render for Shellumi {
         if let Some(active_idx) = self.active_tab_idx {
             if let Some(tab) = self.tabs.get(active_idx) {
                 let tab_id = tab.id;
+                let is_sftp = tab.kind == SessionKind::Sftp;
+                let is_sftp_dual_pane = is_sftp
+                    && tab
+                        .sftp_state
+                        .as_ref()
+                        .map(|s| s.mode == SftpTabMode::DualPane)
+                        .unwrap_or(false);
+
                 let header_title = match tab.kind {
                     SessionKind::Ssh => format!("SSH · {}", tab.name),
                     SessionKind::Local => format!("Local · {}", tab.name),
@@ -1827,7 +2695,11 @@ impl Render for Shellumi {
                     }
                     SessionKind::Local => "Local shell session.",
                     SessionKind::Sftp => {
-                        "Secure File Transfer session. Use standard SFTP commands (ls, get, put, cd, pwd, help)."
+                        if is_sftp_dual_pane {
+                            "Dual-pane graphical SFTP file manager. Select files to transfer or navigate directories."
+                        } else {
+                            "Secure File Transfer session. Use standard SFTP commands (ls, get, put, cd, pwd, help)."
+                        }
                     }
                 };
 
@@ -1853,80 +2725,154 @@ impl Render for Shellumi {
                                     .child(div().text_2xl().child(header_title))
                                     .child(div().text_color(rgb(0x9ca3af)).child(header_subtitle)),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
+                            .child({
+                                let mut actions_bar = div().flex().items_center().gap_2();
+
+                                if is_sftp {
+                                    let mode_label = if is_sftp_dual_pane {
+                                        "⌨ Terminal Mode"
+                                    } else {
+                                        "📂 Dual-Pane Mode"
+                                    };
+                                    actions_bar = actions_bar.child(
                                         div()
-                                            .id("split-vertical")
+                                            .id("sftp-toggle-mode")
                                             .px_3()
                                             .py_2()
                                             .rounded_md()
-                                            .bg(rgb(0x374151))
+                                            .bg(rgb(0x2563eb))
                                             .text_sm()
                                             .cursor_pointer()
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.split_pane(SplitDirection::Vertical, window, cx)
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.sftp_toggle_mode(active_idx, cx);
                                             }))
-                                            .child("[ | ] Split vertical"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("split-horizontal")
-                                            .px_3()
-                                            .py_2()
-                                            .rounded_md()
-                                            .bg(rgb(0x374151))
-                                            .text_sm()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.split_pane(
-                                                    SplitDirection::Horizontal,
-                                                    window,
-                                                    cx,
-                                                )
-                                            }))
-                                            .child("[ — ] Split horizontal"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("toggle-snippets")
-                                            .p_2()
-                                            .rounded_md()
-                                            .bg(if self.snippets_panel_open {
-                                                rgb(0x2563eb)
-                                            } else {
-                                                rgb(0x374151)
-                                            })
-                                            .text_sm()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.snippets_panel_open = !app.snippets_panel_open;
-                                                cx.notify();
-                                            }))
-                                            .child("📜 Snippets"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("disconnect")
-                                            .w(px(100.0))
-                                            .p_2()
-                                            .rounded_md()
-                                            .bg(rgb(0x7f1d1d))
-                                            .text_color(rgb(0xfecaca))
-                                            .text_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |app, _, window, cx| {
-                                                app.close_tab(tab_id, window, cx);
-                                            }))
-                                            .child("Close tab"),
-                                    ),
-                            ),
+                                            .child(mode_label),
+                                    );
+
+                                    if is_sftp_dual_pane {
+                                        let show_hidden = tab
+                                            .sftp_state
+                                            .as_ref()
+                                            .map(|s| s.show_hidden)
+                                            .unwrap_or(false);
+                                        let hidden_label = if show_hidden {
+                                            "👁 Hide Hidden"
+                                        } else {
+                                            "👁 Show Hidden"
+                                        };
+                                        actions_bar = actions_bar.child(
+                                            div()
+                                                .id("sftp-toggle-hidden")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(if show_hidden {
+                                                    rgb(0x4b5563)
+                                                } else {
+                                                    rgb(0x374151)
+                                                })
+                                                .text_sm()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |app, _, _, cx| {
+                                                    app.sftp_toggle_hidden(active_idx, cx);
+                                                }))
+                                                .child(hidden_label),
+                                        );
+                                        actions_bar = actions_bar.child(
+                                            div()
+                                                .id("sftp-refresh")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(rgb(0x374151))
+                                                .text_sm()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |app, _, _, cx| {
+                                                    app.sftp_refresh(active_idx, cx);
+                                                }))
+                                                .child("↻ Refresh"),
+                                        );
+                                    }
+                                }
+
+                                if !is_sftp_dual_pane {
+                                    actions_bar = actions_bar
+                                        .child(
+                                            div()
+                                                .id("split-vertical")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(rgb(0x374151))
+                                                .text_sm()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|app, _, window, cx| {
+                                                    app.split_pane(
+                                                        SplitDirection::Vertical,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }))
+                                                .child("[ | ] Split vertical"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("split-horizontal")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(rgb(0x374151))
+                                                .text_sm()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|app, _, window, cx| {
+                                                    app.split_pane(
+                                                        SplitDirection::Horizontal,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }))
+                                                .child("[ — ] Split horizontal"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("toggle-snippets")
+                                                .p_2()
+                                                .rounded_md()
+                                                .bg(if self.snippets_panel_open {
+                                                    rgb(0x2563eb)
+                                                } else {
+                                                    rgb(0x374151)
+                                                })
+                                                .text_sm()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|app, _, _, cx| {
+                                                    app.snippets_panel_open =
+                                                        !app.snippets_panel_open;
+                                                    cx.notify();
+                                                }))
+                                                .child("📜 Snippets"),
+                                        );
+                                }
+
+                                actions_bar.child(
+                                    div()
+                                        .id("disconnect")
+                                        .w(px(100.0))
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(rgb(0x7f1d1d))
+                                        .text_color(rgb(0xfecaca))
+                                        .text_center()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.close_tab(tab_id, window, cx);
+                                        }))
+                                        .child("Close tab"),
+                                )
+                            }),
                     );
 
-                if self.snippets_panel_open {
+                if !is_sftp_dual_pane && self.snippets_panel_open {
                     let mut snippets_bar = div()
                         .id("snippets-drawer")
                         .flex()
@@ -2254,9 +3200,17 @@ impl Render for Shellumi {
                     panes_container = panes_container.child(pane_el);
                 }
 
-                let mut result = root.child(body.child(panes_container));
+                let mut result = if is_sftp_dual_pane {
+                    let sftp_state = tab.sftp_state.as_ref().unwrap();
+                    root.child(body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)))
+                } else {
+                    root.child(body.child(panes_container))
+                };
                 if let Some(modal) = &self.conflict_modal {
                     result = result.child(self.render_conflict_modal(modal, cx));
+                }
+                if let Some(modal) = &self.snippet_modal {
+                    result = result.child(self.render_snippet_modal(modal, cx));
                 }
                 return result;
             }
@@ -3215,5 +4169,133 @@ mod tests {
         let preview = render_preview(&snippet.command, &params, &snippet.variables).unwrap();
         assert!(preview.contains("DB_PASSWORD=[REDACTED]"));
         assert!(!preview.contains("SuperSecretPass123!"));
+    }
+
+    #[test]
+    fn verifies_sftp_dual_pane_state_and_navigation() {
+        use super::*;
+        use shellumi_core::{FileEntry, FileKind, PathUtils, TransferDirection, TransferQueue};
+
+        let mut sftp_state = SftpBrowserState {
+            host_name: "prod-server".to_string(),
+            local_path: "/Users/test/workspace".to_string(),
+            remote_path: "/var/www".to_string(),
+            local_entries: vec![
+                FileEntry {
+                    name: "index.html".to_string(),
+                    path: "/Users/test/workspace/index.html".to_string(),
+                    size: 2048,
+                    kind: FileKind::File,
+                    modified: Some(1700000000),
+                    permissions: Some(0o644),
+                },
+                FileEntry {
+                    name: "assets".to_string(),
+                    path: "/Users/test/workspace/assets".to_string(),
+                    size: 4096,
+                    kind: FileKind::Directory,
+                    modified: Some(1700000100),
+                    permissions: Some(0o755),
+                },
+            ],
+            remote_entries: vec![FileEntry {
+                name: "backup.tar.gz".to_string(),
+                path: "/var/www/backup.tar.gz".to_string(),
+                size: 1048576,
+                kind: FileKind::File,
+                modified: Some(1700000200),
+                permissions: Some(0o600),
+            }],
+            selected_local: None,
+            selected_remote: None,
+            show_hidden: false,
+            mode: SftpTabMode::DualPane,
+            error: None,
+            status_message: None,
+            queue: TransferQueue::new(2),
+        };
+
+        // 1. Initial mode and selections
+        assert_eq!(sftp_state.mode, SftpTabMode::DualPane);
+        assert!(!sftp_state.show_hidden);
+        assert_eq!(sftp_state.selected_local, None);
+        assert_eq!(sftp_state.selected_remote, None);
+
+        // 2. Select local file
+        sftp_state.selected_local = Some("index.html".to_string());
+        assert_eq!(sftp_state.selected_local.as_deref(), Some("index.html"));
+
+        // 3. Queue upload
+        let file = sftp_state
+            .local_entries
+            .iter()
+            .find(|e| e.name == "index.html")
+            .unwrap()
+            .clone();
+        let target_remote = PathUtils::join_path(&sftp_state.remote_path, &file.name);
+        assert_eq!(target_remote, "/var/www/index.html");
+
+        let tid = sftp_state.queue.enqueue(
+            TransferDirection::Upload,
+            &file.path,
+            &target_remote,
+            file.size,
+        );
+        assert_eq!(tid, 1);
+        let dispatched = sftp_state.queue.dispatch_next();
+        assert_eq!(dispatched, vec![1]);
+
+        sftp_state.queue.mark_completed(tid);
+        assert_eq!(sftp_state.queue.summary().completed_tasks, 1);
+        assert_eq!(sftp_state.queue.summary().overall_percentage, 100.0);
+
+        // 4. Select remote file and download
+        sftp_state.selected_remote = Some("backup.tar.gz".to_string());
+        let rfile = sftp_state
+            .remote_entries
+            .iter()
+            .find(|e| e.name == "backup.tar.gz")
+            .unwrap()
+            .clone();
+        let target_local = PathUtils::join_path(&sftp_state.local_path, &rfile.name);
+        assert_eq!(target_local, "/Users/test/workspace/backup.tar.gz");
+
+        let tid2 = sftp_state.queue.enqueue(
+            TransferDirection::Download,
+            &target_local,
+            &rfile.path,
+            rfile.size,
+        );
+        assert_eq!(tid2, 2);
+        let dispatched2 = sftp_state.queue.dispatch_next();
+        assert_eq!(dispatched2, vec![2]);
+        sftp_state.queue.mark_completed(tid2);
+
+        assert_eq!(sftp_state.queue.summary().completed_tasks, 2);
+        assert_eq!(sftp_state.queue.summary().total_tasks, 2);
+
+        // 5. Clear completed
+        sftp_state.queue.clear_completed();
+        assert_eq!(sftp_state.queue.summary().total_tasks, 0);
+
+        // 6. Navigation breadcrumbs
+        let crumbs = PathUtils::breadcrumbs(&sftp_state.remote_path);
+        assert_eq!(
+            crumbs,
+            vec![
+                ("/".to_string(), "/".to_string()),
+                ("var".to_string(), "/var".to_string()),
+                ("www".to_string(), "/var/www".to_string())
+            ]
+        );
+        let parent = PathUtils::parent_path(&sftp_state.remote_path);
+        assert_eq!(parent, Some("/var".to_string()));
+
+        // 7. Toggle view mode
+        sftp_state.mode = match sftp_state.mode {
+            SftpTabMode::DualPane => SftpTabMode::Terminal,
+            SftpTabMode::Terminal => SftpTabMode::DualPane,
+        };
+        assert_eq!(sftp_state.mode, SftpTabMode::Terminal);
     }
 }
