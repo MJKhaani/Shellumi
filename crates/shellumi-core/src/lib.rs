@@ -37,19 +37,21 @@ pub use snippet::{
 };
 pub use ssh_config::{export_ssh_config, parse_ssh_config, HostConfigEntry};
 pub use sync::{
-    build_delete_file_request, build_download_file_request, build_google_drive_auth_url,
-    build_list_appdata_files_request, build_multipart_upload_request,
+    build_conflict_item_views, build_delete_file_request, build_download_file_request,
+    build_google_drive_auth_url, build_list_appdata_files_request, build_multipart_upload_request,
     build_oauth_callback_response, build_token_exchange_request, build_token_refresh_request,
     build_update_file_request, decrypt_entity, determine_sync_action, diff_sync_records,
     diff_sync_records_with_passphrase, encrypt_entity, encrypt_entity_with_iterations,
-    generate_nonce, generate_pkce_challenge, generate_salt, parse_download_file_response,
-    parse_list_files_response, parse_oauth_callback_request, parse_token_exchange_response,
-    parse_token_refresh_response, parse_upload_file_response, plan_sync_cycle, url_encode,
-    DiffStatus, DriveFileMetadata, EncryptedEnvelope, GoogleDriveSyncClient, HttpRequest,
-    HttpResponse, HttpTransport, OAuthCallbackListener, OAuthTokenBundle, PkceChallenge,
-    RecordDiffSummary, SyncAction, SyncEntityType, SyncError, SyncPlan, SyncRecord, SyncVault,
-    DEFAULT_KDF_ITERATIONS, DRIVE_APPDATA_FILENAME, KEY_LEN, MIN_PASSPHRASE_LENGTH,
-    OAUTH_TOKEN_ACCOUNT, OAUTH_TOKEN_SERVICE, SALT_LEN,
+    format_record_summary, generate_nonce, generate_pkce_challenge, generate_salt,
+    parse_download_file_response, parse_list_files_response, parse_oauth_callback_request,
+    parse_token_exchange_response, parse_token_refresh_response, parse_upload_file_response,
+    plan_sync_cycle, resolve_record_conflict, url_encode, ConflictItemView,
+    ConflictResolutionChoice, DiffStatus, DriveFileMetadata, EncryptedEnvelope,
+    GoogleDriveSyncClient, HttpRequest, HttpResponse, HttpTransport, OAuthCallbackListener,
+    OAuthTokenBundle, PkceChallenge, RecordDiffSummary, SyncAction, SyncBackoff, SyncEntityType,
+    SyncError, SyncPlan, SyncRecord, SyncScheduler, SyncTrigger, SyncVault, DEFAULT_KDF_ITERATIONS,
+    DRIVE_APPDATA_FILENAME, KEY_LEN, MIN_PASSPHRASE_LENGTH, OAUTH_TOKEN_ACCOUNT,
+    OAUTH_TOKEN_SERVICE, SALT_LEN,
 };
 pub use tunnel::{validate_jump_host, ForwardingType, PortForwardRule, TunnelError};
 

@@ -820,6 +820,315 @@ pub fn diff_sync_records(
     diff_sync_records_with_passphrase(local_records, remote_records, None)
 }
 
+/// User's resolution choice when resolving conflicting sync records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictResolutionChoice {
+    /// Keep the local record, incrementing its version to override remote.
+    KeepLocal,
+    /// Accept the remote record, replacing the local record.
+    AcceptRemote,
+}
+
+impl fmt::Display for ConflictResolutionChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::KeepLocal => f.write_str("Keep Local"),
+            Self::AcceptRemote => f.write_str("Accept Remote"),
+        }
+    }
+}
+
+/// Resolves a single conflict between local and remote records based on user's choice.
+pub fn resolve_record_conflict(
+    local: &SyncRecord,
+    remote: &SyncRecord,
+    choice: ConflictResolutionChoice,
+    now: u64,
+) -> SyncRecord {
+    match choice {
+        ConflictResolutionChoice::KeepLocal => {
+            let mut resolved = local.clone();
+            resolved.version = local.version.max(remote.version) + 1;
+            resolved.updated_at = now;
+            resolved
+        }
+        ConflictResolutionChoice::AcceptRemote => remote.clone(),
+    }
+}
+
+/// Extracts a user-friendly summary string of a record's entity contents.
+pub fn format_record_summary(passphrase: Option<&str>, record: &SyncRecord) -> String {
+    if record.deleted {
+        return format!("{} (Deleted / Tombstone)", record.object_id);
+    }
+    let Some(envelope) = &record.envelope else {
+        return format!("{} (No payload)", record.object_id);
+    };
+    let Some(pass) = passphrase else {
+        return format!("{} [Encrypted]", record.object_id);
+    };
+    match decrypt_entity::<serde_json::Value>(pass, envelope) {
+        Ok(val) => {
+            if let Some(obj) = val.as_object() {
+                match record.entity_type {
+                    SyncEntityType::Host => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let host = obj
+                            .get("hostname")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let user = obj
+                            .get("username")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("user");
+                        let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(22);
+                        format!("{name} ({user}@{host}:{port})")
+                    }
+                    SyncEntityType::Group => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        format!("{name} (Group)")
+                    }
+                    SyncEntityType::Tunnel => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let ftype = obj
+                            .get("forwarding_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tunnel");
+                        let bport = obj.get("bind_port").and_then(|v| v.as_u64()).unwrap_or(0);
+                        format!("{name} ({ftype}:{bport})")
+                    }
+                    SyncEntityType::Snippet => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let cmd = obj.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        let short_cmd = if cmd.len() > 30 {
+                            format!("{}…", &cmd[..27])
+                        } else {
+                            cmd.to_string()
+                        };
+                        format!("{name} (`{short_cmd}`)")
+                    }
+                }
+            } else {
+                record.object_id.clone()
+            }
+        }
+        Err(_) => format!("{} [Decryption Failed]", record.object_id),
+    }
+}
+
+/// Human-readable representation of a conflicting item for UI inspection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictItemView {
+    pub object_id: String,
+    pub entity_type: SyncEntityType,
+    pub local_version: u64,
+    pub remote_version: u64,
+    pub local_updated_at: u64,
+    pub remote_updated_at: u64,
+    pub local_summary: String,
+    pub remote_summary: String,
+}
+
+/// Builds human-readable `ConflictItemView` models for all conflicting items between local and remote records.
+pub fn build_conflict_item_views(
+    local_records: &[SyncRecord],
+    remote_records: &[SyncRecord],
+    passphrase: Option<&str>,
+) -> Vec<ConflictItemView> {
+    let diffs = diff_sync_records_with_passphrase(local_records, remote_records, passphrase);
+    let mut views = Vec::new();
+
+    for diff in diffs {
+        if diff.status == DiffStatus::Conflict {
+            let local = local_records.iter().find(|r| r.object_id == diff.object_id);
+            let remote = remote_records
+                .iter()
+                .find(|r| r.object_id == diff.object_id);
+
+            if let (Some(loc), Some(rem)) = (local, remote) {
+                views.push(ConflictItemView {
+                    object_id: diff.object_id.clone(),
+                    entity_type: diff.entity_type,
+                    local_version: loc.version,
+                    remote_version: rem.version,
+                    local_updated_at: loc.updated_at,
+                    remote_updated_at: rem.updated_at,
+                    local_summary: format_record_summary(passphrase, loc),
+                    remote_summary: format_record_summary(passphrase, rem),
+                });
+            }
+        }
+    }
+
+    views
+}
+
+/// Trigger mechanism initiating a synchronization cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncTrigger {
+    /// Initial synchronization upon application startup.
+    Startup,
+    /// Explicit user action via UI button or CLI command.
+    Manual,
+    /// Periodic background timer tick.
+    Periodic,
+    /// Debounced trigger fired after local database modifications.
+    LocalMutation,
+}
+
+impl fmt::Display for SyncTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup => f.write_str("startup"),
+            Self::Manual => f.write_str("manual"),
+            Self::Periodic => f.write_str("periodic"),
+            Self::LocalMutation => f.write_str("local_mutation"),
+        }
+    }
+}
+
+/// Exponential backoff calculator for network resilience.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncBackoff {
+    pub initial_delay_secs: u64,
+    pub max_delay_secs: u64,
+    pub multiplier: f64,
+}
+
+impl Default for SyncBackoff {
+    fn default() -> Self {
+        Self {
+            initial_delay_secs: 5,
+            max_delay_secs: 300,
+            multiplier: 2.0,
+        }
+    }
+}
+
+impl SyncBackoff {
+    pub fn new(initial_delay_secs: u64, max_delay_secs: u64, multiplier: f64) -> Self {
+        Self {
+            initial_delay_secs,
+            max_delay_secs,
+            multiplier,
+        }
+    }
+
+    /// Calculates the backoff delay in seconds for a given consecutive failure count.
+    pub fn compute_delay_secs(&self, consecutive_failures: u32) -> u64 {
+        if consecutive_failures == 0 {
+            return 0;
+        }
+        let factor = self.multiplier.powi((consecutive_failures - 1) as i32);
+        let delay = (self.initial_delay_secs as f64 * factor) as u64;
+        delay.min(self.max_delay_secs)
+    }
+}
+
+/// Coordinates synchronization timing, debounced local mutations, and backoff states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncScheduler {
+    pub last_sync_time: Option<u64>,
+    pub consecutive_failures: u32,
+    pub backoff: SyncBackoff,
+    pub debounce_secs: u64,
+    pub periodic_interval_secs: u64,
+    pub pending_mutation: bool,
+    pub mutation_deadline: Option<u64>,
+}
+
+impl Default for SyncScheduler {
+    fn default() -> Self {
+        Self::new(5, 300)
+    }
+}
+
+impl SyncScheduler {
+    pub fn new(debounce_secs: u64, periodic_interval_secs: u64) -> Self {
+        Self {
+            last_sync_time: None,
+            consecutive_failures: 0,
+            backoff: SyncBackoff::default(),
+            debounce_secs,
+            periodic_interval_secs,
+            pending_mutation: false,
+            mutation_deadline: None,
+        }
+    }
+
+    /// Records a local database mutation and arms the debounce timer.
+    pub fn notify_local_mutation(&mut self, current_time: u64) {
+        self.pending_mutation = true;
+        if self.mutation_deadline.is_none() {
+            self.mutation_deadline = Some(current_time.saturating_add(self.debounce_secs));
+        }
+    }
+
+    /// Determines whether a sync is due given the current time.
+    pub fn check_trigger(&self, current_time: u64) -> Option<SyncTrigger> {
+        // 1. Backoff check if recent failures occurred
+        if self.consecutive_failures > 0 {
+            if let Some(last_attempt) = self.last_sync_time {
+                let required_delay = self.backoff.compute_delay_secs(self.consecutive_failures);
+                if current_time < last_attempt.saturating_add(required_delay) {
+                    return None;
+                }
+            }
+        }
+
+        // 2. Local mutation debounce check
+        if self.pending_mutation {
+            if let Some(deadline) = self.mutation_deadline {
+                if current_time >= deadline {
+                    return Some(SyncTrigger::LocalMutation);
+                }
+            }
+        }
+
+        // 3. Startup sync if never run
+        if self.last_sync_time.is_none() {
+            return Some(SyncTrigger::Startup);
+        }
+
+        // 4. Periodic interval sync
+        if let Some(last) = self.last_sync_time {
+            if current_time >= last.saturating_add(self.periodic_interval_secs) {
+                return Some(SyncTrigger::Periodic);
+            }
+        }
+
+        None
+    }
+
+    /// Records a successful sync cycle, resetting failures and pending mutations.
+    pub fn record_success(&mut self, current_time: u64) {
+        self.last_sync_time = Some(current_time);
+        self.consecutive_failures = 0;
+        self.pending_mutation = false;
+        self.mutation_deadline = None;
+    }
+
+    /// Records a failed sync cycle, incrementing consecutive failure count.
+    pub fn record_failure(&mut self, current_time: u64) {
+        self.last_sync_time = Some(current_time);
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+}
+
 /// Minimal percent-encoder for application/x-www-form-urlencoded strings.
 pub fn url_encode(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len());
@@ -2105,5 +2414,275 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.transport().requests.lock().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn verifies_resolve_record_conflict_choices() {
+        let dummy_env = EncryptedEnvelope {
+            salt: "salt".into(),
+            nonce: "nonce".into(),
+            ciphertext: "cipher".into(),
+            associated_data: "host:server1".into(),
+            kdf_iterations: 1000,
+        };
+
+        let local_record = SyncRecord::new(
+            "server1",
+            SyncEntityType::Host,
+            2,
+            "device-local",
+            100,
+            dummy_env.clone(),
+        );
+
+        let remote_record = SyncRecord::new(
+            "server1",
+            SyncEntityType::Host,
+            2,
+            "device-remote",
+            105,
+            dummy_env.clone(),
+        );
+
+        // Keep local: version should bump to 3, device remains local, timestamp updated
+        let resolved_local = resolve_record_conflict(
+            &local_record,
+            &remote_record,
+            ConflictResolutionChoice::KeepLocal,
+            200,
+        );
+        assert_eq!(resolved_local.version, 3);
+        assert_eq!(resolved_local.device_id, "device-local");
+        assert_eq!(resolved_local.updated_at, 200);
+
+        // Accept remote: version and device should match remote
+        let resolved_remote = resolve_record_conflict(
+            &local_record,
+            &remote_record,
+            ConflictResolutionChoice::AcceptRemote,
+            200,
+        );
+        assert_eq!(resolved_remote.version, 2);
+        assert_eq!(resolved_remote.device_id, "device-remote");
+        assert_eq!(resolved_remote.updated_at, 105);
+    }
+
+    #[test]
+    fn verifies_format_record_summary_for_all_entity_types() {
+        let passphrase = "test-secret-passphrase";
+
+        // 1. Host
+        #[derive(Serialize)]
+        struct TestHost {
+            name: String,
+            hostname: String,
+            username: String,
+            port: u16,
+        }
+        let host_payload = TestHost {
+            name: "Production Bastion".into(),
+            hostname: "bastion.example.com".into(),
+            username: "admin".into(),
+            port: 2222,
+        };
+        let host_env =
+            encrypt_entity_with_iterations(passphrase, "host", "host-1", &host_payload, 1000)
+                .unwrap();
+        let host_rec = SyncRecord::new("host-1", SyncEntityType::Host, 1, "dev1", 100, host_env);
+        let host_summary = format_record_summary(Some(passphrase), &host_rec);
+        assert_eq!(
+            host_summary,
+            "Production Bastion (admin@bastion.example.com:2222)"
+        );
+
+        // 2. Group
+        #[derive(Serialize)]
+        struct TestGroup {
+            name: String,
+        }
+        let group_payload = TestGroup {
+            name: "Database Tier".into(),
+        };
+        let group_env =
+            encrypt_entity_with_iterations(passphrase, "group", "group-1", &group_payload, 1000)
+                .unwrap();
+        let group_rec =
+            SyncRecord::new("group-1", SyncEntityType::Group, 1, "dev1", 100, group_env);
+        let group_summary = format_record_summary(Some(passphrase), &group_rec);
+        assert_eq!(group_summary, "Database Tier (Group)");
+
+        // 3. Tunnel
+        #[derive(Serialize)]
+        struct TestTunnel {
+            name: String,
+            forwarding_type: String,
+            bind_port: u16,
+        }
+        let tunnel_payload = TestTunnel {
+            name: "Postgres Forward".into(),
+            forwarding_type: "local".into(),
+            bind_port: 5432,
+        };
+        let tunnel_env =
+            encrypt_entity_with_iterations(passphrase, "tunnel", "tunnel-1", &tunnel_payload, 1000)
+                .unwrap();
+        let tunnel_rec = SyncRecord::new(
+            "tunnel-1",
+            SyncEntityType::Tunnel,
+            1,
+            "dev1",
+            100,
+            tunnel_env,
+        );
+        let tunnel_summary = format_record_summary(Some(passphrase), &tunnel_rec);
+        assert_eq!(tunnel_summary, "Postgres Forward (local:5432)");
+
+        // 4. Snippet
+        #[derive(Serialize)]
+        struct TestSnippet {
+            name: String,
+            command: String,
+        }
+        let snippet_payload = TestSnippet {
+            name: "Flush Redis".into(),
+            command: "redis-cli flushall".into(),
+        };
+        let snippet_env = encrypt_entity_with_iterations(
+            passphrase,
+            "snippet",
+            "snippet-1",
+            &snippet_payload,
+            1000,
+        )
+        .unwrap();
+        let snippet_rec = SyncRecord::new(
+            "snippet-1",
+            SyncEntityType::Snippet,
+            1,
+            "dev1",
+            100,
+            snippet_env,
+        );
+        let snippet_summary = format_record_summary(Some(passphrase), &snippet_rec);
+        assert_eq!(snippet_summary, "Flush Redis (`redis-cli flushall`)");
+
+        // 5. Tombstone
+        let mut tombstone = snippet_rec.clone();
+        tombstone.deleted = true;
+        let tombstone_summary = format_record_summary(Some(passphrase), &tombstone);
+        assert!(tombstone_summary.contains("Deleted / Tombstone"));
+    }
+
+    #[test]
+    fn verifies_build_conflict_item_views() {
+        let passphrase = "test-secret-passphrase";
+
+        #[derive(Serialize)]
+        struct HostPayload {
+            name: String,
+            hostname: String,
+            username: String,
+            port: u16,
+        }
+
+        let loc_payload = HostPayload {
+            name: "Server A Local".into(),
+            hostname: "srv-a.internal".into(),
+            username: "root".into(),
+            port: 22,
+        };
+        let rem_payload = HostPayload {
+            name: "Server A Remote".into(),
+            hostname: "srv-a.internal".into(),
+            username: "ubuntu".into(),
+            port: 22,
+        };
+
+        let loc_env =
+            encrypt_entity_with_iterations(passphrase, "host", "srv-a", &loc_payload, 1000)
+                .unwrap();
+        let rem_env =
+            encrypt_entity_with_iterations(passphrase, "host", "srv-a", &rem_payload, 1000)
+                .unwrap();
+
+        let local_record =
+            SyncRecord::new("srv-a", SyncEntityType::Host, 1, "dev-local", 100, loc_env);
+        let remote_record =
+            SyncRecord::new("srv-a", SyncEntityType::Host, 1, "dev-remote", 105, rem_env);
+
+        let views = build_conflict_item_views(&[local_record], &[remote_record], Some(passphrase));
+
+        assert_eq!(views.len(), 1);
+        let item = &views[0];
+        assert_eq!(item.object_id, "srv-a");
+        assert_eq!(item.entity_type, SyncEntityType::Host);
+        assert_eq!(item.local_version, 1);
+        assert_eq!(item.remote_version, 1);
+        assert_eq!(
+            item.local_summary,
+            "Server A Local (root@srv-a.internal:22)"
+        );
+        assert_eq!(
+            item.remote_summary,
+            "Server A Remote (ubuntu@srv-a.internal:22)"
+        );
+    }
+
+    #[test]
+    fn verifies_sync_backoff_calculations() {
+        let backoff = SyncBackoff::new(5, 60, 2.0);
+
+        assert_eq!(backoff.compute_delay_secs(0), 0);
+        assert_eq!(backoff.compute_delay_secs(1), 5); // 5 * 2^0 = 5
+        assert_eq!(backoff.compute_delay_secs(2), 10); // 5 * 2^1 = 10
+        assert_eq!(backoff.compute_delay_secs(3), 20); // 5 * 2^2 = 20
+        assert_eq!(backoff.compute_delay_secs(4), 40); // 5 * 2^3 = 40
+        assert_eq!(backoff.compute_delay_secs(5), 60); // capped at 60
+        assert_eq!(backoff.compute_delay_secs(10), 60); // capped at 60
+    }
+
+    #[test]
+    fn verifies_sync_scheduler_triggers_and_debouncing() {
+        // Debounce: 3 seconds, Periodic: 300 seconds
+        let mut scheduler = SyncScheduler::new(3, 300);
+
+        // 1. Initial startup sync
+        assert_eq!(scheduler.check_trigger(1000), Some(SyncTrigger::Startup));
+
+        // Record successful startup sync at t=1000
+        scheduler.record_success(1000);
+        assert_eq!(scheduler.check_trigger(1001), None);
+
+        // 2. Notify local mutation at t=1010
+        scheduler.notify_local_mutation(1010);
+        // Before debounce deadline (deadline is 1010 + 3 = 1013)
+        assert_eq!(scheduler.check_trigger(1011), None);
+        assert_eq!(scheduler.check_trigger(1012), None);
+        // At deadline -> triggers LocalMutation
+        assert_eq!(
+            scheduler.check_trigger(1013),
+            Some(SyncTrigger::LocalMutation)
+        );
+
+        // Record failure at t=1013
+        scheduler.record_failure(1013);
+        assert_eq!(scheduler.consecutive_failures, 1);
+
+        // Backoff delay for 1 failure is 5s, so next retry not allowed until 1013 + 5 = 1018
+        assert_eq!(scheduler.check_trigger(1015), None);
+        assert_eq!(scheduler.check_trigger(1017), None);
+        assert_eq!(
+            scheduler.check_trigger(1018),
+            Some(SyncTrigger::LocalMutation)
+        );
+
+        // Record success at t=1018
+        scheduler.record_success(1018);
+        assert_eq!(scheduler.consecutive_failures, 0);
+        assert_eq!(scheduler.check_trigger(1019), None);
+
+        // 3. Periodic trigger after 300s (at t=1018 + 300 = 1318)
+        assert_eq!(scheduler.check_trigger(1317), None);
+        assert_eq!(scheduler.check_trigger(1318), Some(SyncTrigger::Periodic));
     }
 }

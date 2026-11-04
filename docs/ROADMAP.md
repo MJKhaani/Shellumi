@@ -29,22 +29,24 @@ been checked on macOS.
    and `list_local_directory`), and a complete Snippet & Automation engine (`Snippet`, `SnippetVariable`,
    variable extraction `{{var}}` and `{{var:-default}}`, POSIX shell escaping `shell_escape`, parameter
    rendering, secret variable detection, preview redaction `render_preview`, and JSON export/import).
-   `shellumi-storage` provides transactional schema migrations (schema version 6 with backward-compatible
-   auto-migration from versions 1, 2, 3, 4, and 5), persistent host groups (`groups` table), jump hosts
+   `shellumi-storage` provides transactional schema migrations (schema version 7 with backward-compatible
+   auto-migration from versions 1, 2, 3, 4, 5, and 6), persistent host groups (`groups` table), jump hosts
    (`hosts.jump_host`), persistent SSH tunnels (`tunnels` table with local, remote, and dynamic rules),
    persistent file transfer history (`transfer_history` table), saved snippets and templates (`snippets`
-   table with tags, variables, and parameters), configuration inheritance (`get_effective_destination`,
-   `get_effective_tags`), tags, group/tag/snippet filtering, and search.
+   table with tags, variables, and parameters), disaster recovery snapshots (`sync_snapshots` table with
+   `archive_snapshot`, `list_snapshot_history`, `get_snapshot_vault`, and `rollback_snapshot`), configuration
+   inheritance (`get_effective_destination`, `get_effective_tags`), tags, group/tag/snippet filtering, and search.
    `shellumi-cli` manages host metadata with group/tag/search/jump-host filtering, provides dedicated
    `group add/list/show/delete` and `tunnel add/list/delete` commands, SFTP operations (`sftp local-ls`,
    `sftp history`, `sftp clear-history`, `sftp log`), snippet operations (`snippet add/list/show/render/delete`),
-   an immediate `quick-connect` command, `keygen` for Ed25519 key generation, handles import/export (SSH config,
-   CSV, and JSON snippets), and dispatches connections via system OpenSSH and SFTP with group inheritance and
+   vault disaster recovery commands (`vault export/import/diff/status/oauth-url/history/rollback`), an immediate
+   `quick-connect` command, `keygen` for Ed25519 key generation, handles import/export (SSH config, CSV,
+   and JSON snippets), and dispatches connections via system OpenSSH and SFTP with group inheritance and
    `-J` jump host chaining.
    The GPUI window supports interactive in-window host creation and editing with group/tag/jump-host
    inputs, jump host badge indicators, real-time search filtering, an immediate Quick Connect toolbar,
-   host card actions for Connect (SSH) and SFTP, and an in-terminal Snippets drawer (`📜 Snippets`)
-   for quick parameter pasting and one-click execution.
+   host card actions for Connect (SSH), SFTP, and Delete (with automated SyncScheduler debouncing),
+   and an in-terminal Snippets drawer (`📜 Snippets`) for quick parameter pasting and one-click execution.
 3. Terminal engine and PTY integration: `shellumi-terminal` is now
    implemented with VT/ANSI escape parsing (colors, cursor positioning, erase,
    alternate screen, scrollback history), cross-platform native PTY process
@@ -91,12 +93,15 @@ been checked on macOS.
    verification and user-friendly HTML redirect responses, `OAuthTokenBundle` with expiration checking and
    secure credential store persistence (`save_to_store`, `load_from_store`, `delete_from_store`),
    `diff_sync_records_with_passphrase` with payload-level equality verification, `SyncVault` snapshot export/import
-   in `shellumi-storage`, CLI `vault export/import/diff/status/oauth-url` subcommands, transport-agnostic HTTP
+   in `shellumi-storage`, CLI `vault export/import/diff/status/oauth-url/history/rollback` subcommands, transport-agnostic HTTP
    protocol models (`HttpTransport`, `HttpRequest`, `HttpResponse`), Google Drive Application Data folder REST API
    client (`GoogleDriveSyncClient`: token exchange, token refresh, file listing, multipart snapshot upload, snapshot
-   download, and update/deletion), conflict-safe sync planner (`plan_sync_cycle`, `SyncPlan`), and GPUI in-window
-   Cloud Sync status pill with background execution. Next: interactive conflict resolution modal in GPUI
-   allowing side-by-side diff inspection and selection of conflicting records.
+   download, and update/deletion), conflict-safe sync planner (`plan_sync_cycle`, `SyncPlan`), GPUI in-window
+   Cloud Sync status pill with background execution, explicit conflict resolution strategies (`resolve_record_conflict`,
+   `ConflictResolutionChoice`, `ConflictItemView`), an interactive GPUI Conflict Resolution Modal allowing
+   side-by-side visual diff inspection and granular selection of conflicting records ("Keep Local" vs. "Accept Remote"),
+   and automated disaster recovery snapshots (`sync_snapshots` table, schema v7) with snapshot history and rollback.
+   Next: automated background periodic sync timer loop in GPUI.
 10. Continue the remaining phases in PROJECT.md (Workspaces, Mosh/Telnet/Serial, Collaboration),
     with acceptance tests and platform verification for each capability.
 

@@ -7,7 +7,7 @@ use shellumi_core::{
 use std::fmt;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -24,6 +24,7 @@ pub enum StorageError {
     InvalidTransferPath,
     InvalidSnippet(SnippetError),
     InvalidSync(shellumi_core::SyncError),
+    SnapshotNotFound(String),
     MissingSchemaVersion,
 }
 
@@ -45,6 +46,7 @@ impl fmt::Display for StorageError {
             Self::InvalidTransferPath => f.write_str("transfer paths must not be empty"),
             Self::InvalidSnippet(error) => write!(f, "invalid snippet: {error}"),
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
+            Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
             Self::MissingSchemaVersion => f.write_str("database did not return a schema version"),
         }
     }
@@ -138,6 +140,14 @@ pub struct SavedSnippet {
     pub variables: Vec<SnippetVariable>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotHistoryEntry {
+    pub id: i64,
+    pub snapshot_id: String,
+    pub record_count: usize,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -347,9 +357,20 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 6", ()).await?;
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
         } else if version == 1 {
-            // Migrate schema version 1 to 6
+            // Migrate schema version 1 to 7
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
                 .await?;
             tx.execute(
@@ -417,9 +438,20 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 6", ()).await?;
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
         } else if version == 2 {
-            // Migrate schema version 2 to 6
+            // Migrate schema version 2 to 7
             tx.execute("ALTER TABLE hosts ADD COLUMN jump_host TEXT", ())
                 .await?;
             tx.execute(
@@ -480,9 +512,20 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 6", ()).await?;
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
         } else if version == 3 {
-            // Migrate schema version 3 to 6
+            // Migrate schema version 3 to 7
             tx.execute("ALTER TABLE hosts ADD COLUMN jump_host TEXT", ())
                 .await?;
             tx.execute(
@@ -533,9 +576,20 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 6", ()).await?;
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
         } else if version == 4 {
-            // Migrate schema version 4 to 6
+            // Migrate schema version 4 to 7
             tx.execute(
                 "CREATE TABLE transfer_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -568,9 +622,20 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 6", ()).await?;
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
         } else if version == 5 {
-            // Migrate schema version 5 to 6
+            // Migrate schema version 5 to 7
             tx.execute(
                 "CREATE TABLE snippets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -585,7 +650,32 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 6", ()).await?;
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
+        } else if version == 6 {
+            // Migrate schema version 6 to 7
+            tx.execute(
+                "CREATE TABLE sync_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) > 0),
+                    vault_json TEXT NOT NULL CHECK(length(vault_json) > 0),
+                    record_count INTEGER NOT NULL CHECK(record_count >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 7", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
@@ -1479,6 +1569,7 @@ impl HostStore {
             ));
         }
 
+        let _ = self.archive_snapshot(&vault.vault_id, &vault, 3).await;
         Ok(vault)
     }
 
@@ -1627,7 +1718,115 @@ impl HostStore {
             }
         }
 
+        let _ = self.archive_snapshot(&vault.vault_id, vault, 3).await;
         Ok(summary)
+    }
+
+    /// Archives a snapshot of the SyncVault into the local database for disaster recovery.
+    /// Prunes old snapshots to keep at most `max_keep` latest snapshots.
+    pub async fn archive_snapshot(
+        &self,
+        snapshot_id: &str,
+        vault: &shellumi_core::SyncVault,
+        max_keep: usize,
+    ) -> Result<i64, StorageError> {
+        let vault_json = serde_json::to_string(vault).map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Serialization(e.to_string()))
+        })?;
+        let record_count = vault.records.len() as i64;
+
+        let mut rows = self
+            .connection
+            .query(
+                "INSERT INTO sync_snapshots (snapshot_id, vault_json, record_count)
+                 VALUES (?, ?, ?)
+                 RETURNING id",
+                (snapshot_id, vault_json.as_str(), record_count),
+            )
+            .await?;
+        let id: i64 = rows
+            .next()
+            .await?
+            .ok_or(StorageError::InvalidName)?
+            .get(0)?;
+        drop(rows);
+
+        if max_keep > 0 {
+            let limit = max_keep as i64;
+            self.connection
+                .execute(
+                    "DELETE FROM sync_snapshots WHERE id NOT IN (
+                         SELECT id FROM sync_snapshots ORDER BY id DESC LIMIT ?
+                     )",
+                    (limit,),
+                )
+                .await?;
+        }
+
+        Ok(id)
+    }
+
+    /// Lists snapshot history ordered by creation time descending (newest first).
+    pub async fn list_snapshot_history(&self) -> Result<Vec<SnapshotHistoryEntry>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, snapshot_id, record_count, created_at
+                 FROM sync_snapshots
+                 ORDER BY id DESC",
+                (),
+            )
+            .await?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: i64 = row.get(0)?;
+            let snapshot_id: String = row.get(1)?;
+            let record_count_i64: i64 = row.get(2)?;
+            let created_at: String = row.get(3)?;
+            entries.push(SnapshotHistoryEntry {
+                id,
+                snapshot_id,
+                record_count: record_count_i64.max(0) as usize,
+                created_at,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Retrieves an archived SyncVault by snapshot_id (most recent match).
+    pub async fn get_snapshot_vault(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<shellumi_core::SyncVault>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT vault_json FROM sync_snapshots WHERE snapshot_id = ? ORDER BY id DESC LIMIT 1",
+                (snapshot_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let json_str: String = row.get(0)?;
+            let vault: shellumi_core::SyncVault = serde_json::from_str(&json_str).map_err(|e| {
+                StorageError::InvalidSync(shellumi_core::SyncError::Serialization(e.to_string()))
+            })?;
+            Ok(Some(vault))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Reverts the database using an archived snapshot, restoring records with the given passphrase.
+    pub async fn rollback_snapshot(
+        &mut self,
+        snapshot_id: &str,
+        passphrase: &str,
+    ) -> Result<ImportVaultSummary, StorageError> {
+        let vault = self
+            .get_snapshot_vault(snapshot_id)
+            .await?
+            .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.to_string()))?;
+        self.import_vault(passphrase, &vault).await
     }
 }
 
@@ -1662,7 +1861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_from_schema_versions_1_to_5_to_version_6() {
+    async fn migrates_from_schema_versions_1_to_6_to_version_7() {
         let dir = tempfile::tempdir().unwrap();
         let path1 = dir.path().join("v1.db");
         let path1_str = path1.to_str().unwrap();
@@ -1692,7 +1891,7 @@ mod tests {
         drop(conn);
         drop(db);
 
-        // Open with HostStore and verify migration from v1 to v6
+        // Open with HostStore and verify migration from v1 to v7
         let mut store = HostStore::open(path1_str).await.unwrap();
         let hosts = store.list().await.unwrap();
         assert_eq!(hosts.len(), 1);
@@ -1733,8 +1932,9 @@ mod tests {
         let s_id = store.add_snippet(&snip).await.unwrap();
         assert_eq!(store.list_snippets().await.unwrap().len(), 1);
         assert!(s_id > 0);
+        assert!(store.list_snapshot_history().await.unwrap().is_empty());
 
-        // Test migration from v2 to v6
+        // Test migration from v2 to v7
         let path2 = dir.path().join("v2.db");
         let path2_str = path2.to_str().unwrap();
         let db2 = Builder::new_local(path2_str).build().await.unwrap();
@@ -1761,8 +1961,9 @@ mod tests {
         let mut store2 = HostStore::open(path2_str).await.unwrap();
         store2.add_group(&group).await.unwrap();
         assert_eq!(store2.list_groups().await.unwrap().len(), 1);
+        assert!(store2.list_snapshot_history().await.unwrap().is_empty());
 
-        // Test migration from v3 to v6
+        // Test migration from v3 to v7
         let path3 = dir.path().join("v3.db");
         let path3_str = path3.to_str().unwrap();
         let db3 = Builder::new_local(path3_str).build().await.unwrap();
@@ -1809,8 +2010,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store3.list_tunnels().await.unwrap().len(), 1);
+        assert!(store3.list_snapshot_history().await.unwrap().is_empty());
 
-        // Test migration from v4 to v6
+        // Test migration from v4 to v7
         let path4 = dir.path().join("v4.db");
         let path4_str = path4.to_str().unwrap();
         let db4 = Builder::new_local(path4_str).build().await.unwrap();
@@ -1850,8 +2052,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store4.list_transfers(None, None).await.unwrap().len(), 1);
+        assert!(store4.list_snapshot_history().await.unwrap().is_empty());
 
-        // Test migration from v5 to v6
+        // Test migration from v5 to v7
         let path5 = dir.path().join("v5.db");
         let path5_str = path5.to_str().unwrap();
         let db5 = Builder::new_local(path5_str).build().await.unwrap();
@@ -1883,6 +2086,162 @@ mod tests {
         let snip5 = Snippet::new("Check Disk", "df -h", None, &[]).unwrap();
         assert!(store5.add_snippet(&snip5).await.unwrap() > 0);
         assert_eq!(store5.list_snippets().await.unwrap().len(), 1);
+        assert!(store5.list_snapshot_history().await.unwrap().is_empty());
+
+        // Test migration from v6 to v7
+        let path6 = dir.path().join("v6.db");
+        let path6_str = path6.to_str().unwrap();
+        let db6 = Builder::new_local(path6_str).build().await.unwrap();
+        let conn6 = db6.connect().unwrap();
+        conn6
+            .execute(
+                "CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                username TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                group_name TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                jump_host TEXT
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn6
+            .execute(
+                "CREATE TABLE groups (
+                name TEXT PRIMARY KEY NOT NULL,
+                default_username TEXT,
+                default_port INTEGER,
+                tags TEXT NOT NULL DEFAULT ''
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn6
+            .execute(
+                "CREATE TABLE tunnels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                host_id INTEGER,
+                name TEXT NOT NULL,
+                forwarding_type TEXT NOT NULL,
+                bind_address TEXT,
+                bind_port INTEGER NOT NULL,
+                target_host TEXT,
+                target_port INTEGER,
+                auto_start INTEGER NOT NULL DEFAULT 0
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn6
+            .execute(
+                "CREATE TABLE transfer_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                host_id INTEGER,
+                direction TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                remote_path TEXT NOT NULL,
+                bytes_transferred INTEGER NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn6
+            .execute(
+                "CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                description TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                variables TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+                (),
+            )
+            .await
+            .unwrap();
+        conn6.execute("PRAGMA user_version = 6", ()).await.unwrap();
+        drop(conn6);
+        drop(db6);
+
+        let store6 = HostStore::open(path6_str).await.unwrap();
+        assert!(store6.list_snapshot_history().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn manages_sync_snapshot_history_and_rollback() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+        let destination = SshDestination::new("db.internal", "postgres", 5432).unwrap();
+        let h_id = store
+            .add("ProductionDB", &destination, None, &["db".into()], None)
+            .await
+            .unwrap();
+        assert!(h_id > 0);
+
+        let group = HostGroup::new("Databases", Some("postgres"), Some(5432), &[]).unwrap();
+        store.add_group(&group).await.unwrap();
+
+        let snip = Snippet::new("Vacuum", "VACUUM FULL;", None, &[]).unwrap();
+        store.add_snippet(&snip).await.unwrap();
+
+        // Export vault creates and archives snapshot
+        let vault = store
+            .export_vault_with_iterations("secret123", "device1", 2000)
+            .await
+            .unwrap();
+        let history = store.list_snapshot_history().await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].snapshot_id, vault.vault_id);
+        assert_eq!(history[0].record_count, 3);
+
+        // Delete the host
+        assert!(store.delete(h_id).await.unwrap());
+        assert_eq!(store.list().await.unwrap().len(), 0);
+
+        // Rollback to the snapshot
+        let summary = store
+            .rollback_snapshot(&vault.vault_id, "secret123")
+            .await
+            .unwrap();
+        assert_eq!(summary.hosts_imported, 1);
+        assert_eq!(summary.groups_imported, 1);
+        assert_eq!(summary.snippets_imported, 1);
+
+        // Check host is restored
+        let restored_hosts = store.list().await.unwrap();
+        assert_eq!(restored_hosts.len(), 1);
+        assert_eq!(restored_hosts[0].name, "ProductionDB");
+
+        // Verify pruning with max_keep
+        for i in 1..=5 {
+            let fake_vault = shellumi_core::SyncVault::new(format!("snap-{i}"), 1000 + i);
+            store
+                .archive_snapshot(&fake_vault.vault_id, &fake_vault, 3)
+                .await
+                .unwrap();
+        }
+        let history_pruned = store.list_snapshot_history().await.unwrap();
+        assert_eq!(history_pruned.len(), 3);
+        assert_eq!(history_pruned[0].snapshot_id, "snap-5");
+        assert_eq!(history_pruned[1].snapshot_id, "snap-4");
+        assert_eq!(history_pruned[2].snapshot_id, "snap-3");
+
+        // Rollback unknown snapshot fails with SnapshotNotFound
+        let err = store.rollback_snapshot("non-existent-id", "pass").await;
+        assert!(matches!(err, Err(StorageError::SnapshotNotFound(_))));
     }
 
     #[tokio::test]

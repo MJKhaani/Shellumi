@@ -805,3 +805,90 @@ fn supports_vault_export_status_and_import() {
     let snip_str = String::from_utf8(list_snips.stdout).unwrap();
     assert!(snip_str.contains("Reboot Device"));
 }
+
+#[test]
+fn supports_vault_disaster_recovery_history_and_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("dr.db");
+    let vault_file = dir.path().join("dr_vault.json");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Add host
+    let add_host = run(&[
+        "add",
+        "ProdGateway",
+        "192.168.1.100",
+        "root",
+        "22",
+        "--tags",
+        "gateway,prod",
+    ]);
+    assert!(add_host.status.success());
+
+    // Add snippet
+    let add_snip = run(&["snippet", "add", "Uptime", "uptime"]);
+    assert!(add_snip.status.success());
+
+    // Export vault with custom passphrase (automatically archives snapshot)
+    let exp = run(&[
+        "vault",
+        "export",
+        vault_file.to_str().unwrap(),
+        "--passphrase",
+        "dr-super-secret-key",
+        "--iterations",
+        "2000",
+    ]);
+    assert!(exp.status.success());
+
+    // Check vault history
+    let hist = run(&["vault", "history"]);
+    assert!(hist.status.success());
+    let hist_str = String::from_utf8(hist.stdout).unwrap();
+    assert!(hist_str.contains("SNAPSHOT ID"));
+    assert!(hist_str.contains("RECORDS"));
+
+    // Extract snapshot id from history output
+    let lines: Vec<&str> = hist_str.lines().collect();
+    assert!(lines.len() >= 2);
+    let row_parts: Vec<&str> = lines[1].split('\t').collect();
+    let snapshot_id = row_parts[1];
+
+    // Delete host
+    let del = run(&["delete", "1"]);
+    assert!(del.status.success());
+
+    // Verify host is gone
+    let list_after_del = run(&["list"]);
+    assert!(list_after_del.status.success());
+    assert!(!String::from_utf8(list_after_del.stdout)
+        .unwrap()
+        .contains("ProdGateway"));
+
+    // Rollback using archived snapshot ID
+    let rb = run(&[
+        "vault",
+        "rollback",
+        snapshot_id,
+        "--passphrase",
+        "dr-super-secret-key",
+    ]);
+    assert!(rb.status.success());
+    let rb_str = String::from_utf8(rb.stdout).unwrap();
+    assert!(rb_str.contains("Rolled back to snapshot"));
+    assert!(rb_str.contains("Hosts imported:    1"));
+
+    // Verify host is restored
+    let list_after_rb = run(&["list"]);
+    assert!(list_after_rb.status.success());
+    let list_str = String::from_utf8(list_after_rb.stdout).unwrap();
+    assert!(list_str.contains("ProdGateway"));
+    assert!(list_str.contains("192.168.1.100"));
+}

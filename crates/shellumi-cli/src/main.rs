@@ -32,6 +32,8 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> vault export <output-path> [--passphrase <pass>] [--device-id <id>] [--iterations <n>]
   shellumi-cli <database-path> vault import <input-path> [--passphrase <pass>]
   shellumi-cli <database-path> vault diff <input-path> [--passphrase <pass>]
+  shellumi-cli <database-path> vault history
+  shellumi-cli <database-path> vault rollback <snapshot-id> [--passphrase <pass>]
   shellumi-cli <database-path> vault status
   shellumi-cli <database-path> vault oauth-url [--client-id <id>] [--redirect-uri <uri>]
   shellumi-cli <database-path> connect <id>
@@ -207,12 +209,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
             match args[2].as_str() {
-                "export" | "import" | "diff" => {
+                "export" | "import" | "diff" | "rollback" => {
                     if args.len() < 4 {
                         return Err(invalid(USAGE).into());
                     }
                 }
-                "status" | "oauth-url" => {}
+                "status" | "oauth-url" | "history" => {}
                 _ => return Err(invalid(USAGE).into()),
             }
         }
@@ -858,6 +860,39 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     println!("  Code Challenge: {}", pkce.code_challenge);
                     println!("  State Nonce:    {}", state);
                     println!("\nAuthorization URL:\n{}", auth_url);
+                }
+                "history" => {
+                    let history = store.list_snapshot_history().await?;
+                    if history.is_empty() {
+                        println!("No sync snapshots archived in database.");
+                    } else {
+                        println!("ID\tSNAPSHOT ID\tRECORDS\tCREATED AT");
+                        for entry in history {
+                            println!(
+                                "{}\t{}\t{}\t{}",
+                                entry.id, entry.snapshot_id, entry.record_count, entry.created_at
+                            );
+                        }
+                    }
+                }
+                "rollback" => {
+                    let snapshot_id = &args[3];
+                    let extra = &args[4..];
+                    let passphrase = extract_flag(extra, "--passphrase")
+                        .unwrap_or_else(|| "default-vault-passphrase".to_string());
+
+                    let summary = store.rollback_snapshot(snapshot_id, &passphrase).await?;
+                    println!("Rolled back to snapshot {snapshot_id}:");
+                    println!("  Hosts imported:    {}", summary.hosts_imported);
+                    println!("  Groups imported:   {}", summary.groups_imported);
+                    println!("  Tunnels imported:  {}", summary.tunnels_imported);
+                    println!("  Snippets imported: {}", summary.snippets_imported);
+                    if !summary.errors.is_empty() {
+                        eprintln!("  Errors ({}):", summary.errors.len());
+                        for err in summary.errors {
+                            eprintln!("    - {err}");
+                        }
+                    }
                 }
                 _ => unreachable!(),
             }

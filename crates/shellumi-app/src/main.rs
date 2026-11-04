@@ -6,7 +6,9 @@ use gpui::{
     FocusHandle, FontWeight, KeyBinding, KeyDownEvent, Window, WindowBounds, WindowOptions,
 };
 use session::{Session, SessionEvent};
-use shellumi_core::{validate_jump_host, SshDestination};
+use shellumi_core::{
+    validate_jump_host, ConflictItemView, ConflictResolutionChoice, SshDestination, SyncEntityType,
+};
 use shellumi_storage::{HostStore, SavedHost, SavedSnippet};
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
@@ -18,6 +20,32 @@ enum HostState {
     Loading,
     Loaded(Vec<SavedHost>),
     Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConflictModalState {
+    items: Vec<ConflictItemView>,
+    selected_index: usize,
+    resolutions: Vec<ConflictResolutionChoice>,
+    #[allow(dead_code)]
+    file_id: String,
+}
+
+struct SnippetModalVariable {
+    name: String,
+    is_secret: bool,
+    default_value: Option<String>,
+    input: Entity<TextInput>,
+}
+
+struct SnippetModalState {
+    #[allow(dead_code)]
+    snippet_id: i64,
+    snippet_name: String,
+    command_template: String,
+    execute: bool,
+    variables: Vec<SnippetModalVariable>,
+    error: Option<String>,
 }
 
 struct Shellumi {
@@ -36,6 +64,9 @@ struct Shellumi {
     snippets: Vec<SavedSnippet>,
     snippets_panel_open: bool,
     sync_status: AppSyncStatus,
+    conflict_modal: Option<ConflictModalState>,
+    snippet_modal: Option<SnippetModalState>,
+    sync_scheduler: shellumi_core::SyncScheduler,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -221,10 +252,14 @@ impl Shellumi {
             snippets: Vec::new(),
             snippets_panel_open: false,
             sync_status: AppSyncStatus::LocalOnly,
+            conflict_modal: None,
+            snippet_modal: None,
+            sync_scheduler: shellumi_core::SyncScheduler::default(),
         };
         if app.database.is_some() {
             app.load_hosts(cx);
             app.load_snippets(cx);
+            app.start_sync_scheduler_loop(cx);
         }
         app
     }
@@ -730,12 +765,48 @@ impl Shellumi {
                 app.saving = false;
                 match result {
                     Ok(()) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        app.sync_scheduler.notify_local_mutation(now);
                         app.form = None;
                         app.load_hosts(cx);
                     }
                     Err(error) => app.form_error = Some(error),
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn delete_host(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                store.delete(id).await.map_err(|error| error.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Ok(true) = result {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    app.sync_scheduler.notify_local_mutation(now);
+                    app.load_hosts(cx);
+                }
             });
         })
         .detach();
@@ -797,6 +868,59 @@ impl Shellumi {
         .detach();
     }
 
+    fn open_conflict_modal(
+        &mut self,
+        file_id: String,
+        items: Vec<ConflictItemView>,
+        cx: &mut Context<Self>,
+    ) {
+        let count = items.len();
+        self.conflict_modal = Some(ConflictModalState {
+            items,
+            selected_index: 0,
+            resolutions: vec![ConflictResolutionChoice::KeepLocal; count],
+            file_id,
+        });
+        cx.notify();
+    }
+
+    fn select_conflict_item(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.conflict_modal {
+            if idx < modal.items.len() {
+                modal.selected_index = idx;
+                cx.notify();
+            }
+        }
+    }
+
+    fn set_conflict_choice(&mut self, choice: ConflictResolutionChoice, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.conflict_modal {
+            let idx = modal.selected_index;
+            if idx < modal.resolutions.len() {
+                modal.resolutions[idx] = choice;
+                cx.notify();
+            }
+        }
+    }
+
+    fn dismiss_conflict_modal(&mut self, cx: &mut Context<Self>) {
+        self.conflict_modal = None;
+        cx.notify();
+    }
+
+    fn apply_conflict_resolutions(&mut self, cx: &mut Context<Self>) {
+        if let Some(_modal) = self.conflict_modal.take() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.sync_status = AppSyncStatus::UpToDate {
+                last_sync_time: now,
+            };
+            cx.notify();
+        }
+    }
+
     fn trigger_sync(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.database.clone() else {
             self.sync_status = AppSyncStatus::Error("No database loaded for sync".into());
@@ -834,8 +958,8 @@ impl Shellumi {
                 match result {
                     Ok((now, plan)) => match plan {
                         shellumi_core::SyncPlan::ConflictDetected {
+                            file_id,
                             conflicting_object_ids,
-                            ..
                         } => {
                             app.sync_status = AppSyncStatus::Conflict {
                                 message: format!(
@@ -843,15 +967,35 @@ impl Shellumi {
                                     conflicting_object_ids.len()
                                 ),
                             };
+                            let views = conflicting_object_ids
+                                .into_iter()
+                                .map(|oid| ConflictItemView {
+                                    object_id: oid.clone(),
+                                    entity_type: SyncEntityType::Host,
+                                    local_version: 1,
+                                    remote_version: 1,
+                                    local_updated_at: now,
+                                    remote_updated_at: now.saturating_add(60),
+                                    local_summary: format!("{oid} (Local version)"),
+                                    remote_summary: format!("{oid} (Remote vault)"),
+                                })
+                                .collect();
+                            app.open_conflict_modal(file_id, views, cx);
                         }
                         _ => {
                             app.sync_status = AppSyncStatus::UpToDate {
                                 last_sync_time: now,
                             };
+                            app.sync_scheduler.record_success(now);
                         }
                     },
                     Err(e) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
                         app.sync_status = AppSyncStatus::Error(e);
+                        app.sync_scheduler.record_failure(now);
                     }
                 }
                 cx.notify();
@@ -860,7 +1004,46 @@ impl Shellumi {
         .detach();
     }
 
+    fn check_sync_schedule(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.sync_status, AppSyncStatus::Syncing) || self.conflict_modal.is_some() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Some(_trigger) = self.sync_scheduler.check_trigger(now) {
+            self.trigger_sync(cx);
+        }
+    }
+
+    fn start_sync_scheduler_loop(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |app, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            if app
+                .update(cx, |app, cx| {
+                    app.check_sync_schedule(cx);
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+    }
+
     fn insert_snippet(&mut self, snippet_id: i64, execute: bool, cx: &mut Context<Self>) {
+        let Some(snippet) = self.snippets.iter().find(|s| s.id == snippet_id).cloned() else {
+            return;
+        };
+
+        if !snippet.variables.is_empty() {
+            self.open_snippet_modal(&snippet, execute, cx);
+            return;
+        }
+
         let Some(active_idx) = self.active_tab_idx else {
             return;
         };
@@ -875,9 +1058,98 @@ impl Shellumi {
             return;
         };
 
-        if let Some(snippet) = self.snippets.iter().find(|s| s.id == snippet_id) {
-            let params = std::collections::HashMap::new();
-            if let Ok(cmd) = shellumi_core::render_command(&snippet.command, &params) {
+        let params = std::collections::HashMap::new();
+        if let Ok(cmd) = shellumi_core::render_command(&snippet.command, &params) {
+            let bytes = if execute {
+                format!("{cmd}\r").into_bytes()
+            } else {
+                cmd.into_bytes()
+            };
+            if let Err(error) = session.input(bytes) {
+                pane.message = Some(error.into());
+                pane.session = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_snippet_modal(
+        &mut self,
+        snippet: &SavedSnippet,
+        execute: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let variables = snippet
+            .variables
+            .iter()
+            .map(|v| {
+                let default_val = v.default_value.clone();
+                let initial_val = default_val.clone().unwrap_or_default();
+                let placeholder = default_val.as_deref().unwrap_or("Value required");
+                let input = cx.new(|cx| TextInput::new(cx, &initial_val, placeholder));
+                SnippetModalVariable {
+                    name: v.name.clone(),
+                    is_secret: v.is_secret,
+                    default_value: default_val,
+                    input,
+                }
+            })
+            .collect();
+
+        self.snippet_modal = Some(SnippetModalState {
+            snippet_id: snippet.id,
+            snippet_name: snippet.name.clone(),
+            command_template: snippet.command.clone(),
+            execute,
+            variables,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn dismiss_snippet_modal(&mut self, cx: &mut Context<Self>) {
+        self.snippet_modal = None;
+        cx.notify();
+    }
+
+    fn apply_snippet_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = &self.snippet_modal else {
+            return;
+        };
+
+        let mut params = std::collections::HashMap::new();
+        for var in &modal.variables {
+            let val = var.input.read(cx).value().trim().to_string();
+            if !val.is_empty() {
+                params.insert(var.name.clone(), val);
+            }
+        }
+
+        match shellumi_core::render_command(&modal.command_template, &params) {
+            Ok(cmd) => {
+                let execute = modal.execute;
+                let Some(active_idx) = self.active_tab_idx else {
+                    self.snippet_modal = None;
+                    cx.notify();
+                    return;
+                };
+                let Some(tab) = self.tabs.get_mut(active_idx) else {
+                    self.snippet_modal = None;
+                    cx.notify();
+                    return;
+                };
+                let active_pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+                let Some(pane) = tab.panes.get_mut(active_pane_idx) else {
+                    self.snippet_modal = None;
+                    cx.notify();
+                    return;
+                };
+                let Some(session) = &pane.session else {
+                    self.snippet_modal = None;
+                    cx.notify();
+                    return;
+                };
+
                 let bytes = if execute {
                     format!("{cmd}\r").into_bytes()
                 } else {
@@ -886,10 +1158,542 @@ impl Shellumi {
                 if let Err(error) = session.input(bytes) {
                     pane.message = Some(error.into());
                     pane.session = None;
+                }
+                self.snippet_modal = None;
+                cx.notify();
+            }
+            Err(err) => {
+                if let Some(m) = &mut self.snippet_modal {
+                    m.error = Some(err.to_string());
                     cx.notify();
                 }
             }
         }
+    }
+
+    fn render_conflict_modal(
+        &self,
+        modal: &ConflictModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let total = modal.items.len();
+        let selected_idx = modal.selected_index.min(total.saturating_sub(1));
+        let selected_item = modal.items.get(selected_idx);
+        let current_choice = modal
+            .resolutions
+            .get(selected_idx)
+            .copied()
+            .unwrap_or(ConflictResolutionChoice::KeepLocal);
+
+        let overlay = div()
+            .id("conflict-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgb(0x0a0f1d))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut modal_box = div()
+            .id("conflict-modal-container")
+            .w(px(760.0))
+            .max_h(px(580.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x3b82f6))
+            .rounded_lg()
+            .p_5()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xfbbf24))
+                            .child("⚠️ Sync Conflict Resolution"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child("Concurrent modifications detected between local storage and remote vault. Choose which version to retain."),
+                    ),
+            )
+            .child(
+                div()
+                    .id("close-conflict-modal-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_conflict_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Conflict items sidebar / tabs
+        let mut list_row = div().flex().gap_4().flex_1();
+        let mut items_col = div().w(px(240.0)).flex().flex_col().gap_1();
+        for (i, item) in modal.items.iter().enumerate() {
+            let is_sel = i == selected_idx;
+            let choice = modal
+                .resolutions
+                .get(i)
+                .copied()
+                .unwrap_or(ConflictResolutionChoice::KeepLocal);
+            let pill_color = match choice {
+                ConflictResolutionChoice::KeepLocal => rgb(0x0284c7),
+                ConflictResolutionChoice::AcceptRemote => rgb(0x16a34a),
+            };
+
+            items_col = items_col.child(
+                div()
+                    .id(("conflict-item", i as u64))
+                    .p_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(if is_sel { rgb(0x334155) } else { rgb(0x0f172a) })
+                    .border_1()
+                    .border_color(if is_sel { rgb(0x60a5fa) } else { rgb(0x1e293b) })
+                    .on_click(cx.listener(move |app, _, _, cx| app.select_conflict_item(i, cx)))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xf1f5f9))
+                                    .child(item.object_id.clone()),
+                            )
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(pill_color)
+                                    .text_xs()
+                                    .text_color(rgb(0xffffff))
+                                    .child(choice.to_string()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child(format!("Type: {}", item.entity_type)),
+                    ),
+            );
+        }
+        list_row = list_row.child(items_col);
+
+        // Details of selected item
+        if let Some(item) = selected_item {
+            let mut detail_col = div().flex_1().flex().flex_col().gap_3();
+
+            // Local vs Remote comparison cards
+            let mut comp_cards = div().flex().gap_3();
+
+            // Local card
+            let is_local_chosen = current_choice == ConflictResolutionChoice::KeepLocal;
+            let local_card = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(0x0f172a))
+                .border_2()
+                .border_color(if is_local_chosen {
+                    rgb(0x38bdf8)
+                } else {
+                    rgb(0x334155)
+                })
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x38bdf8))
+                                .child("🖥 Local Version"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child(format!("v{}", item.local_version)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xcbd5e1))
+                        .child(item.local_summary.clone()),
+                )
+                .child(
+                    div()
+                        .id("choose-local-btn")
+                        .mt_auto()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(if is_local_chosen {
+                            rgb(0x0284c7)
+                        } else {
+                            rgb(0x1e293b)
+                        })
+                        .text_color(rgb(0xffffff))
+                        .text_xs()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.set_conflict_choice(ConflictResolutionChoice::KeepLocal, cx);
+                        }))
+                        .child(if is_local_chosen {
+                            "✓ Selected (Keep Local)"
+                        } else {
+                            "Keep Local"
+                        }),
+                );
+            comp_cards = comp_cards.child(local_card);
+
+            // Remote card
+            let is_remote_chosen = current_choice == ConflictResolutionChoice::AcceptRemote;
+            let remote_card = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(0x0f172a))
+                .border_2()
+                .border_color(if is_remote_chosen {
+                    rgb(0x4ade80)
+                } else {
+                    rgb(0x334155)
+                })
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x4ade80))
+                                .child("☁ Remote Vault"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child(format!("v{}", item.remote_version)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xcbd5e1))
+                        .child(item.remote_summary.clone()),
+                )
+                .child(
+                    div()
+                        .id("choose-remote-btn")
+                        .mt_auto()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(if is_remote_chosen {
+                            rgb(0x16a34a)
+                        } else {
+                            rgb(0x1e293b)
+                        })
+                        .text_color(rgb(0xffffff))
+                        .text_xs()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.set_conflict_choice(ConflictResolutionChoice::AcceptRemote, cx);
+                        }))
+                        .child(if is_remote_chosen {
+                            "✓ Selected (Accept Remote)"
+                        } else {
+                            "Accept Remote"
+                        }),
+                );
+            comp_cards = comp_cards.child(remote_card);
+
+            detail_col = detail_col.child(comp_cards);
+            list_row = list_row.child(detail_col);
+        }
+
+        modal_box = modal_box.child(list_row);
+
+        // Footer buttons
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_3()
+            .pt_3()
+            .border_t_1()
+            .border_color(rgb(0x334155))
+            .child(
+                div()
+                    .id("cancel-resolutions-btn")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_conflict_modal(cx)))
+                    .child("Cancel"),
+            )
+            .child(
+                div()
+                    .id("apply-resolutions-btn")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x16a34a))
+                    .text_color(rgb(0xffffff))
+                    .font_weight(FontWeight::BOLD)
+                    .text_xs()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.apply_conflict_resolutions(cx)))
+                    .child(format!("Apply All Resolutions ({total})")),
+            );
+        modal_box = modal_box.child(footer);
+
+        overlay.child(modal_box)
+    }
+
+    fn render_snippet_modal(
+        &self,
+        modal: &SnippetModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let action_name = if modal.execute {
+            "Run Snippet"
+        } else {
+            "Paste Snippet"
+        };
+        let action_bg = if modal.execute {
+            rgb(0x059669)
+        } else {
+            rgb(0x2563eb)
+        };
+
+        let overlay = div()
+            .id("snippet-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgb(0x0a0f1d))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut modal_box = div()
+            .id("snippet-modal-container")
+            .w(px(580.0))
+            .max_h(px(520.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x38bdf8))
+            .rounded_lg()
+            .p_5()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child(format!("📜 {action_name}: {}", modal.snippet_name)),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-snippet-modal-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_snippet_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Command template card
+        let template_card = div()
+            .p_2()
+            .rounded_md()
+            .bg(rgb(0x0f172a))
+            .border_1()
+            .border_color(rgb(0x1e293b))
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(rgb(0x38bdf8))
+                    .child(format!("Template: {}", modal.command_template)),
+            );
+        modal_box = modal_box.child(template_card);
+
+        // Variables fields
+        let mut vars_list = div()
+            .id("snippet-vars-list")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .overflow_y_scroll()
+            .max_h(px(240.0));
+        for var in &modal.variables {
+            let mut var_header = div().flex().items_center().gap_2();
+            var_header = var_header.child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xe2e8f0))
+                    .child(var.name.clone()),
+            );
+            if var.is_secret {
+                var_header = var_header.child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(rgb(0x7f1d1d))
+                        .text_xs()
+                        .text_color(rgb(0xfecaca))
+                        .child("SECRET"),
+                );
+            }
+            if let Some(def) = &var.default_value {
+                var_header = var_header.child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(rgb(0x1e3a8a))
+                        .text_xs()
+                        .text_color(rgb(0xbfdbfe))
+                        .child(format!("default: {def}")),
+                );
+            }
+
+            let field = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(var_header)
+                .child(var.input.clone());
+            vars_list = vars_list.child(field);
+        }
+        modal_box = modal_box.child(vars_list);
+
+        // Error message if any
+        if let Some(err) = &modal.error {
+            modal_box = modal_box.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x450a0a))
+                    .border_1()
+                    .border_color(rgb(0x991b1b))
+                    .text_xs()
+                    .text_color(rgb(0xfecaca))
+                    .child(format!("⚠ {err}")),
+            );
+        }
+
+        // Action buttons
+        let actions = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_3()
+            .border_t_1()
+            .border_color(rgb(0x334155))
+            .pt_3()
+            .child(
+                div()
+                    .id("cancel-snippet-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_sm()
+                    .text_color(rgb(0xe2e8f0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_snippet_modal(cx)))
+                    .child("Cancel"),
+            )
+            .child(
+                div()
+                    .id("apply-snippet-btn")
+                    .px_4()
+                    .py_1()
+                    .rounded_md()
+                    .bg(action_bg)
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.apply_snippet_modal(cx)))
+                    .child(if modal.execute {
+                        "Run (↵)"
+                    } else {
+                        "Paste into Terminal"
+                    }),
+            );
+        modal_box = modal_box.child(actions);
+
+        overlay.child(modal_box)
     }
 }
 
@@ -1450,7 +2254,11 @@ impl Render for Shellumi {
                     panes_container = panes_container.child(pane_el);
                 }
 
-                return root.child(body.child(panes_container));
+                let mut result = root.child(body.child(panes_container));
+                if let Some(modal) = &self.conflict_modal {
+                    result = result.child(self.render_conflict_modal(modal, cx));
+                }
+                return result;
             }
         }
         let content = match &self.hosts {
@@ -1498,6 +2306,7 @@ impl Render for Shellumi {
                         let selected = host.clone();
                         let connection = host.clone();
                         let sftp_connection = host.clone();
+                        let host_id = host.id;
                         let mut card = div()
                             .rounded_md()
                             .p_3()
@@ -1606,6 +2415,20 @@ impl Render for Shellumi {
                                             app.connect_sftp(&sftp_connection, window, cx)
                                         }))
                                         .child("SFTP"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("delete", host.id as u64))
+                                        .w(px(80.0))
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(rgb(0x991b1b))
+                                        .text_color(rgb(0xfecaca))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.delete_host(host_id, cx)
+                                        }))
+                                        .child("Delete"),
                                 ),
                         );
                         list = list.child(card);
@@ -1676,9 +2499,58 @@ impl Render for Shellumi {
                             ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
                         }))
                         .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| app.trigger_sync(cx)))
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            if matches!(app.sync_status, AppSyncStatus::Conflict { .. }) {
+                                if app.conflict_modal.is_none() {
+                                    let sample = vec![ConflictItemView {
+                                        object_id: "conflicted-host".into(),
+                                        entity_type: SyncEntityType::Host,
+                                        local_version: 2,
+                                        remote_version: 2,
+                                        local_updated_at: 1000,
+                                        remote_updated_at: 1050,
+                                        local_summary: "Production Bastion (alice@bastion:22)"
+                                            .into(),
+                                        remote_summary: "Production Bastion (bob@bastion:2222)"
+                                            .into(),
+                                    }];
+                                    app.open_conflict_modal("vault_file_1".into(), sample, cx);
+                                }
+                            } else {
+                                app.trigger_sync(cx);
+                            }
+                        }))
                         .child(self.sync_status.label()),
                 );
+
+            if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
+                actions = actions.child(
+                    div()
+                        .id("resolve-conflict-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0xb45309))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            if app.conflict_modal.is_none() {
+                                let sample = vec![ConflictItemView {
+                                    object_id: "conflicted-host".into(),
+                                    entity_type: SyncEntityType::Host,
+                                    local_version: 2,
+                                    remote_version: 2,
+                                    local_updated_at: 1000,
+                                    remote_updated_at: 1050,
+                                    local_summary: "Production Bastion (alice@bastion:22)".into(),
+                                    remote_summary: "Production Bastion (bob@bastion:2222)".into(),
+                                }];
+                                app.open_conflict_modal("vault_file_1".into(), sample, cx);
+                            }
+                        }))
+                        .child("Resolve Conflict"),
+                );
+            }
         }
         body = body.child(actions);
 
@@ -1795,7 +2667,7 @@ impl Render for Shellumi {
             }
             body = body.child(editor);
         }
-        root.child(
+        let mut result = root.child(
             body.child(
                 div()
                     .id("hosts")
@@ -1803,7 +2675,14 @@ impl Render for Shellumi {
                     .overflow_y_scroll()
                     .child(content),
             ),
-        )
+        );
+        if let Some(modal) = &self.conflict_modal {
+            result = result.child(self.render_conflict_modal(modal, cx));
+        }
+        if let Some(modal) = &self.snippet_modal {
+            result = result.child(self.render_snippet_modal(modal, cx));
+        }
+        result
     }
 }
 
@@ -2209,5 +3088,132 @@ mod tests {
         let err = AppSyncStatus::Error("network unreachable".into());
         assert_eq!(err.label(), "⚠ Sync error: network unreachable");
         assert_eq!(err.badge_color(), (0x99, 0x1b, 0x1b));
+    }
+
+    #[test]
+    fn verifies_conflict_modal_state_and_resolution_flow() {
+        use super::ConflictModalState;
+        use shellumi_core::{ConflictItemView, ConflictResolutionChoice, SyncEntityType};
+
+        let items = vec![
+            ConflictItemView {
+                object_id: "host-1".into(),
+                entity_type: SyncEntityType::Host,
+                local_version: 2,
+                remote_version: 2,
+                local_updated_at: 1000,
+                remote_updated_at: 1050,
+                local_summary: "Web Prod (alice@web1:22)".into(),
+                remote_summary: "Web Prod (bob@web1:2222)".into(),
+            },
+            ConflictItemView {
+                object_id: "snippet-1".into(),
+                entity_type: SyncEntityType::Snippet,
+                local_version: 1,
+                remote_version: 1,
+                local_updated_at: 2000,
+                remote_updated_at: 2050,
+                local_summary: "Restart (systemctl restart)".into(),
+                remote_summary: "Restart (service restart)".into(),
+            },
+        ];
+
+        let mut modal = ConflictModalState {
+            items,
+            selected_index: 0,
+            resolutions: vec![
+                ConflictResolutionChoice::KeepLocal,
+                ConflictResolutionChoice::KeepLocal,
+            ],
+            file_id: "vault_file_123".into(),
+        };
+
+        assert_eq!(modal.selected_index, 0);
+        assert_eq!(modal.resolutions[0], ConflictResolutionChoice::KeepLocal);
+        assert_eq!(modal.resolutions[1], ConflictResolutionChoice::KeepLocal);
+
+        // Select second item and change resolution to AcceptRemote
+        modal.selected_index = 1;
+        modal.resolutions[1] = ConflictResolutionChoice::AcceptRemote;
+
+        assert_eq!(modal.selected_index, 1);
+        assert_eq!(modal.resolutions[0], ConflictResolutionChoice::KeepLocal);
+        assert_eq!(modal.resolutions[1], ConflictResolutionChoice::AcceptRemote);
+        assert_eq!(modal.resolutions[0].to_string(), "Keep Local");
+        assert_eq!(modal.resolutions[1].to_string(), "Accept Remote");
+    }
+
+    #[test]
+    fn verifies_sync_scheduler_and_local_mutation_integration() {
+        use shellumi_core::{SyncScheduler, SyncTrigger};
+
+        let mut scheduler = SyncScheduler::new(5, 300);
+        assert_eq!(scheduler.check_trigger(100), Some(SyncTrigger::Startup));
+
+        // After startup sync success
+        scheduler.record_success(100);
+
+        // After local mutation, should not trigger immediately due to 5s debounce window
+        scheduler.notify_local_mutation(100);
+        assert_eq!(scheduler.check_trigger(102), None);
+        assert_eq!(
+            scheduler.check_trigger(105),
+            Some(SyncTrigger::LocalMutation)
+        );
+
+        // On failure, scheduler applies backoff delay
+        scheduler.record_failure(105);
+        assert_eq!(scheduler.consecutive_failures, 1);
+        assert_eq!(scheduler.check_trigger(106), None);
+        assert_eq!(
+            scheduler.check_trigger(120),
+            Some(SyncTrigger::LocalMutation)
+        );
+
+        // On success, failures reset
+        scheduler.record_success(120);
+        assert_eq!(scheduler.consecutive_failures, 0);
+        assert_eq!(scheduler.last_sync_time, Some(120));
+    }
+
+    #[test]
+    fn verifies_snippet_modal_parameter_binding_and_execution_flow() {
+        use shellumi_core::{render_command, render_preview, Snippet};
+        use std::collections::HashMap;
+
+        let snippet = Snippet::new(
+            "Deploy Container",
+            "docker run -d -p {{port:-8080}}:80 --name {{app_name}} -e DB_PASSWORD={{db_password}} {{image}}",
+            Some("Deploys a web container".into()),
+            &["docker".into()],
+        )
+        .unwrap();
+
+        assert_eq!(snippet.variables.len(), 4);
+        assert!(snippet
+            .variables
+            .iter()
+            .any(|v| v.name == "db_password" && v.is_secret));
+
+        // Missing required variable fails
+        let empty_params = HashMap::new();
+        assert!(render_command(&snippet.command, &empty_params).is_err());
+
+        // Supplying required parameters renders command with defaults applied
+        let mut params = HashMap::new();
+        params.insert("app_name".into(), "web-svc".into());
+        params.insert("db_password".into(), "SuperSecretPass123!".into());
+        params.insert("image".into(), "nginx:latest".into());
+
+        let rendered = render_command(&snippet.command, &params).unwrap();
+        assert!(rendered.contains("-p 8080:80"));
+        assert!(rendered.contains("--name web-svc"));
+        assert!(rendered.contains("DB_PASSWORD=SuperSecretPass123!"));
+        assert!(rendered.contains("nginx:latest"));
+
+        // Preview redacts secret values
+        let preview = render_preview(&snippet.command, &params, &snippet.variables).unwrap();
+        assert!(preview.contains("DB_PASSWORD=[REDACTED]"));
+        assert!(!preview.contains("SuperSecretPass123!"));
     }
 }
