@@ -966,3 +966,114 @@ fn supports_vault_disaster_recovery_history_and_rollback() {
     assert!(list_str.contains("ProdGateway"));
     assert!(list_str.contains("192.168.1.100"));
 }
+
+#[test]
+fn supports_command_palette_search_and_batch_snippet_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Add hosts
+    assert!(run(&[
+        "add",
+        "web-prod-01",
+        "10.0.0.1",
+        "ubuntu",
+        "22",
+        "--tags",
+        "production,web"
+    ])
+    .status
+    .success());
+    assert!(run(&[
+        "add",
+        "web-prod-02",
+        "10.0.0.2",
+        "ubuntu",
+        "22",
+        "--tags",
+        "production,web"
+    ])
+    .status
+    .success());
+
+    // 2. Add snippet
+    let add_snip = run(&[
+        "snippet",
+        "add",
+        "Cluster Status",
+        "echo 'Node={{host.name}} IP={{host.hostname}} Env={{cluster_env:-production}}'",
+        "--description",
+        "Check cluster node state",
+        "--tags",
+        "cluster,ops",
+    ]);
+    assert!(add_snip.status.success());
+    let snip_id = String::from_utf8(add_snip.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // 3. Command Palette search for hosts
+    let pal_host = run(&["palette", "search", "web-prod"]);
+    assert!(pal_host.status.success());
+    let pal_host_out = String::from_utf8(pal_host.stdout).unwrap();
+    assert!(pal_host_out.contains("Hosts"));
+    assert!(pal_host_out.contains("Connect to web-prod-01"));
+    assert!(pal_host_out.contains("Connect to web-prod-02"));
+
+    // 4. Command Palette search for snippet
+    let pal_snip = run(&["palette", "search", "Cluster"]);
+    assert!(pal_snip.status.success());
+    let pal_snip_out = String::from_utf8(pal_snip.stdout).unwrap();
+    assert!(pal_snip_out.contains("Snippets"));
+    assert!(pal_snip_out.contains("Run Snippet: Cluster Status"));
+
+    // 5. Command Palette search for static action
+    let pal_action = run(&["palette", "search", "Quick Connect"]);
+    assert!(pal_action.status.success());
+    let pal_action_out = String::from_utf8(pal_action.stdout).unwrap();
+    assert!(pal_action_out.contains("Quick Connect"));
+    assert!(pal_action_out.contains("Cmd+O"));
+
+    // 6. Snippet Batch Dry-Run Preview
+    let batch_dry = run(&[
+        "snippet",
+        "batch",
+        &snip_id,
+        "--hosts",
+        "web-prod-01,web-prod-02",
+        "--var",
+        "cluster_env=staging",
+        "--dry-run",
+    ]);
+    assert!(batch_dry.status.success());
+    let batch_dry_out = String::from_utf8(batch_dry.stdout).unwrap();
+    assert!(batch_dry_out.contains("Batch Snippet Preview: Cluster Status"));
+    assert!(batch_dry_out.contains("Targets:  2 host(s)"));
+    assert!(batch_dry_out.contains("Node=web-prod-01 IP=10.0.0.1 Env=staging"));
+    assert!(batch_dry_out.contains("Node=web-prod-02 IP=10.0.0.2 Env=staging"));
+
+    // 7. Snippet Batch Execution
+    let batch_exec = run(&[
+        "snippet",
+        "batch",
+        &snip_id,
+        "--hosts",
+        "web-prod-01,web-prod-02",
+        "--var",
+        "cluster_env=staging",
+    ]);
+    assert!(batch_exec.status.success());
+    let batch_exec_out = String::from_utf8(batch_exec.stdout).unwrap();
+    assert!(batch_exec_out.contains("Executing Batch Snippet: Cluster Status on 2 host(s)"));
+    assert!(batch_exec_out.contains("web-prod-01\tSucceeded\texit:0"));
+    assert!(batch_exec_out.contains("web-prod-02\tSucceeded\texit:0"));
+    assert!(batch_exec_out.contains("Summary: Total=2, Succeeded=2, Failed=0, Cancelled=0"));
+}

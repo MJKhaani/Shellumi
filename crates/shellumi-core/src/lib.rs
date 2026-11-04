@@ -1,16 +1,22 @@
 //! UI-independent connection definitions. No network connections are made here.
 
+pub mod batch;
 pub mod credential;
 pub mod csv;
 pub mod group;
 pub mod identity;
 pub mod known_hosts;
+pub mod palette;
 pub mod sftp;
 pub mod snippet;
 pub mod ssh_config;
 pub mod sync;
 pub mod tunnel;
 
+pub use batch::{
+    BatchExecutionPlan, BatchExecutionSummary, BatchHostResult, BatchHostStatus, BatchHostTarget,
+    BatchPolicy, BatchRunner,
+};
 #[cfg(target_os = "macos")]
 pub use credential::MacOsKeychainStore;
 pub use credential::{
@@ -27,6 +33,7 @@ pub use known_hosts::{
     format_known_host_entry, parse_known_hosts, verify_host_key, HostKeyMarker,
     HostKeyVerification, KnownHostEntry, KnownHostsError,
 };
+pub use palette::{PaletteAction, PaletteCategory, PaletteCommand, PaletteMatch, PaletteRegistry};
 pub use sftp::{
     format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,
     NameEntry, OpenFlags, PathUtils, SftpPacket, SftpProtocolError, StatusCode, TransferDirection,
@@ -67,7 +74,7 @@ use std::fmt;
 use std::num::NonZeroU16;
 
 /// A validated SSH destination. Credentials are deliberately excluded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SshDestination {
     host: String,
     username: String,

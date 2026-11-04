@@ -136,7 +136,11 @@ impl Snippet {
 }
 
 fn validate_var_name(name: &str) -> Result<(), SnippetError> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
         return Err(SnippetError::InvalidVariableName(name.to_string()));
     }
     Ok(())

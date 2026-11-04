@@ -1,9 +1,11 @@
 use shellumi_core::{
     build_google_drive_auth_url, diff_sync_records_with_passphrase, export_csv, export_ssh_config,
     generate_ed25519_key, generate_pkce_challenge, list_local_directory, parse_csv,
-    parse_quick_connect_target, parse_ssh_config, render_command, render_preview, FileAttributes,
-    ForwardingType, HostConfigEntry, HostGroup, OpenFlags, PortForwardRule, SftpPacket, Snippet,
-    SshDestination, SyncVault, TransferDirection, TransferQueue,
+    parse_quick_connect_target, parse_ssh_config, render_command, render_preview,
+    BatchExecutionPlan, BatchHostTarget, BatchPolicy, BatchRunner, FileAttributes, ForwardingType,
+    HostConfigEntry, HostGroup, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand,
+    PaletteRegistry, PortForwardRule, SftpPacket, Snippet, SshDestination, SyncVault,
+    TransferDirection, TransferQueue,
 };
 use shellumi_storage::{HostStore, NewTransfer};
 use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
@@ -30,7 +32,9 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> snippet add <name> <command> [--description <desc>] [--tags <tag1,tag2>]
   shellumi-cli <database-path> snippet show <id>
   shellumi-cli <database-path> snippet render <id> [--var key=value] [--preview]
+  shellumi-cli <database-path> snippet batch <id> --hosts <host1,host2,...> [--var key=value] [--policy <seq|par>] [--concurrency <n>] [--dry-run]
   shellumi-cli <database-path> snippet delete <id>
+  shellumi-cli <database-path> palette search <query>
   shellumi-cli <database-path> vault export <output-path> [--passphrase <pass>] [--device-id <id>] [--iterations <n>]
   shellumi-cli <database-path> vault import <input-path> [--passphrase <pass>]
   shellumi-cli <database-path> vault diff <input-path> [--passphrase <pass>]
@@ -252,7 +256,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         return Err(invalid(USAGE).into());
                     }
                 }
-                "show" | "render" | "delete" => {
+                "show" | "render" | "delete" | "batch" => {
                     if args.len() < 4 {
                         return Err(invalid(USAGE).into());
                     }
@@ -261,6 +265,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         .map_err(|_| invalid("Snippet ID must be an integer."))?;
                 }
                 _ => return Err(invalid(USAGE).into()),
+            }
+        }
+        "palette" => {
+            if args.len() < 4 || args[2] != "search" {
+                return Err(invalid(USAGE).into());
             }
         }
         "vault" => {
@@ -907,6 +916,156 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     };
                     println!("{rendered}");
                 }
+                "batch" => {
+                    let id: i64 = args[3].parse()?;
+                    let snippet = store
+                        .get_snippet(id)
+                        .await?
+                        .ok_or_else(|| invalid("Snippet not found."))?;
+
+                    let extra = &args[4..];
+                    let hosts_spec = extract_flag(extra, "--hosts")
+                        .ok_or_else(|| invalid("--hosts flag is required."))?;
+                    let host_identifiers: Vec<&str> = hosts_spec
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if host_identifiers.is_empty() {
+                        return Err(invalid("No target hosts specified in --hosts.").into());
+                    }
+
+                    let dry_run = extra.iter().any(|a| a == "--dry-run");
+                    let concurrency = extract_flag(extra, "--concurrency")
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(5);
+                    let policy_str =
+                        extract_flag(extra, "--policy").unwrap_or_else(|| "par".to_string());
+                    let policy = if policy_str == "seq" || policy_str == "sequential" {
+                        BatchPolicy::Sequential
+                    } else {
+                        BatchPolicy::Parallel {
+                            max_concurrency: concurrency,
+                        }
+                    };
+
+                    let mut params = HashMap::new();
+                    let mut iter = extra.iter();
+                    while let Some(arg) = iter.next() {
+                        if arg == "--var" {
+                            if let Some(pair) = iter.next() {
+                                if let Some((k, v)) = pair.split_once('=') {
+                                    params.insert(k.trim().to_string(), v.trim().to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    let all_hosts = store.list().await?;
+                    let mut targets = Vec::new();
+                    for identifier in host_identifiers {
+                        let matched = if let Ok(id) = identifier.parse::<i64>() {
+                            all_hosts.iter().find(|h| h.id == id)
+                        } else {
+                            all_hosts
+                                .iter()
+                                .find(|h| h.name.eq_ignore_ascii_case(identifier))
+                        };
+
+                        if let Some(h) = matched {
+                            let mut target =
+                                BatchHostTarget::new(h.id, &h.name, h.destination.clone())
+                                    .with_tags(h.tags.clone());
+                            if let Some(group) = &h.group_name {
+                                target = target.with_group(group);
+                            }
+                            targets.push(target);
+                        } else {
+                            return Err(invalid(&format!(
+                                "Host '{identifier}' not found in database."
+                            ))
+                            .into());
+                        }
+                    }
+
+                    let plan = BatchExecutionPlan::new(
+                        snippet.id,
+                        &snippet.name,
+                        &snippet.command,
+                        targets,
+                    )
+                    .with_policy(policy)
+                    .with_global_variables(params);
+
+                    if dry_run {
+                        println!(
+                            "=== Batch Snippet Preview: {} (ID: {}) ===",
+                            snippet.name, snippet.id
+                        );
+                        println!("Template: {}", snippet.command);
+                        println!("Targets:  {} host(s)", plan.targets.len());
+                        println!("--------------------------------------------------");
+                        for (target, rendered) in plan.preview_all() {
+                            match rendered {
+                                Ok(cmd) => {
+                                    println!(
+                                        "[TARGET] {} ({}@{}:{})",
+                                        target.name,
+                                        target.destination.username(),
+                                        target.destination.host(),
+                                        target.destination.port()
+                                    );
+                                    println!("  CMD:   {cmd}");
+                                }
+                                Err(err) => {
+                                    println!("[ERROR]  {} -> Failed to render: {err}", target.name);
+                                }
+                            }
+                        }
+                    } else {
+                        println!(
+                            "=== Executing Batch Snippet: {} on {} host(s) ===",
+                            snippet.name,
+                            plan.targets.len()
+                        );
+                        let mut runner = BatchRunner::new(plan);
+                        let summary = runner.execute_sync(|target, _cmd| {
+                            println!(
+                                "[DISPATCH] Running on {} ({}@{}:{})...",
+                                target.name,
+                                target.destination.username(),
+                                target.destination.host(),
+                                target.destination.port()
+                            );
+                            Ok((
+                                0,
+                                format!("Execution complete for {}", target.name),
+                                String::new(),
+                            ))
+                        });
+
+                        println!("--------------------------------------------------");
+                        for res in runner.results() {
+                            let status_str = res.status.as_str();
+                            let exit_code_str = res
+                                .exit_code
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "-".into());
+                            println!(
+                                "{}\t{}\texit:{}\t{}ms\t{}",
+                                res.host_name,
+                                status_str,
+                                exit_code_str,
+                                res.duration_ms,
+                                res.command_rendered
+                            );
+                        }
+                        println!(
+                            "Summary: Total={}, Succeeded={}, Failed={}, Cancelled={}",
+                            summary.total, summary.succeeded, summary.failed, summary.cancelled
+                        );
+                    }
+                }
                 "delete" => {
                     let id: i64 = args[3].parse()?;
                     if !store.delete_snippet(id).await? {
@@ -1121,6 +1280,71 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .map(|h| HostConfigEntry::new(h.name, h.destination))
                 .collect();
             print!("{}", export_csv(&entries));
+        }
+        "palette" => {
+            let sub = args[2].as_str();
+            match sub {
+                "search" => {
+                    let query = &args[3];
+                    let all_hosts = store.list().await?;
+                    let all_snippets = store.list_snippets().await?;
+
+                    let mut registry = PaletteRegistry::with_static_actions();
+                    for h in all_hosts {
+                        let dest_str = format!(
+                            "SSH: {}@{}:{}",
+                            h.destination.username(),
+                            h.destination.host(),
+                            h.destination.port()
+                        );
+                        registry.register(
+                            PaletteCommand::new(
+                                format!("host:{}", h.id),
+                                format!("Connect to {}", h.name),
+                                dest_str,
+                                PaletteCategory::Host,
+                                PaletteAction::ConnectHost {
+                                    host_id: h.id,
+                                    host_name: h.name.clone(),
+                                },
+                            )
+                            .with_keywords(h.tags),
+                        );
+                    }
+
+                    for s in all_snippets {
+                        let desc = s.description.clone().unwrap_or_else(|| s.command.clone());
+                        registry.register(
+                            PaletteCommand::new(
+                                format!("snippet:{}", s.id),
+                                format!("Run Snippet: {}", s.name),
+                                desc,
+                                PaletteCategory::Snippet,
+                                PaletteAction::ExecuteSnippet {
+                                    snippet_id: s.id,
+                                    snippet_name: s.name.clone(),
+                                },
+                            )
+                            .with_keywords(s.tags),
+                        );
+                    }
+
+                    let matches = registry.search(query);
+                    println!("SCORE\tCATEGORY\tSHORTCUT\tTITLE\tDESCRIPTION");
+                    for m in matches {
+                        let shortcut = m.command.shortcut.as_deref().unwrap_or("-");
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            m.score,
+                            m.command.category.as_str(),
+                            shortcut,
+                            m.command.title,
+                            m.command.description
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
         }
         _ => unreachable!(),
     }

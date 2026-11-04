@@ -103,6 +103,8 @@ OpenSSH session with strict host-key verification, while "SFTP" opens a dedicate
 session featuring both a full graphical dual-pane browser (Local left pane, Remote right pane,
 clickable breadcrumbs, directory traversal, hidden-files toggling, selection-driven Upload/Download actions,
 and a live transfer queue drawer with visual progress bar) and an interactive raw SFTP terminal mode.
+The window provides a global Command Palette accessible via `Cmd-K` (`Ctrl-K` on Linux/Windows) or top toolbar buttons,
+supporting instant fuzzy search across hosts (direct SSH/SFTP connection), saved snippets, navigation, and cloud sync actions.
 The terminal view provides styled text spans (16/256/TrueColor RGB and text attributes), scrollback history,
 clipboard paste, extended ANSI navigation keys, PTY resize support, an in-pane search toolbar, and a live cursor coordinate status bar.
 The PTY worker has been tested with an isolated SSH server; full window interaction
@@ -140,6 +142,8 @@ cargo run --locked -p shellumi-cli -- ./hosts.db sftp local-ls ./
 cargo run --locked -p shellumi-cli -- ./hosts.db sftp packet encode-init --version 3
 cargo run --locked -p shellumi-cli -- ./hosts.db sftp packet decode 000000050100000003
 cargo run --locked -p shellumi-cli -- ./hosts.db sftp queue upload /local/file /remote/file 1024
+cargo run --locked -p shellumi-cli -- ./hosts.db snippet batch 1 --hosts web-01,web-02 --var env=prod --dry-run
+cargo run --locked -p shellumi-cli -- ./hosts.db palette search "web-01"
 ```
 
 `add` prints the new numeric ID. `list` prints tab-separated ID, name, hostname,
@@ -154,6 +158,8 @@ comma-separated host tables. `vault export`, `vault import`, `vault diff`, `vaul
 RFC 7636 PKCE authorization parameters, and automated disaster recovery rollback. `sftp local-ls`,
 `sftp history`, `sftp log`, `sftp packet`, and `sftp queue` provide local filesystem browsing, transfer history auditing,
 RFC-compliant SFTP v3 wire packet inspection/encoding, and concurrent transfer queue orchestration.
+`snippet batch` provides multi-host snippet execution and dry-run previews with safe parameter substitution and host property variables (`{{host.name}}`, `{{host.hostname}}`, `{{host.user}}`, `{{host.port}}`), supporting parallel and sequential policies.
+`palette search` queries the global Command Palette across static actions, hosts, snippets, and navigation entries with tokenized and acronym scoring.
 `connect` executes system OpenSSH with `-o StrictHostKeyChecking=ask` and `-o ForwardAgent=no`. Run with `--help` to display full
 command syntax.
 

@@ -2,20 +2,20 @@ mod session;
 mod text_input;
 
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Entity,
+    actions, div, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context, Entity,
     FocusHandle, FontWeight, KeyBinding, KeyDownEvent, Window, WindowBounds, WindowOptions,
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
     list_local_directory, validate_jump_host, ConflictItemView, ConflictResolutionChoice,
-    FileEntry, FileKind, PathUtils, SshDestination, SyncEntityType, TransferDirection,
-    TransferQueue, TransferStatus,
+    FileEntry, FileKind, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
+    PathUtils, SshDestination, SyncEntityType, TransferDirection, TransferQueue, TransferStatus,
 };
 use shellumi_storage::{HostStore, SavedHost, SavedSnippet};
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
 
-actions!(shellumi, [RefreshHosts]);
+actions!(shellumi, [RefreshHosts, ToggleCommandPalette]);
 
 enum HostState {
     NoDatabase,
@@ -50,6 +50,12 @@ struct SnippetModalState {
     error: Option<String>,
 }
 
+struct CommandPaletteState {
+    input: Entity<TextInput>,
+    registry: PaletteRegistry,
+    selected_idx: usize,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -68,6 +74,7 @@ struct Shellumi {
     sync_status: AppSyncStatus,
     conflict_modal: Option<ConflictModalState>,
     snippet_modal: Option<SnippetModalState>,
+    command_palette: Option<CommandPaletteState>,
     sync_scheduler: shellumi_core::SyncScheduler,
 }
 
@@ -279,6 +286,7 @@ impl Shellumi {
             sync_status: AppSyncStatus::LocalOnly,
             conflict_modal: None,
             snippet_modal: None,
+            command_palette: None,
             sync_scheduler: shellumi_core::SyncScheduler::default(),
         };
         if app.database.is_some() {
@@ -889,7 +897,38 @@ impl Shellumi {
         );
     }
 
-    fn terminal_input(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn terminal_input(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.dismiss_command_palette(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "down" => {
+                    self.command_palette_select_next(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "up" => {
+                    self.command_palette_select_prev(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "enter" => {
+                    self.execute_command_palette_selected(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let Some(active_idx) = self.active_tab_idx else {
             return;
         };
@@ -1483,6 +1522,260 @@ impl Shellumi {
         }
     }
 
+    fn open_command_palette(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let mut registry = PaletteRegistry::with_static_actions();
+
+        // 1. Saved hosts
+        if let HostState::Loaded(hosts) = &self.hosts {
+            for h in hosts {
+                let dest_str = format!(
+                    "SSH: {}@{}:{}",
+                    h.destination.username(),
+                    h.destination.host(),
+                    h.destination.port()
+                );
+                registry.register(
+                    PaletteCommand::new(
+                        format!("host:{}", h.id),
+                        format!("Connect to {}", h.name),
+                        dest_str,
+                        PaletteCategory::Host,
+                        PaletteAction::ConnectHost {
+                            host_id: h.id,
+                            host_name: h.name.clone(),
+                        },
+                    )
+                    .with_keywords(h.tags.clone()),
+                );
+
+                registry.register(
+                    PaletteCommand::new(
+                        format!("sftp:{}", h.id),
+                        format!("Open SFTP: {}", h.name),
+                        format!("SFTP file transfer session with {}", h.name),
+                        PaletteCategory::Sftp,
+                        PaletteAction::ConnectSftp {
+                            host_id: h.id,
+                            host_name: h.name.clone(),
+                        },
+                    )
+                    .with_keywords(h.tags.clone()),
+                );
+            }
+        }
+
+        // 2. Saved snippets
+        for s in &self.snippets {
+            let desc = s.description.clone().unwrap_or_else(|| s.command.clone());
+            registry.register(
+                PaletteCommand::new(
+                    format!("snippet:{}", s.id),
+                    format!("Run Snippet: {}", s.name),
+                    desc,
+                    PaletteCategory::Snippet,
+                    PaletteAction::ExecuteSnippet {
+                        snippet_id: s.id,
+                        snippet_name: s.name.clone(),
+                    },
+                )
+                .with_keywords(s.tags.clone()),
+            );
+        }
+
+        // 3. Tab switching
+        for (i, tab) in self.tabs.iter().enumerate() {
+            registry.register(
+                PaletteCommand::new(
+                    format!("tab:{}", tab.id),
+                    format!("Switch to Tab {}: {}", i + 1, tab.name),
+                    format!("Bring session '{}' to foreground", tab.name),
+                    PaletteCategory::Navigation,
+                    PaletteAction::SwitchToTab(i),
+                )
+                .with_shortcut(format!("Cmd+{}", (i + 2).min(9))),
+            );
+        }
+
+        let input =
+            cx.new(|cx| TextInput::new(cx, "", "Type a command, host, snippet, or action…"));
+        self.command_palette = Some(CommandPaletteState {
+            input,
+            registry,
+            selected_idx: 0,
+        });
+        cx.notify();
+    }
+
+    fn dismiss_command_palette(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = None;
+        cx.notify();
+    }
+
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            self.dismiss_command_palette(cx);
+        } else {
+            self.open_command_palette(window, cx);
+        }
+    }
+
+    fn command_palette_select_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(palette) = &mut self.command_palette {
+            let query = palette.input.read(cx).value();
+            let count = palette.registry.search(query).len();
+            if count > 0 {
+                palette.selected_idx = (palette.selected_idx + 1).min(count - 1);
+                cx.notify();
+            }
+        }
+    }
+
+    fn command_palette_select_prev(&mut self, cx: &mut Context<Self>) {
+        if let Some(palette) = &mut self.command_palette {
+            palette.selected_idx = palette.selected_idx.saturating_sub(1);
+            cx.notify();
+        }
+    }
+
+    fn execute_command_palette_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = &self.command_palette else {
+            return;
+        };
+        let query = palette.input.read(cx).value();
+        let matches = palette.registry.search(query);
+        let action = matches
+            .get(palette.selected_idx)
+            .map(|m| m.command.action.clone());
+        if let Some(action) = action {
+            self.execute_palette_action(action, window, cx);
+        } else {
+            self.dismiss_command_palette(cx);
+        }
+    }
+
+    fn execute_palette_action(
+        &mut self,
+        action: PaletteAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_palette = None;
+        cx.notify();
+
+        match action {
+            PaletteAction::ConnectHost { host_id, .. } => {
+                if let HostState::Loaded(hosts) = &self.hosts {
+                    if let Some(host) = hosts.iter().find(|h| h.id == host_id).cloned() {
+                        self.connect(&host, window, cx);
+                    }
+                }
+            }
+            PaletteAction::ConnectSftp { host_id, .. } => {
+                if let HostState::Loaded(hosts) = &self.hosts {
+                    if let Some(host) = hosts.iter().find(|h| h.id == host_id).cloned() {
+                        self.connect_sftp(&host, window, cx);
+                    }
+                }
+            }
+            PaletteAction::ExecuteSnippet { snippet_id, .. } => {
+                self.insert_snippet(snippet_id, true, cx);
+            }
+            PaletteAction::QuickConnect => {
+                self.active_tab_idx = None;
+                window.focus(&self.focus);
+                cx.notify();
+            }
+            PaletteAction::TriggerSync => {
+                self.trigger_sync(cx);
+            }
+            PaletteAction::OpenConflictResolver => {
+                let sample = vec![ConflictItemView {
+                    object_id: "conflicted-host".into(),
+                    entity_type: SyncEntityType::Host,
+                    local_version: 2,
+                    remote_version: 2,
+                    local_updated_at: 1000,
+                    remote_updated_at: 1050,
+                    local_summary: "Production Bastion (alice@bastion:22)".into(),
+                    remote_summary: "Production Bastion (bob@bastion:2222)".into(),
+                }];
+                self.open_conflict_modal("vault_file_1".into(), sample, cx);
+            }
+            PaletteAction::NewLocalTerminal => {
+                self.open_local_terminal(window, cx);
+            }
+            PaletteAction::SplitVertical => {
+                self.split_pane(SplitDirection::Vertical, window, cx);
+            }
+            PaletteAction::SplitHorizontal => {
+                self.split_pane(SplitDirection::Horizontal, window, cx);
+            }
+            PaletteAction::CloseActiveTab => {
+                if let Some(idx) = self.active_tab_idx {
+                    if let Some(tab) = self.tabs.get(idx) {
+                        let id = tab.id;
+                        self.close_tab(id, window, cx);
+                    }
+                }
+            }
+            PaletteAction::OpenSnippetsDrawer => {
+                self.snippets_panel_open = true;
+                cx.notify();
+            }
+            PaletteAction::AddNewHost => {
+                self.active_tab_idx = None;
+                self.edit_host(None, cx);
+            }
+            PaletteAction::AddNewSnippet => {
+                self.snippets_panel_open = true;
+                cx.notify();
+            }
+            PaletteAction::AddNewTunnel => {
+                cx.notify();
+            }
+            PaletteAction::NavigateToHosts => {
+                self.active_tab_idx = None;
+                cx.notify();
+            }
+            PaletteAction::SwitchToTab(tab_idx) => {
+                if tab_idx < self.tabs.len() {
+                    self.active_tab_idx = Some(tab_idx);
+                    window.focus(&self.focus);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn handle_palette_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.dismiss_command_palette(cx);
+                    cx.stop_propagation();
+                }
+                "down" => {
+                    self.command_palette_select_next(cx);
+                    cx.stop_propagation();
+                }
+                "up" => {
+                    self.command_palette_select_prev(cx);
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    self.execute_command_palette_selected(window, cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn render_conflict_modal(
         &self,
         modal: &ConflictModalState,
@@ -2004,6 +2297,217 @@ impl Shellumi {
                     }),
             );
         modal_box = modal_box.child(actions);
+
+        overlay.child(modal_box)
+    }
+
+    fn render_command_palette(
+        &self,
+        palette: &CommandPaletteState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("command-palette-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgba(0x000000d0))
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt_16();
+
+        let query = palette.input.read(cx).value();
+        let matches = palette.registry.search(query);
+
+        let mut modal_box = div()
+            .id("command-palette-card")
+            .w(px(640.0))
+            .rounded_xl()
+            .bg(rgb(0x111827))
+            .border_1()
+            .border_color(rgb(0x374151))
+            .shadow_2xl()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .on_key_down(cx.listener(Self::handle_palette_key_down));
+
+        // Search Input Header
+        let search_header = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .py_3()
+            .bg(rgb(0x0f172a))
+            .border_b_1()
+            .border_color(rgb(0x1f2937))
+            .child(div().text_lg().child("🔍"))
+            .child(div().flex_1().child(palette.input.clone()))
+            .child(
+                div()
+                    .id("dismiss-palette-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x1f2937))
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_command_palette(cx)))
+                    .child("Esc"),
+            );
+        modal_box = modal_box.child(search_header);
+
+        // Results Container
+        if matches.is_empty() {
+            let empty_view = div()
+                .p_8()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(div().text_2xl().child("🔍"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x9ca3af))
+                        .child("No commands, hosts, or snippets match your query."),
+                );
+            modal_box = modal_box.child(empty_view);
+        } else {
+            let mut results_list = div()
+                .id("palette-results-list")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .max_h(px(380.0))
+                .overflow_y_scroll();
+
+            for (idx, mat) in matches.iter().enumerate() {
+                let is_selected = idx == palette.selected_idx;
+                let (bg_color, border_left) = if is_selected {
+                    (rgb(0x1e3a5f), rgb(0x3b82f6))
+                } else {
+                    (rgb(0x111827), rgb(0x111827))
+                };
+
+                let cat = mat.command.category;
+                let (cat_bg, cat_fg) = match cat {
+                    PaletteCategory::Host => (rgb(0x064e3b), rgb(0xa7f3d0)),
+                    PaletteCategory::Snippet => (rgb(0x581c87), rgb(0xe9d5ff)),
+                    PaletteCategory::Terminal => (rgb(0x1e3a8a), rgb(0xbfdbfe)),
+                    PaletteCategory::Sync => (rgb(0x78350f), rgb(0xfde68a)),
+                    PaletteCategory::Tunnel => (rgb(0x831843), rgb(0xfbcfe8)),
+                    PaletteCategory::Sftp => (rgb(0x14532d), rgb(0xbbf7d0)),
+                    PaletteCategory::Navigation => (rgb(0x374151), rgb(0xf3f4f6)),
+                };
+
+                let action = mat.command.action.clone();
+                let mut row = div()
+                    .id(("palette-item", idx))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(bg_color)
+                    .border_l_4()
+                    .border_color(border_left)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.execute_palette_action(action.clone(), window, cx);
+                    }));
+
+                let left_content = div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cat_bg)
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(cat_fg)
+                            .child(format!("{} {}", cat.badge_icon(), cat.as_str())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if is_selected {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(0xe5e7eb)
+                                    })
+                                    .child(mat.command.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x9ca3af))
+                                    .child(mat.command.description.clone()),
+                            ),
+                    );
+                row = row.child(left_content);
+
+                if let Some(sc) = &mat.command.shortcut {
+                    row = row.child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(rgb(0x1f2937))
+                            .border_1()
+                            .border_color(rgb(0x374151))
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(rgb(0x94a3b8))
+                            .child(sc.clone()),
+                    );
+                }
+
+                results_list = results_list.child(row);
+            }
+
+            modal_box = modal_box.child(results_list);
+        }
+
+        // Footer
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(0x1f2937))
+            .bg(rgb(0x0a0f1d))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x6b7280))
+                    .child("↑↓ navigate  •  ↵ execute  •  esc dismiss"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x4b5563))
+                    .child(format!("{} actions available", matches.len())),
+            );
+        modal_box = modal_box.child(footer);
 
         overlay.child(modal_box)
     }
@@ -2706,6 +3210,9 @@ impl Render for Shellumi {
                 let mut body = div()
                     .id("terminal-view")
                     .track_focus(&self.focus)
+                    .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
+                        app.toggle_command_palette(window, cx);
+                    }))
                     .on_key_down(cx.listener(Self::terminal_input))
                     .size_full()
                     .flex()
@@ -2853,6 +3360,22 @@ impl Render for Shellumi {
                                                 .child("📜 Snippets"),
                                         );
                                 }
+
+                                actions_bar = actions_bar.child(
+                                    div()
+                                        .id("terminal-palette-btn")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .bg(rgb(0x1e3a8a))
+                                        .text_sm()
+                                        .text_color(rgb(0xffffff))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.open_command_palette(window, cx);
+                                        }))
+                                        .child("🔍 Palette (Cmd+K)"),
+                                );
 
                                 actions_bar.child(
                                     div()
@@ -3212,6 +3735,9 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.snippet_modal {
                     result = result.child(self.render_snippet_modal(modal, cx));
                 }
+                if let Some(palette) = &self.command_palette {
+                    result = result.child(self.render_command_palette(palette, cx));
+                }
                 return result;
             }
         }
@@ -3395,6 +3921,10 @@ impl Render for Shellumi {
             .id("shellumi")
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &RefreshHosts, _, cx| app.load_hosts(cx)))
+            .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
+                app.toggle_command_palette(window, cx);
+            }))
+            .on_key_down(cx.listener(Self::handle_palette_key_down))
             .size_full()
             .flex()
             .flex_col()
@@ -3415,6 +3945,20 @@ impl Render for Shellumi {
                 .cursor_pointer()
                 .on_click(cx.listener(|app, _, window, cx| app.open_local_terminal(window, cx)))
                 .child("Local terminal"),
+        );
+        actions = actions.child(
+            div()
+                .id("command-palette-btn")
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(0x1e3a8a))
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.open_command_palette(window, cx);
+                }))
+                .child("🔍 Command Palette (Cmd+K)"),
         );
         if self.database.is_some() && !matches!(self.hosts, HostState::Loading) {
             actions = actions
@@ -3636,6 +4180,9 @@ impl Render for Shellumi {
         if let Some(modal) = &self.snippet_modal {
             result = result.child(self.render_snippet_modal(modal, cx));
         }
+        if let Some(palette) = &self.command_palette {
+            result = result.child(self.render_command_palette(palette, cx));
+        }
         result
     }
 }
@@ -3658,7 +4205,16 @@ fn main() {
         let refresh_shortcut = "cmd-r";
         #[cfg(not(target_os = "macos"))]
         let refresh_shortcut = "ctrl-r";
-        cx.bind_keys([KeyBinding::new(refresh_shortcut, RefreshHosts, None)]);
+
+        #[cfg(target_os = "macos")]
+        let palette_shortcut = "cmd-k";
+        #[cfg(not(target_os = "macos"))]
+        let palette_shortcut = "ctrl-k";
+
+        cx.bind_keys([
+            KeyBinding::new(refresh_shortcut, RefreshHosts, None),
+            KeyBinding::new(palette_shortcut, ToggleCommandPalette, None),
+        ]);
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -4297,5 +4853,102 @@ mod tests {
             SftpTabMode::Terminal => SftpTabMode::DualPane,
         };
         assert_eq!(sftp_state.mode, SftpTabMode::Terminal);
+    }
+
+    #[test]
+    fn verifies_command_palette_registry_matching_and_actions() {
+        use shellumi_core::{
+            PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, SshDestination,
+        };
+
+        let mut registry = PaletteRegistry::with_static_actions();
+
+        // Check static actions
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::QuickConnect));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::TriggerSync));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::SplitVertical));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::NewLocalTerminal));
+
+        // Add mock host
+        let dest = SshDestination::new("192.168.1.50", "admin", 22).unwrap();
+        registry.register(
+            PaletteCommand::new(
+                "host:99",
+                "Connect to Bastion Gateway",
+                format!("SSH: {}@{}:{}", dest.username(), dest.host(), dest.port()),
+                PaletteCategory::Host,
+                PaletteAction::ConnectHost {
+                    host_id: 99,
+                    host_name: "Bastion Gateway".into(),
+                },
+            )
+            .with_keywords(["gateway", "bastion", "prod"]),
+        );
+
+        // Add mock snippet
+        registry.register(
+            PaletteCommand::new(
+                "snippet:77",
+                "Run Snippet: Clear Docker Logs",
+                "truncate -s 0 /var/lib/docker/containers/*/*-json.log",
+                PaletteCategory::Snippet,
+                PaletteAction::ExecuteSnippet {
+                    snippet_id: 77,
+                    snippet_name: "Clear Docker Logs".into(),
+                },
+            )
+            .with_keywords(["docker", "cleanup", "logs"]),
+        );
+
+        // 1. Search for host
+        let host_matches = registry.search("bastion");
+        assert!(!host_matches.is_empty());
+        assert_eq!(
+            host_matches[0].command.action,
+            PaletteAction::ConnectHost {
+                host_id: 99,
+                host_name: "Bastion Gateway".into(),
+            }
+        );
+        assert_eq!(host_matches[0].command.category, PaletteCategory::Host);
+
+        // 2. Search for snippet
+        let snip_matches = registry.search("Clear Docker");
+        assert!(!snip_matches.is_empty());
+        assert_eq!(
+            snip_matches[0].command.action,
+            PaletteAction::ExecuteSnippet {
+                snippet_id: 77,
+                snippet_name: "Clear Docker Logs".into(),
+            }
+        );
+        assert_eq!(snip_matches[0].command.category, PaletteCategory::Snippet);
+
+        // 3. Search for action by shortcut keyword
+        let split_matches = registry.search("split");
+        assert!(split_matches.len() >= 2);
+        assert!(split_matches
+            .iter()
+            .any(|m| m.command.action == PaletteAction::SplitVertical));
+        assert!(split_matches
+            .iter()
+            .any(|m| m.command.action == PaletteAction::SplitHorizontal));
+
+        // 4. Acronym match: "qc" -> Quick Connect
+        let qc_matches = registry.search("qc");
+        assert!(!qc_matches.is_empty());
+        assert_eq!(qc_matches[0].command.action, PaletteAction::QuickConnect);
     }
 }
