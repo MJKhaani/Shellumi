@@ -1,5 +1,58 @@
 //! UI-independent connection definitions. No network connections are made here.
 
+pub mod credential;
+pub mod csv;
+pub mod group;
+pub mod identity;
+pub mod known_hosts;
+pub mod sftp;
+pub mod snippet;
+pub mod ssh_config;
+pub mod sync;
+pub mod tunnel;
+
+#[cfg(target_os = "macos")]
+pub use credential::MacOsKeychainStore;
+pub use credential::{
+    default_credential_store, CredentialError, CredentialStore, CredentialType,
+    EncryptedFileCredentialStore, EphemeralCredentialStore, SecretString,
+};
+pub use csv::{export_csv, parse_csv};
+pub use group::{resolve_effective_destination, resolve_effective_tags, GroupError, HostGroup};
+pub use identity::{
+    compute_sha256_fingerprint, encode_openssh_public_key, generate_ed25519_key, AuthMethod,
+    Identity, IdentityError, KeyPair, KeyType, SshKey,
+};
+pub use known_hosts::{
+    format_known_host_entry, parse_known_hosts, verify_host_key, HostKeyMarker,
+    HostKeyVerification, KnownHostEntry, KnownHostsError,
+};
+pub use sftp::{
+    format_bytes, list_local_directory, ConflictResolution, FileEntry, FileKind, PathUtils,
+    TransferDirection, TransferStatus, TransferTask,
+};
+pub use snippet::{
+    export_snippets_json, extract_variables, parse_snippets_json, render_command, render_preview,
+    shell_escape, Snippet, SnippetError, SnippetVariable,
+};
+pub use ssh_config::{export_ssh_config, parse_ssh_config, HostConfigEntry};
+pub use sync::{
+    build_delete_file_request, build_download_file_request, build_google_drive_auth_url,
+    build_list_appdata_files_request, build_multipart_upload_request,
+    build_oauth_callback_response, build_token_exchange_request, build_token_refresh_request,
+    build_update_file_request, decrypt_entity, determine_sync_action, diff_sync_records,
+    diff_sync_records_with_passphrase, encrypt_entity, encrypt_entity_with_iterations,
+    generate_nonce, generate_pkce_challenge, generate_salt, parse_download_file_response,
+    parse_list_files_response, parse_oauth_callback_request, parse_token_exchange_response,
+    parse_token_refresh_response, parse_upload_file_response, plan_sync_cycle, url_encode,
+    DiffStatus, DriveFileMetadata, EncryptedEnvelope, GoogleDriveSyncClient, HttpRequest,
+    HttpResponse, HttpTransport, OAuthCallbackListener, OAuthTokenBundle, PkceChallenge,
+    RecordDiffSummary, SyncAction, SyncEntityType, SyncError, SyncPlan, SyncRecord, SyncVault,
+    DEFAULT_KDF_ITERATIONS, DRIVE_APPDATA_FILENAME, KEY_LEN, MIN_PASSPHRASE_LENGTH,
+    OAUTH_TOKEN_ACCOUNT, OAUTH_TOKEN_SERVICE, SALT_LEN,
+};
+pub use tunnel::{validate_jump_host, ForwardingType, PortForwardRule, TunnelError};
+
 use std::fmt;
 use std::num::NonZeroU16;
 
@@ -16,6 +69,7 @@ pub enum DestinationError {
     InvalidHost,
     InvalidUsername,
     InvalidPort,
+    InvalidFormat,
 }
 
 impl fmt::Display for DestinationError {
@@ -26,6 +80,7 @@ impl fmt::Display for DestinationError {
             }
             Self::InvalidUsername => "Enter a username without whitespace or control characters.",
             Self::InvalidPort => "Enter a port between 1 and 65535.",
+            Self::InvalidFormat => "Enter a destination in the format user@host[:port].",
         })
     }
 }
@@ -68,11 +123,86 @@ impl SshDestination {
     pub fn port(&self) -> NonZeroU16 {
         self.port
     }
+
+    /// Arguments for an interactive system OpenSSH session. Host-key confirmation
+    /// is required for unknown keys and agent forwarding is disabled by default.
+    pub fn openssh_arguments(&self) -> Vec<String> {
+        vec![
+            "-o".into(),
+            "StrictHostKeyChecking=ask".into(),
+            "-o".into(),
+            "ForwardAgent=no".into(),
+            "-p".into(),
+            self.port.to_string(),
+            "-l".into(),
+            self.username.clone(),
+            "--".into(),
+            self.host.clone(),
+        ]
+    }
+}
+
+/// Parse a quick-connect string in the format `user@host[:port]` or `user@[ipv6][:port]`.
+pub fn parse_quick_connect_target(target: &str) -> Result<SshDestination, DestinationError> {
+    let target = target.trim();
+    let (username, host_part) = target
+        .split_once('@')
+        .ok_or(DestinationError::InvalidFormat)?;
+
+    let (host, port) = if let Some(stripped) = host_part.strip_prefix('[') {
+        let (ipv6, rest) = stripped
+            .split_once(']')
+            .ok_or(DestinationError::InvalidFormat)?;
+        let port = if let Some(port_str) = rest.strip_prefix(':') {
+            port_str
+                .parse::<u16>()
+                .map_err(|_| DestinationError::InvalidPort)?
+        } else {
+            22
+        };
+        (ipv6, port)
+    } else if let Some((h, p)) = host_part.split_once(':') {
+        let port = p
+            .parse::<u16>()
+            .map_err(|_| DestinationError::InvalidPort)?;
+        (h, port)
+    } else {
+        (host_part, 22)
+    };
+
+    SshDestination::new(host, username, port)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_quick_connect_targets() {
+        let d1 = parse_quick_connect_target("alice@example.com").unwrap();
+        assert_eq!(d1.username(), "alice");
+        assert_eq!(d1.host(), "example.com");
+        assert_eq!(d1.port().get(), 22);
+
+        let d2 = parse_quick_connect_target("bob@192.168.1.1:2222").unwrap();
+        assert_eq!(d2.username(), "bob");
+        assert_eq!(d2.host(), "192.168.1.1");
+        assert_eq!(d2.port().get(), 2222);
+
+        let d3 = parse_quick_connect_target("root@[2001:db8::1]:8022").unwrap();
+        assert_eq!(d3.username(), "root");
+        assert_eq!(d3.host(), "2001:db8::1");
+        assert_eq!(d3.port().get(), 8022);
+
+        assert_eq!(
+            parse_quick_connect_target("invalid"),
+            Err(DestinationError::InvalidFormat)
+        );
+        assert_eq!(
+            parse_quick_connect_target("user@host:badport"),
+            Err(DestinationError::InvalidPort)
+        );
+    }
 
     #[test]
     fn accepts_dns_and_ipv6_and_normalizes_outer_whitespace() {

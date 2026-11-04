@@ -1,0 +1,11 @@
+[package]
+name = "shellumi-terminal"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+portable-pty = "0.8.1"
+vte = "0.11.1"
+grid = "0.18.0"

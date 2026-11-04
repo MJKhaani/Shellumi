@@ -1,1 +1,12 @@
 /target/
+.DS_Store
+**/.DS_Store
+build-activity.log
+craft.json
+feed.json
+usage.json
+capture/
+checks/
+investigation.cany/
+pinned/
+
