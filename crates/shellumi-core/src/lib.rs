@@ -6,6 +6,7 @@ pub mod credential;
 pub mod csv;
 pub mod group;
 pub mod identity;
+pub mod infrastructure;
 pub mod known_hosts;
 pub mod palette;
 pub mod protocol;
@@ -35,6 +36,11 @@ pub use group::{resolve_effective_destination, resolve_effective_tags, GroupErro
 pub use identity::{
     compute_sha256_fingerprint, encode_openssh_public_key, generate_ed25519_key, AuthMethod,
     Identity, IdentityError, KeyPair, KeyType, SshKey,
+};
+pub use infrastructure::{
+    AnsibleInventoryEngine, AwsEc2Parser, AzureVmParser, CloudProviderConfig, CloudProviderKind,
+    DigitalOceanParser, DiscoveredHost, ExistingHostRecord, HostExportItem, InfraSyncAction,
+    InfraSyncReport, InfrastructureError, InventoryMergeEngine, MergePolicy,
 };
 pub use known_hosts::{
     format_known_host_entry, parse_known_hosts, verify_host_key, HostKeyMarker,

@@ -2,14 +2,16 @@ use shellumi_core::{
     build_google_drive_auth_url, diff_sync_records_with_passphrase, discover_serial_ports,
     export_csv, export_ssh_config, generate_ed25519_key, generate_pkce_challenge,
     list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
-    render_preview, AuditAction, BatchExecutionPlan, BatchHostTarget, BatchPolicy,
-    ConnectionProtocol, FileAttributes, ForwardingType, HostConfigEntry, HostGroup, MoshConfig,
-    MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand,
-    PaletteRegistry, PortForwardRule, ProtocolError, SerialConfig, SftpPacket, SharedVault,
-    SharingAuditRecord, Snippet, SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig,
-    TransferDirection, TransferQueue,
+    render_preview, AnsibleInventoryEngine, AuditAction, AwsEc2Parser, AzureVmParser,
+    BatchExecutionPlan, BatchHostTarget, BatchPolicy, CloudProviderConfig, CloudProviderKind,
+    ConnectionProtocol, DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry,
+    HostExportItem, HostGroup, MoshConfig, MoshPredictMode, MultiplayerSession, OpenFlags,
+    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PortForwardRule,
+    ProtocolError, SerialConfig, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
+    SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
+    TransferQueue,
 };
-use shellumi_storage::{HostStore, NewTransfer};
+use shellumi_storage::{CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer};
 use std::str::FromStr;
 use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
 
@@ -66,6 +68,14 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> team session grant <session-id> <requester-id> <target-user-id>
   shellumi-cli <database-path> team session revoke <session-id> <requester-id>
   shellumi-cli <database-path> team session status <session-id>
+  shellumi-cli <database-path> infra provider add <kind> --name <name> [--region <r>] [--profile <p>] [--token <t>] [--path <path>] [--format <ini|yaml>]
+  shellumi-cli <database-path> infra provider list
+  shellumi-cli <database-path> infra provider show <id>
+  shellumi-cli <database-path> infra provider delete <id>
+  shellumi-cli <database-path> infra provider sync <id>
+  shellumi-cli <database-path> infra discover <aws|azure|digitalocean|ansible> --file <file> [--private-ip] [--import-all]
+  shellumi-cli <database-path> infra ansible import --file <path> [--format <ini|yaml>]
+  shellumi-cli <database-path> infra ansible export [--format <ini|yaml>] [--output <path>]
   shellumi-cli <database-path> connect <id>
   shellumi-cli <database-path> quick-connect <user@host[:port]>
   shellumi-cli <database-path> mosh <user@host[:port]> [--ssh-port <port>] [--predict <adaptive|always|never|experimental>]
@@ -451,6 +461,47 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 return Err(invalid(USAGE).into());
                             }
                         }
+                        _ => return Err(invalid(USAGE).into()),
+                    }
+                }
+                _ => return Err(invalid(USAGE).into()),
+            }
+        }
+        "infra" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
+            match args[2].as_str() {
+                "provider" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                    match args[3].as_str() {
+                        "list" => {}
+                        "add" => {
+                            if args.len() < 5 {
+                                return Err(invalid(USAGE).into());
+                            }
+                        }
+                        "show" | "delete" | "sync" => {
+                            if args.len() < 5 {
+                                return Err(invalid(USAGE).into());
+                            }
+                        }
+                        _ => return Err(invalid(USAGE).into()),
+                    }
+                }
+                "discover" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                }
+                "ansible" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                    match args[3].as_str() {
+                        "import" | "export" => {}
                         _ => return Err(invalid(USAGE).into()),
                     }
                 }
@@ -2063,6 +2114,363 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             println!("  Session ID: {}", session_id);
                             println!("  Mode:       Single-writer with immediate host revocation");
                             println!("  Encrypted:  Yes (P2P end-to-end encrypted transport)");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        "infra" => {
+            let sub = args[2].as_str();
+            match sub {
+                "provider" => {
+                    let action = args[3].as_str();
+                    match action {
+                        "add" => {
+                            let kind_str = &args[4];
+                            let kind = CloudProviderKind::from_str(kind_str)
+                                .map_err(|e| invalid(&e.to_string()))?;
+                            let name = extract_flag(&args[5..], "--name")
+                                .ok_or_else(|| invalid("Missing required '--name <name>' flag"))?;
+                            let region = extract_flag(&args[5..], "--region");
+                            let profile = extract_flag(&args[5..], "--profile");
+                            let token = extract_flag(&args[5..], "--token");
+                            let path = extract_flag(&args[5..], "--path");
+                            let format = extract_flag(&args[5..], "--format");
+
+                            let mut cfg = CloudProviderConfig::new(kind, &name);
+                            cfg.region = region;
+                            cfg.profile = profile;
+                            if kind == CloudProviderKind::DigitalOcean {
+                                cfg.api_token = token;
+                            }
+                            cfg.inventory_path = path;
+                            cfg.inventory_format = format;
+                            cfg.validate().map_err(|e| invalid(&e.to_string()))?;
+
+                            let prov_id = unique_id("prov");
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+
+                            let cfg_json =
+                                serde_json::to_string(&cfg).map_err(|e| invalid(&e.to_string()))?;
+
+                            let record = CloudProviderRecord {
+                                id: prov_id.clone(),
+                                name: name.to_string(),
+                                provider_kind: kind.as_str().to_string(),
+                                config_json: cfg_json,
+                                sync_interval_mins: 60,
+                                last_synced_at: None,
+                                auto_sync: false,
+                                created_at: now,
+                                updated_at: now,
+                            };
+
+                            store.create_cloud_provider(&record).await?;
+                            println!(
+                                "Created cloud provider '{}' (ID: {}, Kind: {}).",
+                                name, prov_id, kind
+                            );
+                        }
+                        "list" => {
+                            let providers = store.list_cloud_providers().await?;
+                            if providers.is_empty() {
+                                println!("No cloud providers configured.");
+                            } else {
+                                println!("Configured Infrastructure Providers:");
+                                for p in providers {
+                                    let sync_time = p
+                                        .last_synced_at
+                                        .map(|t| format!("{t}"))
+                                        .unwrap_or_else(|| "Never".to_string());
+                                    println!(
+                                        "  [{}] {} ({}) - Auto-sync: {} - Last synced: {}",
+                                        p.id, p.name, p.provider_kind, p.auto_sync, sync_time
+                                    );
+                                }
+                            }
+                        }
+                        "show" => {
+                            let id = &args[4];
+                            if let Some(p) = store.get_cloud_provider(id).await? {
+                                println!("Cloud Provider Details:");
+                                println!("  ID:          {}", p.id);
+                                println!("  Name:        {}", p.name);
+                                println!("  Kind:        {}", p.provider_kind);
+                                println!("  Sync Int:    {} mins", p.sync_interval_mins);
+                                println!("  Auto Sync:   {}", p.auto_sync);
+                                if let Ok(cfg) =
+                                    serde_json::from_str::<CloudProviderConfig>(&p.config_json)
+                                {
+                                    println!("  Config:      {}", cfg.redacted_summary());
+                                }
+                                let discovered = store.list_discovered_hosts(Some(id)).await?;
+                                println!("  Discovered:  {} hosts", discovered.len());
+                            } else {
+                                return Err(invalid(&format!("Provider '{id}' not found.")).into());
+                            }
+                        }
+                        "delete" => {
+                            let id = &args[4];
+                            if store.delete_cloud_provider(id).await? {
+                                println!("Deleted cloud provider '{id}'.");
+                            } else {
+                                return Err(invalid(&format!("Provider '{id}' not found.")).into());
+                            }
+                        }
+                        "sync" => {
+                            let id = &args[4];
+                            let p = store
+                                .get_cloud_provider(id)
+                                .await?
+                                .ok_or_else(|| invalid(&format!("Provider '{id}' not found.")))?;
+
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+
+                            // If provider has an inventory path (e.g. Ansible), parse it directly
+                            if let Ok(cfg) =
+                                serde_json::from_str::<CloudProviderConfig>(&p.config_json)
+                            {
+                                if let Some(ref path) = cfg.inventory_path {
+                                    if let Ok(content) = fs::read_to_string(path) {
+                                        let is_yaml = cfg.inventory_format.as_deref()
+                                            == Some("yaml")
+                                            || path.ends_with(".yml")
+                                            || path.ends_with(".yaml");
+                                        let hosts_res = if is_yaml {
+                                            AnsibleInventoryEngine::parse_yaml_inventory(&content)
+                                        } else {
+                                            AnsibleInventoryEngine::parse_ini_inventory(&content)
+                                        };
+
+                                        if let Ok(hosts) = hosts_res {
+                                            let records: Vec<DiscoveredHostRecord> = hosts
+                                                .into_iter()
+                                                .map(|h| DiscoveredHostRecord {
+                                                    id: unique_id("dh"),
+                                                    provider_id: id.to_string(),
+                                                    external_id: h.id,
+                                                    name: h.name,
+                                                    hostname: h.hostname,
+                                                    port: h.port as i64,
+                                                    username: h.username,
+                                                    state: h.state,
+                                                    region: h.region,
+                                                    group_path: h.group_path,
+                                                    tags_json: serde_json::to_string(&h.tags)
+                                                        .unwrap_or_default(),
+                                                    metadata_json: serde_json::to_string(
+                                                        &h.extra_metadata,
+                                                    )
+                                                    .unwrap_or_default(),
+                                                    imported_host_id: None,
+                                                    last_seen_at: now,
+                                                })
+                                                .collect();
+                                            let saved =
+                                                store.save_discovered_hosts(id, &records).await?;
+                                            store.update_cloud_provider_sync_time(id, now).await?;
+                                            println!("Synced provider '{}'. Discovered and persisted {} hosts.", p.name, saved);
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                            }
+
+                            store.update_cloud_provider_sync_time(id, now).await?;
+                            println!("Synced provider '{}'. Status updated.", p.name);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                "discover" => {
+                    let provider_kind_str = &args[3];
+                    let kind = CloudProviderKind::from_str(provider_kind_str)
+                        .map_err(|e| invalid(&e.to_string()))?;
+                    let file_path = extract_flag(&args[4..], "--file")
+                        .ok_or_else(|| invalid("Missing required '--file <path>' flag"))?;
+                    let use_private_ip = args[4..].iter().any(|a| a == "--private-ip");
+                    let import_all = args[4..].iter().any(|a| a == "--import-all");
+
+                    let content = fs::read_to_string(&file_path)?;
+
+                    let discovered = match kind {
+                        CloudProviderKind::Aws => {
+                            AwsEc2Parser::parse_describe_instances_json(&content, use_private_ip)
+                                .map_err(|e| invalid(&e.to_string()))?
+                        }
+                        CloudProviderKind::Azure => {
+                            AzureVmParser::parse_virtual_machines_json(&content, use_private_ip)
+                                .map_err(|e| invalid(&e.to_string()))?
+                        }
+                        CloudProviderKind::DigitalOcean => {
+                            DigitalOceanParser::parse_droplets_json(&content, use_private_ip)
+                                .map_err(|e| invalid(&e.to_string()))?
+                        }
+                        CloudProviderKind::Ansible => {
+                            if file_path.ends_with(".yml") || file_path.ends_with(".yaml") {
+                                AnsibleInventoryEngine::parse_yaml_inventory(&content)
+                                    .map_err(|e| invalid(&e.to_string()))?
+                            } else {
+                                AnsibleInventoryEngine::parse_ini_inventory(&content)
+                                    .map_err(|e| invalid(&e.to_string()))?
+                            }
+                        }
+                    };
+
+                    println!(
+                        "Discovered {} host(s) from {}:",
+                        discovered.len(),
+                        kind.display_name()
+                    );
+                    for h in &discovered {
+                        let typ = h.instance_type.as_deref().unwrap_or("-");
+                        let reg = h.region.as_deref().unwrap_or("-");
+                        println!(
+                            "  {} {:<20} {:<24} {:<10} {:<12} {}",
+                            h.status_badge(),
+                            h.name,
+                            h.format_destination(),
+                            reg,
+                            typ,
+                            h.group_path.as_deref().unwrap_or("")
+                        );
+                    }
+
+                    if import_all {
+                        let mut imported_count = 0;
+                        for h in &discovered {
+                            let u = h
+                                .username
+                                .as_deref()
+                                .unwrap_or_else(|| kind.default_username());
+                            if let Ok(dest) = SshDestination::new(&h.hostname, u, h.port) {
+                                let tags: Vec<String> = h
+                                    .tags
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        if v.is_empty() {
+                                            k.clone()
+                                        } else {
+                                            format!("{k}:{v}")
+                                        }
+                                    })
+                                    .collect();
+
+                                if store
+                                    .add(&h.name, &dest, h.group_path.as_deref(), &tags, None, None)
+                                    .await
+                                    .is_ok()
+                                {
+                                    imported_count += 1;
+                                }
+                            }
+                        }
+                        println!(
+                            "Imported {} of {} discovered host(s) into Shellumi inventory.",
+                            imported_count,
+                            discovered.len()
+                        );
+                    }
+                }
+                "ansible" => {
+                    let action = args[3].as_str();
+                    match action {
+                        "import" => {
+                            let file_path = extract_flag(&args[4..], "--file")
+                                .ok_or_else(|| invalid("Missing required '--file <path>' flag"))?;
+                            let format = extract_flag(&args[4..], "--format");
+
+                            let content = fs::read_to_string(&file_path)?;
+                            let is_yaml = format.as_deref() == Some("yaml")
+                                || file_path.ends_with(".yml")
+                                || file_path.ends_with(".yaml");
+
+                            let hosts = if is_yaml {
+                                AnsibleInventoryEngine::parse_yaml_inventory(&content)
+                                    .map_err(|e| invalid(&e.to_string()))?
+                            } else {
+                                AnsibleInventoryEngine::parse_ini_inventory(&content)
+                                    .map_err(|e| invalid(&e.to_string()))?
+                            };
+
+                            let mut imported = 0;
+                            for h in &hosts {
+                                let u = h.username.as_deref().unwrap_or("root");
+                                if let Ok(dest) = SshDestination::new(&h.hostname, u, h.port) {
+                                    let tags: Vec<String> = h
+                                        .tags
+                                        .iter()
+                                        .map(|(k, v)| {
+                                            if v.is_empty() {
+                                                k.clone()
+                                            } else {
+                                                format!("{k}:{v}")
+                                            }
+                                        })
+                                        .collect();
+                                    if store
+                                        .add(
+                                            &h.name,
+                                            &dest,
+                                            h.group_path.as_deref(),
+                                            &tags,
+                                            None,
+                                            None,
+                                        )
+                                        .await
+                                        .is_ok()
+                                    {
+                                        imported += 1;
+                                    }
+                                }
+                            }
+                            println!(
+                                "Imported {} host(s) from Ansible inventory '{}'.",
+                                imported, file_path
+                            );
+                        }
+                        "export" => {
+                            let format = extract_flag(&args[4..], "--format");
+                            let output_path = extract_flag(&args[4..], "--output");
+
+                            let hosts = store.list().await?;
+                            let export_items: Vec<HostExportItem> = hosts
+                                .into_iter()
+                                .map(|h| HostExportItem {
+                                    name: h.name,
+                                    hostname: h.destination.host().to_string(),
+                                    port: h.destination.port().get(),
+                                    username: Some(h.destination.username().to_string()),
+                                    group_name: h.group_name,
+                                    tags: h.tags,
+                                })
+                                .collect();
+
+                            let is_yaml = format.as_deref() == Some("yaml");
+                            let rendered = if is_yaml {
+                                AnsibleInventoryEngine::export_to_yaml(&export_items)
+                            } else {
+                                AnsibleInventoryEngine::export_to_ini(&export_items)
+                            };
+
+                            if let Some(path) = output_path {
+                                fs::write(&path, &rendered)?;
+                                println!(
+                                    "Exported {} hosts to Ansible inventory at '{}'.",
+                                    export_items.len(),
+                                    path
+                                );
+                            } else {
+                                print!("{rendered}");
+                            }
                         }
                         _ => unreachable!(),
                     }

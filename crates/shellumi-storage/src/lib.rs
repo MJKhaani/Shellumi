@@ -10,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -262,6 +262,37 @@ pub struct SyncSnippetPayload {
     pub tags: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloudProviderRecord {
+    pub id: String,
+    pub name: String,
+    pub provider_kind: String,
+    pub config_json: String,
+    pub sync_interval_mins: i64,
+    pub last_synced_at: Option<i64>,
+    pub auto_sync: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredHostRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub external_id: String,
+    pub name: String,
+    pub hostname: String,
+    pub port: i64,
+    pub username: Option<String>,
+    pub state: String,
+    pub region: Option<String>,
+    pub group_path: Option<String>,
+    pub tags_json: String,
+    pub metadata_json: String,
+    pub imported_host_id: Option<i64>,
+    pub last_seen_at: i64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportVaultSummary {
     pub hosts_imported: usize,
@@ -271,6 +302,7 @@ pub struct ImportVaultSummary {
     pub workspaces_imported: usize,
     pub shared_vaults_imported: usize,
     pub team_members_imported: usize,
+    pub cloud_providers_imported: usize,
     pub errors: Vec<String>,
 }
 
@@ -519,7 +551,42 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 11", ()).await?;
+            tx.execute(
+                "CREATE TABLE cloud_providers (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    provider_kind TEXT NOT NULL,
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    sync_interval_mins INTEGER NOT NULL DEFAULT 60,
+                    last_synced_at INTEGER,
+                    auto_sync INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE discovered_hosts (
+                    id TEXT PRIMARY KEY,
+                    provider_id TEXT NOT NULL REFERENCES cloud_providers(id) ON DELETE CASCADE,
+                    external_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    port INTEGER NOT NULL DEFAULT 22 CHECK(port BETWEEN 1 AND 65535),
+                    username TEXT,
+                    state TEXT NOT NULL DEFAULT 'active',
+                    region TEXT,
+                    group_path TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    imported_host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+                    last_seen_at INTEGER NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 12", ()).await?;
         } else if version == 1 {
             // Migrate schema version 1 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
@@ -1048,7 +1115,7 @@ impl HostStore {
             tx.execute("PRAGMA user_version = 10", ()).await?;
         }
 
-        if version > 0 && version < 11 {
+        if version > 0 && version < 12 {
             // Migrate schema to version 11: Shared Vaults & Team Collaboration
             tx.execute(
                 "CREATE TABLE IF NOT EXISTS shared_vaults (
@@ -1107,7 +1174,44 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 11", ()).await?;
+
+            // Migrate schema to version 12: Cloud Providers & Infrastructure Discovery
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS cloud_providers (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    provider_kind TEXT NOT NULL,
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    sync_interval_mins INTEGER NOT NULL DEFAULT 60,
+                    last_synced_at INTEGER,
+                    auto_sync INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS discovered_hosts (
+                    id TEXT PRIMARY KEY,
+                    provider_id TEXT NOT NULL REFERENCES cloud_providers(id) ON DELETE CASCADE,
+                    external_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    port INTEGER NOT NULL DEFAULT 22 CHECK(port BETWEEN 1 AND 65535),
+                    username TEXT,
+                    state TEXT NOT NULL DEFAULT 'active',
+                    region TEXT,
+                    group_path TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    imported_host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+                    last_seen_at INTEGER NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 12", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
@@ -2530,6 +2634,251 @@ impl HostStore {
         Ok(list)
     }
 
+    // =========================================================================
+    // Infrastructure Integrations: Cloud Providers & Discovered Hosts
+    // =========================================================================
+
+    pub async fn create_cloud_provider(
+        &mut self,
+        provider: &CloudProviderRecord,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO cloud_providers (id, name, provider_kind, config_json, sync_interval_mins, last_synced_at, auto_sync, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (
+                    provider.id.clone(),
+                    provider.name.clone(),
+                    provider.provider_kind.clone(),
+                    provider.config_json.clone(),
+                    provider.sync_interval_mins,
+                    provider.last_synced_at,
+                    if provider.auto_sync { 1i64 } else { 0i64 },
+                    provider.created_at,
+                    provider.updated_at,
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_cloud_provider(
+        &self,
+        id: &str,
+    ) -> Result<Option<CloudProviderRecord>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, provider_kind, config_json, sync_interval_mins, last_synced_at, auto_sync, created_at, updated_at FROM cloud_providers WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let provider_kind: String = row.get(2)?;
+            let config_json: String = row.get(3)?;
+            let sync_interval_mins: i64 = row.get(4)?;
+            let last_synced_at: Option<i64> = row.get(5)?;
+            let auto_sync_int: i64 = row.get(6)?;
+            let created_at: i64 = row.get(7)?;
+            let updated_at: i64 = row.get(8)?;
+
+            Ok(Some(CloudProviderRecord {
+                id,
+                name,
+                provider_kind,
+                config_json,
+                sync_interval_mins,
+                last_synced_at,
+                auto_sync: auto_sync_int != 0,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_cloud_providers(&self) -> Result<Vec<CloudProviderRecord>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, provider_kind, config_json, sync_interval_mins, last_synced_at, auto_sync, created_at, updated_at FROM cloud_providers ORDER BY name ASC",
+                (),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let provider_kind: String = row.get(2)?;
+            let config_json: String = row.get(3)?;
+            let sync_interval_mins: i64 = row.get(4)?;
+            let last_synced_at: Option<i64> = row.get(5)?;
+            let auto_sync_int: i64 = row.get(6)?;
+            let created_at: i64 = row.get(7)?;
+            let updated_at: i64 = row.get(8)?;
+
+            list.push(CloudProviderRecord {
+                id,
+                name,
+                provider_kind,
+                config_json,
+                sync_interval_mins,
+                last_synced_at,
+                auto_sync: auto_sync_int != 0,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(list)
+    }
+
+    pub async fn update_cloud_provider_sync_time(
+        &mut self,
+        id: &str,
+        last_synced_at: i64,
+    ) -> Result<bool, StorageError> {
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE cloud_providers SET last_synced_at = ?1, updated_at = ?1 WHERE id = ?2",
+                (last_synced_at, id),
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
+    pub async fn delete_cloud_provider(&mut self, id: &str) -> Result<bool, StorageError> {
+        let affected = self
+            .connection
+            .execute("DELETE FROM cloud_providers WHERE id = ?1", (id,))
+            .await?;
+        Ok(affected > 0)
+    }
+
+    pub async fn save_discovered_hosts(
+        &mut self,
+        provider_id: &str,
+        hosts: &[DiscoveredHostRecord],
+    ) -> Result<usize, StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+
+        // Delete existing discovered hosts for this provider
+        tx.execute(
+            "DELETE FROM discovered_hosts WHERE provider_id = ?1",
+            (provider_id,),
+        )
+        .await?;
+
+        let mut count = 0;
+        for h in hosts {
+            tx.execute(
+                "INSERT INTO discovered_hosts (id, provider_id, external_id, name, hostname, port, username, state, region, group_path, tags_json, metadata_json, imported_host_id, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                (
+                    h.id.clone(),
+                    provider_id,
+                    h.external_id.clone(),
+                    h.name.clone(),
+                    h.hostname.clone(),
+                    h.port,
+                    h.username.clone(),
+                    h.state.clone(),
+                    h.region.clone(),
+                    h.group_path.clone(),
+                    h.tags_json.clone(),
+                    h.metadata_json.clone(),
+                    h.imported_host_id,
+                    h.last_seen_at,
+                ),
+            )
+            .await?;
+            count += 1;
+        }
+
+        tx.commit().await?;
+        Ok(count)
+    }
+
+    pub async fn list_discovered_hosts(
+        &self,
+        provider_id: Option<&str>,
+    ) -> Result<Vec<DiscoveredHostRecord>, StorageError> {
+        let (query, param): (&str, Option<String>) = if let Some(pid) = provider_id {
+            (
+                "SELECT id, provider_id, external_id, name, hostname, port, username, state, region, group_path, tags_json, metadata_json, imported_host_id, last_seen_at FROM discovered_hosts WHERE provider_id = ?1 ORDER BY name ASC",
+                Some(pid.to_string()),
+            )
+        } else {
+            (
+                "SELECT id, provider_id, external_id, name, hostname, port, username, state, region, group_path, tags_json, metadata_json, imported_host_id, last_seen_at FROM discovered_hosts ORDER BY name ASC",
+                None,
+            )
+        };
+
+        let mut rows = if let Some(ref p) = param {
+            self.connection.query(query, (p.as_str(),)).await?
+        } else {
+            self.connection.query(query, ()).await?
+        };
+
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let provider_id: String = row.get(1)?;
+            let external_id: String = row.get(2)?;
+            let name: String = row.get(3)?;
+            let hostname: String = row.get(4)?;
+            let port: i64 = row.get(5)?;
+            let username: Option<String> = row.get(6)?;
+            let state: String = row.get(7)?;
+            let region: Option<String> = row.get(8)?;
+            let group_path: Option<String> = row.get(9)?;
+            let tags_json: String = row.get(10)?;
+            let metadata_json: String = row.get(11)?;
+            let imported_host_id: Option<i64> = row.get(12)?;
+            let last_seen_at: i64 = row.get(13)?;
+
+            list.push(DiscoveredHostRecord {
+                id,
+                provider_id,
+                external_id,
+                name,
+                hostname,
+                port,
+                username,
+                state,
+                region,
+                group_path,
+                tags_json,
+                metadata_json,
+                imported_host_id,
+                last_seen_at,
+            });
+        }
+        Ok(list)
+    }
+
+    pub async fn mark_discovered_host_imported(
+        &mut self,
+        discovered_id: &str,
+        imported_host_id: i64,
+    ) -> Result<bool, StorageError> {
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE discovered_hosts SET imported_host_id = ?1 WHERE id = ?2",
+                (imported_host_id, discovered_id),
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
     /// Exports all hosts, groups, tunnels, and snippets into an encrypted `SyncVault` using default KDF iterations.
     pub async fn export_vault(
         &self,
@@ -2725,6 +3074,27 @@ impl HostStore {
                 vault.records.push(shellumi_core::SyncRecord::new(
                     member.id.clone(),
                     shellumi_core::SyncEntityType::TeamMember,
+                    1,
+                    device_id,
+                    now,
+                    envelope,
+                ));
+            }
+        }
+
+        // Export cloud providers
+        if let Ok(providers) = self.list_cloud_providers().await {
+            for prov in &providers {
+                let envelope = shellumi_core::encrypt_entity_with_iterations(
+                    passphrase,
+                    "cloud_provider",
+                    &prov.id,
+                    prov,
+                    iterations,
+                )?;
+                vault.records.push(shellumi_core::SyncRecord::new(
+                    prov.id.clone(),
+                    shellumi_core::SyncEntityType::CloudProvider,
                     1,
                     device_id,
                     now,
@@ -2955,6 +3325,20 @@ impl HostStore {
                         Err(e) => summary
                             .errors
                             .push(format!("AuditRecord {}: {e}", record.object_id)),
+                    }
+                }
+                shellumi_core::SyncEntityType::CloudProvider => {
+                    match shellumi_core::decrypt_entity::<CloudProviderRecord>(passphrase, envelope)
+                    {
+                        Ok(provider) => {
+                            if self.get_cloud_provider(&provider.id).await?.is_none() {
+                                let _ = self.create_cloud_provider(&provider).await;
+                            }
+                            summary.cloud_providers_imported += 1;
+                        }
+                        Err(e) => summary
+                            .errors
+                            .push(format!("CloudProvider {}: {e}", record.object_id)),
                     }
                 }
             }
@@ -4625,6 +5009,128 @@ mod tests {
         assert_eq!(store.list_audit_log("v-101", None).await.unwrap().len(), 0);
         assert_eq!(
             store.list_shared_session_logs("v-101").await.unwrap().len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn manages_cloud_providers_and_discovered_hosts_lifecycle() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // 1. Create Cloud Provider
+        let provider = CloudProviderRecord {
+            id: "cp-aws-prod".to_string(),
+            name: "AWS US-East Production".to_string(),
+            provider_kind: "aws".to_string(),
+            config_json: r#"{"region":"us-east-1","use_private_ip":false}"#.to_string(),
+            sync_interval_mins: 30,
+            last_synced_at: None,
+            auto_sync: true,
+            created_at: 1700000000,
+            updated_at: 1700000000,
+        };
+        store.create_cloud_provider(&provider).await.unwrap();
+
+        let retrieved = store
+            .get_cloud_provider("cp-aws-prod")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retrieved.name, "AWS US-East Production");
+        assert_eq!(retrieved.provider_kind, "aws");
+        assert!(retrieved.auto_sync);
+
+        let all_providers = store.list_cloud_providers().await.unwrap();
+        assert_eq!(all_providers.len(), 1);
+
+        // 2. Update sync time
+        assert!(store
+            .update_cloud_provider_sync_time("cp-aws-prod", 1700001000)
+            .await
+            .unwrap());
+        let updated_prov = store
+            .get_cloud_provider("cp-aws-prod")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_prov.last_synced_at, Some(1700001000));
+
+        // 3. Save Discovered Hosts
+        let hosts = vec![
+            DiscoveredHostRecord {
+                id: "dh-1".to_string(),
+                provider_id: "cp-aws-prod".to_string(),
+                external_id: "aws:i-0123456789".to_string(),
+                name: "api-gw-01".to_string(),
+                hostname: "54.210.1.20".to_string(),
+                port: 22,
+                username: Some("ec2-user".to_string()),
+                state: "running".to_string(),
+                region: Some("us-east-1".to_string()),
+                group_path: Some("AWS/us-east-1/Prod".to_string()),
+                tags_json: r#"{"Environment":"Prod"}"#.to_string(),
+                metadata_json: r#"{"instance_type":"t3.medium"}"#.to_string(),
+                imported_host_id: None,
+                last_seen_at: 1700001000,
+            },
+            DiscoveredHostRecord {
+                id: "dh-2".to_string(),
+                provider_id: "cp-aws-prod".to_string(),
+                external_id: "aws:i-9876543210".to_string(),
+                name: "db-replica-01".to_string(),
+                hostname: "10.0.5.15".to_string(),
+                port: 22,
+                username: Some("ec2-user".to_string()),
+                state: "stopped".to_string(),
+                region: Some("us-east-1".to_string()),
+                group_path: Some("AWS/us-east-1/Prod".to_string()),
+                tags_json: r#"{"Environment":"Prod"}"#.to_string(),
+                metadata_json: r#"{"instance_type":"r6i.large"}"#.to_string(),
+                imported_host_id: None,
+                last_seen_at: 1700001000,
+            },
+        ];
+
+        let saved_count = store
+            .save_discovered_hosts("cp-aws-prod", &hosts)
+            .await
+            .unwrap();
+        assert_eq!(saved_count, 2);
+
+        let discovered = store
+            .list_discovered_hosts(Some("cp-aws-prod"))
+            .await
+            .unwrap();
+        assert_eq!(discovered.len(), 2);
+        assert_eq!(discovered[0].name, "api-gw-01");
+        assert_eq!(discovered[1].name, "db-replica-01");
+
+        // 4. Mark discovered host imported
+        let dest = SshDestination::new("54.210.1.20", "ec2-user", 22).unwrap();
+        let host_id = store
+            .add("api-gw-01", &dest, None, &[], None, None)
+            .await
+            .unwrap();
+        assert!(store
+            .mark_discovered_host_imported("dh-1", host_id)
+            .await
+            .unwrap());
+        let updated_dh = store
+            .list_discovered_hosts(Some("cp-aws-prod"))
+            .await
+            .unwrap();
+        let dh1 = updated_dh.iter().find(|h| h.id == "dh-1").unwrap();
+        assert_eq!(dh1.imported_host_id, Some(host_id));
+
+        // 5. Delete provider cascade
+        assert!(store.delete_cloud_provider("cp-aws-prod").await.unwrap());
+        assert_eq!(store.list_cloud_providers().await.unwrap().len(), 0);
+        assert_eq!(
+            store
+                .list_discovered_hosts(Some("cp-aws-prod"))
+                .await
+                .unwrap()
+                .len(),
             0
         );
     }

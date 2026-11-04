@@ -290,6 +290,7 @@ pub enum SyncEntityType {
     SharedVault,
     TeamMember,
     AuditRecord,
+    CloudProvider,
 }
 
 impl fmt::Display for SyncEntityType {
@@ -303,6 +304,7 @@ impl fmt::Display for SyncEntityType {
             Self::SharedVault => f.write_str("shared_vault"),
             Self::TeamMember => f.write_str("team_member"),
             Self::AuditRecord => f.write_str("audit_record"),
+            Self::CloudProvider => f.write_str("cloud_provider"),
         }
     }
 }
@@ -968,6 +970,14 @@ pub fn format_record_summary(passphrase: Option<&str>, record: &SyncRecord) -> S
                             .and_then(|v| v.as_str())
                             .unwrap_or("actor");
                         format!("{action} by {actor}")
+                    }
+                    SyncEntityType::CloudProvider => {
+                        let name = obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&record.object_id);
+                        let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("cloud");
+                        format!("{name} (Cloud Provider: {kind})")
                     }
                 }
             } else {
@@ -2615,7 +2625,36 @@ mod tests {
         let snippet_summary = format_record_summary(Some(passphrase), &snippet_rec);
         assert_eq!(snippet_summary, "Flush Redis (`redis-cli flushall`)");
 
-        // 5. Tombstone
+        // 5. CloudProvider
+        #[derive(Serialize)]
+        struct TestCloudProvider {
+            name: String,
+            kind: String,
+        }
+        let cloud_payload = TestCloudProvider {
+            name: "AWS Production".into(),
+            kind: "aws".into(),
+        };
+        let cloud_env = encrypt_entity_with_iterations(
+            passphrase,
+            "cloud_provider",
+            "cloud-1",
+            &cloud_payload,
+            1000,
+        )
+        .unwrap();
+        let cloud_rec = SyncRecord::new(
+            "cloud-1",
+            SyncEntityType::CloudProvider,
+            1,
+            "dev1",
+            100,
+            cloud_env,
+        );
+        let cloud_summary = format_record_summary(Some(passphrase), &cloud_rec);
+        assert_eq!(cloud_summary, "AWS Production (Cloud Provider: aws)");
+
+        // 6. Tombstone
         let mut tombstone = snippet_rec.clone();
         tombstone.deleted = true;
         let tombstone_summary = format_record_summary(Some(passphrase), &tombstone);

@@ -155,8 +155,28 @@ been checked on macOS.
     key rotation, and multiplayer terminal collaboration strip on active session tabs with single-writer enforcement, control delegation,
     and revocation to host. 177 workspace tests passing.
     Next: implement Phase 9: Infrastructure Integrations (Cloud providers: AWS, Azure, DigitalOcean host discovery; Ansible inventory synchronization).
-14. Continue the remaining phases in PROJECT.md (Infrastructure Integrations, Production Hardening),
-    with acceptance tests and platform verification for each capability.
+14. Infrastructure Integrations (Phase 9): Implemented cloud infrastructure discovery and inventory synchronization in `shellumi-core::infrastructure`
+    (`CloudProviderKind` [AWS, Azure, DigitalOcean, Ansible], `CloudProviderConfig` with credential redaction and validation,
+    `DiscoveredHost` with running state evaluation and badge formatting, non-destructive `InventoryMergeEngine`, `MergePolicy`,
+    `InfraSyncAction` [Create, Update, Unchanged, Stale], `InfraSyncReport`, `AwsEc2Parser` for `DescribeInstances` JSON,
+    `AzureVmParser` for Compute VM JSON, `DigitalOceanParser` for Droplets v2 API JSON, and bidirectional `AnsibleInventoryEngine`
+    supporting both INI and YAML inventory parsing and serialization). Expanded `SyncEntityType` with `CloudProvider` for
+    zero-knowledge E2EE backup. Expanded `PaletteCategory::Infrastructure` (`☁️`) and registered command palette actions
+    (`PaletteAction::OpenInfrastructureManager`, `SyncCloudInfrastructure`, `ImportAnsibleInventory`, `ExportAnsibleInventory`).
+    Implemented Turso database schema version 12 with transactional migrations from versions 1..11 (`cloud_providers` and `discovered_hosts`
+    tables with foreign key tracking to `hosts(id)`), `HostStore` CRUD methods (`create_cloud_provider`, `get_cloud_provider`,
+    `list_cloud_providers`, `update_cloud_provider_sync_time`, `delete_cloud_provider`, `save_discovered_hosts`, `list_discovered_hosts`,
+    and `mark_discovered_host_imported`), and zero-knowledge encrypted vault backup/restore serialization.
+    Implemented CLI `infra` subcommands (`infra provider add/list/show/delete/sync`, `infra discover <aws|azure|digitalocean|ansible>`,
+    and `infra ansible import/export`). Implemented GPUI desktop integration in `shellumi-app`: `[☁️ Cloud & Infra]` top toolbar action,
+    interactive Infrastructure Modal (`InfraModalState`) with tabbed browsing for Cloud Providers (creation, deletion, manual sync),
+    Discovered Hosts with state indicators (`🟢 Running`, `🔴 Stopped`) and one-click import into inventory (`📥 Import Host`), and
+    Ansible inventory export (INI and YAML formats) executed on background worker threads (`cx.background_executor()`). 188 workspace tests passing.
+    Next: implement Phase 10: Production Hardening, Cross-Platform Validation, Accessibility, and Release Packaging.
+15. Continue Phase 10: Production Hardening and Packaging from PROJECT.md:
+    Cross-platform desktop validation (macOS Metal, Linux Wayland/X11, Windows MSVC), screen-reader accessibility tree audits,
+    memory profiling and terminal scrollback stress testing, and native installer bundling (macOS .dmg/.app, Linux .deb/.AppImage,
+    Windows .msi).
 
 Reference research: [upstream GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui),
 which describes GPUI as pre-1.0 and subject to breaking changes, and

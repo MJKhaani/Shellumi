@@ -33,6 +33,7 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 | **Serial Connections** | Unauthorized local device access / device misconfiguration | Strict validation of port paths, baud rates, parity, stop bits; isolate from remote network tunnels and prevent automated command injection. |
 | **Team Collaboration** | Unauthorized vault modification, privilege escalation, or stale member access | Role hierarchy (`Owner`, `Administrator`, `Editor`, `Viewer`) gating administrative and write capabilities; cryptographic epoch key rotation upon member revocation; append-only audit trail for all vault and membership events. |
 | **Multiplayer Terminal** | Concurrent keystroke race conditions or rogue participant commands | Single-active-writer keystroke arbitration; non-controlling participants are strictly read-only; session host retains instantaneous override/revocation control. |
+| **Cloud & Infrastructure Integrations** | Credential leakage in logs or diagnostics; unauthorized inventory overwrite | Sensitive provider credentials (AWS secret keys, Azure secrets, DigitalOcean tokens) are redacted in summaries and encrypted in storage; non-destructive `InventoryMergeEngine` preserves existing user tags and notes during dynamic discovery; foreign keys link discovered records to inventory hosts. |
 
 For detailed analysis, see [docs/security/threat-model.md](docs/security/threat-model.md).
 

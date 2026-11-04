@@ -1587,3 +1587,137 @@ fn supports_team_collaboration_and_shared_vault_cli() {
     let status_out = String::from_utf8(session_status.stdout).unwrap();
     assert!(status_out.contains("Single-writer with immediate host revocation"));
 }
+
+#[test]
+fn supports_infrastructure_provider_and_ansible_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("infra.db");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Add cloud provider
+    let add_prov = run(&[
+        "infra",
+        "provider",
+        "add",
+        "aws",
+        "--name",
+        "AWS US-East",
+        "--region",
+        "us-east-1",
+    ]);
+    assert!(add_prov.status.success());
+    let add_out = String::from_utf8(add_prov.stdout).unwrap();
+    assert!(add_out.contains("Created cloud provider 'AWS US-East'"));
+
+    // Extract provider id
+    let prov_id = add_out
+        .split("ID: ")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // 2. List cloud providers
+    let list_prov = run(&["infra", "provider", "list"]);
+    assert!(list_prov.status.success());
+    let list_out = String::from_utf8(list_prov.stdout).unwrap();
+    assert!(list_out.contains("AWS US-East"));
+    assert!(list_out.contains("aws"));
+
+    // 3. Show cloud provider
+    let show_prov = run(&["infra", "provider", "show", &prov_id]);
+    assert!(show_prov.status.success());
+    let show_out = String::from_utf8(show_prov.stdout).unwrap();
+    assert!(show_out.contains("Name:        AWS US-East"));
+    assert!(show_out.contains("region: us-east-1"));
+
+    // 4. Test discovery with mock AWS EC2 JSON fixture
+    let aws_fixture = dir.path().join("ec2_instances.json");
+    std::fs::write(
+        &aws_fixture,
+        r#"{
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-0987654321",
+                            "InstanceType": "t3.small",
+                            "State": { "Name": "running" },
+                            "PublicIpAddress": "54.100.200.5",
+                            "Tags": [
+                                { "Key": "Name", "Value": "bastion-host-01" },
+                                { "Key": "Environment", "Value": "Production" }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    let discover_res = run(&[
+        "infra",
+        "discover",
+        "aws",
+        "--file",
+        aws_fixture.to_str().unwrap(),
+        "--import-all",
+    ]);
+    assert!(discover_res.status.success());
+    let disc_out = String::from_utf8(discover_res.stdout).unwrap();
+    assert!(disc_out.contains("bastion-host-01"));
+    assert!(disc_out.contains("Imported 1 of 1 discovered host(s)"));
+
+    // Verify imported host is in database
+    let list_hosts = run(&["list"]);
+    assert!(list_hosts.status.success());
+    let hosts_out = String::from_utf8(list_hosts.stdout).unwrap();
+    assert!(hosts_out.contains("bastion-host-01"));
+    assert!(hosts_out.contains("54.100.200.5"));
+
+    // 5. Test Ansible inventory import and export
+    let ansible_ini = dir.path().join("ansible_hosts.ini");
+    std::fs::write(
+        &ansible_ini,
+        r#"
+[web]
+web01.internal ansible_host=10.0.1.10 ansible_port=2222 ansible_user=deployer
+"#,
+    )
+    .unwrap();
+
+    let ans_imp = run(&[
+        "infra",
+        "ansible",
+        "import",
+        "--file",
+        ansible_ini.to_str().unwrap(),
+    ]);
+    assert!(ans_imp.status.success());
+    let imp_out = String::from_utf8(ans_imp.stdout).unwrap();
+    assert!(imp_out.contains("Imported 1 host(s) from Ansible inventory"));
+
+    // Export to YAML
+    let ans_exp = run(&["infra", "ansible", "export", "--format", "yaml"]);
+    assert!(ans_exp.status.success());
+    let exp_out = String::from_utf8(ans_exp.stdout).unwrap();
+    assert!(exp_out.contains("web01.internal"));
+    assert!(exp_out.contains("ansible_host: \"10.0.1.10\""));
+
+    // 6. Delete cloud provider
+    let del_res = run(&["infra", "provider", "delete", &prov_id]);
+    assert!(del_res.status.success());
+    let del_out = String::from_utf8(del_res.stdout).unwrap();
+    assert!(del_out.contains("Deleted cloud provider"));
+}

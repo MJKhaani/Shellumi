@@ -7,16 +7,18 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    check_dangerous_command, list_local_directory, validate_jump_host, AuditAction,
-    BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy,
-    BatchRunner, BroadcastManager, BroadcastSafetyCheck, ConflictItemView,
-    ConflictResolutionChoice, ConnectionProtocol, FileEntry, FileKind, MoshConfig,
-    MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PathUtils,
-    SerialConfig, SharedVault, SharingAuditRecord, SshDestination, SyncEntityType, TeamMember,
-    TeamRole, TelnetConfig, TransferDirection, TransferQueue, TransferStatus, WorkspaceLayout,
-    WorkspaceSession, WorkspaceSessionKind,
+    check_dangerous_command, list_local_directory, validate_jump_host, AnsibleInventoryEngine,
+    AuditAction, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget,
+    BatchPolicy, BatchRunner, BroadcastManager, BroadcastSafetyCheck, CloudProviderConfig,
+    CloudProviderKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol, FileEntry,
+    FileKind, HostExportItem, MoshConfig, MultiplayerSession, PaletteAction, PaletteCategory,
+    PaletteCommand, PaletteRegistry, PathUtils, SerialConfig, SharedVault, SharingAuditRecord,
+    SshDestination, SyncEntityType, TeamMember, TeamRole, TelnetConfig, TransferDirection,
+    TransferQueue, TransferStatus, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
-use shellumi_storage::{HostStore, SavedHost, SavedSnippet, SavedWorkspace};
+use shellumi_storage::{
+    CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedWorkspace,
+};
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
 
@@ -120,6 +122,31 @@ struct TeamModalState {
     is_loading: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfraModalTab {
+    Providers,
+    Discovered,
+    Ansible,
+}
+
+struct InfraModalState {
+    active_tab: InfraModalTab,
+    providers: Vec<CloudProviderRecord>,
+    selected_provider_id: Option<String>,
+    discovered: Vec<DiscoveredHostRecord>,
+    new_provider_name: Entity<TextInput>,
+    new_provider_kind: CloudProviderKind,
+    new_provider_region: Entity<TextInput>,
+    new_provider_path: Entity<TextInput>,
+    #[allow(dead_code)]
+    ansible_file_path: Entity<TextInput>,
+    #[allow(dead_code)]
+    ansible_is_yaml: bool,
+    error: Option<String>,
+    status_message: Option<String>,
+    is_loading: bool,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -145,6 +172,7 @@ struct Shellumi {
     command_palette: Option<CommandPaletteState>,
     sync_scheduler: shellumi_core::SyncScheduler,
     team_modal: Option<TeamModalState>,
+    infra_modal: Option<InfraModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -370,6 +398,7 @@ impl Shellumi {
             command_palette: None,
             sync_scheduler: shellumi_core::SyncScheduler::default(),
             team_modal: None,
+            infra_modal: None,
         };
         if app.database.is_some() {
             app.load_hosts(cx);
@@ -2534,6 +2563,18 @@ impl Shellumi {
             PaletteAction::ToggleMultiplayerCollaboration => {
                 self.toggle_multiplayer_on_active_tab(cx);
             }
+            PaletteAction::OpenInfrastructureManager | PaletteAction::SyncCloudInfrastructure => {
+                self.open_infra_modal(cx);
+            }
+            PaletteAction::ImportAnsibleInventory => {
+                self.open_infra_modal(cx);
+                if let Some(ref mut m) = self.infra_modal {
+                    m.active_tab = InfraModalTab::Ansible;
+                }
+            }
+            PaletteAction::ExportAnsibleInventory => {
+                self.export_ansible_inventory_file(false, cx);
+            }
         }
     }
 
@@ -3226,6 +3267,511 @@ impl Shellumi {
             let _ = session.add_participant(&user_id, &name, format!("{now}"));
             cx.notify();
         }
+    }
+
+    // =========================================================================
+    // Infrastructure Integrations: Cloud Providers & Discovered Inventory
+    // =========================================================================
+
+    fn open_infra_modal(&mut self, cx: &mut Context<Self>) {
+        let new_provider_name =
+            cx.new(|cx| TextInput::new(cx, "", "Provider name (e.g. AWS Production)"));
+        let new_provider_region =
+            cx.new(|cx| TextInput::new(cx, "", "Region / Resource Group (e.g. us-east-1)"));
+        let new_provider_path =
+            cx.new(|cx| TextInput::new(cx, "", "Inventory file path (optional)"));
+        let ansible_file_path =
+            cx.new(|cx| TextInput::new(cx, "", "Path to Ansible inventory (INI/YAML)"));
+
+        self.infra_modal = Some(InfraModalState {
+            active_tab: InfraModalTab::Providers,
+            providers: Vec::new(),
+            selected_provider_id: None,
+            discovered: Vec::new(),
+            new_provider_name,
+            new_provider_kind: CloudProviderKind::Aws,
+            new_provider_region,
+            new_provider_path,
+            ansible_file_path,
+            ansible_is_yaml: false,
+            error: None,
+            status_message: None,
+            is_loading: true,
+        });
+        cx.notify();
+        self.load_infra_providers(cx);
+    }
+
+    fn dismiss_infra_modal(&mut self, cx: &mut Context<Self>) {
+        self.infra_modal = None;
+        cx.notify();
+    }
+
+    fn load_infra_providers(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            if let Some(m) = &mut self.infra_modal {
+                m.is_loading = false;
+                m.error = Some(
+                    "No database path configured. Infrastructure integrations require a database."
+                        .into(),
+                );
+            }
+            cx.notify();
+            return;
+        };
+
+        if let Some(m) = &mut self.infra_modal {
+            m.is_loading = true;
+            m.error = None;
+        }
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let providers = store
+                    .list_cloud_providers()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let discovered = store
+                    .list_discovered_hosts(None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok((providers, discovered))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(modal) = &mut app.infra_modal {
+                    modal.is_loading = false;
+                    match result {
+                        Ok((providers, discovered)) => {
+                            let first_id = providers.first().map(|p| p.id.clone());
+                            modal.providers = providers;
+                            if modal.selected_provider_id.is_none() {
+                                modal.selected_provider_id = first_id;
+                            }
+                            modal.discovered = discovered;
+                        }
+                        Err(e) => {
+                            modal.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn create_infra_provider(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+
+        let (name, kind, region, inv_path) = {
+            let Some(m) = &self.infra_modal else {
+                return;
+            };
+            (
+                m.new_provider_name.read(cx).value().trim().to_string(),
+                m.new_provider_kind,
+                m.new_provider_region.read(cx).value().trim().to_string(),
+                m.new_provider_path.read(cx).value().trim().to_string(),
+            )
+        };
+
+        if name.is_empty() {
+            if let Some(m) = &mut self.infra_modal {
+                m.error = Some("Provider name cannot be empty.".into());
+            }
+            cx.notify();
+            return;
+        }
+
+        let mut cfg = CloudProviderConfig::new(kind, &name);
+        if !region.is_empty() {
+            cfg.region = Some(region);
+        }
+        if !inv_path.is_empty() {
+            cfg.inventory_path = Some(inv_path);
+        }
+
+        let prov_id = format!(
+            "prov-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let cfg_json = match serde_json::to_string(&cfg) {
+            Ok(j) => j,
+            Err(e) => {
+                if let Some(m) = &mut self.infra_modal {
+                    m.error = Some(format!("Failed to serialize config: {e}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+
+        let record = CloudProviderRecord {
+            id: prov_id,
+            name: name.clone(),
+            provider_kind: kind.as_str().to_string(),
+            config_json: cfg_json,
+            sync_interval_mins: 60,
+            last_synced_at: None,
+            auto_sync: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        if let Some(m) = &mut self.infra_modal {
+            m.is_loading = true;
+            m.error = None;
+            m.status_message = Some(format!("Created provider '{name}'."));
+        }
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .create_cloud_provider(&record)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Err(e) = result {
+                    if let Some(m) = &mut app.infra_modal {
+                        m.error = Some(e);
+                        m.is_loading = false;
+                    }
+                    cx.notify();
+                } else {
+                    app.load_infra_providers(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn delete_infra_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+
+        if let Some(m) = &mut self.infra_modal {
+            m.is_loading = true;
+            m.error = None;
+        }
+        cx.notify();
+
+        let pid = provider_id.clone();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store
+                    .delete_cloud_provider(&pid)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Err(e) = result {
+                    if let Some(m) = &mut app.infra_modal {
+                        m.error = Some(e);
+                        m.is_loading = false;
+                    }
+                    cx.notify();
+                } else {
+                    if let Some(m) = &mut app.infra_modal {
+                        if m.selected_provider_id.as_deref() == Some(&provider_id) {
+                            m.selected_provider_id = None;
+                        }
+                    }
+                    app.load_infra_providers(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn sync_infra_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+
+        if let Some(m) = &mut self.infra_modal {
+            m.is_loading = true;
+            m.error = None;
+            m.status_message = Some("Synchronizing provider inventory...".into());
+        }
+        cx.notify();
+
+        let pid = provider_id.clone();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let prov = store
+                    .get_cloud_provider(&pid)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Provider not found".to_string())?;
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                // If Ansible file configured, parse directly
+                if let Ok(cfg) = serde_json::from_str::<CloudProviderConfig>(&prov.config_json) {
+                    if let Some(ref fpath) = cfg.inventory_path {
+                        if let Ok(content) = std::fs::read_to_string(fpath) {
+                            let is_yaml = cfg.inventory_format.as_deref() == Some("yaml")
+                                || fpath.ends_with(".yml")
+                                || fpath.ends_with(".yaml");
+                            let hosts_res = if is_yaml {
+                                AnsibleInventoryEngine::parse_yaml_inventory(&content)
+                            } else {
+                                AnsibleInventoryEngine::parse_ini_inventory(&content)
+                            };
+
+                            if let Ok(hosts) = hosts_res {
+                                let records: Vec<DiscoveredHostRecord> = hosts
+                                    .into_iter()
+                                    .map(|h| DiscoveredHostRecord {
+                                        id: format!(
+                                            "dh-{}",
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_nanos()
+                                        ),
+                                        provider_id: pid.clone(),
+                                        external_id: h.id,
+                                        name: h.name,
+                                        hostname: h.hostname,
+                                        port: h.port as i64,
+                                        username: h.username,
+                                        state: h.state,
+                                        region: h.region,
+                                        group_path: h.group_path,
+                                        tags_json: serde_json::to_string(&h.tags)
+                                            .unwrap_or_default(),
+                                        metadata_json: serde_json::to_string(&h.extra_metadata)
+                                            .unwrap_or_default(),
+                                        imported_host_id: None,
+                                        last_seen_at: now,
+                                    })
+                                    .collect();
+                                store
+                                    .save_discovered_hosts(&pid, &records)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                }
+
+                store
+                    .update_cloud_provider_sync_time(&pid, now)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Err(e) = result {
+                    if let Some(m) = &mut app.infra_modal {
+                        m.error = Some(e);
+                        m.is_loading = false;
+                    }
+                    cx.notify();
+                } else {
+                    if let Some(m) = &mut app.infra_modal {
+                        m.status_message = Some("Synchronization completed successfully.".into());
+                    }
+                    app.load_infra_providers(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn import_discovered_host_into_inventory(&mut self, host_idx: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+
+        let host_record = {
+            let Some(m) = &self.infra_modal else {
+                return;
+            };
+            let Some(h) = m.discovered.get(host_idx) else {
+                return;
+            };
+            h.clone()
+        };
+
+        if let Some(m) = &mut self.infra_modal {
+            m.is_loading = true;
+            m.error = None;
+            m.status_message = Some(format!("Importing host '{}'...", host_record.name));
+        }
+        cx.notify();
+
+        let h_rec = host_record.clone();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let u = h_rec.username.as_deref().unwrap_or("root");
+                let dest = SshDestination::new(&h_rec.hostname, u, h_rec.port as u16)
+                    .map_err(|e| e.to_string())?;
+
+                let tags_map: std::collections::BTreeMap<String, String> =
+                    serde_json::from_str(&h_rec.tags_json).unwrap_or_default();
+                let tags: Vec<String> = tags_map
+                    .into_iter()
+                    .map(|(k, v)| if v.is_empty() { k } else { format!("{k}:{v}") })
+                    .collect();
+
+                let new_id = store
+                    .add(
+                        &h_rec.name,
+                        &dest,
+                        h_rec.group_path.as_deref(),
+                        &tags,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .mark_discovered_host_imported(&h_rec.id, new_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(new_id)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(m) = &mut app.infra_modal {
+                    m.is_loading = false;
+                    match result {
+                        Ok(new_id) => {
+                            m.status_message = Some(format!(
+                                "Imported host '{}' (ID: {new_id}).",
+                                host_record.name
+                            ));
+                        }
+                        Err(e) => {
+                            m.error = Some(e);
+                        }
+                    }
+                }
+                app.load_hosts(cx);
+                app.load_infra_providers(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn export_ansible_inventory_file(&mut self, is_yaml: bool, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+
+        if let Some(m) = &mut self.infra_modal {
+            m.is_loading = true;
+            m.error = None;
+        }
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let hosts = store.list().await.map_err(|e| e.to_string())?;
+                let export_items: Vec<HostExportItem> = hosts
+                    .into_iter()
+                    .map(|h| HostExportItem {
+                        name: h.name,
+                        hostname: h.destination.host().to_string(),
+                        port: h.destination.port().get(),
+                        username: Some(h.destination.username().to_string()),
+                        group_name: h.group_name,
+                        tags: h.tags,
+                    })
+                    .collect();
+
+                let rendered = if is_yaml {
+                    AnsibleInventoryEngine::export_to_yaml(&export_items)
+                } else {
+                    AnsibleInventoryEngine::export_to_ini(&export_items)
+                };
+                Ok((export_items.len(), rendered))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(m) = &mut app.infra_modal {
+                    m.is_loading = false;
+                    match result {
+                        Ok((count, _rendered)) => {
+                            m.status_message = Some(format!(
+                                "Exported {count} hosts to Ansible inventory format."
+                            ));
+                        }
+                        Err(e) => {
+                            m.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn render_conflict_modal(
@@ -4392,6 +4938,7 @@ impl Shellumi {
                     PaletteCategory::Navigation => (rgb(0x374151), rgb(0xf3f4f6)),
                     PaletteCategory::Workspace => (rgb(0x312e81), rgb(0xc7d2fe)),
                     PaletteCategory::Collaboration => (rgb(0x4338ca), rgb(0xe0e7ff)),
+                    PaletteCategory::Infrastructure => (rgb(0x0e7490), rgb(0xcffafe)),
                 };
 
                 let action = mat.command.action.clone();
@@ -5244,6 +5791,618 @@ impl Shellumi {
                     }
                 }
                 modal_box = modal_box.child(audit_list);
+            }
+        }
+
+        overlay.child(modal_box)
+    }
+
+    fn render_infra_modal(
+        &self,
+        modal: &InfraModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("infra-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgb(0x0a0f1d))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut modal_box = div()
+            .id("infra-modal-container")
+            .w(px(780.0))
+            .max_h(px(680.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x0e7490))
+            .rounded_lg()
+            .p_5()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child("☁️ Cloud Providers & Infrastructure Inventory"),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-infra-modal-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.dismiss_infra_modal(cx);
+                    }))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Feedback / Error Banner
+        if let Some(err) = &modal.error {
+            modal_box = modal_box.child(
+                div()
+                    .p_2()
+                    .rounded_md()
+                    .bg(rgb(0x7f1d1d))
+                    .text_xs()
+                    .text_color(rgb(0xfecaca))
+                    .child(format!("⚠️ {err}")),
+            );
+        }
+        if let Some(status) = &modal.status_message {
+            modal_box = modal_box.child(
+                div()
+                    .p_2()
+                    .rounded_md()
+                    .bg(rgb(0x065f46))
+                    .text_xs()
+                    .text_color(rgb(0xa7f3d0))
+                    .child(format!("ℹ️ {status}")),
+            );
+        }
+
+        // Tab Strip
+        let current_tab = modal.active_tab;
+        let tabs = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_2()
+            .child(
+                div()
+                    .id("infra-tab-providers")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(if current_tab == InfraModalTab::Providers {
+                        rgb(0x0e7490)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if let Some(m) = &mut app.infra_modal {
+                            m.active_tab = InfraModalTab::Providers;
+                            cx.notify();
+                        }
+                    }))
+                    .child("☁️ Providers"),
+            )
+            .child(
+                div()
+                    .id("infra-tab-discovered")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(if current_tab == InfraModalTab::Discovered {
+                        rgb(0x0e7490)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if let Some(m) = &mut app.infra_modal {
+                            m.active_tab = InfraModalTab::Discovered;
+                            cx.notify();
+                        }
+                    }))
+                    .child(format!("🖥 Discovered Hosts ({})", modal.discovered.len())),
+            )
+            .child(
+                div()
+                    .id("infra-tab-ansible")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(if current_tab == InfraModalTab::Ansible {
+                        rgb(0x0e7490)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if let Some(m) = &mut app.infra_modal {
+                            m.active_tab = InfraModalTab::Ansible;
+                            cx.notify();
+                        }
+                    }))
+                    .child("🅰️ Ansible Inventory"),
+            );
+        modal_box = modal_box.child(tabs);
+
+        match current_tab {
+            InfraModalTab::Providers => {
+                // Add Provider Form
+                let current_kind = modal.new_provider_kind;
+                let kind_picker = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("kind-aws")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(if current_kind == CloudProviderKind::Aws {
+                                rgb(0x0e7490)
+                            } else {
+                                rgb(0x374151)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(m) = &mut app.infra_modal {
+                                    m.new_provider_kind = CloudProviderKind::Aws;
+                                    cx.notify();
+                                }
+                            }))
+                            .child("☁️ AWS"),
+                    )
+                    .child(
+                        div()
+                            .id("kind-azure")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(if current_kind == CloudProviderKind::Azure {
+                                rgb(0x0e7490)
+                            } else {
+                                rgb(0x374151)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(m) = &mut app.infra_modal {
+                                    m.new_provider_kind = CloudProviderKind::Azure;
+                                    cx.notify();
+                                }
+                            }))
+                            .child("🔷 Azure"),
+                    )
+                    .child(
+                        div()
+                            .id("kind-do")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(if current_kind == CloudProviderKind::DigitalOcean {
+                                rgb(0x0e7490)
+                            } else {
+                                rgb(0x374151)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(m) = &mut app.infra_modal {
+                                    m.new_provider_kind = CloudProviderKind::DigitalOcean;
+                                    cx.notify();
+                                }
+                            }))
+                            .child("🌊 DigitalOcean"),
+                    )
+                    .child(
+                        div()
+                            .id("kind-ansible")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(if current_kind == CloudProviderKind::Ansible {
+                                rgb(0x0e7490)
+                            } else {
+                                rgb(0x374151)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(m) = &mut app.infra_modal {
+                                    m.new_provider_kind = CloudProviderKind::Ansible;
+                                    cx.notify();
+                                }
+                            }))
+                            .child("🅰️ Ansible"),
+                    );
+
+                let add_form = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .bg(rgb(0x0f172a))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0x334155))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x94a3b8))
+                            .child("Connect New Infrastructure Provider:"),
+                    )
+                    .child(kind_picker)
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(div().flex_1().child(modal.new_provider_name.clone()))
+                            .child(div().w(px(220.0)).child(modal.new_provider_region.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(div().flex_1().child(modal.new_provider_path.clone()))
+                            .child(
+                                div()
+                                    .id("create-provider-btn")
+                                    .px_4()
+                                    .py_1p5()
+                                    .rounded_md()
+                                    .bg(rgb(0x0e7490))
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.create_infra_provider(cx);
+                                    }))
+                                    .child("+ Add Provider"),
+                            ),
+                    );
+                modal_box = modal_box.child(add_form);
+
+                // Configured Providers List
+                let mut prov_list = div()
+                    .id("providers-list")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .max_h(px(240.0))
+                    .overflow_y_scroll();
+
+                if modal.providers.is_empty() {
+                    prov_list = prov_list.child(
+                        div()
+                            .p_4()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("No infrastructure providers configured yet."),
+                    );
+                } else {
+                    for (p_idx, p) in modal.providers.iter().enumerate() {
+                        let pid = p.id.clone();
+                        let sync_pid = p.id.clone();
+                        let icon = match p.provider_kind.as_str() {
+                            "aws" => "☁️",
+                            "azure" => "🔷",
+                            "digitalocean" => "🌊",
+                            "ansible" => "🅰️",
+                            _ => "🌐",
+                        };
+
+                        let card = div()
+                            .id(("provider-card", p_idx))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .border_1()
+                            .border_color(rgb(0x334155))
+                            .child(
+                                div().flex().flex_col().gap_0p5().child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().text_sm().child(icon))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(0xf8fafc))
+                                                .child(p.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x38bdf8))
+                                                .child(p.provider_kind.to_uppercase()),
+                                        ),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(("sync-prov-btn", p_idx))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(rgb(0x0369a1))
+                                            .text_xs()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.sync_infra_provider(sync_pid.clone(), cx);
+                                            }))
+                                            .child("⚡ Sync"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("del-prov-btn", p_idx))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(rgb(0x7f1d1d))
+                                            .text_xs()
+                                            .text_color(rgb(0xfecaca))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.delete_infra_provider(pid.clone(), cx);
+                                            }))
+                                            .child("🗑 Delete"),
+                                    ),
+                            );
+                        prov_list = prov_list.child(card);
+                    }
+                }
+                modal_box = modal_box.child(prov_list);
+            }
+            InfraModalTab::Discovered => {
+                let mut disc_list = div()
+                    .id("discovered-hosts-list")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .max_h(px(420.0))
+                    .overflow_y_scroll();
+
+                if modal.discovered.is_empty() {
+                    disc_list = disc_list.child(
+                        div()
+                            .p_4()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("No hosts discovered yet. Connect a provider and trigger Sync, or import an inventory file."),
+                    );
+                } else {
+                    for (h_idx, h) in modal.discovered.iter().enumerate() {
+                        let is_imported = h.imported_host_id.is_some();
+                        let state_badge = if h.state.eq_ignore_ascii_case("running")
+                            || h.state.eq_ignore_ascii_case("active")
+                        {
+                            "🟢 Running"
+                        } else {
+                            "🔴 Stopped"
+                        };
+
+                        let row = div()
+                            .id(("disc-host-card", h_idx))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .border_1()
+                            .border_color(rgb(0x334155))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(rgb(0xf8fafc))
+                                                    .child(h.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(rgb(0x1e293b))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child(state_badge),
+                                            )
+                                            .child({
+                                                let reg = h.region.as_deref().unwrap_or("-");
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .child(format!("[{reg}]"))
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family("monospace")
+                                            .text_color(rgb(0x38bdf8))
+                                            .child(format!(
+                                                "{}@{}:{}",
+                                                h.username.as_deref().unwrap_or("user"),
+                                                h.hostname,
+                                                h.port
+                                            )),
+                                    ),
+                            )
+                            .child({
+                                if is_imported {
+                                    div()
+                                        .id(("imported-badge", h_idx))
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(rgb(0x065f46))
+                                        .text_xs()
+                                        .text_color(rgb(0xa7f3d0))
+                                        .child(format!(
+                                            "✅ Imported (ID: {})",
+                                            h.imported_host_id.unwrap_or(0)
+                                        ))
+                                } else {
+                                    div()
+                                        .id(("import-host-btn", h_idx))
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(rgb(0x0e7490))
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xffffff))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.import_discovered_host_into_inventory(h_idx, cx);
+                                        }))
+                                        .child("📥 Import Host")
+                                }
+                            });
+                        disc_list = disc_list.child(row);
+                    }
+                }
+                modal_box = modal_box.child(disc_list);
+            }
+            InfraModalTab::Ansible => {
+                let ansible_section = div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .rounded_md()
+                    .bg(rgb(0x0f172a))
+                    .border_1()
+                    .border_color(rgb(0x334155))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xf8fafc))
+                            .child("Export Shellumi Inventory to Ansible"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child("Generate fully compliant Ansible static and dynamic inventory formats from your current Shellumi hosts, groups, and tags."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("export-ansible-ini-btn")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x0e7490))
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.export_ansible_inventory_file(false, cx);
+                                    }))
+                                    .child("📤 Export to Ansible INI"),
+                            )
+                            .child(
+                                div()
+                                    .id("export-ansible-yaml-btn")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x4338ca))
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.export_ansible_inventory_file(true, cx);
+                                    }))
+                                    .child("📤 Export to Ansible YAML"),
+                            ),
+                    );
+                modal_box = modal_box.child(ansible_section);
             }
         }
 
@@ -6806,6 +7965,9 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.team_modal {
                     result = result.child(self.render_team_modal(modal, cx));
                 }
+                if let Some(modal) = &self.infra_modal {
+                    result = result.child(self.render_infra_modal(modal, cx));
+                }
                 return result;
             }
         }
@@ -7141,6 +8303,20 @@ impl Render for Shellumi {
                             app.open_team_modal(cx);
                         }))
                         .child("👥 Team Vaults"),
+                )
+                .child(
+                    div()
+                        .id("cloud-infra-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x0e7490))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.open_infra_modal(cx);
+                        }))
+                        .child("☁️ Cloud & Infra"),
                 );
 
             if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
@@ -7375,6 +8551,9 @@ impl Render for Shellumi {
         }
         if let Some(modal) = &self.team_modal {
             result = result.child(self.render_team_modal(modal, cx));
+        }
+        if let Some(modal) = &self.infra_modal {
+            result = result.child(self.render_infra_modal(modal, cx));
         }
         result
     }
@@ -8527,5 +9706,102 @@ mod tests {
         assert!(log_entry.contains("key_rotated"));
         assert!(log_entry.contains("actor=alice"));
         assert!(log_entry.contains("Rotated key to epoch 2"));
+    }
+
+    #[test]
+    fn verifies_infrastructure_palette_actions_and_categories() {
+        use shellumi_core::{PaletteAction, PaletteCategory, PaletteRegistry};
+
+        let registry = PaletteRegistry::with_static_actions();
+        let infra_commands: Vec<_> = registry
+            .commands()
+            .iter()
+            .filter(|c| c.category == PaletteCategory::Infrastructure)
+            .collect();
+
+        assert_eq!(infra_commands.len(), 4);
+        assert!(infra_commands
+            .iter()
+            .any(|c| c.action == PaletteAction::OpenInfrastructureManager));
+        assert!(infra_commands
+            .iter()
+            .any(|c| c.action == PaletteAction::SyncCloudInfrastructure));
+        assert!(infra_commands
+            .iter()
+            .any(|c| c.action == PaletteAction::ImportAnsibleInventory));
+        assert!(infra_commands
+            .iter()
+            .any(|c| c.action == PaletteAction::ExportAnsibleInventory));
+
+        assert_eq!(PaletteCategory::Infrastructure.as_str(), "Infrastructure");
+        assert_eq!(PaletteCategory::Infrastructure.badge_icon(), "☁️");
+    }
+
+    #[test]
+    fn verifies_infrastructure_cloud_provider_and_discovered_host_models() {
+        use shellumi_core::{CloudProviderConfig, CloudProviderKind, DiscoveredHost};
+        use shellumi_storage::{CloudProviderRecord, DiscoveredHostRecord};
+        use std::collections::BTreeMap;
+
+        let mut config = CloudProviderConfig::new(CloudProviderKind::Aws, "Prod AWS");
+        config.region = Some("us-west-2".into());
+        config.access_key_id = Some("AKIAIOSFODNN7EXAMPLE".into());
+        config.secret_key = Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into());
+
+        assert!(config.validate().is_ok());
+        let redacted = config.redacted_summary();
+        assert!(redacted.contains("us-west-2"));
+        assert!(!redacted.contains("wJalrXUtnFEMI"));
+
+        let provider_rec = CloudProviderRecord {
+            id: "1".into(),
+            name: "Prod AWS".into(),
+            provider_kind: "aws".into(),
+            config_json: serde_json::to_string(&config).unwrap(),
+            sync_interval_mins: 60,
+            last_synced_at: Some(1730000000),
+            auto_sync: true,
+            created_at: 1730000000,
+            updated_at: 1730000000,
+        };
+        assert_eq!(provider_rec.name, "Prod AWS");
+
+        let disc_host = DiscoveredHost {
+            id: "i-0123456789abcdef0".into(),
+            name: "web-server-01".into(),
+            provider: CloudProviderKind::Aws,
+            hostname: "54.214.1.100".into(),
+            port: 22,
+            username: Some("ec2-user".into()),
+            state: "running".into(),
+            region: Some("us-west-2".into()),
+            instance_type: Some("t3.medium".into()),
+            group_path: Some("AWS/us-west-2".into()),
+            tags: BTreeMap::new(),
+            extra_metadata: BTreeMap::new(),
+        };
+
+        assert!(disc_host.is_running());
+        assert_eq!(disc_host.status_badge(), "🟢 Running");
+        assert_eq!(disc_host.format_destination(), "ec2-user@54.214.1.100");
+
+        let disc_rec = DiscoveredHostRecord {
+            id: "10".into(),
+            provider_id: "1".into(),
+            external_id: disc_host.id.clone(),
+            name: disc_host.name.clone(),
+            hostname: disc_host.hostname.clone(),
+            port: disc_host.port as i64,
+            username: disc_host.username.clone(),
+            state: disc_host.state.clone(),
+            region: disc_host.region.clone(),
+            group_path: disc_host.group_path.clone(),
+            tags_json: serde_json::to_string(&disc_host.tags).unwrap(),
+            metadata_json: serde_json::to_string(&disc_host.extra_metadata).unwrap(),
+            imported_host_id: None,
+            last_seen_at: 1730000000,
+        };
+        assert_eq!(disc_rec.external_id, "i-0123456789abcdef0");
+        assert!(disc_rec.imported_host_id.is_none());
     }
 }

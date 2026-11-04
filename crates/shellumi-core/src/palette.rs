@@ -12,6 +12,7 @@ pub enum PaletteCategory {
     Terminal,
     Workspace,
     Collaboration,
+    Infrastructure,
 }
 
 impl PaletteCategory {
@@ -26,6 +27,7 @@ impl PaletteCategory {
             Self::Terminal => "Terminal",
             Self::Workspace => "Workspaces",
             Self::Collaboration => "Collaboration",
+            Self::Infrastructure => "Infrastructure",
         }
     }
 
@@ -40,6 +42,7 @@ impl PaletteCategory {
             Self::Terminal => "⌨",
             Self::Workspace => "📐",
             Self::Collaboration => "👥",
+            Self::Infrastructure => "☁️",
         }
     }
 }
@@ -84,6 +87,10 @@ pub enum PaletteAction {
     SwitchToTab(usize),
     OpenTeamCollaboration,
     ToggleMultiplayerCollaboration,
+    OpenInfrastructureManager,
+    SyncCloudInfrastructure,
+    ImportAnsibleInventory,
+    ExportAnsibleInventory,
 }
 
 /// A searchable command palette item.
@@ -307,6 +314,59 @@ impl PaletteRegistry {
                 PaletteAction::ToggleMultiplayerCollaboration,
             )
             .with_keywords(["multiplayer", "collaborate", "share", "writer", "peer"]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:infra_manager",
+                "Open Infrastructure & Cloud Manager",
+                "Manage AWS, Azure, DigitalOcean, and Ansible inventory discovery",
+                PaletteCategory::Infrastructure,
+                PaletteAction::OpenInfrastructureManager,
+            )
+            .with_keywords([
+                "cloud",
+                "aws",
+                "azure",
+                "digitalocean",
+                "droplets",
+                "ec2",
+                "vms",
+                "infra",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:sync_infra",
+                "Sync Cloud Infrastructure",
+                "Refresh discovered compute instances and dropplets from cloud providers",
+                PaletteCategory::Infrastructure,
+                PaletteAction::SyncCloudInfrastructure,
+            )
+            .with_keywords(["refresh", "cloud", "aws", "sync", "instances"]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:ansible_import",
+                "Import Ansible Inventory",
+                "Import hosts and groups from Ansible INI or YAML inventory files",
+                PaletteCategory::Infrastructure,
+                PaletteAction::ImportAnsibleInventory,
+            )
+            .with_keywords(["ansible", "inventory", "ini", "yaml", "import"]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:ansible_export",
+                "Export Ansible Inventory",
+                "Export current Shellumi hosts and groups to Ansible inventory format",
+                PaletteCategory::Infrastructure,
+                PaletteAction::ExportAnsibleInventory,
+            )
+            .with_keywords(["ansible", "inventory", "export", "yaml", "ini"]),
         );
 
         self.register(
@@ -552,7 +612,9 @@ mod tests {
         // Category "sync"
         let sync_results = registry.search("sync");
         assert!(!sync_results.is_empty());
-        assert_eq!(sync_results[0].command.category, PaletteCategory::Sync);
+        assert!(sync_results
+            .iter()
+            .any(|r| r.command.category == PaletteCategory::Sync));
     }
 
     #[test]
@@ -649,5 +711,26 @@ mod tests {
             PaletteAction::ToggleMultiplayerCollaboration
         );
         assert_eq!(results[0].command.category, PaletteCategory::Collaboration);
+    }
+
+    #[test]
+    fn verifies_infrastructure_palette_actions() {
+        let registry = PaletteRegistry::with_static_actions();
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::OpenInfrastructureManager));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::SyncCloudInfrastructure));
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::ImportAnsibleInventory));
+
+        let results = registry.search("aws");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].command.category, PaletteCategory::Infrastructure);
     }
 }
