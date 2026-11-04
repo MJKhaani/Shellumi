@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "values": [
-    {"name": "default SSH port", "group": "connections", "value": 22, "estimated": true}
-  ]
-}

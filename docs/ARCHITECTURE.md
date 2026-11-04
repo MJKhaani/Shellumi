@@ -1,9 +1,10 @@
 # Architecture (initial)
 
 The root Cargo workspace contains `shellumi-app`, a GPUI window foundation,
-and `shellumi-core`, a UI-independent library. `app/` is the separate Harbor
-prototype and is not a workspace member. The core currently only validates an
-SSH destination; it neither connects to a server nor handles credentials.
+`shellumi-core`, a UI-independent library, and `shellumi-storage`, a local
+database adapter. The core currently only validates an SSH destination; it
+neither connects to a server nor handles credentials. The app does not yet
+integrate the core or storage crates.
 
 The intended dependency direction is UI → application services → protocol,
 terminal and storage adapters. Protocol and domain code must not depend on GPUI.
