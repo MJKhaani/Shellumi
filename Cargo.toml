@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/shellumi-app", "crates/shellumi-core", "crates/shellumi-storage"]
+resolver = "2"

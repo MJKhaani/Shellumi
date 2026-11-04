@@ -1,0 +1,9 @@
+[package]
+name = "shellumi-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+gpui = "=0.2.2"

@@ -1,0 +1,14 @@
+[package]
+name = "shellumi-storage"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+turso = { version = "=0.9.0-pre.2", default-features = false }
+shellumi-core = { path = "../shellumi-core" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tempfile = "3"
