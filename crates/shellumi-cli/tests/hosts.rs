@@ -1768,3 +1768,51 @@ fn supports_system_diagnostics_doctor_cli() {
     let str_db = String::from_utf8(out_db.stdout).unwrap();
     assert!(str_db.contains("Metadata Database"));
 }
+
+#[tokio::test]
+async fn supports_mobile_cli_and_virtual_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+
+    // 1. Virtual keys listing
+    let out_keys = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["mobile", "virtual-keys"])
+        .output()
+        .unwrap();
+    assert!(out_keys.status.success());
+    let str_keys = String::from_utf8(out_keys.stdout).unwrap();
+    assert!(str_keys.contains("Mobile Virtual Accessory Keys"));
+    assert!(str_keys.contains("Esc"));
+    assert!(str_keys.contains("Tab"));
+    assert!(str_keys.contains("^C"));
+
+    // 2. Lifecycle simulation
+    let out_life = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["mobile", "lifecycle-sim", "background"])
+        .output()
+        .unwrap();
+    assert!(out_life.status.success());
+    let str_life = String::from_utf8(out_life.stdout).unwrap();
+    assert!(str_life.contains("Initial state: Connected"));
+    assert!(str_life.contains("Transformed state after background: Background (Grace Period)"));
+
+    // 3. FFI bridge contract verification
+    let out_ffi = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["mobile", "ffi-check"])
+        .output()
+        .unwrap();
+    assert!(out_ffi.status.success());
+    let str_ffi = String::from_utf8(out_ffi.stdout).unwrap();
+    assert!(str_ffi.contains("Mobile FFI contracts verified successfully"));
+    assert!(str_ffi.contains("\"ok\":true"));
+
+    // 4. Database-prefixed invocation
+    let out_db_mobile = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(db.to_str().unwrap())
+        .args(["mobile", "virtual-keys"])
+        .output()
+        .unwrap();
+    assert!(out_db_mobile.status.success());
+    let str_db_mobile = String::from_utf8(out_db_mobile.stdout).unwrap();
+    assert!(str_db_mobile.contains("Mobile Virtual Accessory Keys"));
+}

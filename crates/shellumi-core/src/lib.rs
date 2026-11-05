@@ -9,6 +9,7 @@ pub mod group;
 pub mod identity;
 pub mod infrastructure;
 pub mod known_hosts;
+pub mod mobile;
 pub mod palette;
 pub mod protocol;
 pub mod sftp;
@@ -50,6 +51,11 @@ pub use infrastructure::{
 pub use known_hosts::{
     format_known_host_entry, parse_known_hosts, verify_host_key, HostKeyMarker,
     HostKeyVerification, KnownHostEntry, KnownHostsError,
+};
+pub use mobile::{
+    AccessoryBarLayout, BiometricRequirement, MobileCredentialSpec, MobileFfiBridge,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MobileSessionState,
+    PlatformKeyStoreTarget, VirtualAccessoryBar, VirtualKey, VirtualKeyModifier,
 };
 pub use palette::{PaletteAction, PaletteCategory, PaletteCommand, PaletteMatch, PaletteRegistry};
 pub use protocol::{

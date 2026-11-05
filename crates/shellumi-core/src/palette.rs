@@ -14,6 +14,7 @@ pub enum PaletteCategory {
     Collaboration,
     Infrastructure,
     Diagnostics,
+    Mobile,
 }
 
 impl PaletteCategory {
@@ -30,6 +31,7 @@ impl PaletteCategory {
             Self::Collaboration => "Collaboration",
             Self::Infrastructure => "Infrastructure",
             Self::Diagnostics => "Diagnostics",
+            Self::Mobile => "Mobile",
         }
     }
 
@@ -46,6 +48,7 @@ impl PaletteCategory {
             Self::Collaboration => "👥",
             Self::Infrastructure => "☁️",
             Self::Diagnostics => "🩺",
+            Self::Mobile => "📱",
         }
     }
 }
@@ -95,6 +98,7 @@ pub enum PaletteAction {
     ImportAnsibleInventory,
     ExportAnsibleInventory,
     RunDiagnostics,
+    OpenMobileSimulator,
 }
 
 /// A searchable command palette item.
@@ -390,6 +394,27 @@ impl PaletteRegistry {
                 "audit",
                 "system",
                 "verify",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:mobile_simulator",
+                "Open Mobile Touch & Accessory Simulator",
+                "Preview mobile terminal viewport, touch virtual keys, and lifecycle states",
+                PaletteCategory::Mobile,
+                PaletteAction::OpenMobileSimulator,
+            )
+            .with_shortcut("Cmd+Alt+M")
+            .with_keywords([
+                "mobile",
+                "touch",
+                "virtual",
+                "accessory",
+                "simulator",
+                "ios",
+                "android",
+                "phone",
             ]),
         );
 

@@ -38,6 +38,15 @@ crates/shellumi-app       GPUI desktop window with interactive host management
   - Cross-platform PTY subsystem spawning capability checks.
   - Generates human-readable terminal summaries, structured Markdown reports, and JSON payloads.
   - Registers `PaletteCategory::Diagnostics` (`🩺`) and command palette action `PaletteAction::RunDiagnostics` (`Cmd+Shift+D`).
+- **Mobile & Portable Core Subsystem:** Implements UI-independent mobile models and state machines in `shellumi-core::mobile`:
+  - `MobilePlatform` (`Ios`, `Android`, `Simulator`).
+  - `VirtualKey` (Esc, Tab, Ctrl-chars, Alt-chars, arrows, pipe, tilde, slash, backslash, function keys F1-F12, home, end, pgup, pgdn) and `VirtualKeyModifier` (`Ctrl`, `Alt`, `Shift`).
+  - `VirtualAccessoryBar` with customizable presets (`DefaultTerminal`, `CompactNavigation`, `CodeEditing`), sticky modifier state machine with toggle semantics, and one-shot keystroke resolution `resolve_char_keystroke`.
+  - `MobileSessionState` (`Connecting`, `Connected`, `BackgroundGracePeriod`, `Suspended`, `Reconnecting`, `Disconnected`) and `MobileLifecycleEvent` (`AppForegrounded`, `AppBackgrounded`, `BackgroundTimerTick`, `BackgroundExpired`, `NetworkLost`, `NetworkRestored`, `UserDisconnect`).
+  - `MobileLifecycleManager` managing deterministic mobile lifecycle transitions, background grace timers (default 30s matching iOS background execution bounds), exponential reconnection backoff (1s, 2s, 4s, up to 30s max), and key zeroization upon disconnection.
+  - `MobileCredentialSpec` defining platform-native secure enclave / hardware keystore requirements: iOS Keychain `kSecClassGenericPassword` with `kSecAccessControlBiometryAny` vs Android Keystore AES-GCM with `setUserAuthenticationRequired(true)` and StrongBox backing.
+  - `MobileFfiBridge` headless JSON/C-ABI bridge helpers (`parse_destination_json`, `translate_virtual_key_json`, `generate_keypair_json`) for UniFFI and foreign language binding.
+  - Registers `PaletteCategory::Mobile` (`📱`) and command palette action `PaletteAction::OpenMobileSimulator` (`Cmd+Alt+M`).
 - UI-independent and network-independent; contains no GUI code.
 
 ### `shellumi-terminal`
@@ -63,6 +72,10 @@ crates/shellumi-app       GPUI desktop window with interactive host management
 - Provides dedicated SFTP commands: `sftp local-ls <path> [--all]`, `sftp history [--host-id <id>] [--limit <n>]`, `sftp clear-history [--host-id <id>]`, `sftp log <upload|download> <local-path> <remote-path> <bytes>`, `sftp packet <encode-init|decode|encode-open> [...]`, and `sftp queue <upload|download> <local-path> <remote-path> <bytes>`.
 - Provides dedicated snippet management: `snippet add <name> <cmd> [--desc <desc>] [--tags <t1,t2>]`, `snippet list [--tag <tag>] [--search <query>]`, `snippet show <id>`, `snippet render <id> [--var key=value] [--preview]`, `snippet delete <id>`, and `snippet batch <id> --hosts <h1,h2...> [--parallel|--sequential] [--dry-run]`.
 - Provides automated environment diagnostics: `doctor [--json] [--markdown] [--db <path>]` running comprehensive checks on CSPRNG entropy, AEAD crypto, OpenSSH binary, keychain, network loopback binding, database schema, and PTY capabilities.
+- Provides mobile simulation and validation commands:
+  - `mobile virtual-keys [--preset default|compact|coding]` displaying available touch accessory keys and ANSI byte translations.
+  - `mobile lifecycle-sim <event>` simulating mobile state machine transitions (`foreground`, `background`, `tick`, `expired`, `net-lost`, `net-restored`, `disconnect`).
+  - `mobile ffi-check` verifying portable headless C-ABI / UniFFI bridge functions.
 - Provides dedicated cloud infrastructure subcommands:
   - `infra provider add <name> <aws|azure|digitalocean|ansible> [...]`, `infra provider list`, `infra provider show <id>`, `infra provider delete <id>`, and `infra provider sync <id>`.
   - `infra discover <aws|azure|digitalocean|ansible> --file <json-file> [--import-all] [--dry-run]` to parse and import discovered instances.
@@ -136,6 +149,12 @@ crates/shellumi-app       GPUI desktop window with interactive host management
   bold, italic, underline, strikethrough, scrollback), cursor coordinates/dimensions
   in a status bar, clipboard paste (`Cmd-V` / `Ctrl-Shift-V`), and extended key translation.
 - **System Health Diagnostics & Audit Modal:** The main toolbar includes a `[🩺 Health Check]` action (and Command Palette action `PaletteAction::RunDiagnostics` / `Cmd+Shift+D`) opening the Diagnostics Modal (`DiagnosticsModalState`). Diagnostics execute on background worker threads (`cx.background_executor()`) without UI hitching, auditing CSPRNG entropy, AES-256-GCM AEAD encryption, OpenSSH binary availability, OS keychain backend status, loopback network socket binding, database integrity, and cross-platform PTY capabilities. The modal presents a dynamic system health banner (`✅ All Systems Ready`, `⚠️ System Degraded`, `❌ Action Required`), summary stats, execution duration per check, and actionable remediation steps.
+- **Desktop Mobile Simulator Modal & Virtual Accessory Bar:** The main toolbar features a `[📱 Mobile Sim]` action (and Command Palette action `PaletteAction::OpenMobileSimulator` / `Cmd+Alt+M`) opening the Mobile Simulator overlay (`MobileSimulatorModalState`). It enables interactive desktop testing of mobile-specific UX constraints without mobile hardware:
+  - *Device Viewport Presets:* Switchable viewports for iPhone 15 Pro (393×852 pt / 80×24 chars), Pixel 8 (412×924 pt / 82×26 chars), and iPad Pro 11" (834×1194 pt / 120×36 chars).
+  - *Touch-First Virtual Accessory Strip:* Interactive rendered accessory row with Esc, Tab, Ctrl, Alt, Arrow keys (←, →, ↑, ↓), Pipe (`|`), Tilde (`~`), Slash (`/`), and Backslash (`\`).
+  - *Sticky Modifier State Machine:* One-shot modifier toggles for `Ctrl` and `Alt` designed for single-hand mobile touch typing.
+  - *Mobile Lifecycle Triggers:* Interactive simulation buttons triggering `App Backgrounded`, `Timer Tick (10s)`, `Background Expired`, `App Foregrounded`, `Network Lost`, `Network Restored`, and `Disconnect`.
+  - *ANSI Escape Byte Telemetry:* Real-time live log recording rendered hex and ASCII byte streams emitted by touch keystrokes.
 - **Verification:** An opt-in [isolated OpenSSH test](development/ssh-integration.md)
   exercises host-key confirmation and public-key authentication through the PTY
   worker and terminal grid. Unit tests cover endpoint formatting, host search/group/tag
@@ -161,6 +180,18 @@ Shellumi provides standalone installer definitions for each supported tier-1 des
   - Generates `.deb`, `.dmg`, and `.zip` installers.
   - Generates CycloneDX Software Bill of Materials (SBOM) and SHA-256 checksums (`SHA256SUMS.txt`).
   - Publishes signed GitHub releases on Git version tags (`v*`).
+
+## Mobile architecture & portable core subsystem
+
+Per the mandate in `PROJECT.md`, GPUI 0.2.2 is preserved strictly for desktop windowing without premature web or hybrid wrappers. Mobile support is achieved through an architecturally decoupled, portable Rust core:
+
+1. **Decoupled Headless Core:** `shellumi-core` has zero dependencies on GPUI, AppKit, Wayland, or Win32. All domain logic, destination parsing, Ed25519 key generation, known-hosts verification, port forwarding calculation, and mobile lifecycle state machines compile natively for mobile targets (`aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-linux-android`).
+2. **Mobile Lifecycle State Machine:** `MobileLifecycleManager` governs the transition between `Connecting`, `Connected`, `BackgroundGracePeriod`, `Suspended`, `Reconnecting`, and `Disconnected`. When an app moves to the background on iOS (which grants ~30s before suspending processes), a grace timer runs; if background time expires, sockets are proactively closed and memory zeroized to avoid sudden OS kernel termination. Upon returning to the foreground, deterministic exponential backoff handles reconnection.
+3. **Touch Ergonomics & Virtual Accessory Bar:** On touch devices lacking physical keyboards, `VirtualAccessoryBar` provides essential terminal control keys (Esc, Tab, Ctrl, Alt, Arrow navigation, pipes, tildes, backslashes, and function keys). It features sticky modifier state machine semantics (`Ctrl` and `Alt` toggle on touch and resolve one-shot with the next typed character) eliminating the multi-touch requirement of physical keyboards.
+4. **Hardware-Backed Biometric Security:** `MobileCredentialSpec` defines security parameters for mobile targets:
+   - *iOS:* Keychain items stored with `kSecClassGenericPassword`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, and `kSecAccessControlBiometryAny` (enforcing Face ID / Touch ID via Secure Enclave).
+   - *Android:* Android Keystore AES-GCM encryption with `KeyGenParameterSpec.setUserAuthenticationRequired(true)` and StrongBox Keymaster hardware backing.
+5. **Desktop Touch Simulator:** `shellumi-app` includes an in-process mobile simulator overlay (`MobileSimulatorModalState`) allowing engineers to test mobile accessory layouts, sticky modifier resolution, lifecycle state transitions, and ANSI byte emission directly on macOS, Linux, and Windows desktops.
 
 ## Dependency direction and engineering rules
 

@@ -17,6 +17,7 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 - **Credential Storage:** A macOS Keychain backend and encrypted file store exist. Windows Credential Manager and Linux Secret Service are not yet implemented and return errors. End-to-end credential workflows need validation.
 - **Vault passphrases:** CLI vault operations require an explicit passphrase. Arguments can be visible to local processes; secure interactive entry is not yet implemented. Exports made with the former hard-coded default should be replaced.
 - **Buffer Hygiene:** Secret memory buffers should be zeroized upon release where supported by the Rust toolchain.
+- **Mobile Hardware Security:** Mobile platforms enforce hardware-backed key storage (`MobileCredentialSpec`) leveraging the iOS Secure Enclave (`kSecAccessControlBiometryAny`) and Android StrongBox Keystore (`setUserAuthenticationRequired(true)`). Passwords and private keys are never stored in unencrypted mobile storage.
 
 ---
 
@@ -35,6 +36,7 @@ Shellumi is designed with a **security-first, privacy-first, local-first** archi
 | **Multiplayer Terminal** | Concurrent keystroke race conditions or rogue participant commands | Single-active-writer keystroke arbitration; non-controlling participants are strictly read-only; session host retains instantaneous override/revocation control. |
 | **Cloud & Infrastructure Integrations** | Credential leakage in logs or diagnostics; unauthorized inventory overwrite | Sensitive provider credentials (AWS secret keys, Azure secrets, DigitalOcean tokens) are redacted in summaries and encrypted in storage; non-destructive `InventoryMergeEngine` preserves existing user tags and notes during dynamic discovery; foreign keys link discovered records to inventory hosts. |
 | **System Health & Integrity** | Cryptographic degradation or compromised local environment | Automated runtime health diagnostics (`DiagnosticsRunner`, CLI `doctor`, desktop Diagnostics Modal) actively verify CSPRNG entropy, AES-256-GCM AEAD round-trip encryption, OpenSSH binary discovery, and loopback socket binding; CI/CD release workflow generates CycloneDX SBOMs and SHA-256 checksums. |
+| **Mobile Security** | Device theft, background socket leakage, or touch keylogging | Enforce biometric authorization (Face ID / Touch ID / BiometricPrompt) backed by hardware keystores; proactively drop TCP sockets and zeroize sensitive session state upon background expiration; render accessory bar as native canvas controls bypassing third-party software keyboards. |
 
 For detailed analysis, see [docs/security/threat-model.md](docs/security/threat-model.md).
 

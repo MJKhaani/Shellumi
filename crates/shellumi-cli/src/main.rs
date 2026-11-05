@@ -2,14 +2,15 @@ use shellumi_core::{
     build_google_drive_auth_url, diff_sync_records_with_passphrase, discover_serial_ports,
     export_csv, export_ssh_config, generate_ed25519_key, generate_pkce_challenge,
     list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
-    render_preview, AnsibleInventoryEngine, AuditAction, AwsEc2Parser, AzureVmParser,
-    BatchExecutionPlan, BatchHostTarget, BatchPolicy, CloudProviderConfig, CloudProviderKind,
-    ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType,
-    HostConfigEntry, HostExportItem, HostGroup, MoshConfig, MoshPredictMode, MultiplayerSession,
-    OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PortForwardRule,
-    ProtocolError, SerialConfig, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
-    SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
-    TransferQueue,
+    render_preview, AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AwsEc2Parser,
+    AzureVmParser, BatchExecutionPlan, BatchHostTarget, BatchPolicy, CloudProviderConfig,
+    CloudProviderKind, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes,
+    ForwardingType, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
+    MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
+    PortForwardRule, ProtocolError, SerialConfig, SftpPacket, SharedVault, SharingAuditRecord,
+    Snippet, SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
+    TransferQueue, VirtualAccessoryBar,
 };
 use shellumi_storage::{CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer};
 use std::str::FromStr;
@@ -87,7 +88,8 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> import-csv <csv-path>
   shellumi-cli <database-path> export-csv
   shellumi-cli keygen [--comment <comment>]
-  shellumi-cli doctor [--json] [--markdown] [--db <path>]";
+  shellumi-cli doctor [--json] [--markdown] [--db <path>]
+  shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check>";
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -224,6 +226,68 @@ async fn run() -> Result<(), Box<dyn Error>> {
             std::process::exit(1);
         }
         return Ok(());
+    }
+
+    if args[0] == "mobile" {
+        if args.len() < 2 {
+            println!("Usage: shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check>");
+            return Ok(());
+        }
+        match args[1].as_str() {
+            "virtual-keys" => {
+                let bar = VirtualAccessoryBar::new(AccessoryBarLayout::DefaultTerminal);
+                println!("Mobile Virtual Accessory Keys ({}):", bar.keys.len());
+                for key in &bar.keys {
+                    let bytes = key.to_bytes();
+                    let hex = bytes
+                        .iter()
+                        .map(|b| format!("{:02X}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!("  {:6} -> {:10} (bytes: {:?})", key.label(), hex, bytes);
+                }
+                return Ok(());
+            }
+            "lifecycle-sim" => {
+                let event_name = args.get(2).map(|s| s.as_str()).unwrap_or("background");
+                let mut manager = MobileLifecycleManager::new(MobilePlatform::Ios);
+                manager.mark_connected();
+                println!("Initial state: {}", manager.state.status_label());
+                let event = match event_name {
+                    "background" => MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
+                    "expire" => MobileLifecycleEvent::BackgroundExpired,
+                    "tick" => MobileLifecycleEvent::BackgroundTimerTick {
+                        elapsed_seconds: 10,
+                    },
+                    "disconnect" => MobileLifecycleEvent::NetworkLost,
+                    "reconnect" => MobileLifecycleEvent::NetworkRestored,
+                    "foreground" => MobileLifecycleEvent::AppForegrounded,
+                    _ => MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
+                };
+                manager.transition(event, 1000);
+                println!(
+                    "Transformed state after {}: {}",
+                    event_name,
+                    manager.state.status_label()
+                );
+                return Ok(());
+            }
+            "ffi-check" => {
+                println!("Running Mobile FFI and C-ABI validation checks...");
+                let dest_res =
+                    MobileFfiBridge::parse_destination_json("mobile-user@ssh.example.org:2222");
+                println!("Destination JSON check: {dest_res}");
+                let key_res = MobileFfiBridge::translate_virtual_key_json("ctrl-c");
+                println!("Virtual Key JSON check: {key_res}");
+                let keypair_res = MobileFfiBridge::generate_keypair_json("mobile-ed25519-check");
+                println!("Keypair JSON check: {keypair_res}");
+                println!("Mobile FFI contracts verified successfully.");
+                return Ok(());
+            }
+            other => {
+                return Err(invalid(&format!("Unknown mobile subcommand: {other}")).into());
+            }
+        }
     }
 
     if args.len() < 2 {
@@ -556,7 +620,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
         }
-        "doctor" => {}
+        "doctor" | "mobile" => {}
         _ => return Err(invalid(USAGE).into()),
     }
 
@@ -579,6 +643,65 @@ async fn run() -> Result<(), Box<dyn Error>> {
             std::process::exit(1);
         }
         return Ok(());
+    }
+
+    if command == "mobile" {
+        let sub = args.get(2).map(|s| s.as_str()).unwrap_or("virtual-keys");
+        match sub {
+            "virtual-keys" => {
+                let bar = VirtualAccessoryBar::new(AccessoryBarLayout::DefaultTerminal);
+                println!("Mobile Virtual Accessory Keys ({}):", bar.keys.len());
+                for key in &bar.keys {
+                    let bytes = key.to_bytes();
+                    let hex = bytes
+                        .iter()
+                        .map(|b| format!("{:02X}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!("  {:6} -> {:10} (bytes: {:?})", key.label(), hex, bytes);
+                }
+                return Ok(());
+            }
+            "lifecycle-sim" => {
+                let event_name = args.get(3).map(|s| s.as_str()).unwrap_or("background");
+                let mut manager = MobileLifecycleManager::new(MobilePlatform::Ios);
+                manager.mark_connected();
+                println!("Initial state: {}", manager.state.status_label());
+                let event = match event_name {
+                    "background" => MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
+                    "expire" => MobileLifecycleEvent::BackgroundExpired,
+                    "tick" => MobileLifecycleEvent::BackgroundTimerTick {
+                        elapsed_seconds: 10,
+                    },
+                    "disconnect" => MobileLifecycleEvent::NetworkLost,
+                    "reconnect" => MobileLifecycleEvent::NetworkRestored,
+                    "foreground" => MobileLifecycleEvent::AppForegrounded,
+                    _ => MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
+                };
+                manager.transition(event, 1000);
+                println!(
+                    "Transformed state after {}: {}",
+                    event_name,
+                    manager.state.status_label()
+                );
+                return Ok(());
+            }
+            "ffi-check" => {
+                println!("Running Mobile FFI and C-ABI validation checks...");
+                let dest_res =
+                    MobileFfiBridge::parse_destination_json("mobile-user@ssh.example.org:2222");
+                println!("Destination JSON check: {dest_res}");
+                let key_res = MobileFfiBridge::translate_virtual_key_json("ctrl-c");
+                println!("Virtual Key JSON check: {key_res}");
+                let keypair_res = MobileFfiBridge::generate_keypair_json("mobile-ed25519-check");
+                println!("Keypair JSON check: {keypair_res}");
+                println!("Mobile FFI contracts verified successfully.");
+                return Ok(());
+            }
+            other => {
+                return Err(invalid(&format!("Unknown mobile subcommand: {other}")).into());
+            }
+        }
     }
 
     let mut store = HostStore::open(db_path).await?;

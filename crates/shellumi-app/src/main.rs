@@ -7,15 +7,17 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    check_dangerous_command, list_local_directory, validate_jump_host, AnsibleInventoryEngine,
-    AuditAction, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget,
-    BatchPolicy, BatchRunner, BroadcastManager, BroadcastSafetyCheck, CloudProviderConfig,
-    CloudProviderKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol,
-    DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry, FileKind, HostExportItem,
-    MoshConfig, MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand,
-    PaletteRegistry, PathUtils, SerialConfig, SharedVault, SharingAuditRecord, SshDestination,
-    SyncEntityType, TeamMember, TeamRole, TelnetConfig, TransferDirection, TransferQueue,
-    TransferStatus, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    check_dangerous_command, list_local_directory, validate_jump_host, AccessoryBarLayout,
+    AnsibleInventoryEngine, AuditAction, BatchExecutionPlan, BatchExecutionSummary,
+    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, BroadcastManager,
+    BroadcastSafetyCheck, CloudProviderConfig, CloudProviderKind, ConflictItemView,
+    ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus, DiagnosticsReport,
+    DiagnosticsRunner, FileEntry, FileKind, HostExportItem, MobileLifecycleEvent,
+    MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession,
+    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PathUtils, SerialConfig,
+    SharedVault, SharingAuditRecord, SshDestination, SyncEntityType, TeamMember, TeamRole,
+    TelnetConfig, TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar,
+    VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedWorkspace,
@@ -154,6 +156,39 @@ struct DiagnosticsModalState {
     error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MobileViewportPreset {
+    IPhone15Pro,
+    IPadPro11,
+    AndroidPixel8,
+}
+
+impl MobileViewportPreset {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::IPhone15Pro => "iPhone 15 Pro (393 × 852)",
+            Self::IPadPro11 => "iPad Pro 11\" (834 × 1194)",
+            Self::AndroidPixel8 => "Google Pixel 8 (412 × 924)",
+        }
+    }
+
+    fn terminal_cols_rows(&self) -> (u16, u16) {
+        match self {
+            Self::IPhone15Pro => (80, 24),
+            Self::IPadPro11 => (120, 36),
+            Self::AndroidPixel8 => (82, 26),
+        }
+    }
+}
+
+struct MobileSimulatorModalState {
+    preset: MobileViewportPreset,
+    accessory_bar: VirtualAccessoryBar,
+    lifecycle_manager: MobileLifecycleManager,
+    simulated_output: Vec<String>,
+    input_history: Vec<String>,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -181,6 +216,7 @@ struct Shellumi {
     team_modal: Option<TeamModalState>,
     infra_modal: Option<InfraModalState>,
     diagnostics_modal: Option<DiagnosticsModalState>,
+    mobile_modal: Option<MobileSimulatorModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -408,6 +444,7 @@ impl Shellumi {
             team_modal: None,
             infra_modal: None,
             diagnostics_modal: None,
+            mobile_modal: None,
         };
         if app.database.is_some() {
             app.load_hosts(cx);
@@ -2587,6 +2624,9 @@ impl Shellumi {
             PaletteAction::RunDiagnostics => {
                 self.open_diagnostics_modal(cx);
             }
+            PaletteAction::OpenMobileSimulator => {
+                self.open_mobile_modal(cx);
+            }
         }
     }
 
@@ -3835,6 +3875,121 @@ impl Shellumi {
         .detach();
     }
 
+    // =========================================================================
+    // Mobile Touch & Virtual Key Simulator Engine
+    // =========================================================================
+
+    fn open_mobile_modal(&mut self, cx: &mut Context<Self>) {
+        let mut lifecycle_manager = MobileLifecycleManager::new(MobilePlatform::Ios);
+        lifecycle_manager.mark_connected();
+        let accessory_bar = VirtualAccessoryBar::new(AccessoryBarLayout::DefaultTerminal);
+
+        self.mobile_modal = Some(MobileSimulatorModalState {
+            preset: MobileViewportPreset::IPhone15Pro,
+            accessory_bar,
+            lifecycle_manager,
+            simulated_output: vec![
+                "Last login: user@mobile on ttys002".into(),
+                "Shellumi Mobile Touch Simulator v0.1.0 (iOS/Android Prototype)".into(),
+                "Virtual accessory keys stream VT/ANSI bytes into the mobile session.".into(),
+                "$ ".into(),
+            ],
+            input_history: Vec::new(),
+        });
+        cx.notify();
+    }
+
+    fn dismiss_mobile_modal(&mut self, cx: &mut Context<Self>) {
+        self.mobile_modal = None;
+        cx.notify();
+    }
+
+    fn switch_mobile_preset(&mut self, preset: MobileViewportPreset, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.mobile_modal {
+            m.preset = preset;
+            m.input_history
+                .push(format!("Switched viewport to {}", preset.label()));
+        }
+        cx.notify();
+    }
+
+    fn trigger_mobile_lifecycle(&mut self, event: MobileLifecycleEvent, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.mobile_modal {
+            let label = match &event {
+                MobileLifecycleEvent::AppForegrounded => "App Foregrounded",
+                MobileLifecycleEvent::AppBackgrounded { .. } => "App Backgrounded (30s grace)",
+                MobileLifecycleEvent::BackgroundTimerTick { .. } => "Timer Tick (10s)",
+                MobileLifecycleEvent::BackgroundExpired => "Background Expired",
+                MobileLifecycleEvent::NetworkLost => "Network Lost",
+                MobileLifecycleEvent::NetworkRestored => "Network Restored",
+                MobileLifecycleEvent::UserDisconnect => "User Disconnect",
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            m.lifecycle_manager.transition(event, now);
+            m.input_history.push(format!(
+                "[Lifecycle] {} -> State: {}",
+                label,
+                m.lifecycle_manager.state.status_label()
+            ));
+        }
+        cx.notify();
+    }
+
+    fn press_mobile_virtual_key(&mut self, key: VirtualKey, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.mobile_modal {
+            let bytes = m.accessory_bar.press_key(&key);
+            let hex = bytes
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let label = key.label();
+            m.input_history.push(format!(
+                "Key [{}] -> Bytes: [{}] Hex: {}",
+                label,
+                bytes
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                hex
+            ));
+            if let Some(last) = m.simulated_output.last_mut() {
+                if key == VirtualKey::ArrowUp || key == VirtualKey::ArrowDown {
+                    last.push_str(&format!(" [Key:{}]", label));
+                } else if key == VirtualKey::ControlKey('c') {
+                    m.simulated_output.push("^C".into());
+                    m.simulated_output.push("$ ".into());
+                } else if key == VirtualKey::Escape {
+                    last.push_str(" <ESC>");
+                } else {
+                    last.push_str(&label);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_mobile_modifier(&mut self, modifier: VirtualKeyModifier, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.mobile_modal {
+            let active = m.accessory_bar.toggle_modifier(modifier);
+            let mod_label = match modifier {
+                VirtualKeyModifier::Ctrl => "Ctrl",
+                VirtualKeyModifier::Alt => "Alt",
+                VirtualKeyModifier::Shift => "Shift",
+            };
+            m.input_history.push(format!(
+                "Sticky modifier [{}] is now {}",
+                mod_label,
+                if active { "ACTIVE" } else { "OFF" }
+            ));
+        }
+        cx.notify();
+    }
+
     fn render_conflict_modal(
         &self,
         modal: &ConflictModalState,
@@ -5001,6 +5156,7 @@ impl Shellumi {
                     PaletteCategory::Collaboration => (rgb(0x4338ca), rgb(0xe0e7ff)),
                     PaletteCategory::Infrastructure => (rgb(0x0e7490), rgb(0xcffafe)),
                     PaletteCategory::Diagnostics => (rgb(0x0f766e), rgb(0xccfbf1)),
+                    PaletteCategory::Mobile => (rgb(0x831843), rgb(0xfce7f3)),
                 };
 
                 let action = mat.command.action.clone();
@@ -6720,6 +6876,474 @@ impl Shellumi {
         overlay.child(modal_box)
     }
 
+    fn render_mobile_modal(
+        &self,
+        modal: &MobileSimulatorModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("mobile-modal-overlay")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000cc))
+            .flex()
+            .items_center()
+            .justify_center();
+
+        let mut modal_box = div()
+            .id("mobile-modal-box")
+            .w(px(760.0))
+            .max_h(px(620.0))
+            .p_6()
+            .rounded_xl()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child("📱 Mobile Touch & Virtual Key Simulator (Phase 11)"),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-mobile-modal-btn")
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_mobile_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Viewport selector & Lifecycle status banner
+        let (status_bg, status_fg, status_icon) = match modal.lifecycle_manager.state {
+            MobileSessionState::Connected => (rgb(0x065f46), rgb(0xa7f3d0), "🟢"),
+            MobileSessionState::BackgroundGracePeriod { .. } => {
+                (rgb(0x78350f), rgb(0xfde68a), "🟡")
+            }
+            MobileSessionState::Suspended { .. } => (rgb(0x831843), rgb(0xfce7f3), "🟠"),
+            MobileSessionState::Reconnecting { .. } => (rgb(0x1e3a8a), rgb(0xbfdbfe), "🔄"),
+            MobileSessionState::Connecting => (rgb(0x374151), rgb(0xf3f4f6), "⏳"),
+            MobileSessionState::Disconnected { .. } => (rgb(0x7f1d1d), rgb(0xfecaca), "🔴"),
+        };
+
+        let top_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("preset-iphone")
+                            .px_2p5()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .bg(if modal.preset == MobileViewportPreset::IPhone15Pro {
+                                rgb(0x2563eb)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_color(rgb(0xffffff))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.switch_mobile_preset(MobileViewportPreset::IPhone15Pro, cx);
+                            }))
+                            .child("iPhone 15 Pro"),
+                    )
+                    .child(
+                        div()
+                            .id("preset-pixel")
+                            .px_2p5()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .bg(if modal.preset == MobileViewportPreset::AndroidPixel8 {
+                                rgb(0x2563eb)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_color(rgb(0xffffff))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.switch_mobile_preset(MobileViewportPreset::AndroidPixel8, cx);
+                            }))
+                            .child("Pixel 8"),
+                    )
+                    .child(
+                        div()
+                            .id("preset-ipad")
+                            .px_2p5()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .bg(if modal.preset == MobileViewportPreset::IPadPro11 {
+                                rgb(0x2563eb)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_color(rgb(0xffffff))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.switch_mobile_preset(MobileViewportPreset::IPadPro11, cx);
+                            }))
+                            .child("iPad Pro 11\""),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(status_bg)
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(status_fg)
+                    .child(status_icon)
+                    .child(modal.lifecycle_manager.state.status_label()),
+            );
+        modal_box = modal_box.child(top_row);
+
+        // Lifecycle trigger controls
+        let lifecycle_toolbar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .bg(rgb(0x0f172a))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0x94a3b8))
+                    .child("OS Lifecycle:"),
+            )
+            .child(
+                div()
+                    .id("life-bg-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0xf8fafc))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.trigger_mobile_lifecycle(
+                            MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
+                            cx,
+                        );
+                    }))
+                    .child("📱 Background (30s)"),
+            )
+            .child(
+                div()
+                    .id("life-tick-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0xf8fafc))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.trigger_mobile_lifecycle(
+                            MobileLifecycleEvent::BackgroundTimerTick {
+                                elapsed_seconds: 10,
+                            },
+                            cx,
+                        );
+                    }))
+                    .child("⏱ Tick 10s"),
+            )
+            .child(
+                div()
+                    .id("life-expire-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0xf8fafc))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.trigger_mobile_lifecycle(MobileLifecycleEvent::BackgroundExpired, cx);
+                    }))
+                    .child("⏳ Expire"),
+            )
+            .child(
+                div()
+                    .id("life-netdrop-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0xf8fafc))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.trigger_mobile_lifecycle(MobileLifecycleEvent::NetworkLost, cx);
+                    }))
+                    .child("📶 Drop Net"),
+            )
+            .child(
+                div()
+                    .id("life-reconnect-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0xf8fafc))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.trigger_mobile_lifecycle(MobileLifecycleEvent::NetworkRestored, cx);
+                    }))
+                    .child("🔄 Reconnect"),
+            )
+            .child(
+                div()
+                    .id("life-foreground-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x065f46))
+                    .text_xs()
+                    .text_color(rgb(0xa7f3d0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.trigger_mobile_lifecycle(MobileLifecycleEvent::AppForegrounded, cx);
+                    }))
+                    .child("☀️ Foreground"),
+            );
+        modal_box = modal_box.child(lifecycle_toolbar);
+
+        // Simulated Mobile Device Viewport
+        let (cols, rows) = modal.preset.terminal_cols_rows();
+        let mut screen_area = div()
+            .id("simulated-mobile-screen")
+            .p_4()
+            .rounded_lg()
+            .bg(rgb(0x020617))
+            .border_1()
+            .border_color(rgb(0x1e293b))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .min_h(px(160.0))
+            .max_h(px(180.0))
+            .overflow_y_scroll();
+
+        let notch = div().flex().justify_center().pb_1().child(
+            div()
+                .w(px(100.0))
+                .h(px(12.0))
+                .rounded_full()
+                .bg(rgb(0x1e293b))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(rgb(0x334155))),
+        );
+        screen_area = screen_area.child(notch);
+
+        for line in &modal.simulated_output {
+            screen_area = screen_area.child(
+                div()
+                    .text_xs()
+                    .font_family(".AppleSystemUIFontMonospaced")
+                    .text_color(rgb(0x22c55e))
+                    .child(line.clone()),
+            );
+        }
+        modal_box = modal_box.child(screen_area);
+
+        // Virtual Keyboard Accessory Bar
+        let mut accessory_strip = div()
+            .id("virtual-accessory-strip")
+            .p_2()
+            .rounded_md()
+            .bg(rgb(0x0f172a))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .overflow_x_scroll();
+
+        // Sticky Modifier Buttons
+        let ctrl_active = modal.accessory_bar.has_modifier(VirtualKeyModifier::Ctrl);
+        let alt_active = modal.accessory_bar.has_modifier(VirtualKeyModifier::Alt);
+
+        accessory_strip = accessory_strip
+            .child(
+                div()
+                    .id("mod-ctrl-btn")
+                    .px_2p5()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(if ctrl_active {
+                        rgb(0xd97706)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(if ctrl_active {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x94a3b8)
+                    })
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.toggle_mobile_modifier(VirtualKeyModifier::Ctrl, cx);
+                    }))
+                    .child("Ctrl"),
+            )
+            .child(
+                div()
+                    .id("mod-alt-btn")
+                    .px_2p5()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(if alt_active {
+                        rgb(0xd97706)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(if alt_active {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x94a3b8)
+                    })
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.toggle_mobile_modifier(VirtualKeyModifier::Alt, cx);
+                    }))
+                    .child("Alt"),
+            );
+
+        // Virtual Keys
+        for (k_idx, key) in modal.accessory_bar.keys.iter().enumerate() {
+            let key_clone = key.clone();
+            let label = key.label();
+            accessory_strip = accessory_strip.child(
+                div()
+                    .id(("vkey-btn", k_idx))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(rgb(0x1e293b))
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0x38bdf8))
+                    .border_1()
+                    .border_color(rgb(0x334155))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.press_mobile_virtual_key(key_clone.clone(), cx);
+                    }))
+                    .child(label),
+            );
+        }
+        modal_box = modal_box.child(accessory_strip);
+
+        // Input & Hex Telemetry Log
+        let mut telemetry = div()
+            .id("mobile-telemetry-log")
+            .p_2p5()
+            .rounded_md()
+            .bg(rgb(0x090d16))
+            .border_1()
+            .border_color(rgb(0x1e293b))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(90.0))
+            .overflow_y_scroll();
+
+        if modal.input_history.is_empty() {
+            telemetry = telemetry.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child("Tap virtual keys above to stream ANSI escape codes..."),
+            );
+        } else {
+            for entry in modal.input_history.iter().rev().take(6) {
+                telemetry = telemetry.child(
+                    div()
+                        .text_xs()
+                        .font_family(".AppleSystemUIFontMonospaced")
+                        .text_color(rgb(0x38bdf8))
+                        .child(entry.clone()),
+                );
+            }
+        }
+        modal_box = modal_box.child(telemetry);
+
+        // Footer info
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .pt_2()
+            .border_t_1()
+            .border_color(rgb(0x334155))
+            .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
+                "Viewport: {} ({} × {} cols/rows)",
+                modal.preset.label(),
+                cols,
+                rows
+            )))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .child("Portable Core FFI Bridge: Ready for Swift/Kotlin integration"),
+            );
+        modal_box = modal_box.child(footer);
+
+        overlay.child(modal_box)
+    }
+
     fn render_sftp_dual_pane(
         &self,
         tab_idx: usize,
@@ -8282,6 +8906,9 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.diagnostics_modal {
                     result = result.child(self.render_diagnostics_modal(modal, cx));
                 }
+                if let Some(modal) = &self.mobile_modal {
+                    result = result.child(self.render_mobile_modal(modal, cx));
+                }
                 return result;
             }
         }
@@ -8645,6 +9272,20 @@ impl Render for Shellumi {
                             app.open_diagnostics_modal(cx);
                         }))
                         .child("🩺 Health Check"),
+                )
+                .child(
+                    div()
+                        .id("mobile-sim-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x831843))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.open_mobile_modal(cx);
+                        }))
+                        .child("📱 Mobile Sim"),
                 );
 
             if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
@@ -8885,6 +9526,9 @@ impl Render for Shellumi {
         }
         if let Some(modal) = &self.diagnostics_modal {
             result = result.child(self.render_diagnostics_modal(modal, cx));
+        }
+        if let Some(modal) = &self.mobile_modal {
+            result = result.child(self.render_mobile_modal(modal, cx));
         }
         result
     }
@@ -10187,5 +10831,92 @@ mod tests {
         assert_eq!(passed, 2);
         assert_eq!(warnings, 0);
         assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn verifies_mobile_simulator_modal_and_palette_integration() {
+        use super::{MobileSimulatorModalState, MobileViewportPreset};
+        use shellumi_core::{
+            AccessoryBarLayout, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
+            MobileSessionState, PaletteAction, PaletteCategory, PaletteRegistry,
+            VirtualAccessoryBar, VirtualKey, VirtualKeyModifier,
+        };
+
+        // 1. Verify Palette command registration
+        let registry = PaletteRegistry::with_static_actions();
+        let mobile_cmd = registry
+            .commands()
+            .iter()
+            .find(|c| c.action == PaletteAction::OpenMobileSimulator)
+            .expect("should register mobile simulator command");
+
+        assert_eq!(mobile_cmd.category, PaletteCategory::Mobile);
+        assert_eq!(mobile_cmd.title, "Open Mobile Touch & Accessory Simulator");
+        assert!(mobile_cmd.keywords.contains(&"touch".to_string()));
+        assert!(mobile_cmd.keywords.contains(&"virtual".to_string()));
+
+        // 2. Verify simulator modal state initialization
+        let mut lifecycle_manager = MobileLifecycleManager::new(MobilePlatform::Ios);
+        lifecycle_manager.mark_connected();
+        let accessory_bar = VirtualAccessoryBar::new(AccessoryBarLayout::DefaultTerminal);
+
+        let mut modal = MobileSimulatorModalState {
+            preset: MobileViewportPreset::IPhone15Pro,
+            accessory_bar,
+            lifecycle_manager,
+            simulated_output: vec!["$ ".into()],
+            input_history: Vec::new(),
+        };
+
+        assert_eq!(modal.preset, MobileViewportPreset::IPhone15Pro);
+        assert_eq!(modal.preset.terminal_cols_rows(), (80, 24));
+        assert_eq!(modal.lifecycle_manager.state, MobileSessionState::Connected);
+
+        // 3. Test virtual key press & byte sequence translation
+        let esc_bytes = modal.accessory_bar.press_key(&VirtualKey::Escape);
+        assert_eq!(esc_bytes, vec![0x1B]);
+
+        let ctrl_c_bytes = modal.accessory_bar.press_key(&VirtualKey::ControlKey('c'));
+        assert_eq!(ctrl_c_bytes, vec![0x03]);
+
+        // 4. Test sticky modifiers
+        modal
+            .accessory_bar
+            .toggle_modifier(VirtualKeyModifier::Ctrl);
+        assert!(modal.accessory_bar.has_modifier(VirtualKeyModifier::Ctrl));
+        let resolved = modal.accessory_bar.resolve_char_keystroke('z');
+        assert_eq!(resolved, vec![0x1A]); // Ctrl-Z
+        assert!(!modal.accessory_bar.has_modifier(VirtualKeyModifier::Ctrl));
+
+        // 5. Test lifecycle transitions
+        modal.lifecycle_manager.transition(
+            MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
+            100,
+        );
+        assert_eq!(
+            modal.lifecycle_manager.state,
+            MobileSessionState::BackgroundGracePeriod { remaining_secs: 30 }
+        );
+
+        modal
+            .lifecycle_manager
+            .transition(MobileLifecycleEvent::BackgroundExpired, 130);
+        assert_eq!(
+            modal.lifecycle_manager.state,
+            MobileSessionState::Suspended {
+                saved_at_epoch: 130
+            }
+        );
+
+        modal
+            .lifecycle_manager
+            .transition(MobileLifecycleEvent::AppForegrounded, 150);
+        assert_eq!(
+            modal.lifecycle_manager.state,
+            MobileSessionState::Reconnecting {
+                attempt: 1,
+                backoff_secs: 2
+            }
+        );
     }
 }
