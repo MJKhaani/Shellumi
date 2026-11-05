@@ -175,6 +175,9 @@ cargo run --locked -p shellumi-cli -- mobile lifecycle-sim background
 cargo run --locked -p shellumi-cli -- mobile ffi-check
 cargo run --locked -p shellumi-cli -- mobile header
 cargo run --locked -p shellumi-cli -- mobile build-info
+cargo run --locked -p shellumi-cli -- shell-hook zsh
+cargo run --locked -p shellumi-cli -- complete "git c"
+cargo run --locked -p shellumi-cli -- prompt-detect "[sudo] password for admin:"
 ```
 
 `add` prints the new numeric ID. `list` prints tab-separated ID, name, hostname,
@@ -192,6 +195,7 @@ RFC 7636 PKCE authorization parameters, and automated disaster recovery rollback
 RFC-compliant SFTP v3 wire packet inspection/encoding, and concurrent transfer queue orchestration.
 `doctor` runs automated environment and system diagnostics across CSPRNG entropy, AES-256-GCM AEAD encryption, OpenSSH client binaries, OS credential stores, network loopback binding, database schema/integrity, and cross-platform PTY support, with terminal, `--json`, and `--markdown` formatting.
 `mobile` inspects virtual key byte sequences (`mobile virtual-keys`), simulates mobile OS background suspension and reconnection states (`mobile lifecycle-sim <event>`), and validates C-ABI / UniFFI serialization contracts (`mobile ffi-check`).
+`shell-hook` outputs shell hook definitions for Bash, Zsh, or Fish to inject OSC 133 semantic prompt markers (`133;A` prompt start, `133;B` command start, `133;C` executed, `133;D` exit code) and OSC 7 / OSC 9;9 current working directory reporting. `complete` provides context-aware command line autocomplete suggestions across CLI tools, subcommands, flags, files, inventory hosts, snippets, and history. `prompt-detect` parses terminal prompt output to classify password requests (`Sudo`, `Ssh`, `KeyPassphrase`, `MfaCode`, `GenericPassword`) strictly passively without credential auto-injection.
 `snippet batch --dry-run` previews commands; CLI batch execution is not implemented. Vault commands require an explicit passphrase; command-line arguments may be visible to other local processes.
 `palette search` queries the global Command Palette across static actions, hosts, snippets, and navigation entries with tokenized and acronym scoring.
 `mosh`, `telnet`, `serial`, and `serial-ports` handle dedicated protocol connections and local serial port discovery; `telnet` emits an explicit cleartext credential warning before launch.

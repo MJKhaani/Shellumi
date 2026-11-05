@@ -7,17 +7,19 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    check_dangerous_command, list_local_directory, validate_jump_host, AccessoryBarLayout,
-    AnsibleInventoryEngine, AuditAction, BatchExecutionPlan, BatchExecutionSummary,
-    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, BroadcastManager,
-    BroadcastSafetyCheck, CloudProviderConfig, CloudProviderKind, ConflictItemView,
-    ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus, DiagnosticsReport,
-    DiagnosticsRunner, FileEntry, FileKind, HostExportItem, MobileLifecycleEvent,
-    MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession,
-    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PathUtils, SerialConfig,
-    SharedVault, SharingAuditRecord, SshDestination, SyncEntityType, TeamMember, TeamRole,
-    TelnetConfig, TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar,
-    VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    check_dangerous_command, generate_bash_hook, generate_fish_hook, generate_zsh_hook,
+    list_local_directory, validate_jump_host, AccessoryBarLayout, AnsibleInventoryEngine,
+    AuditAction, AutocompleteContext, AutocompleteEngine, BatchExecutionPlan,
+    BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner,
+    BroadcastManager, BroadcastSafetyCheck, CloudProviderConfig, CloudProviderKind, CompletionItem,
+    CompletionKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol,
+    DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry, FileKind, HostExportItem,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig,
+    MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
+    PasswordPromptDetector, PasswordPromptKind, PathUtils, SerialConfig, SharedVault,
+    SharingAuditRecord, SshDestination, SyncEntityType, TeamMember, TeamRole, TelnetConfig,
+    TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey,
+    VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedWorkspace,
@@ -189,6 +191,24 @@ struct MobileSimulatorModalState {
     input_history: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellIntegrationTab {
+    Hooks,
+    OscMarkers,
+    PasswordDetection,
+    Autocomplete,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ShellIntegrationModalState {
+    active_tab: ShellIntegrationTab,
+    selected_shell: String,
+    test_prompt_input: String,
+    detected_prompt_kind: Option<PasswordPromptKind>,
+    test_query_input: String,
+    autocomplete_results: Vec<CompletionItem>,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -217,6 +237,7 @@ struct Shellumi {
     infra_modal: Option<InfraModalState>,
     diagnostics_modal: Option<DiagnosticsModalState>,
     mobile_modal: Option<MobileSimulatorModalState>,
+    shell_integration_modal: Option<ShellIntegrationModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -445,6 +466,7 @@ impl Shellumi {
             infra_modal: None,
             diagnostics_modal: None,
             mobile_modal: None,
+            shell_integration_modal: None,
         };
         if app.database.is_some() {
             app.load_hosts(cx);
@@ -2627,6 +2649,9 @@ impl Shellumi {
             PaletteAction::OpenMobileSimulator => {
                 self.open_mobile_modal(cx);
             }
+            PaletteAction::OpenShellIntegrationModal => {
+                self.open_shell_integration_modal(cx);
+            }
         }
     }
 
@@ -3986,6 +4011,66 @@ impl Shellumi {
                 mod_label,
                 if active { "ACTIVE" } else { "OFF" }
             ));
+        }
+        cx.notify();
+    }
+
+    fn open_shell_integration_modal(&mut self, cx: &mut Context<Self>) {
+        let engine = AutocompleteEngine::new();
+        let initial_completions = engine.complete(&AutocompleteContext::new("git ", 4));
+        self.shell_integration_modal = Some(ShellIntegrationModalState {
+            active_tab: ShellIntegrationTab::Hooks,
+            selected_shell: "zsh".to_string(),
+            test_prompt_input: "[sudo] password for admin:".to_string(),
+            detected_prompt_kind: Some(PasswordPromptKind::Sudo),
+            test_query_input: "git ".to_string(),
+            autocomplete_results: initial_completions,
+        });
+        cx.notify();
+    }
+
+    fn dismiss_shell_integration_modal(&mut self, cx: &mut Context<Self>) {
+        self.shell_integration_modal = None;
+        cx.notify();
+    }
+
+    fn set_shell_integration_tab(&mut self, tab: ShellIntegrationTab, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.shell_integration_modal {
+            m.active_tab = tab;
+        }
+        cx.notify();
+    }
+
+    fn set_shell_integration_shell(&mut self, shell: &str, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.shell_integration_modal {
+            m.selected_shell = shell.to_string();
+        }
+        cx.notify();
+    }
+
+    fn update_test_prompt_input(&mut self, input: &str, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.shell_integration_modal {
+            m.test_prompt_input = input.to_string();
+            m.detected_prompt_kind = PasswordPromptDetector::detect(input).map(|p| p.kind);
+        }
+        cx.notify();
+    }
+
+    fn update_test_autocomplete_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.shell_integration_modal {
+            m.test_query_input = query.to_string();
+            let engine = AutocompleteEngine::new();
+            let mut ctx = AutocompleteContext::new(query, query.len());
+            if let HostState::Loaded(ref hosts) = self.hosts {
+                for h in hosts {
+                    ctx.host_candidates.push(h.name.clone());
+                }
+            }
+            for s in &self.snippets {
+                ctx.snippet_candidates
+                    .push((s.name.clone(), s.command.clone()));
+            }
+            m.autocomplete_results = engine.complete(&ctx);
         }
         cx.notify();
     }
@@ -7344,6 +7429,591 @@ impl Shellumi {
         overlay.child(modal_box)
     }
 
+    fn render_shell_integration_modal(
+        &self,
+        modal: &ShellIntegrationModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("shell-integration-modal-overlay")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000cc))
+            .flex()
+            .items_center()
+            .justify_center();
+
+        let mut modal_box = div()
+            .id("shell-integration-modal-box")
+            .w(px(780.0))
+            .max_h(px(640.0))
+            .p_6()
+            .rounded_xl()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xf8fafc))
+                            .child("⚡ Shell Integration & Autocomplete (Phase 13)"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child("Semantic OSC 133 prompts, CWD tracking, password prompt classification, and offline autocomplete"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("dismiss-shell-integration-modal-btn")
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_shell_integration_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Tab Navigation
+        let tab_buttons = [
+            (ShellIntegrationTab::Hooks, "🐚 Shell Hooks"),
+            (ShellIntegrationTab::OscMarkers, "🏷️ OSC 133 & CWD"),
+            (
+                ShellIntegrationTab::PasswordDetection,
+                "🔑 Password Prompts",
+            ),
+            (ShellIntegrationTab::Autocomplete, "💡 Autocomplete Engine"),
+        ];
+
+        let mut tab_bar = div().flex().items_center().gap_2();
+        for (tab, label) in tab_buttons {
+            let is_active = modal.active_tab == tab;
+            tab_bar = tab_bar.child(
+                div()
+                    .id(("shell-tab", tab as usize))
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(if is_active {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .bg(if is_active {
+                        rgb(0x2563eb)
+                    } else {
+                        rgb(0x0f172a)
+                    })
+                    .text_color(if is_active {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x94a3b8)
+                    })
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.set_shell_integration_tab(tab, cx);
+                    }))
+                    .child(label),
+            );
+        }
+        modal_box = modal_box.child(tab_bar);
+
+        // Body per active tab
+        match modal.active_tab {
+            ShellIntegrationTab::Hooks => {
+                let mut hooks_body = div().flex().flex_col().gap_3();
+
+                // Shell selector pills
+                let mut shell_pills = div().flex().items_center().gap_2();
+                shell_pills = shell_pills.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child("Target Shell:"),
+                );
+                for (idx, shell) in ["zsh", "bash", "fish"].into_iter().enumerate() {
+                    let is_sel = modal.selected_shell == shell;
+                    shell_pills = shell_pills.child(
+                        div()
+                            .id(("shell-pill", idx))
+                            .px_2p5()
+                            .py_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_xs()
+                            .bg(if is_sel { rgb(0x0284c7) } else { rgb(0x334155) })
+                            .text_color(if is_sel { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.set_shell_integration_shell(shell, cx);
+                            }))
+                            .child(shell.to_uppercase()),
+                    );
+                }
+                hooks_body = hooks_body.child(shell_pills);
+
+                // Generated Hook script display
+                let hook_code = match modal.selected_shell.as_str() {
+                    "bash" => generate_bash_hook(),
+                    "fish" => generate_fish_hook(),
+                    _ => generate_zsh_hook(),
+                };
+
+                let script_box = div()
+                    .id("hook-script-box")
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x020617))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .max_h(px(220.0))
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(".AppleSystemUIFontMonospaced")
+                            .text_color(rgb(0xa5f3fc))
+                            .child(hook_code),
+                    );
+                hooks_body = hooks_body.child(script_box);
+
+                // Instructions
+                let install_cmd =
+                    format!("eval \"$(shellumi shell-hook {})\"", modal.selected_shell);
+                let instructions = div()
+                    .p_2p5()
+                    .rounded_md()
+                    .bg(rgb(0x0f172a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .text_xs()
+                    .text_color(rgb(0xcbd5e1))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child("Installation Instructions:"),
+                    )
+                    .child(div().text_color(rgb(0x94a3b8)).child(format!(
+                        "Add the following to your ~/.{}rc or config file:",
+                        modal.selected_shell
+                    )))
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x1e293b))
+                            .font_family(".AppleSystemUIFontMonospaced")
+                            .text_color(rgb(0x38bdf8))
+                            .child(install_cmd),
+                    );
+                hooks_body = hooks_body.child(instructions);
+
+                modal_box = modal_box.child(hooks_body);
+            }
+            ShellIntegrationTab::OscMarkers => {
+                let mut markers_body = div().flex().flex_col().gap_3();
+
+                // Explanatory breakdown
+                let explanation = div()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x0f172a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_xs()
+                            .text_color(rgb(0xf1f5f9))
+                            .child("Semantic Prompt Escape Sequences (OSC 133 & OSC 7):"),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                            "• OSC 133 ; A ST — Prompt Start: Signals the terminal that the interactive shell prompt has begun rendering.",
+                        ),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                            "• OSC 133 ; B ST — Command Start: Signals the user has begun typing command input.",
+                        ),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                            "• OSC 133 ; C ST — Command Executed: User pressed Enter; command process is now running.",
+                        ),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                            "• OSC 133 ; D [; exitcode] ST — Command Finished: Command exited with status code (e.g. 0 for success).",
+                        ),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                            "• OSC 7 file://hostname/path ST — CWD Notification: Updates the active working directory badge.",
+                        ),
+                    );
+                markers_body = markers_body.child(explanation);
+
+                // Active Pane State Inspector
+                let active_tab_info = if let Some(tab_idx) = self.active_tab_idx {
+                    if let Some(tab) = self.tabs.get(tab_idx) {
+                        if let Some(pane) = tab.panes.get(tab.active_pane_idx) {
+                            let cwd = pane
+                                .terminal
+                                .current_working_directory()
+                                .unwrap_or("(none reported)");
+                            let exit_code = pane
+                                .terminal
+                                .last_exit_code()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "(none)".to_string());
+                            let mark = format!("{:?}", pane.terminal.prompt_mark());
+                            let history_len = pane.terminal.command_history().len();
+
+                            format!(
+                                "Active Pane '{}': CWD = {} | Last Exit = {} | Mark = {} | Captured Commands = {}",
+                                pane.name, cwd, exit_code, mark, history_len
+                            )
+                        } else {
+                            "No active terminal pane".into()
+                        }
+                    } else {
+                        "No active tab".into()
+                    }
+                } else {
+                    "No active tab".into()
+                };
+
+                let inspector = div()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x020617))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x38bdf8))
+                            .child("🔍 Live Session State Inspector:"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(".AppleSystemUIFontMonospaced")
+                            .text_color(rgb(0x94a3b8))
+                            .child(active_tab_info),
+                    );
+                markers_body = markers_body.child(inspector);
+
+                modal_box = modal_box.child(markers_body);
+            }
+            ShellIntegrationTab::PasswordDetection => {
+                let mut pw_body = div().flex().flex_col().gap_3();
+
+                // Security Banner
+                let sec_banner = div()
+                    .p_2p5()
+                    .rounded_md()
+                    .bg(rgb(0x451a03))
+                    .border_1()
+                    .border_color(rgb(0x78350f))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().child("🔒"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xfde68a))
+                            .child("Security Guarantee: Password prompt detection is strictly passive. Shellumi NEVER auto-injects credentials into arbitrary terminal streams without explicit user confirmation."),
+                    );
+                pw_body = pw_body.child(sec_banner);
+
+                // Sample prompt buttons
+                let mut sample_buttons = div().flex().flex_col().gap_1p5();
+                sample_buttons = sample_buttons.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child("Click a sample prompt line to test classification:"),
+                );
+
+                let samples = [
+                    ("[sudo] password for dev:", "Sudo"),
+                    ("user@prod-server.corp's password:", "SSH Password"),
+                    (
+                        "Enter passphrase for key '/Users/user/.ssh/id_ed25519':",
+                        "Key Passphrase",
+                    ),
+                    ("Enter 6-digit MFA verification code:", "MFA Code"),
+                    ("Password: ", "Generic Password"),
+                ];
+
+                let mut sample_row = div().flex().flex_wrap().gap_2();
+                for (idx, (prompt_sample, label)) in samples.into_iter().enumerate() {
+                    sample_row = sample_row.child(
+                        div()
+                            .id(("sample-prompt", idx))
+                            .px_2p5()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x334155))
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(rgb(0xe2e8f0))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.update_test_prompt_input(prompt_sample, cx);
+                            }))
+                            .child(label),
+                    );
+                }
+                sample_buttons = sample_buttons.child(sample_row);
+                pw_body = pw_body.child(sample_buttons);
+
+                // Detection Output Box
+                let detected_label = match modal.detected_prompt_kind {
+                    Some(PasswordPromptKind::Sudo) => {
+                        "Detected: [Sudo] Privilege escalation password prompt"
+                    }
+                    Some(PasswordPromptKind::Ssh) => {
+                        "Detected: [SSH] Remote authentication password prompt"
+                    }
+                    Some(PasswordPromptKind::KeyPassphrase) => {
+                        "Detected: [Key Passphrase] Encrypted private key passphrase prompt"
+                    }
+                    Some(PasswordPromptKind::MfaCode) => {
+                        "Detected: [MFA Code] Multi-factor authentication one-time passcode prompt"
+                    }
+                    Some(PasswordPromptKind::GenericPassword) => {
+                        "Detected: [Generic Password] Standard password input prompt"
+                    }
+                    None => "No password prompt detected (Safe standard output)",
+                };
+
+                let output_box = div()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x020617))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("Current Prompt Line:"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(".AppleSystemUIFontMonospaced")
+                            .text_color(rgb(0xffffff))
+                            .child(modal.test_prompt_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .bg(if modal.detected_prompt_kind.is_some() {
+                                rgb(0x78350f)
+                            } else {
+                                rgb(0x1e293b)
+                            })
+                            .text_color(if modal.detected_prompt_kind.is_some() {
+                                rgb(0xfde68a)
+                            } else {
+                                rgb(0x94a3b8)
+                            })
+                            .child(detected_label),
+                    );
+                pw_body = pw_body.child(output_box);
+
+                modal_box = modal_box.child(pw_body);
+            }
+            ShellIntegrationTab::Autocomplete => {
+                let mut ac_body = div().flex().flex_col().gap_3();
+
+                // Sample query buttons
+                let mut sample_queries = div().flex().items_center().gap_2();
+                sample_queries = sample_queries.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child("Sample Queries:"),
+                );
+                for (idx, query) in ["git ", "docker ", "cargo ", "ssh ", "systemctl "]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let is_active = modal.test_query_input == query;
+                    sample_queries = sample_queries.child(
+                        div()
+                            .id(("sample-query", idx))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_xs()
+                            .bg(if is_active {
+                                rgb(0x2563eb)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_color(rgb(0xffffff))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.update_test_autocomplete_query(query, cx);
+                            }))
+                            .child(query.trim()),
+                    );
+                }
+                ac_body = ac_body.child(sample_queries);
+
+                // Completions List
+                let mut list_box = div()
+                    .id("autocomplete-results-box")
+                    .p_2p5()
+                    .rounded_md()
+                    .bg(rgb(0x020617))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .max_h(px(250.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1();
+
+                if modal.autocomplete_results.is_empty() {
+                    list_box = list_box.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("No autocomplete suggestions found for query."),
+                    );
+                } else {
+                    for item in &modal.autocomplete_results {
+                        let kind_color = match item.kind {
+                            CompletionKind::Command => rgb(0x38bdf8),
+                            CompletionKind::Subcommand => rgb(0x4ade80),
+                            CompletionKind::Flag => rgb(0xfacc15),
+                            CompletionKind::FilePath => rgb(0xa78bfa),
+                            CompletionKind::Host => rgb(0xf472b6),
+                            CompletionKind::Snippet => rgb(0xfb923c),
+                            CompletionKind::History => rgb(0x94a3b8),
+                        };
+
+                        let row = div()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0x0f172a))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e293b))
+                                            .text_xs()
+                                            .text_color(kind_color)
+                                            .child(format!("{:?}", item.kind)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family(".AppleSystemUIFontMonospaced")
+                                            .text_color(rgb(0xf8fafc))
+                                            .child(item.display_label.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x64748b))
+                                    .child(item.description.clone().unwrap_or_default()),
+                            );
+                        list_box = list_box.child(row);
+                    }
+                }
+                ac_body = ac_body.child(list_box);
+
+                modal_box = modal_box.child(ac_body);
+            }
+        }
+
+        // Footer
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .pt_2()
+            .border_t_1()
+            .border_color(rgb(0x334155))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child("Local-First & Offline Engine: No telemetry or remote dependency"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .child("CLI: shellumi shell-hook / complete / prompt-detect"),
+            );
+        modal_box = modal_box.child(footer);
+
+        overlay.child(modal_box)
+    }
+
     fn render_sftp_dual_pane(
         &self,
         tab_idx: usize,
@@ -8656,6 +9326,8 @@ impl Render for Shellumi {
                         .bg(rgb(0x111827))
                         .rounded_sm();
 
+                    let mut pane_info_group = div().flex().items_center().gap_2();
+
                     let pane_info = format!(
                         "{} · {}x{} · Cursor: row {}, col {}",
                         pane.name,
@@ -8664,7 +9336,7 @@ impl Render for Shellumi {
                         grid.cursor().row + 1,
                         grid.cursor().col + 1
                     );
-                    pane_controls = pane_controls.child(
+                    pane_info_group = pane_info_group.child(
                         div()
                             .text_xs()
                             .text_color(if is_active_pane {
@@ -8675,7 +9347,80 @@ impl Render for Shellumi {
                             .child(pane_info),
                     );
 
+                    // Semantic CWD badge
+                    if let Some(cwd) = pane.terminal.current_working_directory() {
+                        let display_cwd = if cwd.len() > 25 {
+                            format!("…{}", &cwd[cwd.len() - 24..])
+                        } else {
+                            cwd.to_string()
+                        };
+                        pane_info_group = pane_info_group.child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(rgb(0x1e293b))
+                                .text_color(rgb(0x38bdf8))
+                                .text_xs()
+                                .child(format!("📂 {}", display_cwd)),
+                        );
+                    }
+
+                    // Exit code badge
+                    if let Some(code) = pane.terminal.last_exit_code() {
+                        let (bg_color, fg_color, text) = if code == 0 {
+                            (rgb(0x064e3b), rgb(0x6ee7b7), "✓ 0".to_string())
+                        } else {
+                            (rgb(0x7f1d1d), rgb(0xfca5a5), format!("✗ {}", code))
+                        };
+                        pane_info_group = pane_info_group.child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(bg_color)
+                                .text_color(fg_color)
+                                .text_xs()
+                                .child(text),
+                        );
+                    }
+
+                    // Passive password prompt detection
+                    let cursor_row = grid.cursor().row;
+                    if let Some(current_line) = pane.terminal.row_text(cursor_row) {
+                        if let Some(prompt_match) = PasswordPromptDetector::detect(&current_line) {
+                            pane_info_group = pane_info_group.child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(rgb(0x78350f))
+                                    .text_color(rgb(0xfde68a))
+                                    .text_xs()
+                                    .child(format!("🔑 Prompt: {:?}", prompt_match.kind)),
+                            );
+                        }
+                    }
+
+                    pane_controls = pane_controls.child(pane_info_group);
+
                     let mut pane_btn_group = div().flex().items_center().gap_1();
+                    pane_btn_group = pane_btn_group.child(
+                        div()
+                            .id(("open-shell-integration", pane_id))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .cursor_pointer()
+                            .bg(rgb(0x374151))
+                            .text_color(rgb(0xd1d5db))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.open_shell_integration_modal(cx);
+                                cx.stop_propagation();
+                            }))
+                            .child("⚡ Integration"),
+                    );
                     pane_btn_group = pane_btn_group.child(
                         div()
                             .id(("toggle-search", pane_id))
@@ -8908,6 +9653,9 @@ impl Render for Shellumi {
                 }
                 if let Some(modal) = &self.mobile_modal {
                     result = result.child(self.render_mobile_modal(modal, cx));
+                }
+                if let Some(modal) = &self.shell_integration_modal {
+                    result = result.child(self.render_shell_integration_modal(modal, cx));
                 }
                 return result;
             }
@@ -9529,6 +10277,9 @@ impl Render for Shellumi {
         }
         if let Some(modal) = &self.mobile_modal {
             result = result.child(self.render_mobile_modal(modal, cx));
+        }
+        if let Some(modal) = &self.shell_integration_modal {
+            result = result.child(self.render_shell_integration_modal(modal, cx));
         }
         result
     }
@@ -10918,5 +11669,103 @@ mod tests {
                 backoff_secs: 2
             }
         );
+    }
+
+    #[test]
+    fn verifies_shell_integration_modal_and_autocomplete_integration() {
+        use super::*;
+        use shellumi_terminal::Terminal;
+
+        // 1. Verify Command Palette action registration
+        let registry = PaletteRegistry::with_static_actions();
+        let cmd = registry
+            .commands()
+            .iter()
+            .find(|c| c.action == PaletteAction::OpenShellIntegrationModal)
+            .expect("should register shell integration command");
+
+        assert_eq!(cmd.category, PaletteCategory::Terminal);
+        assert_eq!(cmd.title, "Shell Integration & Autocomplete Setup");
+        assert!(cmd.keywords.contains(&"osc133".to_string()));
+        assert!(cmd.keywords.contains(&"autocomplete".to_string()));
+
+        // 2. Verify modal state and tab transitions
+        let mut modal = ShellIntegrationModalState {
+            active_tab: ShellIntegrationTab::Hooks,
+            selected_shell: "zsh".to_string(),
+            test_prompt_input: "[sudo] password for root:".to_string(),
+            detected_prompt_kind: Some(PasswordPromptKind::Sudo),
+            test_query_input: "git ".to_string(),
+            autocomplete_results: Vec::new(),
+        };
+
+        assert_eq!(modal.active_tab, ShellIntegrationTab::Hooks);
+        assert_eq!(modal.selected_shell, "zsh");
+
+        modal.active_tab = ShellIntegrationTab::OscMarkers;
+        assert_eq!(modal.active_tab, ShellIntegrationTab::OscMarkers);
+
+        modal.active_tab = ShellIntegrationTab::PasswordDetection;
+        assert_eq!(modal.active_tab, ShellIntegrationTab::PasswordDetection);
+
+        // 3. Verify hook generation for all supported shells
+        let zsh_hook = generate_zsh_hook();
+        assert!(zsh_hook.contains("133;A"));
+        assert!(zsh_hook.contains("133;D"));
+        assert!(zsh_hook.contains("file://"));
+
+        let bash_hook = generate_bash_hook();
+        assert!(bash_hook.contains("133;A"));
+        assert!(bash_hook.contains("PROMPT_COMMAND"));
+
+        let fish_hook = generate_fish_hook();
+        assert!(fish_hook.contains("133;A"));
+        assert!(fish_hook.contains("fish_prompt"));
+
+        // 4. Verify password prompt classification in app context
+        let sudo_match = PasswordPromptDetector::detect(&modal.test_prompt_input);
+        assert!(sudo_match.is_some());
+        assert_eq!(sudo_match.unwrap().kind, PasswordPromptKind::Sudo);
+
+        let ssh_match = PasswordPromptDetector::detect("root@bastion.internal's password: ");
+        assert!(ssh_match.is_some());
+        assert_eq!(ssh_match.unwrap().kind, PasswordPromptKind::Ssh);
+
+        let mfa_match = PasswordPromptDetector::detect("Enter 6-digit MFA verification code: ");
+        assert!(mfa_match.is_some());
+        assert_eq!(mfa_match.unwrap().kind, PasswordPromptKind::MfaCode);
+
+        let normal_output =
+            PasswordPromptDetector::detect("total 48 drwxr-xr-x  14 user  staff   448B");
+        assert!(normal_output.is_none());
+
+        // 5. Verify Autocomplete engine integration
+        let engine = AutocompleteEngine::new();
+        let git_results = engine.complete(&AutocompleteContext::new("git ch", 6));
+        assert!(git_results.iter().any(|c| c.display_label == "checkout"));
+
+        let mut host_ctx = AutocompleteContext::new("ssh sta", 7);
+        host_ctx
+            .host_candidates
+            .push("staging-cluster-01".to_string());
+        let host_results = engine.complete(&host_ctx);
+        assert!(host_results
+            .iter()
+            .any(|c| c.display_label == "staging-cluster-01"));
+
+        let mut snip_ctx = AutocompleteContext::new("dep", 3);
+        snip_ctx.snippet_candidates.push((
+            "deploy-prod".to_string(),
+            "kubectl rollout restart deployment".to_string(),
+        ));
+        let snippet_results = engine.complete(&snip_ctx);
+        assert!(snippet_results
+            .iter()
+            .any(|c| c.display_label == "deploy-prod"));
+
+        // 6. Verify Terminal row text and shell integration tracking
+        let mut term = Terminal::new(24, 80);
+        term.process_bytes(b"echo hello world\r\n");
+        assert_eq!(term.row_text(0).as_deref(), Some("echo hello world"));
     }
 }

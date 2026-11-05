@@ -1841,3 +1841,93 @@ async fn supports_mobile_cli_and_virtual_keys() {
     let str_db_mobile = String::from_utf8(out_db_mobile.stdout).unwrap();
     assert!(str_db_mobile.contains("Mobile Virtual Accessory Keys"));
 }
+
+#[test]
+fn supports_autocomplete_prompt_detect_and_shell_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("autocomp.db");
+
+    // 1. Shell hooks for Bash, Zsh, Fish
+    let out_bash = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["shell-hook", "bash"])
+        .output()
+        .unwrap();
+    assert!(out_bash.status.success());
+    let bash_str = String::from_utf8(out_bash.stdout).unwrap();
+    assert!(bash_str.contains("133;A"));
+    assert!(bash_str.contains("PROMPT_COMMAND"));
+
+    let out_zsh = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["shell-hook", "zsh"])
+        .output()
+        .unwrap();
+    assert!(out_zsh.status.success());
+    let zsh_str = String::from_utf8(out_zsh.stdout).unwrap();
+    assert!(zsh_str.contains("add-zsh-hook"));
+    assert!(zsh_str.contains("133;D"));
+
+    let out_fish = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["shell-hook", "fish"])
+        .output()
+        .unwrap();
+    assert!(out_fish.status.success());
+    let fish_str = String::from_utf8(out_fish.stdout).unwrap();
+    assert!(fish_str.contains("on-event fish_prompt"));
+
+    // 2. Prompt Detection
+    let out_sudo = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["prompt-detect", "[sudo] password for operator: "])
+        .output()
+        .unwrap();
+    assert!(out_sudo.status.success());
+    let sudo_str = String::from_utf8(out_sudo.stdout).unwrap();
+    assert!(sudo_str.contains("MATCH:"));
+    assert!(sudo_str.contains("Sudo Password"));
+    assert!(sudo_str.contains("Target User: operator"));
+
+    let out_ssh_pwd = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["prompt-detect", "dev@10.0.0.1's password:"])
+        .output()
+        .unwrap();
+    assert!(out_ssh_pwd.status.success());
+    let ssh_str = String::from_utf8(out_ssh_pwd.stdout).unwrap();
+    assert!(ssh_str.contains("SSH Password"));
+    assert!(ssh_str.contains("Target User: dev"));
+
+    // 3. Standalone Completion
+    let out_comp = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["complete", "git st"])
+        .output()
+        .unwrap();
+    assert!(out_comp.status.success());
+    let comp_str = String::from_utf8(out_comp.stdout).unwrap();
+    assert!(comp_str.contains("status"));
+    assert!(comp_str.contains("Subcommand"));
+
+    let out_flag = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["complete", "cargo test --off"])
+        .output()
+        .unwrap();
+    assert!(out_flag.status.success());
+    let flag_str = String::from_utf8(out_flag.stdout).unwrap();
+    assert!(flag_str.contains("--offline"));
+    assert!(flag_str.contains("Flag"));
+
+    // 4. Database-backed completion (hosts & snippets)
+    let add_host = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["add", "ClusterPrimary", "192.168.1.1", "admin", "22"])
+        .output()
+        .unwrap();
+    assert!(add_host.status.success());
+
+    let out_db_comp = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["complete", "ssh Cluster"])
+        .output()
+        .unwrap();
+    assert!(out_db_comp.status.success());
+    let db_comp_str = String::from_utf8(out_db_comp.stdout).unwrap();
+    assert!(db_comp_str.contains("ClusterPrimary"));
+    assert!(db_comp_str.contains("Host"));
+}

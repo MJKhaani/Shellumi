@@ -47,11 +47,19 @@ crates/shellumi-app       GPUI desktop window with interactive host management
   - `MobileCredentialSpec` defining platform-native secure enclave / hardware keystore requirements: iOS Keychain `kSecClassGenericPassword` with `kSecAccessControlBiometryAny` vs Android Keystore AES-GCM with `setUserAuthenticationRequired(true)` and StrongBox backing.
   - `MobileFfiBridge` headless JSON/C-ABI bridge helpers (`parse_destination_json`, `translate_virtual_key_json`, `generate_keypair_json`) for UniFFI and foreign language binding.
   - Registers `PaletteCategory::Mobile` (`📱`) and command palette action `PaletteAction::OpenMobileSimulator` (`Cmd+Alt+M`).
+- **Intelligent Autocomplete & Password Prompt Detection Subsystem:** Implements UI-independent autocomplete and prompt classification in `shellumi-core::autocomplete`:
+  - `AutocompleteEngine` evaluating ranked completions across CLI commands (`git`, `docker`, `cargo`, `systemctl`, `ssh`, `kubectl`), subcommands, flags, file paths, saved snippets, inventory hosts, and history.
+  - `AutocompleteContext` passing input lines, cursor offset, active working directory, and candidates.
+  - `CompletionItem` and `CompletionKind` (`Command`, `Subcommand`, `Flag`, `FilePath`, `Host`, `Snippet`, `History`).
+  - `PasswordPromptDetector` for passive classification (`Sudo`, `Ssh`, `KeyPassphrase`, `MfaCode`, `GenericPassword`) strictly adhering to safety-by-default rules (no automatic secret injection into arbitrary terminal streams).
+  - Shell hook generators (`generate_bash_hook`, `generate_zsh_hook`, `generate_fish_hook`) emitting zero-config scripts for OSC 133 and OSC 7 integration.
+  - Registers `PaletteAction::OpenShellIntegrationModal` (`Cmd+Shift+I`) in the command palette.
 - UI-independent and network-independent; contains no GUI code.
 
 ### `shellumi-terminal`
 - **Screen & Grid Management:** Manages character cells (`Cell`), 16 standard ANSI colors, 256-color palette, and 24-bit TrueColor RGB (`Color`), text attributes (bold, dim, italic, underline, inverse, strikethrough), cursor positioning, and scrollback history. Converts character cells into minimal contiguous styled spans (`StyledSpan`) for efficient UI rendering. Supports configurable scrollback capacity (`set_scrollback_limit`, `scrollback_limit`) with automated trimming of excess lines to protect against unbounded memory growth during high-throughput workloads.
 - **Escape Sequence Handling & Sanitization:** Implements `vte::Perform` to parse ANSI/VT sequences, cursor movement (CUU, CUD, CUF, CUB, CNL, CPL, CHA, CUP), screen/line clearing (ED, EL), scrolling (SU, SD), alternate screen buffers (DECSET/DECRST 1049), and window titles (OSC 0/2). Sanitizes incoming OSC sequences by filtering ASCII control codes (`\x00..\x1F` except tab) and clamping titles to 256 characters, neutralizing terminal title escape injection and buffer abuse.
+- **Semantic Shell Integration Engine:** Implements `shellumi-terminal::shell_integration` (`PromptSemanticMark`, `ShellIntegrationState`) to parse OSC 133 prompt markers (`133;A` prompt start, `133;B` command start, `133;C` command executed, `133;D;<exit_code>` command finished with exit code classification), OSC 7 (`file://hostname/path`) and OSC 9;9 working directory notifications with percent-decoding, and semantic command history capture.
 - **Cross-Platform PTY:** Spawns native pseudo-terminals (`portable-pty`) on macOS, Linux, and Windows, supporting shell auto-detection, custom commands, arguments, working directories, environment variables, resizing, and child process lifecycle.
 
 ### `shellumi-storage`
@@ -71,6 +79,10 @@ crates/shellumi-app       GPUI desktop window with interactive host management
 - Provides dedicated tunnel management: `tunnel add`, `tunnel list`, and `tunnel delete`, with automatic localhost exposure detection and security warnings.
 - Provides dedicated SFTP commands: `sftp local-ls <path> [--all]`, `sftp history [--host-id <id>] [--limit <n>]`, `sftp clear-history [--host-id <id>]`, `sftp log <upload|download> <local-path> <remote-path> <bytes>`, `sftp packet <encode-init|decode|encode-open> [...]`, and `sftp queue <upload|download> <local-path> <remote-path> <bytes>`.
 - Provides dedicated snippet management: `snippet add <name> <cmd> [--desc <desc>] [--tags <t1,t2>]`, `snippet list [--tag <tag>] [--search <query>]`, `snippet show <id>`, `snippet render <id> [--var key=value] [--preview]`, `snippet delete <id>`, and `snippet batch <id> --hosts <h1,h2...> [--parallel|--sequential] [--dry-run]`.
+- Provides shell integration and autocomplete commands:
+  - `shell-hook <bash|zsh|fish>` generating hook scripts for OSC 133 and OSC 7 integration.
+  - `complete <query> [--dir <dir>]` generating context-aware completions with host and snippet candidate injection.
+  - `prompt-detect "<line>"` classifying password prompts without automatic injection.
 - Provides automated environment diagnostics: `doctor [--json] [--markdown] [--db <path>]` running comprehensive checks on CSPRNG entropy, AEAD crypto, OpenSSH binary, keychain, network loopback binding, database schema, and PTY capabilities.
 - Provides mobile simulation and validation commands:
   - `mobile virtual-keys [--preset default|compact|coding]` displaying available touch accessory keys and ANSI byte translations.

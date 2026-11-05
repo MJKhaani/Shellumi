@@ -347,6 +347,17 @@ impl TerminalGrid {
         Some(cells_to_spans(&cells))
     }
 
+    /// Returns plain text for a given row in the active screen with trailing spaces trimmed.
+    pub fn row_text(&self, row: usize) -> Option<String> {
+        self.row_spans(row).map(|spans| {
+            let mut s = String::new();
+            for span in spans {
+                s.push_str(&span.text);
+            }
+            s.trim_end().to_string()
+        })
+    }
+
     /// Returns the total number of lines stored in scrollback history.
     pub fn scrollback_count(&self) -> usize {
         self.scrollback.len()

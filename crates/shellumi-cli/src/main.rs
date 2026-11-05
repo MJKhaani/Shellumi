@@ -1,16 +1,17 @@
 use shellumi_core::{
     build_google_drive_auth_url, diff_sync_records_with_passphrase, discover_serial_ports,
-    export_csv, export_ssh_config, generate_ed25519_key, generate_pkce_challenge,
-    list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
-    render_preview, AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AwsEc2Parser,
-    AzureVmParser, BatchExecutionPlan, BatchHostTarget, BatchPolicy, CloudProviderConfig,
-    CloudProviderKind, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes,
-    ForwardingType, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
-    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
-    MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
-    PortForwardRule, ProtocolError, SerialConfig, SftpPacket, SharedVault, SharingAuditRecord,
-    Snippet, SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
-    TransferQueue, VirtualAccessoryBar,
+    export_csv, export_ssh_config, generate_bash_hook, generate_ed25519_key, generate_fish_hook,
+    generate_pkce_challenge, generate_zsh_hook, list_local_directory, parse_csv,
+    parse_quick_connect_target, parse_ssh_config, render_command, render_preview,
+    AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
+    AutocompleteEngine, AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget,
+    BatchPolicy, CloudProviderConfig, CloudProviderKind, ConnectionProtocol, DiagnosticsRunner,
+    DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry, HostExportItem, HostGroup,
+    MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig,
+    MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand,
+    PaletteRegistry, PasswordPromptDetector, PortForwardRule, ProtocolError, SerialConfig,
+    SftpPacket, SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncVault, TeamMember,
+    TeamRole, TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar,
 };
 use shellumi_storage::{CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer};
 use std::str::FromStr;
@@ -89,7 +90,11 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> export-csv
   shellumi-cli keygen [--comment <comment>]
   shellumi-cli doctor [--json] [--markdown] [--db <path>]
-  shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check|header|build-info>";
+  shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check|header|build-info>
+  shellumi-cli complete <query> [--dir <dir>]
+  shellumi-cli <database-path> complete <query>
+  shellumi-cli prompt-detect \"<prompt-line>\"
+  shellumi-cli shell-hook <bash|zsh|fish>";
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -341,6 +346,75 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(&format!("Unknown mobile subcommand: {other}")).into());
             }
         }
+    }
+
+    if args[0] == "shell-hook" {
+        if args.len() < 2 {
+            println!("Usage: shellumi-cli shell-hook <bash|zsh|fish>");
+            return Ok(());
+        }
+        match args[1].to_ascii_lowercase().as_str() {
+            "bash" => print!("{}", generate_bash_hook()),
+            "zsh" => print!("{}", generate_zsh_hook()),
+            "fish" => print!("{}", generate_fish_hook()),
+            other => {
+                return Err(invalid(&format!(
+                    "Unsupported shell for hook: '{other}'. Use bash, zsh, or fish."
+                ))
+                .into())
+            }
+        }
+        return Ok(());
+    }
+
+    if args[0] == "prompt-detect" {
+        if args.len() < 2 {
+            println!("Usage: shellumi-cli prompt-detect \"<terminal-output-line>\"");
+            return Ok(());
+        }
+        let line = &args[1];
+        if let Some(m) = PasswordPromptDetector::detect(line) {
+            println!("MATCH: {} (kind: {})", m.raw_prompt, m.kind.label());
+            if let Some(user) = m.target_user {
+                println!("Target User: {user}");
+            }
+        } else {
+            println!("No password prompt detected.");
+        }
+        return Ok(());
+    }
+
+    if args[0] == "complete" {
+        if args.len() < 2 {
+            println!("Usage: shellumi-cli complete <query> [--dir <dir>]");
+            return Ok(());
+        }
+        let query = &args[1];
+        let current_dir = extract_flag(&args[2..], "--dir");
+        let engine = AutocompleteEngine::new();
+        let ctx = AutocompleteContext {
+            input_line: query.clone(),
+            cursor_pos: query.len(),
+            current_dir,
+            ..Default::default()
+        };
+        let suggestions = engine.suggest(&ctx);
+        if suggestions.is_empty() {
+            println!("No suggestions for: '{query}'");
+        } else {
+            println!("SCORE\tKIND\tVALUE\tDESCRIPTION");
+            for item in suggestions {
+                let desc = item.description.as_deref().unwrap_or("-");
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    item.score,
+                    item.kind.display_label(),
+                    item.value,
+                    desc
+                );
+            }
+        }
+        return Ok(());
     }
 
     if args.len() < 2 {
@@ -673,7 +747,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
         }
-        "doctor" | "mobile" => {}
+        "doctor" | "mobile" | "complete" => {}
         _ => return Err(invalid(USAGE).into()),
     }
 
@@ -2867,6 +2941,44 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 _ => unreachable!(),
+            }
+        }
+        "complete" => {
+            let query = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            let current_dir = extract_flag(&args[3..], "--dir");
+            let all_hosts = store.list().await?;
+            let all_snippets = store.list_snippets().await?;
+
+            let host_names = all_hosts.into_iter().map(|h| h.name).collect();
+            let snippet_tuples = all_snippets
+                .into_iter()
+                .map(|s| (s.name, s.command))
+                .collect();
+
+            let engine = AutocompleteEngine::new();
+            let ctx = AutocompleteContext {
+                input_line: query.to_string(),
+                cursor_pos: query.len(),
+                current_dir,
+                host_candidates: host_names,
+                snippet_candidates: snippet_tuples,
+                history_candidates: Vec::new(),
+            };
+            let suggestions = engine.suggest(&ctx);
+            if suggestions.is_empty() {
+                println!("No suggestions for: '{query}'");
+            } else {
+                println!("SCORE\tKIND\tVALUE\tDESCRIPTION");
+                for item in suggestions {
+                    let desc = item.description.as_deref().unwrap_or("-");
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        item.score,
+                        item.kind.display_label(),
+                        item.value,
+                        desc
+                    );
+                }
             }
         }
         _ => unreachable!(),

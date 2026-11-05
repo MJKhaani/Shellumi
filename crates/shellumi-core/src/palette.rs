@@ -99,6 +99,7 @@ pub enum PaletteAction {
     ExportAnsibleInventory,
     RunDiagnostics,
     OpenMobileSimulator,
+    OpenShellIntegrationModal,
 }
 
 /// A searchable command palette item.
@@ -415,6 +416,29 @@ impl PaletteRegistry {
                 "ios",
                 "android",
                 "phone",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:shell_integration",
+                "Shell Integration & Autocomplete Setup",
+                "View shell hooks for Bash, Zsh, Fish, OSC 133 prompt markers, and CWD detection",
+                PaletteCategory::Terminal,
+                PaletteAction::OpenShellIntegrationModal,
+            )
+            .with_shortcut("Cmd+Shift+I")
+            .with_keywords([
+                "shell",
+                "integration",
+                "osc133",
+                "autocomplete",
+                "prompt",
+                "cwd",
+                "fish",
+                "zsh",
+                "bash",
+                "hook",
             ]),
         );
 

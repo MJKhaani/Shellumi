@@ -1,5 +1,6 @@
 //! UI-independent connection definitions. No network connections are made here.
 
+pub mod autocomplete;
 pub mod batch;
 pub mod collaboration;
 pub mod credential;
@@ -20,6 +21,11 @@ pub mod sync;
 pub mod tunnel;
 pub mod workspace;
 
+pub use autocomplete::{
+    generate_bash_hook, generate_fish_hook, generate_zsh_hook, AutocompleteContext,
+    AutocompleteEngine, CompletionItem, CompletionKind, PasswordPromptDetector, PasswordPromptKind,
+    PasswordPromptMatch,
+};
 pub use batch::{
     BatchExecutionPlan, BatchExecutionSummary, BatchHostResult, BatchHostStatus, BatchHostTarget,
     BatchPolicy, BatchRunner,

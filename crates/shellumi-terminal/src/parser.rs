@@ -3,12 +3,14 @@
 use crate::cell::{Cell, CellAttributes};
 use crate::color::{Color, NamedColor};
 use crate::grid::TerminalGrid;
+use crate::shell_integration::ShellIntegrationState;
 use vte::{Params, Perform};
 
 /// Handles VTE parser actions and applies them to the terminal grid.
 pub struct TerminalHandler<'a> {
     pub grid: &'a mut TerminalGrid,
     pub title: &'a mut Option<String>,
+    pub shell_integration: Option<&'a mut ShellIntegrationState>,
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttributes,
@@ -19,10 +21,16 @@ impl<'a> TerminalHandler<'a> {
         Self {
             grid,
             title,
+            shell_integration: None,
             fg: Color::Default,
             bg: Color::Default,
             attrs: CellAttributes::default(),
         }
+    }
+
+    pub fn with_shell_integration(mut self, integration: &'a mut ShellIntegrationState) -> Self {
+        self.shell_integration = Some(integration);
+        self
     }
 
     fn current_cell(&self, c: char) -> Cell {
@@ -310,6 +318,21 @@ impl<'a> Perform for TerminalHandler<'a> {
                         .take(256)
                         .collect();
                     *self.title = Some(sanitized);
+                }
+            } else if command == b"7" {
+                // OSC 7: Current Working Directory (file://[hostname]/path)
+                if let Some(ref mut integration) = self.shell_integration {
+                    integration.handle_osc_7(params[1]);
+                }
+            } else if command == b"133" {
+                // OSC 133: FinalTerm / iTerm2 Semantic Prompt Protocol
+                if let Some(ref mut integration) = self.shell_integration {
+                    integration.handle_osc_133(&params[1..]);
+                }
+            } else if command == b"9" && params.len() >= 3 && params[1] == b"9" {
+                // OSC 9;9: ConEmu CWD ("path")
+                if let Some(ref mut integration) = self.shell_integration {
+                    integration.handle_osc_9_9(params[2]);
                 }
             }
         }

@@ -196,11 +196,17 @@ been checked on macOS.
     - Android Gradle & Prototype (`packaging/mobile/android/`): created Gradle library manifest (`build.gradle.kts`), JNI build script (`build-aar.sh` targeting `arm64-v8a` and `x86_64`), Kotlin JNI bridge (`ShellumiNativeCore.kt`), and Jetpack Compose prototype (`MainActivity.kt`) integrating hardware `BiometricPrompt` for StrongBox / Keystore credential unlocking and Android lifecycle event observation.
     - CLI mobile commands: updated `shellumi-cli mobile` with `mobile header` and `mobile build-info`, and enhanced `mobile ffi-check` to verify exported C-ABI functions. 212 workspace tests passing.
     Next: implement Phase 13: Intelligent Shell Integration, OSC 133 Prompt & CWD Detection, and In-Terminal Autocomplete Engine.
-18. Phase 13 — Intelligent Shell Integration & In-Terminal Autocomplete Engine:
-    - Implement OSC 133 semantic prompt demarcation parsing in `shellumi-terminal` (Prompt Start `133;A`, Command Start `133;B`, Command Executed `133;C`, Command Finished with Exit Code `133;D;<exitcode>`).
-    - Implement OSC 7 / OSC 9;9 current working directory detection to track shell directory navigation across remote SSH and local sessions.
-    - Build in-terminal intelligent autocomplete engine in `shellumi-core` offering context-aware suggestions for commands, paths, snippets, hostnames, and history.
-    - Implement password prompt detector (`Password:`, `[sudo] password for`) with safe identification.
+18. Intelligent Shell Integration, OSC 133 Prompt & CWD Detection, and In-Terminal Autocomplete Engine (Phase 13):
+    - Semantic Shell Integration Engine (`shellumi-terminal::shell_integration`): implemented OSC 133 prompt markers (`133;A` prompt start, `133;B` command start, `133;C` executed, `133;D;<exit_code>` command finished with exit code classification), OSC 7 URL parsing (`file://hostname/path` with percent decoding) and OSC 9;9 path handling to track the current working directory (CWD), and automatic command history capturing. Integrated parser state machine into `TerminalHandler` with `with_shell_integration`.
+    - Intelligent Autocomplete & Password Prompt Detection (`shellumi-core::autocomplete`): built `AutocompleteEngine` evaluating ranked completions across CLI commands, subcommands, flags, file paths, saved snippets, inventory hosts, and history; shell hook generators for Bash (`PROMPT_COMMAND`), Zsh (`preexec`/`precmd`), and Fish (`fish_prompt`/`fish_preexec`); and `PasswordPromptDetector` for passive classification (`Sudo`, `Ssh`, `KeyPassphrase`, `MfaCode`, `GenericPassword`) strictly adhering to safety-by-default rules (no automatic secret injection into arbitrary terminal streams).
+    - CLI Shell Integration Commands: implemented `shellumi-cli shell-hook <bash|zsh|fish>`, `prompt-detect "<line>"`, and `complete "<query>" [--dir <dir>]` incorporating database-backed host and snippet candidates.
+    - GPUI Desktop Integration (`shellumi-app`): added live CWD badge (`📂 <cwd>`) and command exit status badge (`✓ 0` / `✗ <code>`) in terminal pane headers; added passive password prompt detection chips (`🔑 Prompt: <kind>`); added `[⚡ Integration]` pane header button and interactive Shell Integration Modal (`ShellIntegrationModalState`, `Cmd+Shift+I`) with tabbed browsing for Shell Hooks, OSC 133 & CWD Markers, Password Prompts, and live Autocomplete Engine testing. 224 workspace tests passing.
+    Next: implement Phase 14: Terminal Session Logging, Audit Recording & Cast Playback Engine.
+19. Phase 14 — Terminal Session Logging, Audit Recording & Cast Playback Engine:
+    - Implement streaming session logger in `shellumi-terminal` supporting asciicast v2 format (`.cast`), timestamped VT/ANSI I/O events, and plain text logs.
+    - Add automated sensitive data redaction in `shellumi-core` to mask classified passwords, private keys, and MFA tokens from persistent session logs.
+    - Add database storage for session recordings in `shellumi-storage` with search, metadata indexing, and size caps.
+    - Implement CLI `record` / `play` subcommands in `shellumi-cli` and GPUI desktop in-window session replay controls.
 
 Reference research: [upstream GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui),
 which describes GPUI as pre-1.0 and subject to breaking changes, and

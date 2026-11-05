@@ -8,11 +8,13 @@ pub mod color;
 pub mod grid;
 pub mod parser;
 pub mod pty;
+pub mod shell_integration;
 
 pub use cell::{cells_to_spans, Cell, CellAttributes, StyledSpan};
 pub use color::{Color, NamedColor};
 pub use grid::{Cursor, SearchBuffer, SearchMatch, TerminalGrid};
 pub use pty::{PtySession, TerminalCommand};
+pub use shell_integration::{PromptSemanticMark, ShellIntegrationState};
 
 use parser::TerminalHandler;
 use vte::Parser;
@@ -22,6 +24,7 @@ pub struct Terminal {
     grid: TerminalGrid,
     parser: Parser,
     title: Option<String>,
+    shell_integration: ShellIntegrationState,
 }
 
 impl Terminal {
@@ -31,12 +34,14 @@ impl Terminal {
             grid: TerminalGrid::new(rows, cols),
             parser: Parser::new(),
             title: None,
+            shell_integration: ShellIntegrationState::new(),
         }
     }
 
     /// Feeds incoming raw bytes (from PTY or SSH stream) into the VT parser.
     pub fn process_bytes(&mut self, bytes: &[u8]) {
-        let mut handler = TerminalHandler::new(&mut self.grid, &mut self.title);
+        let mut handler = TerminalHandler::new(&mut self.grid, &mut self.title)
+            .with_shell_integration(&mut self.shell_integration);
         for &byte in bytes {
             self.parser.advance(&mut handler, byte);
         }
@@ -45,6 +50,36 @@ impl Terminal {
     /// Feeds an incoming UTF-8 string into the VT parser.
     pub fn process_str(&mut self, s: &str) {
         self.process_bytes(s.as_bytes());
+    }
+
+    /// Accesses semantic shell integration state (OSC 133, OSC 7, etc.).
+    pub fn shell_integration(&self) -> &ShellIntegrationState {
+        &self.shell_integration
+    }
+
+    /// Mutably accesses semantic shell integration state.
+    pub fn shell_integration_mut(&mut self) -> &mut ShellIntegrationState {
+        &mut self.shell_integration
+    }
+
+    /// Returns the current working directory if reported by the shell via OSC 7 or OSC 9;9.
+    pub fn current_working_directory(&self) -> Option<&str> {
+        self.shell_integration.current_dir()
+    }
+
+    /// Returns the exit code of the last completed command if reported via OSC 133;D.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.shell_integration.last_exit_code()
+    }
+
+    /// Returns the current semantic prompt mark (e.g. PromptStart, CommandExecuted).
+    pub fn prompt_mark(&self) -> Option<&PromptSemanticMark> {
+        self.shell_integration.current_mark.as_ref()
+    }
+
+    /// Returns command history captured via semantic shell integration.
+    pub fn command_history(&self) -> &[String] {
+        &self.shell_integration.command_history
     }
 
     /// Accesses the underlying terminal screen grid.
@@ -80,6 +115,11 @@ impl Terminal {
     /// Returns the styled text spans for a given row in the active screen.
     pub fn row_spans(&self, row: usize) -> Option<Vec<StyledSpan>> {
         self.grid.row_spans(row)
+    }
+
+    /// Returns plain text for an active screen row, with trailing whitespace trimmed.
+    pub fn row_text(&self, row: usize) -> Option<String> {
+        self.grid.row_text(row)
     }
 
     /// Returns the number of lines stored in scrollback history.
@@ -288,5 +328,37 @@ mod tests {
         let mut term = Terminal::new(24, 80);
         term.process_bytes(&output);
         assert!(term.screen_to_string().contains("hello from pty"));
+    }
+
+    #[test]
+    fn handles_osc_133_and_cwd_in_terminal_stream() {
+        let mut term = Terminal::new(24, 80);
+
+        // Shell prompt start (OSC 133;A) and CWD (OSC 7)
+        term.process_str("\x1b]133;A\x07");
+        term.process_str("\x1b]7;file://ubuntu-server/var/log\x07");
+        assert_eq!(term.prompt_mark(), Some(&PromptSemanticMark::PromptStart));
+        assert_eq!(term.current_working_directory(), Some("/var/log"));
+
+        // Prompt end / command start (OSC 133;B) and command line property (OSC 133;P;cl=ls -la)
+        term.process_str("\x1b]133;B\x07");
+        term.process_str("\x1b]133;P;cl=ls -la\x07");
+        assert_eq!(term.prompt_mark(), Some(&PromptSemanticMark::CommandStart));
+
+        // Command executed (OSC 133;C)
+        term.process_str("\x1b]133;C\x07");
+        assert_eq!(
+            term.prompt_mark(),
+            Some(&PromptSemanticMark::CommandExecuted)
+        );
+        assert_eq!(term.command_history(), &["ls -la".to_string()]);
+
+        // Command finished with exit code 0 (OSC 133;D;0)
+        term.process_str("\x1b]133;D;0\x07");
+        assert_eq!(term.last_exit_code(), Some(0));
+
+        // Next prompt start (OSC 133;A) with changed directory via OSC 9;9
+        term.process_str("\x1b]9;9;\"/home/dev/projects\"\x07");
+        assert_eq!(term.current_working_directory(), Some("/home/dev/projects"));
     }
 }
