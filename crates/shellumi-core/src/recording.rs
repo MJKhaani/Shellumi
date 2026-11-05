@@ -627,6 +627,12 @@ fn redact_assignments(text: &str) -> String {
                 val_end += val_offset;
             }
 
+            let val_slice = &remaining[val_offset..val_end];
+            if val_slice.starts_with("[REDACTED_") {
+                cur = val_start + val_end;
+                continue;
+            }
+
             if val_end > val_offset && (val_end - val_offset) > 0 {
                 let prefix = &out[..val_start + val_offset];
                 let suffix = &out[val_start + val_end..];
