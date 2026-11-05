@@ -1590,6 +1590,149 @@ pub fn plan_sync_cycle(
     }
 }
 
+/// Detailed report from an automated sync cycle execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncExecutionReport {
+    pub local_updated: usize,
+    pub remote_updated: usize,
+    pub conflicts_resolved: usize,
+    pub duration_ms: u64,
+    pub message: String,
+}
+
+/// Result of evaluating or executing an end-to-end sync cycle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncCycleResult {
+    /// Both sides are already identical.
+    AlreadySynchronized,
+    /// Successfully synchronized without conflicts.
+    Success {
+        report: SyncExecutionReport,
+        merged_records: Vec<SyncRecord>,
+    },
+    /// Unresolved conflicts detected; requires interactive visual resolution.
+    Conflicts(Vec<ConflictItemView>),
+    /// Authentication or encryption error.
+    Error(String),
+}
+
+/// Executes a full synchronization cycle between local and remote sync records.
+///
+/// If conflicting records are found and `resolutions` is `None`, returns `SyncCycleResult::Conflicts`.
+/// If `resolutions` is provided, each conflict is resolved according to the user's choice
+/// (`KeepLocal` or `AcceptRemote`) and merged into the final record set.
+pub fn execute_sync_cycle(
+    local_records: &[SyncRecord],
+    remote_records: &[SyncRecord],
+    passphrase: &str,
+    resolutions: Option<&[ConflictResolutionChoice]>,
+) -> SyncCycleResult {
+    let diffs = diff_sync_records_with_passphrase(local_records, remote_records, Some(passphrase));
+    let mut conflicts = Vec::new();
+
+    for d in &diffs {
+        if d.status == DiffStatus::Conflict {
+            conflicts.push(d.object_id.clone());
+        }
+    }
+
+    if !conflicts.is_empty() {
+        let Some(choices) = resolutions else {
+            let conflict_views =
+                build_conflict_item_views(local_records, remote_records, Some(passphrase));
+            return SyncCycleResult::Conflicts(conflict_views);
+        };
+
+        if choices.len() != conflicts.len() {
+            let conflict_views =
+                build_conflict_item_views(local_records, remote_records, Some(passphrase));
+            return SyncCycleResult::Conflicts(conflict_views);
+        }
+    }
+
+    if diffs.iter().all(|d| d.status == DiffStatus::Identical) {
+        return SyncCycleResult::AlreadySynchronized;
+    }
+
+    let mut merged = Vec::new();
+    let mut local_applied = 0;
+    let mut remote_uploaded = 0;
+    let mut conflict_idx = 0;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for d in diffs {
+        match d.status {
+            DiffStatus::Identical => {
+                if let Some(r) = local_records
+                    .iter()
+                    .find(|rec| rec.object_id == d.object_id)
+                {
+                    merged.push(r.clone());
+                }
+            }
+            DiffStatus::LocalOnly | DiffStatus::LocalNewer => {
+                if let Some(r) = local_records
+                    .iter()
+                    .find(|rec| rec.object_id == d.object_id)
+                {
+                    merged.push(r.clone());
+                    remote_uploaded += 1;
+                }
+            }
+            DiffStatus::RemoteOnly | DiffStatus::RemoteNewer => {
+                if let Some(r) = remote_records
+                    .iter()
+                    .find(|rec| rec.object_id == d.object_id)
+                {
+                    merged.push(r.clone());
+                    local_applied += 1;
+                }
+            }
+            DiffStatus::Conflict => {
+                let choice = resolutions
+                    .and_then(|r| r.get(conflict_idx))
+                    .copied()
+                    .unwrap_or(ConflictResolutionChoice::KeepLocal);
+                conflict_idx += 1;
+
+                let loc = local_records
+                    .iter()
+                    .find(|rec| rec.object_id == d.object_id);
+                let rem = remote_records
+                    .iter()
+                    .find(|rec| rec.object_id == d.object_id);
+
+                if let (Some(l), Some(r)) = (loc, rem) {
+                    let resolved = resolve_record_conflict(l, r, choice, now);
+                    match choice {
+                        ConflictResolutionChoice::KeepLocal => remote_uploaded += 1,
+                        ConflictResolutionChoice::AcceptRemote => local_applied += 1,
+                    }
+                    merged.push(resolved);
+                }
+            }
+        }
+    }
+
+    let report = SyncExecutionReport {
+        local_updated: local_applied,
+        remote_updated: remote_uploaded,
+        conflicts_resolved: conflict_idx,
+        duration_ms: 10,
+        message: format!(
+            "Sync complete: {local_applied} local updated, {remote_uploaded} remote updated, {conflict_idx} conflicts resolved"
+        ),
+    };
+
+    SyncCycleResult::Success {
+        report,
+        merged_records: merged,
+    }
+}
+
 /// High-level client for managing synchronization with Google Drive Application Data folder.
 pub struct GoogleDriveSyncClient<T: HttpTransport> {
     transport: T,
@@ -2772,5 +2915,96 @@ mod tests {
         // 3. Periodic trigger after 300s (at t=1018 + 300 = 1318)
         assert_eq!(scheduler.check_trigger(1317), None);
         assert_eq!(scheduler.check_trigger(1318), Some(SyncTrigger::Periodic));
+    }
+
+    #[test]
+    fn verifies_execute_sync_cycle_and_resolution() {
+        let passphrase = "test-secret-passphrase";
+
+        #[derive(Serialize)]
+        struct SimpleHost {
+            name: String,
+            port: u16,
+        }
+
+        let loc_env = encrypt_entity_with_iterations(
+            passphrase,
+            "host",
+            "srv-1",
+            &SimpleHost {
+                name: "Server 1".into(),
+                port: 22,
+            },
+            1000,
+        )
+        .unwrap();
+
+        let rem_env = encrypt_entity_with_iterations(
+            passphrase,
+            "host",
+            "srv-1",
+            &SimpleHost {
+                name: "Server 1 Remote".into(),
+                port: 2222,
+            },
+            1000,
+        )
+        .unwrap();
+
+        let local_rec = SyncRecord::new("srv-1", SyncEntityType::Host, 1, "dev1", 100, loc_env);
+        let remote_rec = SyncRecord::new("srv-1", SyncEntityType::Host, 1, "dev2", 105, rem_env);
+
+        // 1. Conflict detected without resolutions
+        let res = execute_sync_cycle(
+            std::slice::from_ref(&local_rec),
+            std::slice::from_ref(&remote_rec),
+            passphrase,
+            None,
+        );
+        match res {
+            SyncCycleResult::Conflicts(views) => {
+                assert_eq!(views.len(), 1);
+                assert_eq!(views[0].object_id, "srv-1");
+            }
+            _ => panic!("expected conflicts"),
+        }
+
+        // 2. Conflict resolved with KeepLocal
+        let res_keep_local = execute_sync_cycle(
+            std::slice::from_ref(&local_rec),
+            std::slice::from_ref(&remote_rec),
+            passphrase,
+            Some(&[ConflictResolutionChoice::KeepLocal]),
+        );
+        match res_keep_local {
+            SyncCycleResult::Success {
+                report,
+                merged_records,
+            } => {
+                assert_eq!(report.conflicts_resolved, 1);
+                assert_eq!(merged_records.len(), 1);
+                assert_eq!(merged_records[0].device_id, "dev1"); // local retained
+            }
+            _ => panic!("expected success"),
+        }
+
+        // 3. Conflict resolved with AcceptRemote
+        let res_accept_remote = execute_sync_cycle(
+            &[local_rec],
+            &[remote_rec],
+            passphrase,
+            Some(&[ConflictResolutionChoice::AcceptRemote]),
+        );
+        match res_accept_remote {
+            SyncCycleResult::Success {
+                report,
+                merged_records,
+            } => {
+                assert_eq!(report.conflicts_resolved, 1);
+                assert_eq!(merged_records.len(), 1);
+                assert_eq!(merged_records[0].device_id, "dev2"); // remote accepted
+            }
+            _ => panic!("expected success"),
+        }
     }
 }

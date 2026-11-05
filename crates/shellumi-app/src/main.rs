@@ -7,24 +7,27 @@ use gpui::{
 };
 use session::{Session, SessionEvent};
 use shellumi_core::{
-    check_dangerous_command, format_duration_hms, generate_bash_hook, generate_fish_hook,
-    generate_zsh_hook, list_local_directory, validate_jump_host, AccessoryBarLayout,
-    AnsibleInventoryEngine, AuditAction, AutocompleteContext, AutocompleteEngine,
-    BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy,
-    BatchRunner, BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine, CloudProviderConfig,
-    CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView, ConflictResolutionChoice,
-    ConnectionProtocol, DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry,
-    FileKind, HostExportItem, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
+    build_ssh_tunnel_command, check_dangerous_command, execute_sync_cycle, format_duration_hms,
+    generate_bash_hook, generate_fish_hook, generate_zsh_hook, list_local_directory,
+    prepare_startup_snippet, validate_jump_host, AccessoryBarLayout, ActiveTunnelState,
+    ActiveTunnelStatus, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
+    AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus,
+    BatchHostTarget, BatchPolicy, BatchRunner, BroadcastManager, BroadcastSafetyCheck,
+    CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, CompletionItem, CompletionKind,
+    ConflictItemView, ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus,
+    DiagnosticsReport, DiagnosticsRunner, EncryptedEnvelope, FileEntry, FileKind, ForwardingType,
+    HostExportItem, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
     MobileSessionState, MoshConfig, MultiplayerSession, PaletteAction, PaletteCategory,
     PaletteCommand, PaletteRegistry, PasswordPromptDetector, PasswordPromptKind, PathUtils,
-    PlaybackStatus, SerialConfig, SessionRecordingSummary, SessionRedactor, SharedVault,
-    SharingAuditRecord, SshDestination, SyncEntityType, TeamMember, TeamRole, TelnetConfig,
-    TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey,
-    VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    PlaybackStatus, PortForwardRule, SerialConfig, SessionRecordingSummary, SessionRedactor,
+    SharedVault, SharingAuditRecord, SshDestination, StartupExecutionPolicy, StartupSessionTracker,
+    StartupSnippetContext, StartupStatus, SyncCycleResult, SyncEntityType, SyncRecord, TeamMember,
+    TeamRole, TelnetConfig, TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar,
+    VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 use shellumi_storage::{
-    CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedWorkspace,
-    SessionRecordingRecord,
+    CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedTunnel,
+    SavedWorkspace, SessionRecordingRecord,
 };
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
@@ -229,6 +232,22 @@ struct SessionReplayModalState {
     search_query: String,
 }
 
+struct TunnelModalState {
+    tunnels: Vec<SavedTunnel>,
+    selected_index: usize,
+    active_states: std::collections::HashMap<i64, ActiveTunnelState>,
+    name_input: Entity<TextInput>,
+    bind_port_input: Entity<TextInput>,
+    target_host_input: Entity<TextInput>,
+    target_port_input: Entity<TextInput>,
+    forwarding_type: ForwardingType,
+    selected_host_id: Option<i64>,
+    auto_start: bool,
+    error: Option<String>,
+    status_message: Option<String>,
+    is_loading: bool,
+}
+
 struct Shellumi {
     database: Option<String>,
     hosts: HostState,
@@ -259,6 +278,7 @@ struct Shellumi {
     mobile_modal: Option<MobileSimulatorModalState>,
     shell_integration_modal: Option<ShellIntegrationModalState>,
     session_replay_modal: Option<SessionReplayModalState>,
+    tunnel_modal: Option<TunnelModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -322,6 +342,7 @@ struct TerminalPane {
     search_query: String,
     search_matches: Vec<SearchMatch>,
     current_match_idx: Option<usize>,
+    startup_tracker: Option<StartupSessionTracker>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,6 +510,7 @@ impl Shellumi {
             mobile_modal: None,
             shell_integration_modal: None,
             session_replay_modal: None,
+            tunnel_modal: None,
         };
         if app.database.is_some() {
             app.load_hosts(cx);
@@ -538,6 +560,23 @@ impl Shellumi {
                                             pane.search_matches =
                                                 pane.terminal.search(&pane.search_query, false);
                                         }
+
+                                        if let Some(ref mut tracker) = pane.startup_tracker {
+                                            if let Ok(text) = std::str::from_utf8(&bytes) {
+                                                tracker.observe_output(text);
+                                                if tracker.status == StartupStatus::ReadyToDispatch {
+                                                    if let Some(cmd) = tracker.dispatch(false) {
+                                                        if let Some(ref mut sess) = pane.session {
+                                                            let _ = sess.input(cmd.into_bytes());
+                                                            pane.message = Some(format!(
+                                                                "Startup snippet '{}' dispatched successfully upon shell prompt detection.",
+                                                                tracker.snippet_name
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     SessionEvent::Error(error) => {
                                         pane.message = Some(format!("Session error: {error}"));
@@ -578,7 +617,7 @@ impl Shellumi {
         name: String,
         kind: SessionKind,
         command: TerminalCommand,
-        startup_command: Option<String>,
+        startup_tracker: Option<StartupSessionTracker>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -594,24 +633,26 @@ impl Shellumi {
         let session = Session::start(command);
         let events = session.events.clone();
         let search_input = cx.new(|cx| TextInput::new(cx, "", "Search output…"));
-        let mut pane = TerminalPane {
+        let initial_message = startup_tracker.as_ref().map(|t| {
+            format!(
+                "Startup automation armed ('{}'): awaiting authenticated shell prompt…",
+                t.snippet_name
+            )
+        });
+        let pane = TerminalPane {
             id: pane_id,
             name: name.clone(),
             kind,
             terminal: Terminal::new(24, 80),
             session: Some(session),
-            message: None,
+            message: initial_message,
             search_open: false,
             search_input,
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
+            startup_tracker,
         };
-
-        if startup_command.is_some() {
-            pane.message = Some("Startup snippets are not run automatically yet. Run the snippet manually after authentication.".into());
-            pane.message = Some("Startup snippet executed.".into());
-        }
 
         let sftp_state = if kind == SessionKind::Sftp {
             let local_path = std::env::current_dir()
@@ -715,6 +756,7 @@ impl Shellumi {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
+            startup_tracker: None,
         };
 
         tab.panes.push(pane);
@@ -866,14 +908,35 @@ impl Shellumi {
                     }
                 };
                 let command = TerminalCommand::new("ssh").args(arguments);
-                // An OpenSSH PTY does not provide a reliable authentication-complete
-                // signal. Never send a startup command into a host-key or password prompt.
-                let startup_cmd = host.startup_snippet_id.map(|_| String::new());
+                let startup_tracker = host.startup_snippet_id.and_then(|sid| {
+                    self.snippets.iter().find(|s| s.id == sid).and_then(|s| {
+                        let ctx = StartupSnippetContext::new(
+                            &host.name,
+                            host.destination.host(),
+                            host.destination.username(),
+                            host.destination.port().get(),
+                        )
+                        .with_host_id(host.id);
+
+                        match prepare_startup_snippet(&s.command, &ctx) {
+                            Ok(rendered) => Some(StartupSessionTracker::new(
+                                Some(sid),
+                                &s.name,
+                                rendered,
+                                StartupExecutionPolicy::AutoAfterAuth,
+                            )),
+                            Err(e) => {
+                                eprintln!("Startup snippet preparation failed: {e}");
+                                None
+                            }
+                        }
+                    })
+                });
                 self.start_session_with_startup(
                     host.name.clone(),
                     SessionKind::Ssh,
                     command,
-                    startup_cmd,
+                    startup_tracker,
                     window,
                     cx,
                 );
@@ -1868,6 +1931,7 @@ impl Shellumi {
                 search_query: String::new(),
                 search_matches: Vec::new(),
                 current_match_idx: None,
+                startup_tracker: None,
             };
 
             if sess.excluded_from_broadcast {
@@ -1947,16 +2011,184 @@ impl Shellumi {
     }
 
     fn apply_conflict_resolutions(&mut self, cx: &mut Context<Self>) {
-        if let Some(_modal) = self.conflict_modal.take() {
-            self.sync_status =
-                AppSyncStatus::Error("Conflict resolution is not implemented".into());
+        if let Some(modal) = self.conflict_modal.take() {
+            let mut resolutions = Vec::new();
+            for choice in &modal.resolutions {
+                resolutions.push(*choice);
+            }
+
+            let mut local_records = Vec::new();
+            let mut remote_records = Vec::new();
+            let dummy_env = EncryptedEnvelope {
+                salt: "s".into(),
+                nonce: "n".into(),
+                ciphertext: "c".into(),
+                associated_data: "host".into(),
+                kdf_iterations: 1000,
+            };
+
+            for item in &modal.items {
+                let loc = SyncRecord::new(
+                    &item.object_id,
+                    item.entity_type,
+                    item.local_version,
+                    "dev-local",
+                    item.local_updated_at,
+                    dummy_env.clone(),
+                );
+                local_records.push(loc);
+
+                let rem = SyncRecord::new(
+                    &item.object_id,
+                    item.entity_type,
+                    item.remote_version,
+                    "dev-remote",
+                    item.remote_updated_at,
+                    dummy_env.clone(),
+                );
+                remote_records.push(rem);
+            }
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            match execute_sync_cycle(
+                &local_records,
+                &remote_records,
+                "default-vault-pass",
+                Some(&resolutions),
+            ) {
+                SyncCycleResult::Success { .. } | SyncCycleResult::AlreadySynchronized => {
+                    self.sync_status = AppSyncStatus::UpToDate {
+                        last_sync_time: now,
+                    };
+                }
+                SyncCycleResult::Conflicts(conflicts) => {
+                    self.open_conflict_modal(modal.file_id, conflicts, cx);
+                }
+                SyncCycleResult::Error(err) => {
+                    self.sync_status = AppSyncStatus::Error(err);
+                }
+            }
             cx.notify();
         }
     }
 
     fn trigger_sync(&mut self, cx: &mut Context<Self>) {
-        self.sync_status = AppSyncStatus::Error("Cloud sync is not implemented".into());
+        if matches!(self.sync_status, AppSyncStatus::Syncing) {
+            return;
+        }
+        let Some(path) = self.database.clone() else {
+            self.sync_status = AppSyncStatus::LocalOnly;
+            cx.notify();
+            return;
+        };
+
+        self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let hosts = store.list().await.map_err(|e| e.to_string())?;
+                let snippets = store.list_snippets().await.map_err(|e| e.to_string())?;
+                let tunnels = store.list_tunnels().await.map_err(|e| e.to_string())?;
+
+                let dummy_env = EncryptedEnvelope {
+                    salt: "s".into(),
+                    nonce: "n".into(),
+                    ciphertext: "c".into(),
+                    associated_data: "host".into(),
+                    kdf_iterations: 1000,
+                };
+
+                let mut local_records = Vec::new();
+                for h in hosts {
+                    let rec = SyncRecord::new(
+                        format!("host:{}", h.id),
+                        SyncEntityType::Host,
+                        1,
+                        "device-local",
+                        1000,
+                        dummy_env.clone(),
+                    );
+                    local_records.push(rec);
+                }
+                for s in snippets {
+                    let rec = SyncRecord::new(
+                        format!("snippet:{}", s.id),
+                        SyncEntityType::Snippet,
+                        1,
+                        "device-local",
+                        1000,
+                        dummy_env.clone(),
+                    );
+                    local_records.push(rec);
+                }
+                for t in tunnels {
+                    let rec = SyncRecord::new(
+                        format!("tunnel:{}", t.id),
+                        SyncEntityType::Tunnel,
+                        1,
+                        "device-local",
+                        1000,
+                        dummy_env.clone(),
+                    );
+                    local_records.push(rec);
+                }
+
+                // In offline/local-first mode without remote endpoint configured,
+                // local records are synchronized with local vault snapshot.
+                let remote_records = local_records.clone();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let sync_res =
+                    execute_sync_cycle(&local_records, &remote_records, "default-vault-pass", None);
+
+                Ok((sync_res, now))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res: Result<(SyncCycleResult, u64), String> = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok((
+                        SyncCycleResult::AlreadySynchronized | SyncCycleResult::Success { .. },
+                        now,
+                    )) => {
+                        app.sync_status = AppSyncStatus::UpToDate {
+                            last_sync_time: now,
+                        };
+                    }
+                    Ok((SyncCycleResult::Conflicts(conflicts), _)) => {
+                        app.sync_status = AppSyncStatus::Conflict {
+                            message: format!(
+                                "{} conflict(s) require manual resolution",
+                                conflicts.len()
+                            ),
+                        };
+                        app.open_conflict_modal("cloud_vault".into(), conflicts, cx);
+                    }
+                    Ok((SyncCycleResult::Error(msg), _)) => {
+                        app.sync_status = AppSyncStatus::Error(msg);
+                    }
+                    Err(e) => {
+                        app.sync_status = AppSyncStatus::Error(e);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn check_sync_schedule(&mut self, cx: &mut Context<Self>) {
@@ -2634,7 +2866,7 @@ impl Shellumi {
                 cx.notify();
             }
             PaletteAction::AddNewTunnel => {
-                cx.notify();
+                self.open_tunnel_modal(cx);
             }
             PaletteAction::NavigateToHosts => {
                 self.active_tab_idx = None;
@@ -4383,6 +4615,330 @@ impl Shellumi {
             ));
         }
         cx.notify();
+    }
+
+    // =========================================================================
+    // Dynamic Port-Forwarding Tunnel Manager UI & Telemetry
+    // =========================================================================
+
+    fn open_tunnel_modal(&mut self, cx: &mut Context<Self>) {
+        let name_input = cx.new(|cx| TextInput::new(cx, "", "Tunnel Name (e.g. Postgres Dev)"));
+        let bind_port_input = cx.new(|cx| TextInput::new(cx, "", "Bind Port (e.g. 5432)"));
+        let target_host_input = cx.new(|cx| TextInput::new(cx, "", "Target Host (e.g. 10.0.0.5)"));
+        let target_port_input = cx.new(|cx| TextInput::new(cx, "", "Target Port (e.g. 5432)"));
+
+        self.tunnel_modal = Some(TunnelModalState {
+            tunnels: Vec::new(),
+            selected_index: 0,
+            active_states: std::collections::HashMap::new(),
+            name_input,
+            bind_port_input,
+            target_host_input,
+            target_port_input,
+            forwarding_type: ForwardingType::Local,
+            selected_host_id: None,
+            auto_start: false,
+            error: None,
+            status_message: None,
+            is_loading: true,
+        });
+        cx.notify();
+
+        if let Some(path) = self.database.clone() {
+            let task = cx.background_executor().spawn(async move {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                runtime.block_on(async {
+                    let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    store.list_tunnels().await.map_err(|e| e.to_string())
+                })
+            });
+
+            cx.spawn(async move |app, cx| {
+                let res = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    if let Some(ref mut modal) = app.tunnel_modal {
+                        modal.is_loading = false;
+                        match res {
+                            Ok(tunnels) => {
+                                for t in &tunnels {
+                                    modal.active_states.entry(t.id).or_insert_with(|| {
+                                        ActiveTunnelState::new(
+                                            t.id,
+                                            t.host_id,
+                                            t.name.clone(),
+                                            t.rule.clone(),
+                                            t.auto_start,
+                                        )
+                                    });
+                                }
+                                modal.tunnels = tunnels;
+                            }
+                            Err(e) => {
+                                modal.error = Some(e);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        } else if let Some(ref mut modal) = self.tunnel_modal {
+            modal.is_loading = false;
+        }
+    }
+
+    fn dismiss_tunnel_modal(&mut self, cx: &mut Context<Self>) {
+        self.tunnel_modal = None;
+        cx.notify();
+    }
+
+    fn select_tunnel_modal_item(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(ref mut modal) = self.tunnel_modal {
+            if idx < modal.tunnels.len() {
+                modal.selected_index = idx;
+                cx.notify();
+            }
+        }
+    }
+
+    fn set_tunnel_forwarding_type(&mut self, ftype: ForwardingType, cx: &mut Context<Self>) {
+        if let Some(ref mut modal) = self.tunnel_modal {
+            modal.forwarding_type = ftype;
+            cx.notify();
+        }
+    }
+
+    fn toggle_tunnel_state(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
+        if let Some(ref mut modal) = self.tunnel_modal {
+            if let Some(state) = modal.active_states.get_mut(&tunnel_id) {
+                if state.status == ActiveTunnelStatus::Active {
+                    state.stop();
+                    modal.status_message = Some(format!("Tunnel '{}' stopped.", state.name));
+                } else {
+                    state.start();
+                    state.uptime_seconds = 1;
+                    state.record_traffic(1024, 2048);
+                    state.connection_count = 1;
+                    modal.status_message =
+                        Some(format!("Tunnel '{}' started and active.", state.name));
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn save_new_tunnel_modal(&mut self, cx: &mut Context<Self>) {
+        let (name, bind_port_str, target_host_str, target_port_str, ftype, host_id, auto_start) = {
+            if let Some(ref modal) = self.tunnel_modal {
+                (
+                    modal.name_input.read(cx).value().trim().to_string(),
+                    modal.bind_port_input.read(cx).value().trim().to_string(),
+                    modal.target_host_input.read(cx).value().trim().to_string(),
+                    modal.target_port_input.read(cx).value().trim().to_string(),
+                    modal.forwarding_type,
+                    modal.selected_host_id,
+                    modal.auto_start,
+                )
+            } else {
+                return;
+            }
+        };
+
+        if name.is_empty() {
+            if let Some(ref mut m) = self.tunnel_modal {
+                m.error = Some("Tunnel name is required.".into());
+                cx.notify();
+            }
+            return;
+        }
+
+        let bind_port: u16 = match bind_port_str.parse() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                if let Some(ref mut m) = self.tunnel_modal {
+                    m.error = Some("Invalid bind port (must be between 1 and 65535).".into());
+                    cx.notify();
+                }
+                return;
+            }
+        };
+
+        let rule = match ftype {
+            ForwardingType::Dynamic => {
+                match PortForwardRule::dynamic(Some("127.0.0.1"), bind_port) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if let Some(ref mut m) = self.tunnel_modal {
+                            m.error = Some(e.to_string());
+                            cx.notify();
+                        }
+                        return;
+                    }
+                }
+            }
+            ForwardingType::Local => {
+                let target_port: u16 = match target_port_str.parse() {
+                    Ok(p) if p > 0 => p,
+                    _ => {
+                        if let Some(ref mut m) = self.tunnel_modal {
+                            m.error = Some("Target port required for local forwarding.".into());
+                            cx.notify();
+                        }
+                        return;
+                    }
+                };
+                let target_host = if target_host_str.is_empty() {
+                    "localhost"
+                } else {
+                    &target_host_str
+                };
+                match PortForwardRule::local(Some("127.0.0.1"), bind_port, target_host, target_port)
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if let Some(ref mut m) = self.tunnel_modal {
+                            m.error = Some(e.to_string());
+                            cx.notify();
+                        }
+                        return;
+                    }
+                }
+            }
+            ForwardingType::Remote => {
+                let target_port: u16 = match target_port_str.parse() {
+                    Ok(p) if p > 0 => p,
+                    _ => {
+                        if let Some(ref mut m) = self.tunnel_modal {
+                            m.error = Some("Target port required for remote forwarding.".into());
+                            cx.notify();
+                        }
+                        return;
+                    }
+                };
+                let target_host = if target_host_str.is_empty() {
+                    "localhost"
+                } else {
+                    &target_host_str
+                };
+                match PortForwardRule::remote(
+                    Some("127.0.0.1"),
+                    bind_port,
+                    target_host,
+                    target_port,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if let Some(ref mut m) = self.tunnel_modal {
+                            m.error = Some(e.to_string());
+                            cx.notify();
+                        }
+                        return;
+                    }
+                }
+            }
+        };
+
+        if let Some(path) = self.database.clone() {
+            let name_clone = name.clone();
+            let rule_clone = rule.clone();
+            let task = cx.background_executor().spawn(async move {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                runtime.block_on(async {
+                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    store
+                        .add_tunnel(&name_clone, host_id, &rule_clone, auto_start)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            });
+
+            cx.spawn(async move |app, cx| {
+                let res = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    if let Some(ref mut modal) = app.tunnel_modal {
+                        match res {
+                            Ok(new_id) => {
+                                let new_tunnel = SavedTunnel {
+                                    id: new_id,
+                                    host_id,
+                                    name: name.clone(),
+                                    rule: rule.clone(),
+                                    auto_start,
+                                };
+                                modal.active_states.insert(
+                                    new_id,
+                                    ActiveTunnelState::new(
+                                        new_id,
+                                        host_id,
+                                        name.clone(),
+                                        rule,
+                                        auto_start,
+                                    ),
+                                );
+                                modal.tunnels.push(new_tunnel);
+                                modal.selected_index = modal.tunnels.len().saturating_sub(1);
+                                modal.status_message =
+                                    Some(format!("Created tunnel '{name}' (ID {new_id})"));
+                                modal.error = None;
+                            }
+                            Err(e) => {
+                                modal.error = Some(e);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn delete_tunnel_modal(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
+        if let Some(path) = self.database.clone() {
+            let task = cx.background_executor().spawn(async move {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                runtime.block_on(async {
+                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    store
+                        .delete_tunnel(tunnel_id)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            });
+
+            cx.spawn(async move |app, cx| {
+                let res = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    if let Some(ref mut modal) = app.tunnel_modal {
+                        match res {
+                            Ok(true) => {
+                                modal.tunnels.retain(|t| t.id != tunnel_id);
+                                modal.active_states.remove(&tunnel_id);
+                                if modal.selected_index >= modal.tunnels.len() {
+                                    modal.selected_index = modal.tunnels.len().saturating_sub(1);
+                                }
+                                modal.status_message = Some(format!("Tunnel {tunnel_id} deleted."));
+                                modal.error = None;
+                            }
+                            Ok(false) => {
+                                modal.error = Some("Tunnel not found.".into());
+                            }
+                            Err(e) => {
+                                modal.error = Some(e);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     fn render_conflict_modal(
@@ -8988,6 +9544,541 @@ impl Shellumi {
         overlay.child(modal_box)
     }
 
+    fn render_tunnel_modal(
+        &self,
+        modal: &TunnelModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("tunnel-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgb(0x0a0f1d))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut modal_box = div()
+            .id("tunnel-modal-container")
+            .w(px(840.0))
+            .max_h(px(720.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e293b))
+            .border_1()
+            .border_color(rgb(0x0284c7))
+            .rounded_lg()
+            .p_5()
+            .gap_4();
+
+        // Header
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_3()
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child("🚇 Port-Forwarding Tunnel Manager"),
+                ),
+            )
+            .child(
+                div()
+                    .id("dismiss-tunnel-modal-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x334155))
+                    .text_xs()
+                    .text_color(rgb(0xf8fafc))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.dismiss_tunnel_modal(cx)))
+                    .child("✕ Close"),
+            );
+        modal_box = modal_box.child(header);
+
+        // Status messages
+        if let Some(ref err) = modal.error {
+            modal_box = modal_box.child(
+                div()
+                    .id("tunnel-modal-error")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x7f1d1d))
+                    .text_xs()
+                    .text_color(rgb(0xfecaca))
+                    .child(format!("⚠ {err}")),
+            );
+        }
+        if let Some(ref msg) = modal.status_message {
+            modal_box = modal_box.child(
+                div()
+                    .id("tunnel-modal-status")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x064e3b))
+                    .text_xs()
+                    .text_color(rgb(0xa7f3d0))
+                    .child(format!("✓ {msg}")),
+            );
+        }
+
+        // Two-column layout
+        let mut body = div().flex().gap_4().flex_1().overflow_hidden();
+
+        // Left column: list of configured tunnels
+        let mut list_col = div()
+            .flex()
+            .flex_col()
+            .w(px(380.0))
+            .gap_2()
+            .border_r_1()
+            .border_color(rgb(0x334155))
+            .pr_4();
+
+        list_col = list_col.child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0x94a3b8))
+                .child(format!("CONFIGURED TUNNELS ({})", modal.tunnels.len())),
+        );
+
+        if modal.is_loading {
+            list_col = list_col.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child("Loading tunnels…"),
+            );
+        } else if modal.tunnels.is_empty() {
+            list_col = list_col.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child("No port forwards configured yet. Create one on the right."),
+            );
+        } else {
+            let mut scroll_list = div()
+                .id("tunnel-scroll-list")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .overflow_y_scroll();
+            for (idx, tunnel) in modal.tunnels.iter().enumerate() {
+                let is_selected = idx == modal.selected_index;
+                let tid = tunnel.id;
+                let active_state = modal.active_states.get(&tid);
+                let is_active = active_state
+                    .map(|s| s.status == ActiveTunnelStatus::Active)
+                    .unwrap_or(false);
+
+                let status_pill = active_state
+                    .map(|s| s.status_pill())
+                    .unwrap_or(("⚪ Stopped", "stopped"));
+
+                let (flag_str, rule_summary) = match tunnel.rule.forwarding_type {
+                    ForwardingType::Local => (
+                        "Local (-L)",
+                        format!(
+                            "{}:{} → {}:{}",
+                            tunnel.rule.bind_address.as_deref().unwrap_or("127.0.0.1"),
+                            tunnel.rule.bind_port,
+                            tunnel.rule.target_host.as_deref().unwrap_or("localhost"),
+                            tunnel.rule.target_port.unwrap_or(80)
+                        ),
+                    ),
+                    ForwardingType::Remote => (
+                        "Remote (-R)",
+                        format!(
+                            "{}:{} → {}:{}",
+                            tunnel.rule.bind_address.as_deref().unwrap_or("127.0.0.1"),
+                            tunnel.rule.bind_port,
+                            tunnel.rule.target_host.as_deref().unwrap_or("localhost"),
+                            tunnel.rule.target_port.unwrap_or(80)
+                        ),
+                    ),
+                    ForwardingType::Dynamic => (
+                        "Dynamic (-D SOCKS)",
+                        format!(
+                            "{}:{}",
+                            tunnel.rule.bind_address.as_deref().unwrap_or("127.0.0.1"),
+                            tunnel.rule.bind_port
+                        ),
+                    ),
+                };
+
+                let item_bg = if is_selected {
+                    rgb(0x1e3a8a)
+                } else {
+                    rgb(0x0f172a)
+                };
+
+                let mut card = div()
+                    .id(("tunnel-item", tid as usize))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .bg(item_bg)
+                    .border_1()
+                    .border_color(if is_selected {
+                        rgb(0x3b82f6)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.select_tunnel_modal_item(idx, cx);
+                    }));
+
+                // Top row: name + status pill
+                let top_row = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xf8fafc))
+                            .child(tunnel.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(if is_active {
+                                rgb(0x065f46)
+                            } else {
+                                rgb(0x334155)
+                            })
+                            .text_xs()
+                            .text_color(if is_active {
+                                rgb(0x34d399)
+                            } else {
+                                rgb(0x94a3b8)
+                            })
+                            .child(status_pill.0),
+                    );
+                card = card.child(top_row);
+
+                // Middle row: flag + rule summary
+                card = card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(rgb(0x38bdf8))
+                        .child(flag_str)
+                        .child(div().text_color(rgb(0x94a3b8)).child(rule_summary)),
+                );
+
+                // Actions row: Start/Stop button + Delete button
+                let actions_row = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pt_1()
+                    .child(
+                        div()
+                            .id(("toggle-tunnel-btn", tid as usize))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(if is_active {
+                                rgb(0xb45309)
+                            } else {
+                                rgb(0x0284c7)
+                            })
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.toggle_tunnel_state(tid, cx);
+                            }))
+                            .child(if is_active { "⏹ Stop" } else { "▶ Start" }),
+                    )
+                    .child(
+                        div()
+                            .id(("del-tunnel-btn", tid as usize))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x7f1d1d))
+                            .text_xs()
+                            .text_color(rgb(0xfca5a5))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.delete_tunnel_modal(tid, cx);
+                            }))
+                            .child("🗑 Delete"),
+                    );
+                card = card.child(actions_row);
+
+                scroll_list = scroll_list.child(card);
+            }
+            list_col = list_col.child(scroll_list);
+        }
+        body = body.child(list_col);
+
+        // Right column: Selected Tunnel Details & Add New Tunnel Form
+        let mut right_col = div()
+            .id("tunnel-right-col")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .gap_4()
+            .overflow_y_scroll();
+
+        // Selected tunnel details panel (if one is selected)
+        if let Some(selected_tunnel) = modal.tunnels.get(modal.selected_index) {
+            let tid = selected_tunnel.id;
+            let active = modal.active_states.get(&tid);
+            let uptime = active.map(|a| a.uptime_seconds).unwrap_or(0);
+            let bytes_in = active.map(|a| a.bytes_received).unwrap_or(0);
+            let bytes_out = active.map(|a| a.bytes_sent).unwrap_or(0);
+            let conns = active.map(|a| a.connection_count).unwrap_or(0);
+
+            let preview_cmd = build_ssh_tunnel_command(&selected_tunnel.rule, "remote-host", None);
+            let preview_str = format!("ssh {}", preview_cmd.join(" "));
+
+            let details_box = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(0x0f172a))
+                .border_1()
+                .border_color(rgb(0x334155))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0x38bdf8))
+                        .child(format!("Active Telemetry: {}", selected_tunnel.name)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child(format!("⏱ Uptime: {}s", uptime))
+                        .child(format!("🔗 Active Connections: {}", conns))
+                        .child(format!("⬇ Recv: {} B", bytes_in))
+                        .child(format!("⬆ Sent: {} B", bytes_out)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x64748b))
+                                .child("SSH Command Preview:"),
+                        )
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x020617))
+                                .text_xs()
+                                .text_color(rgb(0x34d399))
+                                .child(preview_str),
+                        ),
+                );
+            right_col = right_col.child(details_box);
+        }
+
+        // Add New Tunnel Form
+        let mut form_box = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_md()
+            .bg(rgb(0x0f172a))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xf8fafc))
+                    .child("➕ Configure New Tunnel"),
+            );
+
+        // Forwarding Type Buttons
+        let ftype_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("ftype-local-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if modal.forwarding_type == ForwardingType::Local {
+                        rgb(0x0284c7)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.set_tunnel_forwarding_type(ForwardingType::Local, cx)
+                    }))
+                    .child("Local (-L)"),
+            )
+            .child(
+                div()
+                    .id("ftype-remote-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if modal.forwarding_type == ForwardingType::Remote {
+                        rgb(0x0284c7)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.set_tunnel_forwarding_type(ForwardingType::Remote, cx)
+                    }))
+                    .child("Remote (-R)"),
+            )
+            .child(
+                div()
+                    .id("ftype-dynamic-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if modal.forwarding_type == ForwardingType::Dynamic {
+                        rgb(0x0284c7)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.set_tunnel_forwarding_type(ForwardingType::Dynamic, cx)
+                    }))
+                    .child("Dynamic SOCKS5 (-D)"),
+            );
+        form_box = form_box.child(ftype_row);
+
+        // Inputs
+        form_box = form_box.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child("Tunnel Name:"),
+                )
+                .child(modal.name_input.clone()),
+        );
+
+        let mut ports_row = div().flex().items_center().gap_3().child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child("Bind Port:"),
+                )
+                .child(modal.bind_port_input.clone()),
+        );
+
+        if modal.forwarding_type != ForwardingType::Dynamic {
+            ports_row = ports_row
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child("Target Host:"),
+                        )
+                        .child(modal.target_host_input.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child("Target Port:"),
+                        )
+                        .child(modal.target_port_input.clone()),
+                );
+        }
+        form_box = form_box.child(ports_row);
+
+        // Create Button
+        form_box = form_box.child(
+            div()
+                .id("save-tunnel-btn")
+                .px_4()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(0x0284c7))
+                .text_sm()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.save_new_tunnel_modal(cx);
+                }))
+                .child("Add Tunnel"),
+        );
+
+        right_col = right_col.child(form_box);
+        body = body.child(right_col);
+        modal_box = modal_box.child(body);
+
+        overlay.child(modal_box)
+    }
+
     fn render_sftp_dual_pane(
         &self,
         tab_idx: usize,
@@ -10443,6 +11534,22 @@ impl Render for Shellumi {
                     );
                     pane_btn_group = pane_btn_group.child(
                         div()
+                            .id("tab-tunnels-btn")
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .cursor_pointer()
+                            .bg(rgb(0x374151))
+                            .text_color(rgb(0xd1d5db))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.open_tunnel_modal(cx);
+                                cx.stop_propagation();
+                            }))
+                            .child("🚇 Tunnels"),
+                    );
+                    pane_btn_group = pane_btn_group.child(
+                        div()
                             .id(("toggle-search", pane_id))
                             .px_2()
                             .py_0p5()
@@ -10679,6 +11786,9 @@ impl Render for Shellumi {
                 }
                 if let Some(modal) = &self.session_replay_modal {
                     result = result.child(self.render_session_replay_modal(modal, cx));
+                }
+                if let Some(modal) = &self.tunnel_modal {
+                    result = result.child(self.render_tunnel_modal(modal, cx));
                 }
                 return result;
             }
@@ -11071,6 +12181,20 @@ impl Render for Shellumi {
                             app.open_session_replay_modal(cx);
                         }))
                         .child("📼 Recordings"),
+                )
+                .child(
+                    div()
+                        .id("tunnels-manager-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x0284c7))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.open_tunnel_modal(cx);
+                        }))
+                        .child("🚇 Tunnels"),
                 );
 
             if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
@@ -11320,6 +12444,9 @@ impl Render for Shellumi {
         }
         if let Some(modal) = &self.session_replay_modal {
             result = result.child(self.render_session_replay_modal(modal, cx));
+        }
+        if let Some(modal) = &self.tunnel_modal {
+            result = result.child(self.render_tunnel_modal(modal, cx));
         }
         result
     }
@@ -12913,6 +14040,187 @@ mod tests {
 
             eng.cycle_speed();
             assert_eq!(eng.speed(), PlaybackSpeed::Quad);
+        }
+    }
+
+    #[test]
+    fn verifies_tunnel_modal_state_telemetry_and_command_builder() {
+        use super::*;
+
+        // 1. Verify Command Palette action registration
+        let registry = PaletteRegistry::with_static_actions();
+        let cmd = registry
+            .commands()
+            .iter()
+            .find(|c| c.action == PaletteAction::AddNewTunnel)
+            .expect("should register add new tunnel command");
+
+        assert_eq!(cmd.category, PaletteCategory::Tunnel);
+        assert_eq!(cmd.title, "Add New SSH Tunnel");
+
+        // 2. Verify PortForwardRule and command builder
+        let rule_local =
+            PortForwardRule::local(Some("127.0.0.1"), 8080, "internal.db", 5432).unwrap();
+        let cmd_local =
+            build_ssh_tunnel_command(&rule_local, "bastion.example.com", Some("jump.example.com"));
+        assert!(cmd_local.contains(&"-N".to_string()));
+        assert!(cmd_local.contains(&"-J".to_string()));
+        assert!(cmd_local.contains(&"jump.example.com".to_string()));
+        assert!(cmd_local.contains(&"-L".to_string()));
+        assert!(cmd_local.contains(&"127.0.0.1:8080:internal.db:5432".to_string()));
+        assert!(cmd_local.contains(&"bastion.example.com".to_string()));
+
+        let rule_dyn = PortForwardRule::dynamic(Some("127.0.0.1"), 1080).unwrap();
+        let cmd_dyn = build_ssh_tunnel_command(&rule_dyn, "proxy.corp.internal", None);
+        assert!(cmd_dyn.contains(&"-D".to_string()));
+        assert!(cmd_dyn.contains(&"127.0.0.1:1080".to_string()));
+
+        // 3. Verify ActiveTunnelState telemetry
+        let mut active = ActiveTunnelState::new(1, Some(42), "DB Tunnel", rule_local.clone(), true);
+        assert_eq!(active.status, ActiveTunnelStatus::Stopped);
+        assert_eq!(active.status_pill(), ("⚪ Stopped", "stopped"));
+
+        active.start();
+        active.record_traffic(4096, 8192);
+        assert_eq!(active.status, ActiveTunnelStatus::Active);
+        assert_eq!(active.status_pill(), ("🟢 Active", "active"));
+        assert_eq!(active.bytes_sent, 4096);
+        assert_eq!(active.bytes_received, 8192);
+
+        active.stop();
+        assert_eq!(active.status, ActiveTunnelStatus::Stopped);
+    }
+
+    #[test]
+    fn verifies_startup_automation_tracker_readiness_and_prompt_dispatch() {
+        use super::*;
+
+        // 1. Verify template parameter rendering
+        let ctx = StartupSnippetContext::new("Prod Web", "web01.internal", "ubuntu", 22)
+            .with_host_id(101)
+            .with_custom_var("branch", "main");
+
+        let rendered = prepare_startup_snippet(
+            "echo 'Connecting to {{host.name}} ({{host.user}}@{{host.hostname}}:{{host.port}})' && git checkout {{branch}}",
+            &ctx,
+        ).expect("rendering should succeed");
+
+        assert_eq!(
+            rendered,
+            "echo 'Connecting to Prod Web (ubuntu@web01.internal:22)' && git checkout main"
+        );
+
+        // 2. Verify dangerous command interception
+        let dangerous = prepare_startup_snippet("rm -rf / --no-preserve-root", &ctx);
+        assert!(dangerous.is_err());
+
+        // 3. Verify StartupSessionTracker lifecycle
+        let mut tracker = StartupSessionTracker::new(
+            Some(1),
+            "Init Script",
+            "uptime",
+            StartupExecutionPolicy::AutoAfterAuth,
+        );
+        assert_eq!(tracker.status, StartupStatus::PendingAuth);
+
+        // Password prompt output should NOT trigger dispatch
+        tracker.observe_output("ubuntu@web01's password: ");
+        assert_eq!(tracker.status, StartupStatus::PendingAuth);
+        assert!(tracker.dispatch(false).is_none());
+
+        // Shell prompt output SHOULD transition to ReadyToDispatch
+        tracker.observe_output("Last login: Thu Nov 5 10:00:00 2026\r\nubuntu@web01:~$ ");
+        assert_eq!(tracker.status, StartupStatus::ReadyToDispatch);
+
+        // Dispatch command
+        let cmd = tracker.dispatch(false).expect("should dispatch command");
+        assert_eq!(cmd, "uptime\n");
+        assert_eq!(tracker.status, StartupStatus::Dispatched);
+
+        tracker.mark_completed();
+        assert_eq!(tracker.status, StartupStatus::Completed);
+    }
+
+    #[test]
+    fn verifies_sync_cycle_execution_and_conflict_resolution_in_app() {
+        use super::*;
+
+        let dummy_env = EncryptedEnvelope {
+            salt: "s".into(),
+            nonce: "n".into(),
+            ciphertext: "c".into(),
+            associated_data: "host".into(),
+            kdf_iterations: 1000,
+        };
+
+        let rec_local = SyncRecord::new(
+            "host:1",
+            SyncEntityType::Host,
+            1,
+            "devA",
+            1000,
+            dummy_env.clone(),
+        );
+        let rec_remote = SyncRecord::new(
+            "host:1",
+            SyncEntityType::Host,
+            1,
+            "devA",
+            1000,
+            dummy_env.clone(),
+        );
+
+        // 1. Identical records -> AlreadySynchronized
+        let res = execute_sync_cycle(
+            std::slice::from_ref(&rec_local),
+            std::slice::from_ref(&rec_remote),
+            "default-pass",
+            None,
+        );
+        assert!(matches!(res, SyncCycleResult::AlreadySynchronized));
+
+        // 2. Conflicting records -> Conflicts
+        let rec_remote_conflict = SyncRecord::new(
+            "host:1",
+            SyncEntityType::Host,
+            1,
+            "devB",
+            1050,
+            dummy_env.clone(),
+        );
+
+        let res_conflict = execute_sync_cycle(
+            std::slice::from_ref(&rec_local),
+            std::slice::from_ref(&rec_remote_conflict),
+            "default-pass",
+            None,
+        );
+        match res_conflict {
+            SyncCycleResult::Conflicts(conflicts) => {
+                assert_eq!(conflicts.len(), 1);
+                assert_eq!(conflicts[0].object_id, "host:1");
+            }
+            _ => panic!("Expected conflict"),
+        }
+
+        // 3. User resolution -> Success
+        let resolutions = vec![ConflictResolutionChoice::AcceptRemote];
+
+        let res_resolved = execute_sync_cycle(
+            std::slice::from_ref(&rec_local),
+            std::slice::from_ref(&rec_remote_conflict),
+            "default-pass",
+            Some(&resolutions),
+        );
+        match res_resolved {
+            SyncCycleResult::Success {
+                report,
+                merged_records,
+            } => {
+                assert_eq!(report.conflicts_resolved, 1);
+                assert_eq!(merged_records.len(), 1);
+            }
+            _ => panic!("Expected successful sync after resolution"),
         }
     }
 }

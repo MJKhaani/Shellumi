@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForwardingType {
     Local,
     Remote,
@@ -77,7 +77,7 @@ impl fmt::Display for TunnelError {
 impl std::error::Error for TunnelError {}
 
 /// A validated SSH port forwarding rule.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PortForwardRule {
     pub forwarding_type: ForwardingType,
     pub bind_address: Option<String>,
@@ -346,6 +346,123 @@ pub fn validate_jump_host(jump: &str) -> Result<String, TunnelError> {
     Ok(trimmed.to_string())
 }
 
+/// Runtime status of an SSH port forwarding tunnel.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActiveTunnelStatus {
+    Stopped,
+    Connecting,
+    Active,
+    Error(String),
+}
+
+impl fmt::Display for ActiveTunnelStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stopped => f.write_str("Stopped"),
+            Self::Connecting => f.write_str("Connecting…"),
+            Self::Active => f.write_str("Active"),
+            Self::Error(err) => write!(f, "Error: {err}"),
+        }
+    }
+}
+
+/// Real-time state and telemetry for an active SSH port forwarding tunnel.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveTunnelState {
+    pub id: i64,
+    pub host_id: Option<i64>,
+    pub name: String,
+    pub rule: PortForwardRule,
+    pub auto_start: bool,
+    pub status: ActiveTunnelStatus,
+    pub uptime_seconds: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub connection_count: u32,
+}
+
+impl ActiveTunnelState {
+    pub fn new(
+        id: i64,
+        host_id: Option<i64>,
+        name: impl Into<String>,
+        rule: PortForwardRule,
+        auto_start: bool,
+    ) -> Self {
+        Self {
+            id,
+            host_id,
+            name: name.into(),
+            rule,
+            auto_start,
+            status: ActiveTunnelStatus::Stopped,
+            uptime_seconds: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+            connection_count: 0,
+        }
+    }
+
+    pub fn start(&mut self) {
+        self.status = ActiveTunnelStatus::Active;
+    }
+
+    pub fn stop(&mut self) {
+        self.status = ActiveTunnelStatus::Stopped;
+        self.uptime_seconds = 0;
+    }
+
+    pub fn set_error(&mut self, err: impl Into<String>) {
+        self.status = ActiveTunnelStatus::Error(err.into());
+    }
+
+    pub fn record_traffic(&mut self, sent: u64, received: u64) {
+        self.bytes_sent = self.bytes_sent.saturating_add(sent);
+        self.bytes_received = self.bytes_received.saturating_add(received);
+    }
+
+    pub fn status_pill(&self) -> (&'static str, &'static str) {
+        match &self.status {
+            ActiveTunnelStatus::Active => ("🟢 Active", "active"),
+            ActiveTunnelStatus::Connecting => ("🟡 Connecting", "connecting"),
+            ActiveTunnelStatus::Stopped => ("⚪ Stopped", "stopped"),
+            ActiveTunnelStatus::Error(_) => ("🔴 Error", "error"),
+        }
+    }
+}
+
+/// Builds the OpenSSH command-line argument vector to launch an SSH tunnel session in the background
+/// or foreground (`ssh -N -o ExitOnForwardFailure=yes ...`).
+pub fn build_ssh_tunnel_command(
+    rule: &PortForwardRule,
+    destination: &str,
+    jump_host: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "-N".to_string(), // Do not execute a remote command (tunnel only)
+        "-o".to_string(),
+        "ExitOnForwardFailure=yes".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=30".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+    ];
+
+    if let Some(jump) = jump_host {
+        if !jump.trim().is_empty() {
+            args.push("-J".to_string());
+            args.push(jump.trim().to_string());
+        }
+    }
+
+    let (flag, val) = rule.openssh_argument();
+    args.push(flag.to_string());
+    args.push(val);
+
+    args.push(destination.to_string());
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +565,40 @@ mod tests {
         assert!(validate_jump_host("host; rm -rf /").is_err());
         assert!(validate_jump_host("host`id`").is_err());
         assert!(validate_jump_host("host$USER").is_err());
+    }
+
+    #[test]
+    fn active_tunnel_state_and_command_builder() {
+        let rule = PortForwardRule::local(Some("127.0.0.1"), 8080, "db.internal", 5432).unwrap();
+        let mut tunnel =
+            ActiveTunnelState::new(1, Some(10), "Postgres Forward", rule.clone(), true);
+
+        assert_eq!(tunnel.status, ActiveTunnelStatus::Stopped);
+        let (pill, _) = tunnel.status_pill();
+        assert_eq!(pill, "⚪ Stopped");
+
+        tunnel.start();
+        assert_eq!(tunnel.status, ActiveTunnelStatus::Active);
+        let (pill_active, _) = tunnel.status_pill();
+        assert_eq!(pill_active, "🟢 Active");
+
+        tunnel.record_traffic(1024, 2048);
+        assert_eq!(tunnel.bytes_sent, 1024);
+        assert_eq!(tunnel.bytes_received, 2048);
+
+        tunnel.set_error("Port 8080 in use");
+        assert!(matches!(tunnel.status, ActiveTunnelStatus::Error(_)));
+
+        tunnel.stop();
+        assert_eq!(tunnel.status, ActiveTunnelStatus::Stopped);
+
+        // Command builder
+        let cmd = build_ssh_tunnel_command(&rule, "ubuntu@bastion.corp:22", Some("jump.corp:2222"));
+        assert!(cmd.contains(&"-N".to_string()));
+        assert!(cmd.contains(&"-J".to_string()));
+        assert!(cmd.contains(&"jump.corp:2222".to_string()));
+        assert!(cmd.contains(&"-L".to_string()));
+        assert!(cmd.contains(&"127.0.0.1:8080:db.internal:5432".to_string()));
+        assert_eq!(cmd.last().unwrap(), "ubuntu@bastion.corp:22");
     }
 }

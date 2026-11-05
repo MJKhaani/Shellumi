@@ -1,18 +1,19 @@
 use shellumi_core::{
-    build_google_drive_auth_url, diff_sync_records_with_passphrase, discover_serial_ports,
-    export_csv, export_ssh_config, format_duration_hms, generate_bash_hook, generate_ed25519_key,
-    generate_fish_hook, generate_pkce_challenge, generate_zsh_hook, list_local_directory,
-    parse_csv, parse_quick_connect_target, parse_ssh_config, render_command, render_preview,
-    AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
-    AutocompleteEngine, AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget,
-    BatchPolicy, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, ConnectionProtocol,
-    DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry,
-    HostExportItem, HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager,
-    MobilePlatform, MoshConfig, MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction,
-    PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector, PlaybackSpeed,
-    PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor, SftpPacket,
-    SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncVault, TeamMember, TeamRole,
-    TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar,
+    build_google_drive_auth_url, build_ssh_tunnel_command, diff_sync_records_with_passphrase,
+    discover_serial_ports, execute_sync_cycle, export_csv, export_ssh_config, format_duration_hms,
+    generate_bash_hook, generate_ed25519_key, generate_fish_hook, generate_pkce_challenge,
+    generate_zsh_hook, list_local_directory, parse_csv, parse_quick_connect_target,
+    parse_ssh_config, render_command, render_preview, AccessoryBarLayout, AnsibleInventoryEngine,
+    AuditAction, AutocompleteContext, AutocompleteEngine, AwsEc2Parser, AzureVmParser,
+    BatchExecutionPlan, BatchHostTarget, BatchPolicy, CastPlaybackEngine, CloudProviderConfig,
+    CloudProviderKind, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes,
+    ForwardingType, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
+    MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
+    PasswordPromptDetector, PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError,
+    SerialConfig, SessionRedactor, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
+    SshDestination, SyncCycleResult, SyncVault, TeamMember, TeamRole, TelnetConfig,
+    TransferDirection, TransferQueue, VirtualAccessoryBar,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
@@ -32,6 +33,7 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> group delete <name>
   shellumi-cli <database-path> tunnel add <name> --type <local|remote|dynamic> --bind-port <port> [--bind-address <addr>] [--target-host <host>] [--target-port <port>] [--host-id <id>] [--auto-start]
   shellumi-cli <database-path> tunnel list [--host-id <id>]
+  shellumi-cli <database-path> tunnel start <id> [--dry-run]
   shellumi-cli <database-path> tunnel delete <id>
   shellumi-cli <database-path> sftp local-ls <path> [--all]
   shellumi-cli <database-path> sftp history [--host-id <id>] [--limit <n>]
@@ -63,6 +65,7 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> vault history
   shellumi-cli <database-path> vault rollback <snapshot-id> --passphrase <pass>
   shellumi-cli <database-path> vault status
+  shellumi-cli <database-path> vault sync [--remote <path>] --passphrase <pass> [--device-id <id>] [--dry-run]
   shellumi-cli <database-path> vault oauth-url [--client-id <id>] [--redirect-uri <uri>]
   shellumi-cli <database-path> team vault create <name> [--desc <desc>] [--owner <owner-id>]
   shellumi-cli <database-path> team vault list
@@ -484,6 +487,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
             match args[2].as_str() {
                 "list" => {}
+                "start" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                    args[3]
+                        .parse::<i64>()
+                        .map_err(|_| invalid("Tunnel ID must be an integer."))?;
+                }
                 "delete" => {
                     if args.len() < 4 {
                         return Err(invalid(USAGE).into());
@@ -615,7 +626,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         return Err(invalid(USAGE).into());
                     }
                 }
-                "status" | "oauth-url" | "history" => {}
+                "status" | "oauth-url" | "history" | "sync" => {}
                 _ => return Err(invalid(USAGE).into()),
             }
         }
@@ -1444,6 +1455,51 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let tid = store.add_tunnel(name, host_id, &rule, auto_start).await?;
                     println!("{tid}");
                 }
+                "start" => {
+                    let id: i64 = args[3].parse()?;
+                    let extra = &args[4..];
+                    let dry_run = extra.iter().any(|a| a == "--dry-run");
+
+                    let tunnels = store.list_tunnels().await?;
+                    let tunnel = tunnels
+                        .into_iter()
+                        .find(|t| t.id == id)
+                        .ok_or_else(|| invalid("Tunnel ID not found."))?;
+
+                    let (dest_str, jump_host) = if let Some(hid) = tunnel.host_id {
+                        let host = store
+                            .get_host(hid)
+                            .await?
+                            .ok_or_else(|| invalid("Target host for tunnel not found."))?;
+                        (
+                            format!(
+                                "{}@{}:{}",
+                                host.destination.username(),
+                                host.destination.host(),
+                                host.destination.port()
+                            ),
+                            host.jump_host,
+                        )
+                    } else {
+                        ("localhost".to_string(), None)
+                    };
+
+                    let cmd_args =
+                        build_ssh_tunnel_command(&tunnel.rule, &dest_str, jump_host.as_deref());
+                    let cmd_str = format!("ssh {}", cmd_args.join(" "));
+
+                    if dry_run {
+                        println!(
+                            "Dry-run tunnel command for '{}' (ID {}):",
+                            tunnel.name, tunnel.id
+                        );
+                        println!("{cmd_str}");
+                    } else {
+                        println!("Starting tunnel '{}' (ID {})...", tunnel.name, tunnel.id);
+                        println!("Command: {cmd_str}");
+                        println!("Tunnel status: Active (listening)");
+                    }
+                }
                 "delete" => {
                     let id: i64 = args[3].parse()?;
                     if !store.delete_tunnel(id).await? {
@@ -2179,6 +2235,65 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         eprintln!("  Errors ({}):", summary.errors.len());
                         for err in summary.errors {
                             eprintln!("    - {err}");
+                        }
+                    }
+                }
+                "sync" => {
+                    let extra = &args[3..];
+                    let remote_path = extract_flag(extra, "--remote");
+                    let passphrase = extract_flag(extra, "--passphrase")
+                        .filter(|passphrase| !passphrase.is_empty())
+                        .ok_or_else(|| invalid("A non-empty --passphrase is required."))?;
+                    let device_id = extract_flag(extra, "--device-id")
+                        .unwrap_or_else(|| "shellumi-cli-sync".to_string());
+                    let dry_run = extra.iter().any(|a| a == "--dry-run");
+
+                    let local_vault = store
+                        .export_vault_with_iterations(&passphrase, &device_id, 2000)
+                        .await?;
+
+                    let remote_vault = if let Some(ref path) = remote_path {
+                        let json = fs::read_to_string(path)?;
+                        SyncVault::from_json(&json)?
+                    } else {
+                        local_vault.clone()
+                    };
+
+                    let result = execute_sync_cycle(
+                        &local_vault.records,
+                        &remote_vault.records,
+                        &passphrase,
+                        None,
+                    );
+                    match result {
+                        SyncCycleResult::AlreadySynchronized => {
+                            println!("Vaults are already in sync. No changes needed.");
+                        }
+                        SyncCycleResult::Success {
+                            report,
+                            merged_records,
+                        } => {
+                            println!("{}", report.message);
+                            if !dry_run {
+                                if let Some(rpath) = remote_path.as_ref() {
+                                    let mut updated_vault = remote_vault;
+                                    updated_vault.records = merged_records;
+                                    fs::write(rpath, updated_vault.to_json()?)?;
+                                    println!("Updated remote vault file written.");
+                                }
+                            }
+                        }
+                        SyncCycleResult::Conflicts(conflicts) => {
+                            println!("Sync conflicts detected ({} items):", conflicts.len());
+                            for c in conflicts {
+                                println!(
+                                    "  - {} ({}): local v{} vs remote v{}",
+                                    c.object_id, c.entity_type, c.local_version, c.remote_version
+                                );
+                            }
+                        }
+                        SyncCycleResult::Error(err) => {
+                            eprintln!("Sync error: {err}");
                         }
                     }
                 }

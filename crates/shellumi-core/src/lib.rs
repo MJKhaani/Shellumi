@@ -18,6 +18,7 @@ pub mod recording;
 pub mod sftp;
 pub mod snippet;
 pub mod ssh_config;
+pub mod startup;
 pub mod sync;
 pub mod tunnel;
 pub mod workspace;
@@ -104,24 +105,31 @@ pub use snippet::{
     shell_escape, Snippet, SnippetError, SnippetVariable,
 };
 pub use ssh_config::{export_ssh_config, parse_ssh_config, HostConfigEntry};
+pub use startup::{
+    prepare_startup_snippet, StartupError, StartupExecutionPolicy, StartupSessionTracker,
+    StartupSnippetContext, StartupStatus,
+};
 pub use sync::{
     build_conflict_item_views, build_delete_file_request, build_download_file_request,
     build_google_drive_auth_url, build_list_appdata_files_request, build_multipart_upload_request,
     build_oauth_callback_response, build_token_exchange_request, build_token_refresh_request,
     build_update_file_request, decrypt_entity, determine_sync_action, diff_sync_records,
     diff_sync_records_with_passphrase, encrypt_entity, encrypt_entity_with_iterations,
-    format_record_summary, generate_nonce, generate_pkce_challenge, generate_salt,
-    parse_download_file_response, parse_list_files_response, parse_oauth_callback_request,
-    parse_token_exchange_response, parse_token_refresh_response, parse_upload_file_response,
-    plan_sync_cycle, resolve_record_conflict, url_encode, ConflictItemView,
-    ConflictResolutionChoice, DiffStatus, DriveFileMetadata, EncryptedEnvelope,
+    execute_sync_cycle, format_record_summary, generate_nonce, generate_pkce_challenge,
+    generate_salt, parse_download_file_response, parse_list_files_response,
+    parse_oauth_callback_request, parse_token_exchange_response, parse_token_refresh_response,
+    parse_upload_file_response, plan_sync_cycle, resolve_record_conflict, url_encode,
+    ConflictItemView, ConflictResolutionChoice, DiffStatus, DriveFileMetadata, EncryptedEnvelope,
     GoogleDriveSyncClient, HttpRequest, HttpResponse, HttpTransport, OAuthCallbackListener,
-    OAuthTokenBundle, PkceChallenge, RecordDiffSummary, SyncAction, SyncBackoff, SyncEntityType,
-    SyncError, SyncPlan, SyncRecord, SyncScheduler, SyncTrigger, SyncVault, DEFAULT_KDF_ITERATIONS,
-    DRIVE_APPDATA_FILENAME, KEY_LEN, MIN_PASSPHRASE_LENGTH, OAUTH_TOKEN_ACCOUNT,
-    OAUTH_TOKEN_SERVICE, SALT_LEN,
+    OAuthTokenBundle, PkceChallenge, RecordDiffSummary, SyncAction, SyncBackoff, SyncCycleResult,
+    SyncEntityType, SyncError, SyncExecutionReport, SyncPlan, SyncRecord, SyncScheduler,
+    SyncTrigger, SyncVault, DEFAULT_KDF_ITERATIONS, DRIVE_APPDATA_FILENAME, KEY_LEN,
+    MIN_PASSPHRASE_LENGTH, OAUTH_TOKEN_ACCOUNT, OAUTH_TOKEN_SERVICE, SALT_LEN,
 };
-pub use tunnel::{validate_jump_host, ForwardingType, PortForwardRule, TunnelError};
+pub use tunnel::{
+    build_ssh_tunnel_command, validate_jump_host, ActiveTunnelState, ActiveTunnelStatus,
+    ForwardingType, PortForwardRule, TunnelError,
+};
 pub use workspace::{
     check_dangerous_command, BroadcastManager, BroadcastSafetyCheck, Workspace, WorkspaceError,
     WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
