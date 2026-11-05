@@ -5,15 +5,15 @@ use shellumi_core::{
     generate_zsh_hook, list_local_directory, parse_csv, parse_quick_connect_target,
     parse_ssh_config, render_command, render_preview, AccessoryBarLayout, AnsibleInventoryEngine,
     AuditAction, AutocompleteContext, AutocompleteEngine, AwsEc2Parser, AzureVmParser,
-    BatchExecutionPlan, BatchHostTarget, BatchPolicy, CastPlaybackEngine, CloudProviderConfig,
-    CloudProviderKind, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes,
-    ForwardingType, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
-    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
-    MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
-    PasswordPromptDetector, PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError,
-    SerialConfig, SessionRedactor, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
-    SshDestination, SyncCycleResult, SyncVault, TeamMember, TeamRole, TelnetConfig,
-    TransferDirection, TransferQueue, VirtualAccessoryBar,
+    BatchExecutionPlan, BatchHostTarget, BatchPolicy, BenchmarkCategory, BenchmarkRunner,
+    CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, ConnectionProtocol,
+    DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry,
+    HostExportItem, HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager,
+    MobilePlatform, MoshConfig, MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction,
+    PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector, PlaybackSpeed,
+    PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor, SftpPacket,
+    SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncCycleResult, SyncVault,
+    TeamMember, TeamRole, TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
@@ -102,6 +102,7 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> export-csv
   shellumi-cli keygen [--comment <comment>]
   shellumi-cli doctor [--json] [--markdown] [--db <path>]
+  shellumi-cli bench [--json] [--markdown] [--category <category>]
   shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check|header|build-info>
   shellumi-cli complete <query> [--dir <dir>]
   shellumi-cli <database-path> complete <query>
@@ -240,6 +241,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
 
         if report.has_failures() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if args[0] == "bench" {
+        let is_json = args.iter().any(|a| a == "--json");
+        let is_markdown = args.iter().any(|a| a == "--markdown");
+        let category_str = extract_flag(&args[1..], "--category");
+        let category = category_str.and_then(|c| BenchmarkCategory::from_str_loose(&c));
+
+        let report = BenchmarkRunner::run_suite(category);
+
+        if is_json {
+            println!("{}", report.to_json()?);
+        } else if is_markdown {
+            println!("{}", report.to_markdown());
+        } else {
+            print!("{}", report.format_terminal_table());
+        }
+
+        if !report.is_healthy() {
             std::process::exit(1);
         }
         return Ok(());
@@ -786,8 +809,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
         }
-        "doctor" | "mobile" | "complete" => {}
+        "doctor" | "mobile" | "complete" | "bench" => {}
         _ => return Err(invalid(USAGE).into()),
+    }
+
+    if command == "bench" {
+        let is_json = args.iter().any(|a| a == "--json");
+        let is_markdown = args.iter().any(|a| a == "--markdown");
+        let category_str = extract_flag(&args[2..], "--category");
+        let category = category_str.and_then(|c| BenchmarkCategory::from_str_loose(&c));
+
+        let report = BenchmarkRunner::run_suite(category);
+
+        if is_json {
+            println!("{}", report.to_json()?);
+        } else if is_markdown {
+            println!("{}", report.to_markdown());
+        } else {
+            print!("{}", report.format_terminal_table());
+        }
+
+        if !report.is_healthy() {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     if command == "doctor" {

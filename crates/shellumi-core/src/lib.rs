@@ -2,6 +2,7 @@
 
 pub mod autocomplete;
 pub mod batch;
+pub mod bench;
 pub mod collaboration;
 pub mod credential;
 pub mod csv;
@@ -31,6 +32,9 @@ pub use autocomplete::{
 pub use batch::{
     BatchExecutionPlan, BatchExecutionSummary, BatchHostResult, BatchHostStatus, BatchHostTarget,
     BatchPolicy, BatchRunner,
+};
+pub use bench::{
+    BenchmarkCategory, BenchmarkMetric, BenchmarkReport, BenchmarkRunner, BenchmarkStatus,
 };
 pub use collaboration::{
     AuditAction, CollaborationError, LogBookmark, LogComment, MultiplayerParticipant,

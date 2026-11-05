@@ -2033,3 +2033,46 @@ fn session_recording_cli_lifecycle() {
         .unwrap()
         .contains("No session recordings found."));
 }
+
+#[test]
+fn supports_performance_benchmarks_via_cli() {
+    // 1. Text table output with category filter
+    let out_text = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["bench", "--category", "network"])
+        .output()
+        .unwrap();
+    assert!(out_text.status.success());
+    let text = String::from_utf8(out_text.stdout).unwrap();
+    assert!(text.contains("SHELLUMI PERFORMANCE BENCHMARK REPORT"));
+    assert!(text.contains("port_forward_spec_parsing"));
+
+    // 2. JSON structured output
+    let out_json = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["bench", "--json", "--category", "template"])
+        .output()
+        .unwrap();
+    assert!(out_json.status.success());
+    let json_str = String::from_utf8(out_json.stdout).unwrap();
+    assert!(json_str.contains("\"name\": \"startup_template_resolution\""));
+    assert!(json_str.contains("\"passed_count\": 1"));
+
+    // 3. Markdown formatted output
+    let out_md = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["bench", "--markdown", "--category", "autocomplete"])
+        .output()
+        .unwrap();
+    assert!(out_md.status.success());
+    let md = String::from_utf8(out_md.stdout).unwrap();
+    assert!(md.contains("# Shellumi Performance Benchmark Report"));
+    assert!(md.contains("In-Terminal Autocomplete"));
+
+    // 4. Invocation with database prefix
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bench_test.db");
+    let out_db = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["bench", "--category", "network"])
+        .output()
+        .unwrap();
+    assert!(out_db.status.success());
+}

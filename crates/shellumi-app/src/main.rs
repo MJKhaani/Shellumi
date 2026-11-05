@@ -12,18 +12,19 @@ use shellumi_core::{
     prepare_startup_snippet, validate_jump_host, AccessoryBarLayout, ActiveTunnelState,
     ActiveTunnelStatus, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
     AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus,
-    BatchHostTarget, BatchPolicy, BatchRunner, BroadcastManager, BroadcastSafetyCheck,
-    CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, CompletionItem, CompletionKind,
-    ConflictItemView, ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus,
-    DiagnosticsReport, DiagnosticsRunner, EncryptedEnvelope, FileEntry, FileKind, ForwardingType,
-    HostExportItem, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
-    MobileSessionState, MoshConfig, MultiplayerSession, PaletteAction, PaletteCategory,
-    PaletteCommand, PaletteRegistry, PasswordPromptDetector, PasswordPromptKind, PathUtils,
-    PlaybackStatus, PortForwardRule, SerialConfig, SessionRecordingSummary, SessionRedactor,
-    SharedVault, SharingAuditRecord, SshDestination, StartupExecutionPolicy, StartupSessionTracker,
-    StartupSnippetContext, StartupStatus, SyncCycleResult, SyncEntityType, SyncRecord, TeamMember,
-    TeamRole, TelnetConfig, TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar,
-    VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner, BenchmarkStatus,
+    BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine, CloudProviderConfig,
+    CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView, ConflictResolutionChoice,
+    ConnectionProtocol, DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, EncryptedEnvelope,
+    FileEntry, FileKind, ForwardingType, HostExportItem, MobileLifecycleEvent,
+    MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession,
+    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
+    PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule, SerialConfig,
+    SessionRecordingSummary, SessionRedactor, SharedVault, SharingAuditRecord, SshDestination,
+    StartupExecutionPolicy, StartupSessionTracker, StartupSnippetContext, StartupStatus,
+    SyncCycleResult, SyncEntityType, SyncRecord, TeamMember, TeamRole, TelnetConfig,
+    TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey,
+    VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedTunnel,
@@ -157,9 +158,18 @@ struct InfraModalState {
     is_loading: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiagnosticsModalTab {
+    HealthChecks,
+    Benchmarks,
+}
+
 struct DiagnosticsModalState {
+    active_tab: DiagnosticsModalTab,
     report: Option<DiagnosticsReport>,
+    benchmark_report: Option<BenchmarkReport>,
     is_running: bool,
+    is_running_benchmarks: bool,
     error: Option<String>,
 }
 
@@ -2900,6 +2910,9 @@ impl Shellumi {
             PaletteAction::RunDiagnostics => {
                 self.open_diagnostics_modal(cx);
             }
+            PaletteAction::RunBenchmarks => {
+                self.open_benchmarks_modal(cx);
+            }
             PaletteAction::OpenMobileSimulator => {
                 self.open_mobile_modal(cx);
             }
@@ -4114,17 +4127,57 @@ impl Shellumi {
 
     fn open_diagnostics_modal(&mut self, cx: &mut Context<Self>) {
         self.diagnostics_modal = Some(DiagnosticsModalState {
+            active_tab: DiagnosticsModalTab::HealthChecks,
             report: None,
+            benchmark_report: None,
             is_running: true,
+            is_running_benchmarks: false,
             error: None,
         });
         cx.notify();
         self.run_diagnostics_checks(cx);
     }
 
+    fn open_benchmarks_modal(&mut self, cx: &mut Context<Self>) {
+        self.diagnostics_modal = Some(DiagnosticsModalState {
+            active_tab: DiagnosticsModalTab::Benchmarks,
+            report: None,
+            benchmark_report: None,
+            is_running: false,
+            is_running_benchmarks: true,
+            error: None,
+        });
+        cx.notify();
+        self.run_benchmarks(cx);
+    }
+
     fn dismiss_diagnostics_modal(&mut self, cx: &mut Context<Self>) {
         self.diagnostics_modal = None;
         cx.notify();
+    }
+
+    fn run_benchmarks(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref mut m) = self.diagnostics_modal {
+            m.is_running_benchmarks = true;
+            m.error = None;
+        }
+        cx.notify();
+
+        let task = cx
+            .background_executor()
+            .spawn(async move { BenchmarkRunner::run_suite(None) });
+
+        cx.spawn(async move |app, cx| {
+            let report = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(m) = &mut app.diagnostics_modal {
+                    m.is_running_benchmarks = false;
+                    m.benchmark_report = Some(report);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn run_diagnostics_checks(&mut self, cx: &mut Context<Self>) {
@@ -7638,190 +7691,497 @@ impl Shellumi {
             );
         modal_box = modal_box.child(header);
 
-        if modal.is_running {
-            let loading = div()
-                .p_8()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(
-                    div()
-                        .text_lg()
-                        .text_color(rgb(0x38bdf8))
-                        .child("⏳ Running system diagnostic checks..."),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x94a3b8))
-                        .child("Testing OpenSSH binary, CSPRNG, AEAD ciphers, network loopback, and storage integrity..."),
-                );
-            modal_box = modal_box.child(loading);
-        } else if let Some(ref report) = modal.report {
-            let (passed, warnings, failures) = report.counts();
-
-            // Status Banner
-            let (banner_bg, banner_fg, banner_text) = if failures > 0 {
-                (
-                    rgb(0x7f1d1d),
-                    rgb(0xfecaca),
-                    format!("❌ Action Required: {failures} critical check(s) failed."),
-                )
-            } else if warnings > 0 {
-                (
-                    rgb(0x78350f),
-                    rgb(0xfde68a),
-                    format!("⚠️ Degraded: All critical tests passed, but {warnings} warning(s) detected."),
-                )
-            } else {
-                (
-                    rgb(0x065f46),
-                    rgb(0xa7f3d0),
-                    "✅ All Systems Ready: All production environment prerequisites passed."
-                        .to_string(),
-                )
-            };
-
-            let status_strip = div()
-                .px_4()
-                .py_2p5()
-                .rounded_md()
-                .bg(banner_bg)
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(banner_fg)
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(banner_text)
-                .child(format!(
-                    "Passed: {passed} | Warnings: {warnings} | Failed: {failures}"
-                ));
-            modal_box = modal_box.child(status_strip);
-
-            // Checks list
-            let mut checks_list = div()
-                .id("diagnostics-checks-list")
-                .flex()
-                .flex_col()
-                .gap_2()
-                .overflow_y_scroll()
-                .max_h(px(320.0));
-
-            for (c_idx, check) in report.checks.iter().enumerate() {
-                let (badge_bg, badge_fg) = match check.status {
-                    DiagnosticStatus::Passed => (rgb(0x065f46), rgb(0xa7f3d0)),
-                    DiagnosticStatus::Warning => (rgb(0x78350f), rgb(0xfde68a)),
-                    DiagnosticStatus::Failed => (rgb(0x7f1d1d), rgb(0xfecaca)),
-                };
-
-                let mut row = div()
-                    .id(("diag-check-row", c_idx))
-                    .p_3()
+        // Sub-Navigation Tabs
+        let tabs = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgb(0x334155))
+            .pb_2()
+            .child(
+                div()
+                    .id("diag-tab-health")
+                    .px_3()
+                    .py_1p5()
                     .rounded_md()
-                    .bg(rgb(0x0f172a))
-                    .border_1()
-                    .border_color(rgb(0x334155))
-                    .flex()
-                    .flex_col()
-                    .gap_1p5();
+                    .cursor_pointer()
+                    .bg(if modal.active_tab == DiagnosticsModalTab::HealthChecks {
+                        rgb(0x0f766e)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(if modal.active_tab == DiagnosticsModalTab::HealthChecks {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x94a3b8)
+                    })
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if let Some(ref mut m) = app.diagnostics_modal {
+                            m.active_tab = DiagnosticsModalTab::HealthChecks;
+                            if m.report.is_none() && !m.is_running {
+                                app.run_diagnostics_checks(cx);
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child("🩺 System Health Checks"),
+            )
+            .child(
+                div()
+                    .id("diag-tab-benchmarks")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(if modal.active_tab == DiagnosticsModalTab::Benchmarks {
+                        rgb(0x2563eb)
+                    } else {
+                        rgb(0x334155)
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(if modal.active_tab == DiagnosticsModalTab::Benchmarks {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x94a3b8)
+                    })
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if let Some(ref mut m) = app.diagnostics_modal {
+                            m.active_tab = DiagnosticsModalTab::Benchmarks;
+                            if m.benchmark_report.is_none() && !m.is_running_benchmarks {
+                                app.run_benchmarks(cx);
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child("⚡ Performance Benchmarks"),
+            );
+        modal_box = modal_box.child(tabs);
 
-                let row_header = div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
+        match modal.active_tab {
+            DiagnosticsModalTab::HealthChecks => {
+                if modal.is_running {
+                    let loading = div()
+                        .p_8()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_lg()
+                                .text_color(rgb(0x38bdf8))
+                                .child("⏳ Running system diagnostic checks..."),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child("Testing OpenSSH binary, CSPRNG, AEAD ciphers, network loopback, and storage integrity..."),
+                        );
+                    modal_box = modal_box.child(loading);
+                } else if let Some(ref report) = modal.report {
+                    let (passed, warnings, failures) = report.counts();
+
+                    // Status Banner
+                    let (banner_bg, banner_fg, banner_text) = if failures > 0 {
+                        (
+                            rgb(0x7f1d1d),
+                            rgb(0xfecaca),
+                            format!("❌ Action Required: {failures} critical check(s) failed."),
+                        )
+                    } else if warnings > 0 {
+                        (
+                            rgb(0x78350f),
+                            rgb(0xfde68a),
+                            format!("⚠️ Degraded: All critical tests passed, but {warnings} warning(s) detected."),
+                        )
+                    } else {
+                        (
+                            rgb(0x065f46),
+                            rgb(0xa7f3d0),
+                            "✅ All Systems Ready: All production environment prerequisites passed."
+                                .to_string(),
+                        )
+                    };
+
+                    let status_strip = div()
+                        .px_4()
+                        .py_2p5()
+                        .rounded_md()
+                        .bg(banner_bg)
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(banner_fg)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(banner_text)
+                        .child(format!(
+                            "Passed: {passed} | Warnings: {warnings} | Failed: {failures}"
+                        ));
+                    modal_box = modal_box.child(status_strip);
+
+                    // Checks list
+                    let mut checks_list = div()
+                        .id("diagnostics-checks-list")
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .overflow_y_scroll()
+                        .max_h(px(320.0));
+
+                    for (c_idx, check) in report.checks.iter().enumerate() {
+                        let (badge_bg, badge_fg) = match check.status {
+                            DiagnosticStatus::Passed => (rgb(0x065f46), rgb(0xa7f3d0)),
+                            DiagnosticStatus::Warning => (rgb(0x78350f), rgb(0xfde68a)),
+                            DiagnosticStatus::Failed => (rgb(0x7f1d1d), rgb(0xfecaca)),
+                        };
+
+                        let mut row = div()
+                            .id(("diag-check-row", c_idx))
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .border_1()
+                            .border_color(rgb(0x334155))
+                            .flex()
+                            .flex_col()
+                            .gap_1p5();
+
+                        let row_header = div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child(div().text_sm().child(check.category.icon()))
+                            .justify_between()
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
-                                    .child(check.name.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x64748b))
-                                    .child(format!("{}ms", check.duration_ms)),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_sm().child(check.category.icon()))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xf8fafc))
+                                            .child(check.name.clone()),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(badge_bg)
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(badge_fg)
-                                    .child(check.status.badge()),
-                            ),
-                    );
-                row = row.child(row_header);
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x64748b))
+                                            .child(format!("{}ms", check.duration_ms)),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(badge_bg)
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(badge_fg)
+                                            .child(check.status.badge()),
+                                    ),
+                            );
+                        row = row.child(row_header);
 
-                let row_msg = div()
-                    .text_xs()
-                    .text_color(rgb(0x94a3b8))
-                    .child(check.message.clone());
-                row = row.child(row_msg);
+                        let row_msg = div()
+                            .text_xs()
+                            .text_color(rgb(0x94a3b8))
+                            .child(check.message.clone());
+                        row = row.child(row_msg);
 
-                if let Some(ref rem) = check.remediation {
-                    let row_rem = div()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(rgb(0x1e293b))
-                        .text_xs()
-                        .text_color(rgb(0x38bdf8))
-                        .child(format!("↳ Remediation: {rem}"));
-                    row = row.child(row_rem);
+                        if let Some(ref rem) = check.remediation {
+                            let row_rem = div()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(rgb(0x1e293b))
+                                .text_xs()
+                                .text_color(rgb(0x38bdf8))
+                                .child(format!("↳ Remediation: {rem}"));
+                            row = row.child(row_rem);
+                        }
+
+                        checks_list = checks_list.child(row);
+                    }
+                    modal_box = modal_box.child(checks_list);
+
+                    // Footer controls
+                    let footer = div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(0x334155))
+                        .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
+                            "Platform: {} [{}]",
+                            report.os_platform, report.os_arch
+                        )))
+                        .child(
+                            div()
+                                .id("rerun-diagnostics-btn")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(rgb(0x0f766e))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.run_diagnostics_checks(cx);
+                                }))
+                                .child("🔄 Re-run Checks"),
+                        );
+                    modal_box = modal_box.child(footer);
                 }
-
-                checks_list = checks_list.child(row);
             }
-            modal_box = modal_box.child(checks_list);
+            DiagnosticsModalTab::Benchmarks => {
+                if modal.is_running_benchmarks {
+                    let loading = div()
+                        .p_8()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_lg()
+                                .text_color(rgb(0x38bdf8))
+                                .child("⏳ Running deterministic micro-benchmarks..."),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child("Evaluating AES-256-GCM AEAD, PBKDF2 stretching, autocomplete, template engine, and sync diffing..."),
+                        );
+                    modal_box = modal_box.child(loading);
+                } else if let Some(ref b_report) = modal.benchmark_report {
+                    let (b_bg, b_fg, b_title) = if b_report.failed_count > 0 {
+                        (
+                            rgb(0x7f1d1d),
+                            rgb(0xfecaca),
+                            format!(
+                                "❌ SLA Breach: {} benchmark(s) failed strict SLAs.",
+                                b_report.failed_count
+                            ),
+                        )
+                    } else if b_report.warning_count > 0 {
+                        (
+                            rgb(0x78350f),
+                            rgb(0xfde68a),
+                            format!(
+                                "⚠️ SLA Warning: {} benchmark(s) close to SLA threshold.",
+                                b_report.warning_count
+                            ),
+                        )
+                    } else {
+                        (
+                            rgb(0x065f46),
+                            rgb(0xa7f3d0),
+                            "✅ All Performance Benchmarks Passed: Subsystem throughput and latency exceed strict SLA targets."
+                                .to_string(),
+                        )
+                    };
 
-            // Footer controls
-            let footer = div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .pt_2()
-                .border_t_1()
-                .border_color(rgb(0x334155))
-                .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
-                    "Platform: {} [{}]",
-                    report.os_platform, report.os_arch
-                )))
-                .child(
-                    div()
-                        .id("rerun-diagnostics-btn")
-                        .px_3()
-                        .py_1p5()
+                    let status_strip = div()
+                        .px_4()
+                        .py_2p5()
                         .rounded_md()
-                        .bg(rgb(0x0f766e))
+                        .bg(b_bg)
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.run_diagnostics_checks(cx);
-                        }))
-                        .child("🔄 Re-run Checks"),
-                );
-            modal_box = modal_box.child(footer);
+                        .text_color(b_fg)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(b_title)
+                        .child(format!(
+                            "Total: {:.1}ms | Passed: {} | Warnings: {} | Failed: {}",
+                            b_report.total_duration_ms,
+                            b_report.passed_count,
+                            b_report.warning_count,
+                            b_report.failed_count
+                        ));
+                    modal_box = modal_box.child(status_strip);
+
+                    let mut bench_list = div()
+                        .id("diagnostics-bench-list")
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .overflow_y_scroll()
+                        .max_h(px(320.0));
+
+                    for (b_idx, metric) in b_report.metrics.iter().enumerate() {
+                        let (badge_bg, badge_fg) = match metric.status {
+                            BenchmarkStatus::Passed => (rgb(0x065f46), rgb(0xa7f3d0)),
+                            BenchmarkStatus::Warning => (rgb(0x78350f), rgb(0xfde68a)),
+                            BenchmarkStatus::Failed => (rgb(0x7f1d1d), rgb(0xfecaca)),
+                        };
+
+                        let latency_str = if metric.latency_us_per_op >= 1000.0 {
+                            format!("{:.2} ms/op", metric.latency_us_per_op / 1000.0)
+                        } else {
+                            format!("{:.1} µs/op", metric.latency_us_per_op)
+                        };
+
+                        let throughput_str = if let Some(mbps) = metric.throughput_mb_per_sec {
+                            format!("{:.1} MB/s", mbps)
+                        } else if metric.ops_per_sec >= 1000.0 {
+                            format!("{:.0} k ops/s", metric.ops_per_sec / 1000.0)
+                        } else {
+                            format!("{:.0} ops/s", metric.ops_per_sec)
+                        };
+
+                        let mut row = div()
+                            .id(("diag-bench-row", b_idx))
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x0f172a))
+                            .border_1()
+                            .border_color(rgb(0x334155))
+                            .flex()
+                            .flex_col()
+                            .gap_1p5();
+
+                        let row_header = div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_sm().child(metric.category.icon()))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xf8fafc))
+                                            .child(metric.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x64748b))
+                                            .child(format!("({} iters)", metric.iterations)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0x38bdf8))
+                                            .child(throughput_str),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x94a3b8))
+                                            .child(latency_str),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(badge_bg)
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(badge_fg)
+                                            .child(metric.status.badge()),
+                                    ),
+                            );
+                        row = row.child(row_header);
+
+                        let row_desc = div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x94a3b8))
+                                    .child(metric.description.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xca8a04))
+                                    .child(format!("SLA: {}", metric.target_sla)),
+                            );
+                        row = row.child(row_desc);
+
+                        if !metric.note.is_empty() {
+                            let row_note = div()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(rgb(0x1e293b))
+                                .text_xs()
+                                .text_color(rgb(0x64748b))
+                                .child(format!("↳ {}", metric.note));
+                            row = row.child(row_note);
+                        }
+
+                        bench_list = bench_list.child(row);
+                    }
+                    modal_box = modal_box.child(bench_list);
+
+                    let bench_footer = div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(0x334155))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x64748b))
+                                .child("Local Deterministic Micro-Benchmarks (All Offline)"),
+                        )
+                        .child(
+                            div()
+                                .id("rerun-benchmarks-btn")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(rgb(0x2563eb))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.run_benchmarks(cx);
+                                }))
+                                .child("⚡ Re-run Benchmarks"),
+                        );
+                    modal_box = modal_box.child(bench_footer);
+                }
+            }
         }
 
         overlay.child(modal_box)
@@ -13750,6 +14110,30 @@ mod tests {
         assert_eq!(passed, 2);
         assert_eq!(warnings, 0);
         assert_eq!(failures, 0);
+
+        // Verify benchmark palette registration and modal tab state
+        let bench_cmd = registry
+            .commands()
+            .iter()
+            .find(|c| c.action == PaletteAction::RunBenchmarks)
+            .expect("should register benchmarks command");
+        assert_eq!(bench_cmd.category, PaletteCategory::Diagnostics);
+        assert_eq!(bench_cmd.title, "Run Performance Benchmarks");
+        assert!(bench_cmd.keywords.contains(&"bench".to_string()));
+
+        let modal_state = super::DiagnosticsModalState {
+            active_tab: super::DiagnosticsModalTab::Benchmarks,
+            report: None,
+            benchmark_report: None,
+            is_running: false,
+            is_running_benchmarks: true,
+            error: None,
+        };
+        assert_eq!(
+            modal_state.active_tab,
+            super::DiagnosticsModalTab::Benchmarks
+        );
+        assert!(modal_state.is_running_benchmarks);
     }
 
     #[test]

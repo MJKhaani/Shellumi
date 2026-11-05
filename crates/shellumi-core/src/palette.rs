@@ -98,6 +98,7 @@ pub enum PaletteAction {
     ImportAnsibleInventory,
     ExportAnsibleInventory,
     RunDiagnostics,
+    RunBenchmarks,
     OpenMobileSimulator,
     OpenShellIntegrationModal,
     OpenSessionRecordings,
@@ -396,6 +397,27 @@ impl PaletteRegistry {
                 "audit",
                 "system",
                 "verify",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:benchmarks",
+                "Run Performance Benchmarks",
+                "Execute deterministic micro-benchmarks for AEAD crypto, KDF, autocomplete, and templates",
+                PaletteCategory::Diagnostics,
+                PaletteAction::RunBenchmarks,
+            )
+            .with_shortcut("Cmd+Alt+B")
+            .with_keywords([
+                "bench",
+                "benchmark",
+                "perf",
+                "performance",
+                "speed",
+                "throughput",
+                "latency",
+                "sla",
             ]),
         );
 
@@ -726,6 +748,15 @@ mod tests {
         assert_eq!(
             doctor_results[0].command.action,
             PaletteAction::RunDiagnostics
+        );
+
+        // Keyword "bench" -> "Run Performance Benchmarks"
+        let bench_results = registry.search("bench");
+        assert!(!bench_results.is_empty());
+        assert_eq!(bench_results[0].command.title, "Run Performance Benchmarks");
+        assert_eq!(
+            bench_results[0].command.action,
+            PaletteAction::RunBenchmarks
         );
         assert_eq!(PaletteCategory::Diagnostics.as_str(), "Diagnostics");
         assert_eq!(PaletteCategory::Diagnostics.badge_icon(), "🩺");
