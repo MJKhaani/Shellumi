@@ -5,6 +5,7 @@ pub mod collaboration;
 pub mod credential;
 pub mod csv;
 pub mod diagnostics;
+pub mod ffi;
 pub mod group;
 pub mod identity;
 pub mod infrastructure;
@@ -37,6 +38,12 @@ pub use csv::{export_csv, parse_csv};
 pub use diagnostics::{
     DiagnosticCategory, DiagnosticCheck, DiagnosticSeverity, DiagnosticStatus, DiagnosticsReport,
     DiagnosticsRunner,
+};
+pub use ffi::{
+    shellumi_core_version, shellumi_generate_keypair_c, shellumi_get_credential_spec_c,
+    shellumi_lifecycle_transition_c, shellumi_mobile_platform_supported,
+    shellumi_parse_destination_c, shellumi_string_free, shellumi_translate_virtual_key_c,
+    SHELLUMI_MODIFIER_ALT, SHELLUMI_MODIFIER_CTRL, SHELLUMI_MODIFIER_SHIFT,
 };
 pub use group::{resolve_effective_destination, resolve_effective_tags, GroupError, HostGroup};
 pub use identity::{

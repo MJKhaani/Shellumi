@@ -1,0 +1,12 @@
+// UniFFI Interface Definition for Shellumi Core Mobile Bindings
+// This definition enables automated code generation for Swift (iOS) and Kotlin (Android).
+
+namespace shellumi {
+    string core_version();
+    boolean mobile_platform_supported(string platform_name);
+    string parse_destination(string target);
+    string generate_keypair(string? comment);
+    string translate_virtual_key(string key_name, u32 modifier_flags);
+    string lifecycle_transition(string current_state, string event_name, u64 param, u64 epoch_seconds);
+    string get_credential_spec(string platform, string service_name, string account_name, boolean require_biometric);
+};

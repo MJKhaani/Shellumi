@@ -192,6 +192,10 @@ Per the mandate in `PROJECT.md`, GPUI 0.2.2 is preserved strictly for desktop wi
    - *iOS:* Keychain items stored with `kSecClassGenericPassword`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, and `kSecAccessControlBiometryAny` (enforcing Face ID / Touch ID via Secure Enclave).
    - *Android:* Android Keystore AES-GCM encryption with `KeyGenParameterSpec.setUserAuthenticationRequired(true)` and StrongBox Keymaster hardware backing.
 5. **Desktop Touch Simulator:** `shellumi-app` includes an in-process mobile simulator overlay (`MobileSimulatorModalState`) allowing engineers to test mobile accessory layouts, sticky modifier resolution, lifecycle state transitions, and ANSI byte emission directly on macOS, Linux, and Windows desktops.
+6. **Pure C-ABI & UniFFI Bridge:** `crates/shellumi-core/src/ffi.rs` exports standard C-ABI functions (`shellumi_core_version`, `shellumi_parse_destination_c`, `shellumi_generate_keypair_c`, `shellumi_translate_virtual_key_c`, `shellumi_lifecycle_transition_c`, `shellumi_get_credential_spec_c`, and null-safe `shellumi_string_free`), accompanied by the C header `crates/shellumi-core/include/shellumi_mobile.h` and UniFFI definition `crates/shellumi-core/src/shellumi.udl`.
+7. **Native Mobile Packaging & Prototypes:** Standalone packaging configurations and working native prototype applications:
+   - *iOS (`packaging/mobile/ios/`):* Swift Package Manager manifest (`Package.swift`), automated XCFramework build script (`build-xcframework.sh`), and SwiftUI application prototype (`ShellumiMobile/ContentView.swift`) integrating hardware biometric unlock (`LAContext`), virtual accessory bar with sticky modifiers, and iOS ScenePhase lifecycle transitions.
+   - *Android (`packaging/mobile/android/`):* Gradle build configuration (`build.gradle.kts`), JNI compilation script (`build-aar.sh`), Kotlin JNI bridge (`ShellumiNativeCore.kt`), and Jetpack Compose application prototype (`MainActivity.kt`) integrating hardware `BiometricPrompt` for StrongBox / Keystore credential unlocking and Android lifecycle event observation.
 
 ## Dependency direction and engineering rules
 

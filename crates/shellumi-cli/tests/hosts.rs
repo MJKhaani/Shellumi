@@ -1796,7 +1796,7 @@ async fn supports_mobile_cli_and_virtual_keys() {
     assert!(str_life.contains("Initial state: Connected"));
     assert!(str_life.contains("Transformed state after background: Background (Grace Period)"));
 
-    // 3. FFI bridge contract verification
+    // 3. FFI bridge contract verification & C-ABI
     let out_ffi = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
         .args(["mobile", "ffi-check"])
         .output()
@@ -1805,8 +1805,33 @@ async fn supports_mobile_cli_and_virtual_keys() {
     let str_ffi = String::from_utf8(out_ffi.stdout).unwrap();
     assert!(str_ffi.contains("Mobile FFI contracts verified successfully"));
     assert!(str_ffi.contains("\"ok\":true"));
+    assert!(str_ffi.contains("C-ABI Core Version: 0.1.0"));
+    assert!(str_ffi.contains("C-ABI Destination Parsing:"));
+    assert!(str_ffi.contains("C-ABI Virtual Key Translation:"));
 
-    // 4. Database-prefixed invocation
+    // 4. Header inspection
+    let out_header = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["mobile", "header"])
+        .output()
+        .unwrap();
+    assert!(out_header.status.success());
+    let str_header = String::from_utf8(out_header.stdout).unwrap();
+    assert!(str_header.contains("Shellumi Mobile C-ABI Header:"));
+    assert!(str_header.contains("shellumi_core_version"));
+    assert!(str_header.contains("shellumi_string_free"));
+
+    // 5. Build info inspection
+    let out_build = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["mobile", "build-info"])
+        .output()
+        .unwrap();
+    assert!(out_build.status.success());
+    let str_build = String::from_utf8(out_build.stdout).unwrap();
+    assert!(str_build.contains("Shellumi Mobile Packaging & Build Specification:"));
+    assert!(str_build.contains("aarch64-apple-ios"));
+    assert!(str_build.contains("aarch64-linux-android"));
+
+    // 6. Database-prefixed invocation
     let out_db_mobile = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
         .arg(db.to_str().unwrap())
         .args(["mobile", "virtual-keys"])

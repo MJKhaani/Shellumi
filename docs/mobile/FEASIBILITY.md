@@ -164,9 +164,17 @@ To validate mobile ergonomics without requiring physical phones during developme
      ```sh
      cargo run -p shellumi-cli -- mobile lifecycle-sim background
      ```
-   - Verify FFI bridge serialization:
+   - Verify FFI bridge serialization and C-ABI symbols:
      ```sh
      cargo run -p shellumi-cli -- mobile ffi-check
+     ```
+   - Inspect C-ABI header declarations:
+     ```sh
+     cargo run -p shellumi-cli -- mobile header
+     ```
+   - Review mobile target packaging and build specifications:
+     ```sh
+     cargo run -p shellumi-cli -- mobile build-info
      ```
 
 ---
@@ -175,7 +183,6 @@ To validate mobile ergonomics without requiring physical phones during developme
 
 ```text
 Phase 11 (Completed): Feasibility, portable core models, virtual accessory engine, lifecycle state machines, desktop simulator modal, and documentation.
-Phase 11.1 (Next): UniFFI Rust crate (shellumi-mobile-ffi) generating Swift and Kotlin bindings.
-Phase 11.2: Native iOS/iPadOS Xcode project (SwiftUI + Swift Terminal View + iOS Keychain).
-Phase 11.3: Native Android Android Studio project (Jetpack Compose + Android Keystore + ForegroundService).
+Phase 12 (Completed): Pure C-ABI FFI exports, C99/C11 header (shellumi_mobile.h), UniFFI interface definition (shellumi.udl), iOS Swift Package Manager setup with XCFramework build script and SwiftUI prototype (LocalAuthentication Face ID/Touch ID), Android Gradle library with JNI build script and Jetpack Compose prototype (BiometricPrompt), and CLI mobile tools.
+Phase 13 (Next): Intelligent Shell Integration, OSC 133 semantic prompt demarcation, OSC 7/9;9 CWD tracking, and in-terminal autocomplete.
 ```

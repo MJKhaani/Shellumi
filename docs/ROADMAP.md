@@ -189,11 +189,18 @@ been checked on macOS.
     - CLI mobile commands: implemented `shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check>` with comprehensive integration tests in `crates/shellumi-cli/tests/hosts.rs`.
     - Published comprehensive engineering report in `docs/mobile/FEASIBILITY.md` covering GPUI status, portable core architecture, touch ergonomics, iOS vs Android background execution, hardware biometric keychain integration, and mobile roadmap. 204 workspace tests passing.
     Next: implement Phase 12: Mobile FFI Bindings & Native Wrapper Packages.
-17. Phase 12 — Mobile FFI Bindings & Native Wrapper Packages:
-    - Define UniFFI schema definitions (`shellumi.udl`) and C-ABI headers (`shellumi_mobile.h`) exposing `shellumi-core` connection parsing, Ed25519 key generation, virtual accessory keystroke resolution, and lifecycle state machines.
-    - Implement automated build scripts generating iOS Swift Package (`ShellumiCore.xcframework` targeting `aarch64-apple-ios` and `aarch64-apple-ios-sim`) and Android JNI AAR (`libshellumi_core.so` targeting `aarch64-linux-android` and `x86_64-linux-android`).
-    - Prototype native mobile UI shells (SwiftUI on iOS and Jetpack Compose on Android) consuming the generated Rust mobile framework.
-    - Verify hardware-backed biometric unlock using iOS LocalAuthentication (`LAContext`) and Android BiometricPrompt.
+17. Mobile FFI Bindings, Native Wrapper Packages & Biometric Integration (Phase 12): Implemented native foreign-function interface bindings, C-ABI export headers, UniFFI definitions, cross-compilation packaging scripts, and native mobile prototypes:
+    - Pure C-compatible ABI in `crates/shellumi-core/src/ffi.rs`: implemented `shellumi_core_version`, `shellumi_mobile_platform_supported`, `shellumi_parse_destination_c`, `shellumi_generate_keypair_c`, `shellumi_translate_virtual_key_c`, `shellumi_lifecycle_transition_c`, `shellumi_get_credential_spec_c`, and null-safe `shellumi_string_free`, backed by 8 dedicated memory-safety and contract unit tests. Configured `crates/shellumi-core/Cargo.toml` with `crate-type = ["lib", "staticlib", "cdylib"]`.
+    - C Header & UniFFI Interface Definitions: authored standard C99/C11 header [`crates/shellumi-core/include/shellumi_mobile.h`](file:///Users/mjk/Documents/Craft%20Anything/termius/crates/shellumi-core/include/shellumi_mobile.h) and UniFFI interface definition [`crates/shellumi-core/src/shellumi.udl`](file:///Users/mjk/Documents/Craft%20Anything/termius/crates/shellumi-core/src/shellumi.udl).
+    - iOS Swift Package & Prototype (`packaging/mobile/ios/`): created Swift Package Manager manifest (`Package.swift`), automated XCFramework build script (`build-xcframework.sh` targeting `aarch64-apple-ios` and `aarch64-apple-ios-sim`), and SwiftUI prototype (`ShellumiMobile/ContentView.swift`) integrating hardware biometric authentication (`LocalAuthentication.LAContext`), virtual accessory bar with sticky modifiers, and iOS ScenePhase lifecycle transitions.
+    - Android Gradle & Prototype (`packaging/mobile/android/`): created Gradle library manifest (`build.gradle.kts`), JNI build script (`build-aar.sh` targeting `arm64-v8a` and `x86_64`), Kotlin JNI bridge (`ShellumiNativeCore.kt`), and Jetpack Compose prototype (`MainActivity.kt`) integrating hardware `BiometricPrompt` for StrongBox / Keystore credential unlocking and Android lifecycle event observation.
+    - CLI mobile commands: updated `shellumi-cli mobile` with `mobile header` and `mobile build-info`, and enhanced `mobile ffi-check` to verify exported C-ABI functions. 212 workspace tests passing.
+    Next: implement Phase 13: Intelligent Shell Integration, OSC 133 Prompt & CWD Detection, and In-Terminal Autocomplete Engine.
+18. Phase 13 — Intelligent Shell Integration & In-Terminal Autocomplete Engine:
+    - Implement OSC 133 semantic prompt demarcation parsing in `shellumi-terminal` (Prompt Start `133;A`, Command Start `133;B`, Command Executed `133;C`, Command Finished with Exit Code `133;D;<exitcode>`).
+    - Implement OSC 7 / OSC 9;9 current working directory detection to track shell directory navigation across remote SSH and local sessions.
+    - Build in-terminal intelligent autocomplete engine in `shellumi-core` offering context-aware suggestions for commands, paths, snippets, hostnames, and history.
+    - Implement password prompt detector (`Password:`, `[sudo] password for`) with safe identification.
 
 Reference research: [upstream GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui),
 which describes GPUI as pre-1.0 and subject to breaking changes, and

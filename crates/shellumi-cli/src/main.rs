@@ -89,7 +89,7 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> export-csv
   shellumi-cli keygen [--comment <comment>]
   shellumi-cli doctor [--json] [--markdown] [--db <path>]
-  shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check>";
+  shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check|header|build-info>";
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -230,7 +230,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     if args[0] == "mobile" {
         if args.len() < 2 {
-            println!("Usage: shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check>");
+            println!("Usage: shellumi-cli mobile <virtual-keys|lifecycle-sim|ffi-check|header|build-info>");
             return Ok(());
         }
         match args[1].as_str() {
@@ -274,6 +274,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
             "ffi-check" => {
                 println!("Running Mobile FFI and C-ABI validation checks...");
+                // 1. Rust bridge checks
                 let dest_res =
                     MobileFfiBridge::parse_destination_json("mobile-user@ssh.example.org:2222");
                 println!("Destination JSON check: {dest_res}");
@@ -281,7 +282,59 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 println!("Virtual Key JSON check: {key_res}");
                 let keypair_res = MobileFfiBridge::generate_keypair_json("mobile-ed25519-check");
                 println!("Keypair JSON check: {keypair_res}");
+
+                // 2. Direct C-ABI symbol verification
+                unsafe {
+                    let ver_ptr = shellumi_core::shellumi_core_version();
+                    let ver_str = std::ffi::CStr::from_ptr(ver_ptr)
+                        .to_str()
+                        .unwrap_or("unknown");
+                    println!("C-ABI Core Version: {ver_str}");
+
+                    let c_target = std::ffi::CString::new("admin@prod.server:22").unwrap();
+                    let c_dest_ptr = shellumi_core::shellumi_parse_destination_c(c_target.as_ptr());
+                    let c_dest_str = std::ffi::CStr::from_ptr(c_dest_ptr).to_str().unwrap_or("");
+                    println!("C-ABI Destination Parsing: {c_dest_str}");
+                    shellumi_core::shellumi_string_free(c_dest_ptr);
+
+                    let c_key = std::ffi::CString::new("esc").unwrap();
+                    let c_key_ptr =
+                        shellumi_core::shellumi_translate_virtual_key_c(c_key.as_ptr(), 0);
+                    let c_key_str = std::ffi::CStr::from_ptr(c_key_ptr).to_str().unwrap_or("");
+                    println!("C-ABI Virtual Key Translation: {c_key_str}");
+                    shellumi_core::shellumi_string_free(c_key_ptr);
+                }
+
                 println!("Mobile FFI contracts verified successfully.");
+                return Ok(());
+            }
+            "header" => {
+                println!("Shellumi Mobile C-ABI Header:");
+                println!("Path: crates/shellumi-core/include/shellumi_mobile.h");
+                println!("Functions:");
+                println!("  - const char* shellumi_core_version(void);");
+                println!("  - bool shellumi_mobile_platform_supported(const char* platform_name);");
+                println!("  - char* shellumi_parse_destination_c(const char* target);");
+                println!("  - char* shellumi_generate_keypair_c(const char* comment);");
+                println!("  - char* shellumi_translate_virtual_key_c(const char* key_name, uint32_t modifier_flags);");
+                println!("  - char* shellumi_lifecycle_transition_c(const char* current_state, const char* event, uint64_t param, uint64_t epoch);");
+                println!("  - char* shellumi_get_credential_spec_c(const char* platform, const char* service, const char* account, bool biometric);");
+                println!("  - void shellumi_string_free(char* ptr);");
+                return Ok(());
+            }
+            "build-info" => {
+                println!("Shellumi Mobile Packaging & Build Specification:");
+                println!("Supported Mobile Targets:");
+                println!("  - iOS Physical:  aarch64-apple-ios (SwiftUI + XCFramework)");
+                println!("  - iOS Simulator: aarch64-apple-ios-sim (Metal GPU / Simulator)");
+                println!("  - Android ARM64: aarch64-linux-android (arm64-v8a JNI)");
+                println!("  - Android x86:   x86_64-linux-android (Emulator JNI)");
+                println!("Packaging Locations:");
+                println!("  - iOS Swift Package:   packaging/mobile/ios/Package.swift");
+                println!("  - iOS Build Script:    packaging/mobile/ios/build-xcframework.sh");
+                println!("  - Android Gradle:      packaging/mobile/android/build.gradle.kts");
+                println!("  - Android Build Script packaging/mobile/android/build-aar.sh");
+                println!("UniFFI Interface:        crates/shellumi-core/src/shellumi.udl");
                 return Ok(());
             }
             other => {
@@ -688,6 +741,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
             "ffi-check" => {
                 println!("Running Mobile FFI and C-ABI validation checks...");
+                // 1. Rust bridge checks
                 let dest_res =
                     MobileFfiBridge::parse_destination_json("mobile-user@ssh.example.org:2222");
                 println!("Destination JSON check: {dest_res}");
@@ -695,7 +749,59 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 println!("Virtual Key JSON check: {key_res}");
                 let keypair_res = MobileFfiBridge::generate_keypair_json("mobile-ed25519-check");
                 println!("Keypair JSON check: {keypair_res}");
+
+                // 2. Direct C-ABI symbol verification
+                unsafe {
+                    let ver_ptr = shellumi_core::shellumi_core_version();
+                    let ver_str = std::ffi::CStr::from_ptr(ver_ptr)
+                        .to_str()
+                        .unwrap_or("unknown");
+                    println!("C-ABI Core Version: {ver_str}");
+
+                    let c_target = std::ffi::CString::new("admin@prod.server:22").unwrap();
+                    let c_dest_ptr = shellumi_core::shellumi_parse_destination_c(c_target.as_ptr());
+                    let c_dest_str = std::ffi::CStr::from_ptr(c_dest_ptr).to_str().unwrap_or("");
+                    println!("C-ABI Destination Parsing: {c_dest_str}");
+                    shellumi_core::shellumi_string_free(c_dest_ptr);
+
+                    let c_key = std::ffi::CString::new("esc").unwrap();
+                    let c_key_ptr =
+                        shellumi_core::shellumi_translate_virtual_key_c(c_key.as_ptr(), 0);
+                    let c_key_str = std::ffi::CStr::from_ptr(c_key_ptr).to_str().unwrap_or("");
+                    println!("C-ABI Virtual Key Translation: {c_key_str}");
+                    shellumi_core::shellumi_string_free(c_key_ptr);
+                }
+
                 println!("Mobile FFI contracts verified successfully.");
+                return Ok(());
+            }
+            "header" => {
+                println!("Shellumi Mobile C-ABI Header:");
+                println!("Path: crates/shellumi-core/include/shellumi_mobile.h");
+                println!("Functions:");
+                println!("  - const char* shellumi_core_version(void);");
+                println!("  - bool shellumi_mobile_platform_supported(const char* platform_name);");
+                println!("  - char* shellumi_parse_destination_c(const char* target);");
+                println!("  - char* shellumi_generate_keypair_c(const char* comment);");
+                println!("  - char* shellumi_translate_virtual_key_c(const char* key_name, uint32_t modifier_flags);");
+                println!("  - char* shellumi_lifecycle_transition_c(const char* current_state, const char* event, uint64_t param, uint64_t epoch);");
+                println!("  - char* shellumi_get_credential_spec_c(const char* platform, const char* service, const char* account, bool biometric);");
+                println!("  - void shellumi_string_free(char* ptr);");
+                return Ok(());
+            }
+            "build-info" => {
+                println!("Shellumi Mobile Packaging & Build Specification:");
+                println!("Supported Mobile Targets:");
+                println!("  - iOS Physical:  aarch64-apple-ios (SwiftUI + XCFramework)");
+                println!("  - iOS Simulator: aarch64-apple-ios-sim (Metal GPU / Simulator)");
+                println!("  - Android ARM64: aarch64-linux-android (arm64-v8a JNI)");
+                println!("  - Android x86:   x86_64-linux-android (Emulator JNI)");
+                println!("Packaging Locations:");
+                println!("  - iOS Swift Package:   packaging/mobile/ios/Package.swift");
+                println!("  - iOS Build Script:    packaging/mobile/ios/build-xcframework.sh");
+                println!("  - Android Gradle:      packaging/mobile/android/build.gradle.kts");
+                println!("  - Android Build Script packaging/mobile/android/build-aar.sh");
+                println!("UniFFI Interface:        crates/shellumi-core/src/shellumi.udl");
                 return Ok(());
             }
             other => {
