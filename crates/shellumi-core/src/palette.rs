@@ -100,6 +100,7 @@ pub enum PaletteAction {
     RunDiagnostics,
     OpenMobileSimulator,
     OpenShellIntegrationModal,
+    OpenSessionRecordings,
 }
 
 /// A searchable command palette item.
@@ -439,6 +440,28 @@ impl PaletteRegistry {
                 "zsh",
                 "bash",
                 "hook",
+            ]),
+        );
+
+        self.register(
+            PaletteCommand::new(
+                "action:session_recordings",
+                "Session Recordings & Cast Replay",
+                "Browse terminal session recordings, asciicast v2 audit logs, and play back captured sessions",
+                PaletteCategory::Terminal,
+                PaletteAction::OpenSessionRecordings,
+            )
+            .with_shortcut("Cmd+Shift+R")
+            .with_keywords([
+                "session",
+                "recording",
+                "record",
+                "play",
+                "cast",
+                "asciinema",
+                "asciicast",
+                "audit",
+                "log",
             ]),
         );
 
@@ -823,5 +846,22 @@ mod tests {
         let results = registry.search("aws");
         assert!(!results.is_empty());
         assert_eq!(results[0].command.category, PaletteCategory::Infrastructure);
+    }
+
+    #[test]
+    fn verifies_session_recording_palette_actions() {
+        let registry = PaletteRegistry::with_static_actions();
+        assert!(registry
+            .commands()
+            .iter()
+            .any(|c| c.action == PaletteAction::OpenSessionRecordings));
+
+        let results = registry.search("asciicast");
+        assert!(!results.is_empty());
+        assert_eq!(
+            results[0].command.action,
+            PaletteAction::OpenSessionRecordings
+        );
+        assert_eq!(results[0].command.category, PaletteCategory::Terminal);
     }
 }

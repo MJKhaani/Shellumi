@@ -2,15 +2,15 @@
 use shellumi_core::{
     resolve_effective_destination, resolve_effective_tags, validate_jump_host, AuditAction,
     CollaborationError, DestinationError, ForwardingType, GroupError, HostGroup, LogBookmark,
-    LogComment, PortForwardRule, SharedSessionLog, SharedVault, SharingAuditRecord, Snippet,
-    SnippetError, SnippetVariable, SshDestination, TeamMember, TeamRole, TransferDirection,
-    TunnelError, WorkspaceError, WorkspaceSession,
+    LogComment, PortForwardRule, SessionRecordingSummary, SharedSessionLog, SharedVault,
+    SharingAuditRecord, Snippet, SnippetError, SnippetVariable, SshDestination, TeamMember,
+    TeamRole, TransferDirection, TunnelError, WorkspaceError, WorkspaceSession,
 };
 use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -28,6 +28,7 @@ pub enum StorageError {
     InvalidSnippet(SnippetError),
     InvalidWorkspace(WorkspaceError),
     InvalidCollaboration(CollaborationError),
+    InvalidRecording(String),
     Serialization(String),
     InvalidSync(shellumi_core::SyncError),
     SnapshotNotFound(String),
@@ -55,6 +56,7 @@ impl fmt::Display for StorageError {
             Self::InvalidCollaboration(error) => {
                 write!(f, "invalid collaboration operation: {error}")
             }
+            Self::InvalidRecording(msg) => write!(f, "invalid session recording: {msg}"),
             Self::Serialization(error) => write!(f, "serialization error: {error}"),
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
             Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
@@ -586,7 +588,23 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 12", ()).await?;
+            tx.execute(
+                "CREATE TABLE session_recordings (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+                    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                    duration_secs REAL NOT NULL CHECK(duration_secs >= 0.0),
+                    event_count INTEGER NOT NULL CHECK(event_count >= 0),
+                    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                    cast_data TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 13", ()).await?;
         } else if version == 1 {
             // Migrate schema version 1 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
@@ -1115,103 +1133,123 @@ impl HostStore {
             tx.execute("PRAGMA user_version = 10", ()).await?;
         }
 
-        if version > 0 && version < 12 {
-            // Migrate schema to version 11: Shared Vaults & Team Collaboration
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS shared_vaults (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
-                    description TEXT,
-                    current_epoch INTEGER NOT NULL DEFAULT 1 CHECK(current_epoch >= 1),
-                    owner_id TEXT NOT NULL CHECK(length(trim(owner_id)) > 0),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )",
-                (),
-            )
-            .await?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS team_members (
-                    id TEXT PRIMARY KEY,
-                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
-                    user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
-                    display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
-                    public_key TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    enrolled_at TEXT NOT NULL,
-                    invited_by TEXT NOT NULL,
-                    revoked INTEGER NOT NULL DEFAULT 0,
-                    revoked_at TEXT
-                )",
-                (),
-            )
-            .await?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS sharing_audit_log (
-                    id TEXT PRIMARY KEY,
-                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
-                    action TEXT NOT NULL,
-                    actor_id TEXT NOT NULL,
-                    target_id TEXT,
-                    details TEXT,
-                    timestamp_utc TEXT NOT NULL
-                )",
-                (),
-            )
-            .await?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS shared_session_logs (
-                    id TEXT PRIMARY KEY,
-                    vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
-                    host_name TEXT NOT NULL,
-                    author_id TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    retention_days INTEGER NOT NULL DEFAULT 30,
-                    comments_json TEXT NOT NULL DEFAULT '[]',
-                    bookmarks_json TEXT NOT NULL DEFAULT '[]'
-                )",
-                (),
-            )
-            .await?;
+        if version > 0 && version < 13 {
+            if version < 12 {
+                // Migrate schema to version 11: Shared Vaults & Team Collaboration
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS shared_vaults (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                        description TEXT,
+                        current_epoch INTEGER NOT NULL DEFAULT 1 CHECK(current_epoch >= 1),
+                        owner_id TEXT NOT NULL CHECK(length(trim(owner_id)) > 0),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS team_members (
+                        id TEXT PRIMARY KEY,
+                        vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                        user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
+                        display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
+                        public_key TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        enrolled_at TEXT NOT NULL,
+                        invited_by TEXT NOT NULL,
+                        revoked INTEGER NOT NULL DEFAULT 0,
+                        revoked_at TEXT
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS sharing_audit_log (
+                        id TEXT PRIMARY KEY,
+                        vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                        action TEXT NOT NULL,
+                        actor_id TEXT NOT NULL,
+                        target_id TEXT,
+                        details TEXT,
+                        timestamp_utc TEXT NOT NULL
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS shared_session_logs (
+                        id TEXT PRIMARY KEY,
+                        vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
+                        host_name TEXT NOT NULL,
+                        author_id TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        ended_at TEXT,
+                        retention_days INTEGER NOT NULL DEFAULT 30,
+                        comments_json TEXT NOT NULL DEFAULT '[]',
+                        bookmarks_json TEXT NOT NULL DEFAULT '[]'
+                    )",
+                    (),
+                )
+                .await?;
 
-            // Migrate schema to version 12: Cloud Providers & Infrastructure Discovery
+                // Migrate schema to version 12: Cloud Providers & Infrastructure Discovery
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS cloud_providers (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                        provider_kind TEXT NOT NULL,
+                        config_json TEXT NOT NULL DEFAULT '{}',
+                        sync_interval_mins INTEGER NOT NULL DEFAULT 60,
+                        last_synced_at INTEGER,
+                        auto_sync INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS discovered_hosts (
+                        id TEXT PRIMARY KEY,
+                        provider_id TEXT NOT NULL REFERENCES cloud_providers(id) ON DELETE CASCADE,
+                        external_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        hostname TEXT NOT NULL,
+                        port INTEGER NOT NULL DEFAULT 22 CHECK(port BETWEEN 1 AND 65535),
+                        username TEXT,
+                        state TEXT NOT NULL DEFAULT 'active',
+                        region TEXT,
+                        group_path TEXT,
+                        tags_json TEXT NOT NULL DEFAULT '{}',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        imported_host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+                        last_seen_at INTEGER NOT NULL
+                    )",
+                    (),
+                )
+                .await?;
+            }
+
+            // Migrate schema to version 13: Terminal Session Recordings
             tx.execute(
-                "CREATE TABLE IF NOT EXISTS cloud_providers (
+                "CREATE TABLE IF NOT EXISTS session_recordings (
                     id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
-                    provider_kind TEXT NOT NULL,
-                    config_json TEXT NOT NULL DEFAULT '{}',
-                    sync_interval_mins INTEGER NOT NULL DEFAULT 60,
-                    last_synced_at INTEGER,
-                    auto_sync INTEGER NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
+                    session_id TEXT NOT NULL,
+                    host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+                    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                    duration_secs REAL NOT NULL CHECK(duration_secs >= 0.0),
+                    event_count INTEGER NOT NULL CHECK(event_count >= 0),
+                    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                    cast_data TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )",
                 (),
             )
             .await?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS discovered_hosts (
-                    id TEXT PRIMARY KEY,
-                    provider_id TEXT NOT NULL REFERENCES cloud_providers(id) ON DELETE CASCADE,
-                    external_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    hostname TEXT NOT NULL,
-                    port INTEGER NOT NULL DEFAULT 22 CHECK(port BETWEEN 1 AND 65535),
-                    username TEXT,
-                    state TEXT NOT NULL DEFAULT 'active',
-                    region TEXT,
-                    group_path TEXT,
-                    tags_json TEXT NOT NULL DEFAULT '{}',
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    imported_host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
-                    last_seen_at INTEGER NOT NULL
-                )",
-                (),
-            )
-            .await?;
-            tx.execute("PRAGMA user_version = 12", ()).await?;
+            tx.execute("PRAGMA user_version = 13", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
@@ -3454,6 +3492,181 @@ impl HostStore {
             .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.to_string()))?;
         self.import_vault(passphrase, &vault).await
     }
+
+    /// Saves or updates a terminal session recording.
+    pub async fn save_session_recording(
+        &mut self,
+        record: &SessionRecordingRecord,
+    ) -> Result<(), StorageError> {
+        let title_trimmed = record.title.trim();
+        if title_trimmed.is_empty() {
+            return Err(StorageError::InvalidRecording(
+                "title cannot be empty".to_string(),
+            ));
+        }
+        if record.id.trim().is_empty() {
+            return Err(StorageError::InvalidRecording(
+                "id cannot be empty".to_string(),
+            ));
+        }
+
+        self.connection
+            .execute(
+                "INSERT INTO session_recordings (
+                    id, session_id, host_id, title, duration_secs, event_count, byte_size, cast_data, recorded_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    host_id = excluded.host_id,
+                    title = excluded.title,
+                    duration_secs = excluded.duration_secs,
+                    event_count = excluded.event_count,
+                    byte_size = excluded.byte_size,
+                    cast_data = excluded.cast_data,
+                    recorded_at = excluded.recorded_at,
+                    created_at = excluded.created_at",
+                (
+                    record.id.as_str(),
+                    record.session_id.as_str(),
+                    record.host_id,
+                    title_trimmed,
+                    record.duration_secs,
+                    record.event_count as i64,
+                    record.byte_size as i64,
+                    record.cast_data.as_str(),
+                    record.recorded_at.as_str(),
+                    record.created_at.as_str(),
+                ),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Retrieves a session recording by its ID.
+    pub async fn get_session_recording(
+        &self,
+        id: &str,
+    ) -> Result<Option<SessionRecordingRecord>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, session_id, host_id, title, duration_secs, event_count, byte_size, cast_data, recorded_at, created_at
+                 FROM session_recordings WHERE id = ?",
+                (id,),
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let host_id: Option<i64> = row.get(2)?;
+            let title: String = row.get(3)?;
+            let duration_secs: f64 = row.get(4)?;
+            let event_count: i64 = row.get(5)?;
+            let byte_size: i64 = row.get(6)?;
+            let cast_data: String = row.get(7)?;
+            let recorded_at: String = row.get(8)?;
+            let created_at: String = row.get(9)?;
+
+            Ok(Some(SessionRecordingRecord {
+                id,
+                session_id,
+                host_id,
+                title,
+                duration_secs,
+                event_count: event_count.max(0) as usize,
+                byte_size: byte_size.max(0) as usize,
+                cast_data,
+                recorded_at,
+                created_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Lists summaries of recorded sessions, optionally filtered by host.
+    pub async fn list_session_recordings(
+        &self,
+        host_id: Option<i64>,
+    ) -> Result<Vec<SessionRecordingSummary>, StorageError> {
+        let mut rows = if let Some(hid) = host_id {
+            self.connection
+                .query(
+                    "SELECT id, session_id, host_id, title, duration_secs, event_count, byte_size, recorded_at
+                     FROM session_recordings WHERE host_id = ? ORDER BY recorded_at DESC, id DESC",
+                    (hid,),
+                )
+                .await?
+        } else {
+            self.connection
+                .query(
+                    "SELECT id, session_id, host_id, title, duration_secs, event_count, byte_size, recorded_at
+                     FROM session_recordings ORDER BY recorded_at DESC, id DESC",
+                    (),
+                )
+                .await?
+        };
+
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let host_id: Option<i64> = row.get(2)?;
+            let title: String = row.get(3)?;
+            let duration_secs: f64 = row.get(4)?;
+            let event_count: i64 = row.get(5)?;
+            let byte_size: i64 = row.get(6)?;
+            let recorded_at: String = row.get(7)?;
+
+            list.push(SessionRecordingSummary {
+                id,
+                session_id,
+                host_id,
+                title,
+                duration_secs,
+                event_count: event_count.max(0) as usize,
+                byte_size: byte_size.max(0) as usize,
+                recorded_at,
+            });
+        }
+
+        Ok(list)
+    }
+
+    /// Deletes a session recording by its ID. Returns true if a record was removed.
+    pub async fn delete_session_recording(&mut self, id: &str) -> Result<bool, StorageError> {
+        let changes = self
+            .connection
+            .execute("DELETE FROM session_recordings WHERE id = ?", (id,))
+            .await?;
+        Ok(changes > 0)
+    }
+
+    /// Deletes all session recordings. Returns the number of removed recordings.
+    pub async fn delete_all_session_recordings(&mut self) -> Result<usize, StorageError> {
+        let changes = self
+            .connection
+            .execute("DELETE FROM session_recordings", ())
+            .await?;
+        Ok(changes as usize)
+    }
+}
+
+/// Persistent record representing a saved terminal session recording.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionRecordingRecord {
+    pub id: String,
+    pub session_id: String,
+    pub host_id: Option<i64>,
+    pub title: String,
+    pub duration_secs: f64,
+    pub event_count: usize,
+    pub byte_size: usize,
+    pub cast_data: String,
+    pub recorded_at: String,
+    pub created_at: String,
 }
 
 #[cfg(test)]
@@ -5133,5 +5346,137 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn migrates_schema_to_version_13_and_manages_session_recordings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v12.db");
+        let path_str = path.to_str().unwrap();
+
+        // Create a database with user_version = 12
+        {
+            let store = HostStore::open(path_str).await.unwrap();
+            store
+                .connection
+                .execute("PRAGMA user_version = 12", ())
+                .await
+                .unwrap();
+            store
+                .connection
+                .execute("DROP TABLE IF EXISTS session_recordings", ())
+                .await
+                .unwrap();
+        }
+
+        // Reopen database; should auto-migrate to version 13
+        let mut store = HostStore::open(path_str).await.unwrap();
+        let mut rows = store
+            .connection
+            .query("PRAGMA user_version", ())
+            .await
+            .unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(version, 13);
+
+        // Add a host
+        let dest = SshDestination::new("10.0.0.50", "admin", 22).unwrap();
+        let host_id = store
+            .add("Bastion", &dest, None, &[], None, None)
+            .await
+            .unwrap();
+
+        // 1. Save session recording with host
+        let rec1 = SessionRecordingRecord {
+            id: "rec-1".to_string(),
+            session_id: "sess-abc".to_string(),
+            host_id: Some(host_id),
+            title: "Production Deployment".to_string(),
+            duration_secs: 45.5,
+            event_count: 120,
+            byte_size: 4096,
+            cast_data:
+                "{\"version\":2,\"width\":80,\"height\":24}\n[0.1, \"o\", \"Deploying...\"]\n"
+                    .to_string(),
+            recorded_at: "2026-11-05T07:00:00Z".to_string(),
+            created_at: "2026-11-05T07:01:00Z".to_string(),
+        };
+        store.save_session_recording(&rec1).await.unwrap();
+
+        // 2. Save session recording without host
+        let rec2 = SessionRecordingRecord {
+            id: "rec-2".to_string(),
+            session_id: "sess-xyz".to_string(),
+            host_id: None,
+            title: "Local Shell Session".to_string(),
+            duration_secs: 15.0,
+            event_count: 35,
+            byte_size: 1024,
+            cast_data: "{\"version\":2,\"width\":80,\"height\":24}\n[0.1, \"o\", \"ls -la\"]\n"
+                .to_string(),
+            recorded_at: "2026-11-05T07:10:00Z".to_string(),
+            created_at: "2026-11-05T07:11:00Z".to_string(),
+        };
+        store.save_session_recording(&rec2).await.unwrap();
+
+        // 3. List recordings
+        let all_recs = store.list_session_recordings(None).await.unwrap();
+        assert_eq!(all_recs.len(), 2);
+        assert_eq!(all_recs[0].id, "rec-2"); // Ordered by recorded_at DESC
+        assert_eq!(all_recs[1].id, "rec-1");
+
+        let host_recs = store.list_session_recordings(Some(host_id)).await.unwrap();
+        assert_eq!(host_recs.len(), 1);
+        assert_eq!(host_recs[0].id, "rec-1");
+        assert_eq!(host_recs[0].title, "Production Deployment");
+        assert_eq!(host_recs[0].formatted_duration(), "00:46");
+        assert_eq!(host_recs[0].formatted_size(), "4.0 KB");
+
+        // 4. Retrieve single recording
+        let fetched = store
+            .get_session_recording("rec-1")
+            .await
+            .unwrap()
+            .expect("exists");
+        assert_eq!(fetched.id, "rec-1");
+        assert_eq!(fetched.duration_secs, 45.5);
+        assert_eq!(fetched.cast_data, rec1.cast_data);
+
+        // 5. Update existing recording
+        let mut rec1_updated = rec1.clone();
+        rec1_updated.title = "Production Deployment (Completed)".to_string();
+        rec1_updated.duration_secs = 60.0;
+        store.save_session_recording(&rec1_updated).await.unwrap();
+        let fetched_updated = store.get_session_recording("rec-1").await.unwrap().unwrap();
+        assert_eq!(fetched_updated.title, "Production Deployment (Completed)");
+        assert_eq!(fetched_updated.duration_secs, 60.0);
+
+        // 6. Deleting host sets host_id to NULL via foreign key
+        store.delete(host_id).await.unwrap();
+        let fetched_after_host_del = store.get_session_recording("rec-1").await.unwrap().unwrap();
+        assert_eq!(fetched_after_host_del.host_id, None);
+
+        // 7. Delete single recording
+        assert!(store.delete_session_recording("rec-1").await.unwrap());
+        assert_eq!(store.get_session_recording("rec-1").await.unwrap(), None);
+
+        // 8. Delete all recordings
+        assert_eq!(store.delete_all_session_recordings().await.unwrap(), 1);
+        assert_eq!(store.list_session_recordings(None).await.unwrap().len(), 0);
+
+        // 9. Validation error on empty title or id
+        let invalid = SessionRecordingRecord {
+            id: "".to_string(),
+            session_id: "s1".to_string(),
+            host_id: None,
+            title: "Valid".to_string(),
+            duration_secs: 1.0,
+            event_count: 1,
+            byte_size: 1,
+            cast_data: "{}".to_string(),
+            recorded_at: "now".to_string(),
+            created_at: "now".to_string(),
+        };
+        assert!(store.save_session_recording(&invalid).await.is_err());
     }
 }

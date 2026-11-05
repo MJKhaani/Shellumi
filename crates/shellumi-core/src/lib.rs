@@ -14,6 +14,7 @@ pub mod known_hosts;
 pub mod mobile;
 pub mod palette;
 pub mod protocol;
+pub mod recording;
 pub mod sftp;
 pub mod snippet;
 pub mod ssh_config;
@@ -82,6 +83,10 @@ pub use protocol::{
 pub fn discover_serial_ports() -> Vec<String> {
     SerialConfig::discover_serial_ports()
 }
+pub use recording::{
+    format_duration_hms, CastPlaybackEngine, PlaybackFrame, PlaybackSpeed, PlaybackStatus,
+    SessionRecordingMetadata, SessionRecordingSummary, SessionRedactor,
+};
 pub use sftp::{
     format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,
     NameEntry, OpenFlags, PathUtils, SftpPacket, SftpProtocolError, StatusCode, TransferDirection,

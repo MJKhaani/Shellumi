@@ -8,12 +8,14 @@ pub mod color;
 pub mod grid;
 pub mod parser;
 pub mod pty;
+pub mod recording;
 pub mod shell_integration;
 
 pub use cell::{cells_to_spans, Cell, CellAttributes, StyledSpan};
 pub use color::{Color, NamedColor};
 pub use grid::{Cursor, SearchBuffer, SearchMatch, TerminalGrid};
 pub use pty::{PtySession, TerminalCommand};
+pub use recording::{AsciicastHeader, CastEvent, CastEventType, SessionRecorder, SessionRecording};
 pub use shell_integration::{PromptSemanticMark, ShellIntegrationState};
 
 use parser::TerminalHandler;
@@ -25,6 +27,7 @@ pub struct Terminal {
     parser: Parser,
     title: Option<String>,
     shell_integration: ShellIntegrationState,
+    recorder: Option<SessionRecorder>,
 }
 
 impl Terminal {
@@ -35,11 +38,15 @@ impl Terminal {
             parser: Parser::new(),
             title: None,
             shell_integration: ShellIntegrationState::new(),
+            recorder: None,
         }
     }
 
     /// Feeds incoming raw bytes (from PTY or SSH stream) into the VT parser.
     pub fn process_bytes(&mut self, bytes: &[u8]) {
+        if let Some(ref mut rec) = self.recorder {
+            rec.record_output(bytes);
+        }
         let mut handler = TerminalHandler::new(&mut self.grid, &mut self.title)
             .with_shell_integration(&mut self.shell_integration);
         for &byte in bytes {
@@ -99,7 +106,46 @@ impl Terminal {
 
     /// Resizes the terminal screen grid.
     pub fn resize(&mut self, rows: usize, cols: usize) {
+        if let Some(ref mut rec) = self.recorder {
+            rec.record_resize(cols, rows);
+        }
         self.grid.resize(rows, cols);
+    }
+
+    /// Starts recording session input/output in Asciicast v2 format.
+    pub fn start_recording(&mut self, title: Option<String>) {
+        let mut recorder = SessionRecorder::new(self.grid.cols(), self.grid.rows(), title);
+        recorder.start();
+        self.recorder = Some(recorder);
+    }
+
+    /// Stops session recording and returns the recorded session if active.
+    pub fn stop_recording(&mut self) -> Option<SessionRecording> {
+        self.recorder.take().map(|mut r| r.stop())
+    }
+
+    /// Returns true if session recording is active.
+    pub fn is_recording(&self) -> bool {
+        self.recorder.as_ref().is_some_and(|r| r.is_active())
+    }
+
+    /// Records user keystroke input sent to the terminal PTY.
+    pub fn record_input(&mut self, bytes: &[u8]) {
+        if let Some(ref mut rec) = self.recorder {
+            rec.record_input(bytes);
+        }
+    }
+
+    /// Returns the number of events recorded in the active session.
+    pub fn recording_event_count(&self) -> usize {
+        self.recorder.as_ref().map_or(0, |r| r.event_count())
+    }
+
+    /// Returns elapsed duration since session recording started.
+    pub fn recording_duration(&self) -> std::time::Duration {
+        self.recorder
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |r| r.elapsed_duration())
     }
 
     /// Sets the maximum scrollback capacity.
@@ -360,5 +406,31 @@ mod tests {
         // Next prompt start (OSC 133;A) with changed directory via OSC 9;9
         term.process_str("\x1b]9;9;\"/home/dev/projects\"\x07");
         assert_eq!(term.current_working_directory(), Some("/home/dev/projects"));
+    }
+
+    #[test]
+    fn tracks_and_records_terminal_session_to_asciicast() {
+        let mut term = Terminal::new(24, 80);
+        assert!(!term.is_recording());
+
+        term.start_recording(Some("CI Recording".to_string()));
+        assert!(term.is_recording());
+
+        term.record_input(b"uptime\r");
+        term.process_str(" 10:00:00 up 42 days, 1 user\r\n");
+        term.resize(30, 100);
+
+        assert_eq!(term.recording_event_count(), 3);
+
+        let recording = term.stop_recording().expect("recording should exist");
+        assert!(!term.is_recording());
+        assert_eq!(recording.events.len(), 3);
+        assert_eq!(recording.header.title.as_deref(), Some("CI Recording"));
+
+        let cast_output = recording.to_asciicast_v2().expect("should serialize cast");
+        assert!(cast_output.contains("\"version\":2"));
+        assert!(cast_output.contains("uptime\\r"));
+        assert!(cast_output.contains("10:00:00"));
+        assert!(cast_output.contains("100x30"));
     }
 }

@@ -1,19 +1,22 @@
 use shellumi_core::{
     build_google_drive_auth_url, diff_sync_records_with_passphrase, discover_serial_ports,
-    export_csv, export_ssh_config, generate_bash_hook, generate_ed25519_key, generate_fish_hook,
-    generate_pkce_challenge, generate_zsh_hook, list_local_directory, parse_csv,
-    parse_quick_connect_target, parse_ssh_config, render_command, render_preview,
+    export_csv, export_ssh_config, format_duration_hms, generate_bash_hook, generate_ed25519_key,
+    generate_fish_hook, generate_pkce_challenge, generate_zsh_hook, list_local_directory,
+    parse_csv, parse_quick_connect_target, parse_ssh_config, render_command, render_preview,
     AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
     AutocompleteEngine, AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget,
-    BatchPolicy, CloudProviderConfig, CloudProviderKind, ConnectionProtocol, DiagnosticsRunner,
-    DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry, HostExportItem, HostGroup,
-    MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig,
-    MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand,
-    PaletteRegistry, PasswordPromptDetector, PortForwardRule, ProtocolError, SerialConfig,
-    SftpPacket, SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncVault, TeamMember,
-    TeamRole, TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar,
+    BatchPolicy, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, ConnectionProtocol,
+    DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry,
+    HostExportItem, HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager,
+    MobilePlatform, MoshConfig, MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction,
+    PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector, PlaybackSpeed,
+    PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor, SftpPacket,
+    SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncVault, TeamMember, TeamRole,
+    TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar,
 };
-use shellumi_storage::{CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer};
+use shellumi_storage::{
+    CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
+};
 use std::str::FromStr;
 use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
 
@@ -48,6 +51,12 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> workspace duplicate <id> <new-name>
   shellumi-cli <database-path> workspace delete <id>
   shellumi-cli <database-path> palette search <query>
+  shellumi-cli <database-path> session list [--host-id <id>]
+  shellumi-cli <database-path> session show <id>
+  shellumi-cli <database-path> session play <id> [--speed <multiplier>] [--raw]
+  shellumi-cli <database-path> session export <id> [--out <path>]
+  shellumi-cli <database-path> session import <cast-file> --title <title> [--host-id <id>] [--redact]
+  shellumi-cli <database-path> session delete <id>
   shellumi-cli <database-path> vault export <output-path> --passphrase <pass> [--device-id <id>] [--iterations <n>]
   shellumi-cli <database-path> vault import <input-path> --passphrase <pass>
   shellumi-cli <database-path> vault diff <input-path> --passphrase <pass>
@@ -575,6 +584,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "palette" => {
             if args.len() < 4 || args[2] != "search" {
                 return Err(invalid(USAGE).into());
+            }
+        }
+        "session" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
+            match args[2].as_str() {
+                "list" => {}
+                "show" | "delete" | "play" | "export" => {
+                    if args.len() < 4 {
+                        return Err(invalid("Session recording ID required.").into());
+                    }
+                }
+                "import" => {
+                    if args.len() < 4 {
+                        return Err(invalid("Path to asciicast (.cast) file required.").into());
+                    }
+                }
+                _ => return Err(invalid(USAGE).into()),
             }
         }
         "vault" => {
@@ -2938,6 +2966,175 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             m.command.title,
                             m.command.description
                         );
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        "session" => {
+            let sub = args[2].as_str();
+            match sub {
+                "list" => {
+                    let host_id_opt =
+                        extract_flag(&args[3..], "--host-id").and_then(|s| s.parse::<i64>().ok());
+                    let recordings = store.list_session_recordings(host_id_opt).await?;
+                    if recordings.is_empty() {
+                        println!("No session recordings found.");
+                    } else {
+                        println!("ID\tDURATION\tEVENTS\tSIZE\tRECORDED AT\tTITLE");
+                        for r in recordings {
+                            println!(
+                                "{}\t{}\t{}\t{}\t{}\t{}",
+                                r.id,
+                                r.formatted_duration(),
+                                r.event_count,
+                                r.formatted_size(),
+                                r.recorded_at,
+                                r.title
+                            );
+                        }
+                    }
+                }
+                "show" => {
+                    let id = &args[3];
+                    if let Some(r) = store.get_session_recording(id).await? {
+                        println!("Session Recording ID: {}", r.id);
+                        println!("Session ID:          {}", r.session_id);
+                        println!(
+                            "Host ID:             {}",
+                            r.host_id
+                                .map(|h| h.to_string())
+                                .unwrap_or_else(|| "None (local)".to_string())
+                        );
+                        println!("Title:               {}", r.title);
+                        println!(
+                            "Duration:            {}",
+                            format_duration_hms(r.duration_secs)
+                        );
+                        println!("Event Count:         {}", r.event_count);
+                        println!("Byte Size:           {} bytes", r.byte_size);
+                        println!("Recorded At:         {}", r.recorded_at);
+                        println!("Created At:          {}", r.created_at);
+                    } else {
+                        return Err(invalid(&format!("Session recording '{id}' not found.")).into());
+                    }
+                }
+                "export" => {
+                    let id = &args[3];
+                    if let Some(r) = store.get_session_recording(id).await? {
+                        let out_path = extract_flag(&args[4..], "--out");
+                        if let Some(path) = out_path {
+                            fs::write(&path, &r.cast_data)?;
+                            println!("Exported recording '{id}' to {path}");
+                        } else {
+                            print!("{}", r.cast_data);
+                        }
+                    } else {
+                        return Err(invalid(&format!("Session recording '{id}' not found.")).into());
+                    }
+                }
+                "import" => {
+                    let path = &args[3];
+                    let title = extract_flag(&args[4..], "--title")
+                        .ok_or_else(|| invalid("Missing required --title flag"))?;
+                    let host_id_opt =
+                        extract_flag(&args[4..], "--host-id").and_then(|s| s.parse::<i64>().ok());
+                    let should_redact = args[4..].iter().any(|a| a == "--redact");
+
+                    let raw_cast = fs::read_to_string(path)?;
+                    let final_cast = if should_redact {
+                        SessionRedactor::redact_asciicast_v2(&raw_cast)
+                            .map_err(|e| invalid(&format!("Redaction failed: {e}")))?
+                    } else {
+                        raw_cast
+                    };
+
+                    let engine = CastPlaybackEngine::from_asciicast_v2(&final_cast)
+                        .map_err(|e| invalid(&format!("Failed to parse asciicast: {e}")))?;
+
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let now_str = format!("{now}");
+                    let rec = SessionRecordingRecord {
+                        id: unique_id("rec"),
+                        session_id: unique_id("sess"),
+                        host_id: host_id_opt,
+                        title,
+                        duration_secs: engine.duration_secs(),
+                        event_count: engine.total_frames(),
+                        byte_size: final_cast.len(),
+                        cast_data: final_cast,
+                        recorded_at: now_str.clone(),
+                        created_at: now_str,
+                    };
+                    let rec_id = rec.id.clone();
+                    store.save_session_recording(&rec).await?;
+                    println!(
+                        "Imported session recording {rec_id} ({} events, {})",
+                        rec.event_count,
+                        format_duration_hms(rec.duration_secs)
+                    );
+                }
+                "play" => {
+                    let id = &args[3];
+                    if let Some(r) = store.get_session_recording(id).await? {
+                        let is_raw = args[4..].iter().any(|a| a == "--raw");
+                        let speed_multiplier = extract_flag(&args[4..], "--speed")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(1.0);
+
+                        let mut engine = CastPlaybackEngine::from_asciicast_v2(&r.cast_data)
+                            .map_err(|e| invalid(&format!("Failed to parse asciicast: {e}")))?;
+
+                        let speed = match (speed_multiplier * 10.0).round() as i32 {
+                            5 => PlaybackSpeed::Half,
+                            20 => PlaybackSpeed::Double,
+                            40 => PlaybackSpeed::Quad,
+                            _ => PlaybackSpeed::Normal,
+                        };
+                        engine.set_speed(speed);
+                        engine.play();
+
+                        if is_raw {
+                            let frames = engine.seek(r.duration_secs);
+                            for f in frames {
+                                if f.event_type == "o" {
+                                    print!("{}", f.data);
+                                }
+                            }
+                        } else {
+                            println!(
+                                "▶ Playing '{}' ({}, speed: {})",
+                                r.title,
+                                format_duration_hms(r.duration_secs),
+                                speed.display_label()
+                            );
+                            let step = 0.05;
+                            while engine.status() == PlaybackStatus::Playing {
+                                let frames = engine.advance(step);
+                                for f in frames {
+                                    if f.event_type == "o" {
+                                        print!("{}", f.data);
+                                        use std::io::Write;
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                            println!("\n[End of playback]");
+                        }
+                    } else {
+                        return Err(invalid(&format!("Session recording '{id}' not found.")).into());
+                    }
+                }
+                "delete" => {
+                    let id = &args[3];
+                    if store.delete_session_recording(id).await? {
+                        println!("Deleted session recording '{id}'.");
+                    } else {
+                        return Err(invalid(&format!("Session recording '{id}' not found.")).into());
                     }
                 }
                 _ => unreachable!(),

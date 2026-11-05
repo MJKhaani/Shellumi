@@ -1931,3 +1931,105 @@ fn supports_autocomplete_prompt_detect_and_shell_hook() {
     assert!(db_comp_str.contains("ClusterPrimary"));
     assert!(db_comp_str.contains("Host"));
 }
+
+#[test]
+fn session_recording_cli_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("hosts.db");
+    let cast_path = dir.path().join("session.cast");
+
+    // 1. Create a raw asciicast recording with a sensitive secret
+    let raw_cast = "{\"version\":2,\"width\":80,\"height\":24,\"title\":\"Audit Test\",\"duration\":2.5}\n[0.1, \"o\", \"Connecting to server...\\r\\n\"]\n[0.5, \"i\", \"export SECRET=super_confidential_key\\r\"]\n[1.0, \"o\", \"Access granted\\r\\n\"]\n";
+    std::fs::write(&cast_path, raw_cast).unwrap();
+
+    // 2. Import the session recording with automated redaction enabled
+    let import_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args([
+            "session",
+            "import",
+            cast_path.to_str().unwrap(),
+            "--title",
+            "Server Incident Audit",
+            "--redact",
+        ])
+        .output()
+        .unwrap();
+    assert!(import_out.status.success());
+    let import_str = String::from_utf8(import_out.stdout).unwrap();
+    assert!(import_str.contains("Imported session recording rec-"));
+    assert!(import_str.contains("3 events"));
+
+    // 3. List recordings
+    let list_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["session", "list"])
+        .output()
+        .unwrap();
+    assert!(list_out.status.success());
+    let list_str = String::from_utf8(list_out.stdout).unwrap();
+    assert!(list_str.contains("Server Incident Audit"));
+    assert!(list_str.contains("00:03"));
+
+    // Extract ID
+    let rec_id = list_str
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split('\t').next())
+        .expect("should find recording id in list");
+    assert!(rec_id.starts_with("rec-"));
+
+    // 4. Show recording metadata
+    let show_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["session", "show", rec_id])
+        .output()
+        .unwrap();
+    assert!(show_out.status.success());
+    let show_str = String::from_utf8(show_out.stdout).unwrap();
+    assert!(show_str.contains("Server Incident Audit"));
+    assert!(show_str.contains("Event Count:         3"));
+
+    // 5. Export recording and verify redaction
+    let export_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["session", "export", rec_id])
+        .output()
+        .unwrap();
+    assert!(export_out.status.success());
+    let export_str = String::from_utf8(export_out.stdout).unwrap();
+    assert!(export_str.contains("[REDACTED_SECRET]"));
+    assert!(!export_str.contains("super_confidential_key"));
+
+    // 6. Play recording with --raw flag
+    let play_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["session", "play", rec_id, "--raw"])
+        .output()
+        .unwrap();
+    assert!(play_out.status.success());
+    let play_str = String::from_utf8(play_out.stdout).unwrap();
+    assert!(play_str.contains("Connecting to server..."));
+    assert!(play_str.contains("Access granted"));
+
+    // 7. Delete recording
+    let del_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["session", "delete", rec_id])
+        .output()
+        .unwrap();
+    assert!(del_out.status.success());
+    let del_str = String::from_utf8(del_out.stdout).unwrap();
+    assert!(del_str.contains(&format!("Deleted session recording '{rec_id}'.")));
+
+    // Verify list is now empty
+    let list_empty = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["session", "list"])
+        .output()
+        .unwrap();
+    assert!(list_empty.status.success());
+    assert!(String::from_utf8(list_empty.stdout)
+        .unwrap()
+        .contains("No session recordings found."));
+}
