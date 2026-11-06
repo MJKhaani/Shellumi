@@ -166,9 +166,29 @@ alias-rewritten prompts that do not match the selected target. Jump-host
 credentials need their own OpenSSH/agent configuration. Native credential access
 can require an OS unlock/permission dialog.
 
+## SFTP transfer safety
+
+The graphical transfer queue starts at most two jobs per tab and reports live
+byte progress. **Cancel** removes queued work immediately or requests running
+work to stop at the next packet boundary. Closing a tab also requests cancellation.
+Cancellation is refused once final publication begins, and the task remains in
+progress until its worker confirms completion or cancellation. A stalled SSH
+read can delay cancellation; forced interruption is not implemented yet.
+
+Downloads write a private sibling `.shellumi-transfer-*.part` file and rename it
+after size/EOF checks, a successful server CLOSE, and a local file sync. Uploads
+use an exclusive private remote staging file and publish with OpenSSH's
+`posix-rename` extension when available. Other servers use SFTP rename and may
+refuse replacement of an existing file; Shellumi never deletes the destination
+as an overwrite fallback. Existing destination contents remain intact on
+pre-publication failure or cancellation. New files use private permissions
+(`0600` on Unix); original destination permissions/timestamps are not preserved.
+Network loss or abrupt shutdown may leave staging files. If remote cleanup fails,
+the transfer retains a visible error with the temporary path.
+
 ## Verification and limitations
 
-The local macOS workspace suite passed **301 automated tests**, with two
+The local macOS workspace suite passed **313 automated tests**, with two
 real-server tests opt-in. The self-contained SSH/SFTP acceptance test also passed
 separately; see [the test guide](docs/development/ssh-integration.md). Local macOS
 GUI checks covered snippet creation, workspace saving and shell launch, preference
@@ -187,8 +207,10 @@ Remaining limitations include:
 
 - The graphical SFTP transport passed isolated real-server encrypted-key,
   listing, transfer, reconnect and host-key rejection tests. GUI interaction,
-  password/MFA, cancellation and atomic destination replacement remain to be
-  verified or implemented; failed transfers can leave partial destination data.
+  staged atomic publication and cooperative cancellation also passed. GUI interaction,
+  password/MFA, interruption of stalled SSH reads, metadata preservation and
+  other-platform acceptance remain pending. Network loss or abrupt shutdown can
+  leave hidden staging files; cleanup failures report their remote path.
 - Drive still needs real-account acceptance. Authorization requires an externally
   supplied OAuth token; there is no complete account setup flow.
 - Authenticated cloud inventory discovery and network collaboration remain unconnected.

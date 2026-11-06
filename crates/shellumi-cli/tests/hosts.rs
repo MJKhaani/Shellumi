@@ -716,7 +716,7 @@ fn supports_sftp_packet_codecs_and_transfer_queue() {
     assert!(dec_open_out.contains("Request ID: 77"));
     assert!(dec_open_out.contains("/var/log/audit.log"));
 
-    // 5. Transfer queue simulation
+    // 5. Queue preview must not claim bytes or completion without network IO
     let q_res = run(&[
         "sftp",
         "queue",
@@ -728,8 +728,9 @@ fn supports_sftp_packet_codecs_and_transfer_queue() {
     assert!(q_res.status.success());
     let q_out = String::from_utf8(q_res.stdout).unwrap();
     assert!(q_out.contains("Task ID: 1"));
-    assert!(q_out.contains("Transferred: 2048/2048 bytes (100.0%)"));
-    assert!(q_out.contains("Completed: 1/1"));
+    assert!(q_out.contains("Queue preview only; no SSH connection or file transfer was performed."));
+    assert!(q_out.contains("Transferred: 0/2048 bytes (0.0%)"));
+    assert!(q_out.contains("Completed: 0/1"));
 }
 
 #[test]

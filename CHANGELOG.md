@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Reject unsafe listing filenames before joining GUI transfer destinations.
+- Align live SFTP reads with the codec’s 16 MiB frame limit before allocation.
+- Stage SFTP downloads/uploads privately and publish only after validated transfer
+  completion; preserve existing destinations on pre-publication failure/cancel.
+- Add graphical queued/running Cancel actions, live byte progress, real worker
+  limits and stable tab/listing updates. Cancellation is cooperative; failed
+  remote cleanup retains a visible temporary-file path.
+- Prevent byte progress and CLI queue previews from claiming completed transfers.
+- Extend OpenSSH acceptance with destination preservation and cancellation in
+  both directions; cover EOF/close failures, symlink safety and commit races.
+
 - Add self-contained macOS OpenSSH/SFTP acceptance covering saved group identity
   resolution, encrypted-key askpass, listing, binary/empty transfers, reconnect,
   wrong-passphrase and changed/unknown server-key rejection.
@@ -23,7 +34,7 @@
 - Disable SFTP agent forwarding and require previously trusted host keys.
 - Pipe HTTP headers and UTF-8 bodies to curl through stdin rather than argv;
   reject malformed header input and ignore user curl configuration.
-- Regression coverage: 301 workspace tests passed on macOS, two opt-in tests ignored;
+- Regression coverage: 313 workspace tests passed on macOS, two opt-in tests ignored;
   the self-contained real-server SSH/SFTP acceptance test passed separately.
 
 ## 0.0.1-alpha

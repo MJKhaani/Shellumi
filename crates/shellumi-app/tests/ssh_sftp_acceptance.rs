@@ -2,7 +2,8 @@
 #![cfg(target_os = "macos")]
 
 use shellumi_core::{
-    AuthMethod, HostGroup, NewIdentity, SftpClient, SftpConnectOptions, SshDestination,
+    AuthMethod, HostGroup, NewIdentity, SftpClient, SftpConnectOptions, SftpError, SshDestination,
+    TransferControl,
 };
 use shellumi_storage::HostStore;
 use std::net::{TcpListener, TcpStream};
@@ -200,6 +201,49 @@ fn saved_identity_sftp_roundtrip_reconnect_and_host_trust() {
     assert!(client
         .list_remote_directory(text(&root.join("missing")))
         .is_err());
+    // Cancellation must leave pre-existing destinations intact and remove staging files.
+    let cancel_upload = TransferControl::default();
+    std::fs::write(&source, vec![42u8; 262_144]).unwrap();
+    let cancelled = client.upload_file_with_control(
+        &source,
+        text(&remote),
+        &cancel_upload,
+        Some(|_, _| {
+            assert_eq!(std::fs::read(&remote).unwrap(), payload);
+            assert!(cancel_upload.cancel());
+        }),
+    );
+    assert!(matches!(cancelled, Err(SftpError::Cancelled)));
+    assert_eq!(std::fs::read(&remote).unwrap(), payload);
+    assert_eq!(
+        client
+            .list_remote_directory(text(&remote_dir))
+            .unwrap()
+            .len(),
+        1
+    );
+    let cancel_download = TransferControl::default();
+    std::fs::write(&downloaded, b"existing destination").unwrap();
+    let cancelled = client.download_file_with_control(
+        text(&remote),
+        &downloaded,
+        &cancel_download,
+        Some(|_, _| {
+            assert_eq!(std::fs::read(&downloaded).unwrap(), b"existing destination");
+            assert!(cancel_download.cancel());
+        }),
+    );
+    assert!(matches!(cancelled, Err(SftpError::Cancelled)));
+    assert_eq!(std::fs::read(&downloaded).unwrap(), b"existing destination");
+    assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".shellumi-transfer-")));
+    assert_eq!(
+        client.stat(text(&remote)).unwrap().permissions.unwrap() & 0o777,
+        0o600
+    );
     // Empty files must still be created, transferred and closed correctly.
     std::fs::write(&source, []).unwrap();
     assert_eq!(
@@ -241,5 +285,5 @@ fn saved_identity_sftp_roundtrip_reconnect_and_host_trust() {
         SftpClient::connect(&plan.destination, &options).is_err(),
         "Incorrect key passphrase must fail"
     );
-    println!("Real OpenSSH: group identity, encrypted key, SFTP listing, binary/empty transfers, reconnect, changed/unknown host key rejection and wrong-passphrase rejection passed.");
+    println!("Real OpenSSH: group identity, encrypted key, SFTP listing, binary/empty atomic transfers, cancellation preserving originals, reconnect, changed/unknown host key rejection and wrong-passphrase rejection passed.");
 }

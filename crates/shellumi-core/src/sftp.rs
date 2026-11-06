@@ -6,9 +6,14 @@
 //! - Transfer tasks, queue management, and progress calculations
 //! - Local filesystem listing and directory browsing
 
+mod transfer;
+pub use transfer::TransferControl;
+
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+const MAX_SFTP_PACKET_LENGTH: usize = 16 * 1024 * 1024;
 
 /// The kind of a file entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +194,16 @@ pub enum ConflictResolution {
 pub struct PathUtils;
 
 impl PathUtils {
+    /// A listing entry must be a single filename before it can be joined to a
+    /// user-selected transfer directory. Reject separators on either platform.
+    pub fn is_safe_file_name(name: &str) -> bool {
+        if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(char::is_control) {
+            return false;
+        }
+        let mut components = Path::new(name).components();
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+    }
+
     /// Generates breadcrumb tuples of `(display_name, absolute_path)`.
     ///
     /// For example `/var/log/nginx` produces:
@@ -1010,7 +1025,7 @@ impl SftpPacket {
         }
 
         let length = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if length == 0 || length > 16 * 1024 * 1024 {
+        if length == 0 || length > MAX_SFTP_PACKET_LENGTH {
             return Err(SftpProtocolError::InvalidPacketLength(length));
         }
 
@@ -1418,11 +1433,12 @@ impl TransferQueue {
     }
 
     pub fn update_progress(&mut self, id: u64, bytes: u64) {
-        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+        if let Some(task) = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.status == TransferStatus::InProgress)
+        {
             task.bytes_transferred = bytes.min(task.total_bytes);
-            if task.bytes_transferred == task.total_bytes && task.total_bytes > 0 {
-                task.status = TransferStatus::Completed;
-            }
         }
     }
 
@@ -1541,6 +1557,7 @@ pub enum SftpError {
     FileNotFound(String),
     PermissionDenied(String),
     Cancelled,
+    CleanupFailed { path: String, message: String },
 }
 
 impl fmt::Display for SftpError {
@@ -1557,6 +1574,9 @@ impl fmt::Display for SftpError {
             Self::FileNotFound(path) => write!(f, "remote file or directory not found: {path}"),
             Self::PermissionDenied(path) => write!(f, "permission denied for path: {path}"),
             Self::Cancelled => f.write_str("SFTP operation cancelled"),
+            Self::CleanupFailed { path, message } => {
+                write!(f, "{message}; temporary remote file may remain at {path}")
+            }
         }
     }
 }
@@ -1730,7 +1750,7 @@ impl SftpClient {
         let mut len_bytes = [0u8; 4];
         self.reader.read_exact(&mut len_bytes)?;
         let length = u32::from_be_bytes(len_bytes) as usize;
-        if length > 256 * 1024 * 1024 {
+        if length == 0 || length > MAX_SFTP_PACKET_LENGTH {
             return Err(SftpError::Protocol(SftpProtocolError::InvalidPacketLength(
                 length,
             )));
@@ -1874,190 +1894,260 @@ impl SftpClient {
         Ok(entries)
     }
 
-    /// Download a remote file to a local destination, invoking an optional progress callback.
+    /// Download to a private sibling file and publish only after EOF and CLOSE validation.
     pub fn download_file<F>(
         &mut self,
         remote_path: &str,
         local_path: &Path,
-        progress_callback: Option<F>,
+        callback: Option<F>,
     ) -> Result<u64, SftpError>
     where
         F: Fn(u64, u64),
     {
-        let total_size = self
-            .stat(remote_path)
-            .map(|a| a.size.unwrap_or(0))
-            .unwrap_or(0);
-
-        let open_id = self.next_id();
+        self.download_file_with_control(
+            remote_path,
+            local_path,
+            &TransferControl::default(),
+            callback,
+        )
+    }
+    pub fn download_file_with_control<F>(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        control: &TransferControl,
+        callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
+        control.check()?;
+        let size = self.stat(remote_path)?.size;
+        let mut staging = transfer::LocalStaging::new(local_path)?;
+        control.check()?;
+        let id = self.next_id();
         self.send_packet(&SftpPacket::Open {
-            id: open_id,
-            filename: remote_path.to_string(),
+            id,
+            filename: remote_path.into(),
             pflags: SSH_FXF_READ,
             attrs: FileAttributes::new(),
         })?;
-
         let handle = match self.read_packet()? {
-            SftpPacket::Handle { handle, .. } => handle,
-            SftpPacket::Status {
-                code: StatusCode::NoSuchFile,
-                ..
-            } => return Err(SftpError::FileNotFound(remote_path.to_string())),
-            SftpPacket::Status {
-                code: StatusCode::PermissionDenied,
-                ..
-            } => return Err(SftpError::PermissionDenied(remote_path.to_string())),
+            SftpPacket::Handle {
+                id: response,
+                handle,
+            } if response == id => handle,
             SftpPacket::Status { code, message, .. } => {
                 return Err(SftpError::Status { code, message })
             }
             other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
         };
-
-        if let Some(parent) = local_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let mut local_file = std::fs::File::create(local_path)?;
-        let chunk_size = 32768u32;
-        let mut offset = 0u64;
-
-        loop {
-            let read_id = self.next_id();
-            self.send_packet(&SftpPacket::Read {
-                id: read_id,
-                handle: handle.clone(),
-                offset,
-                len: chunk_size,
-            })?;
-
-            match self.read_packet()? {
-                SftpPacket::Data { data, .. } => {
-                    if data.is_empty() {
-                        break;
+        let transferred = (|| {
+            let mut offset = 0;
+            loop {
+                control.check()?;
+                let id = self.next_id();
+                self.send_packet(&SftpPacket::Read {
+                    id,
+                    handle: handle.clone(),
+                    offset,
+                    len: 32768,
+                })?;
+                let reply = self.read_packet()?;
+                control.check()?;
+                match reply {
+                    SftpPacket::Data { id: response, data }
+                        if response == id && !data.is_empty() =>
+                    {
+                        use std::io::Write;
+                        staging
+                            .file
+                            .as_mut()
+                            .expect("staging file is open until publication")
+                            .write_all(&data)?;
+                        offset += data.len() as u64;
+                        if let Some(callback) = &callback {
+                            callback(offset, size.unwrap_or(offset));
+                        }
                     }
-                    use std::io::Write as _;
-                    local_file.write_all(&data)?;
-                    offset += data.len() as u64;
-                    if let Some(ref cb) = progress_callback {
-                        cb(offset, total_size.max(offset));
+                    SftpPacket::Status {
+                        id: response,
+                        code: StatusCode::Eof,
+                        ..
+                    } if response == id => break,
+                    SftpPacket::Status { code, message, .. } => {
+                        return Err(SftpError::Status { code, message })
                     }
-                }
-                SftpPacket::Status {
-                    code: StatusCode::Eof,
-                    ..
-                } => break,
-                SftpPacket::Status { code, message, .. } => {
-                    let close_id = self.next_id();
-                    let _ = self.send_packet(&SftpPacket::Close {
-                        id: close_id,
-                        handle,
-                    });
-                    let _ = self.read_packet();
-                    return Err(SftpError::Status { code, message });
-                }
-                other => {
-                    let close_id = self.next_id();
-                    let _ = self.send_packet(&SftpPacket::Close {
-                        id: close_id,
-                        handle,
-                    });
-                    let _ = self.read_packet();
-                    return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                    other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
                 }
             }
-        }
-
-        self.close_handle(handle)?;
-
-        Ok(offset)
+            if size.is_some_and(|expected| offset != expected) {
+                return Err(SftpError::UnexpectedResponse(
+                    "Remote file size changed or transfer ended early".into(),
+                ));
+            }
+            Ok(offset)
+        })();
+        let closed = self.close_handle(handle);
+        let bytes = transferred?;
+        closed?;
+        staging.publish(local_path, control)?;
+        Ok(bytes)
     }
 
-    /// Upload a local file to a remote destination path.
+    /// Upload to an exclusive private sibling file, then rename without deleting the old destination.
     pub fn upload_file<F>(
         &mut self,
         local_path: &Path,
         remote_path: &str,
-        progress_callback: Option<F>,
+        callback: Option<F>,
     ) -> Result<u64, SftpError>
     where
         F: Fn(u64, u64),
     {
-        use std::io::Read as _;
-        let mut local_file = std::fs::File::open(local_path)?;
-        let total_size = local_file.metadata().map(|m| m.len()).unwrap_or(0);
-
-        let open_id = self.next_id();
+        self.upload_file_with_control(
+            local_path,
+            remote_path,
+            &TransferControl::default(),
+            callback,
+        )
+    }
+    pub fn upload_file_with_control<F>(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        control: &TransferControl,
+        callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
+        use std::io::Read;
+        control.check()?;
+        if remote_path.is_empty() || remote_path.ends_with('/') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Upload destination must name a file",
+            )
+            .into());
+        }
+        let mut source = std::fs::File::open(local_path)?;
+        let size = source.metadata()?.len();
+        let directory = remote_path
+            .rsplit_once('/')
+            .map(|(parent, _)| format!("{parent}/"))
+            .unwrap_or_default();
+        let staging = format!("{directory}.shellumi-transfer-{}.part", transfer::suffix()?);
+        let id = self.next_id();
         self.send_packet(&SftpPacket::Open {
-            id: open_id,
-            filename: remote_path.to_string(),
-            pflags: SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC,
-            attrs: FileAttributes::new(),
+            id,
+            filename: staging.clone(),
+            pflags: SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL,
+            attrs: FileAttributes::new().with_permissions(0o600),
         })?;
-
-        let handle = match self.read_packet()? {
-            SftpPacket::Handle { handle, .. } => handle,
-            SftpPacket::Status {
-                code: StatusCode::PermissionDenied,
-                ..
-            } => return Err(SftpError::PermissionDenied(remote_path.to_string())),
+        let creation_reply = self
+            .read_packet()
+            .map_err(|error| SftpError::CleanupFailed {
+                path: staging.clone(),
+                message: format!("Could not confirm remote staging creation: {error}"),
+            })?;
+        let handle = match creation_reply {
+            SftpPacket::Handle {
+                id: response,
+                handle,
+            } if response == id => handle,
             SftpPacket::Status { code, message, .. } => {
                 return Err(SftpError::Status { code, message })
             }
             other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
         };
-
-        let chunk_size = 32768;
-        let mut buf = vec![0u8; chunk_size];
-        let mut offset = 0u64;
-
-        loop {
-            let bytes_read = local_file.read(&mut buf)?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            let write_id = self.next_id();
-            self.send_packet(&SftpPacket::Write {
-                id: write_id,
-                handle: handle.clone(),
-                offset,
-                data: buf[..bytes_read].to_vec(),
-            })?;
-
-            match self.read_packet()? {
-                SftpPacket::Status {
-                    code: StatusCode::Ok,
-                    ..
-                } => {
-                    offset += bytes_read as u64;
-                    if let Some(ref cb) = progress_callback {
-                        cb(offset, total_size);
+        let transferred = (|| {
+            let mut buffer = vec![0u8; 32768];
+            let mut offset = 0;
+            loop {
+                control.check()?;
+                let count = source.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                let id = self.next_id();
+                self.send_packet(&SftpPacket::Write {
+                    id,
+                    handle: handle.clone(),
+                    offset,
+                    data: buffer[..count].to_vec(),
+                })?;
+                let reply = self.read_packet()?;
+                control.check()?;
+                match reply {
+                    SftpPacket::Status {
+                        id: response,
+                        code: StatusCode::Ok,
+                        ..
+                    } if response == id => {
+                        offset += count as u64;
+                        if let Some(callback) = &callback {
+                            callback(offset, size);
+                        }
                     }
-                }
-                SftpPacket::Status { code, message, .. } => {
-                    let close_id = self.next_id();
-                    let _ = self.send_packet(&SftpPacket::Close {
-                        id: close_id,
-                        handle,
-                    });
-                    let _ = self.read_packet();
-                    return Err(SftpError::Status { code, message });
-                }
-                other => {
-                    let close_id = self.next_id();
-                    let _ = self.send_packet(&SftpPacket::Close {
-                        id: close_id,
-                        handle,
-                    });
-                    let _ = self.read_packet();
-                    return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                    SftpPacket::Status { code, message, .. } => {
+                        return Err(SftpError::Status { code, message })
+                    }
+                    other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
                 }
             }
+            if offset != size {
+                return Err(SftpError::UnexpectedResponse(
+                    "Local file size changed during transfer".into(),
+                ));
+            }
+            Ok(offset)
+        })();
+        let closed = self.close_handle(handle);
+        let result = transferred.and_then(|bytes| {
+            closed?;
+            control.begin_commit()?;
+            self.publish_upload(&staging, remote_path)?;
+            Ok(bytes)
+        });
+        match result {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => match self.remove_file(&staging) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(SftpError::CleanupFailed {
+                    path: staging,
+                    message: format!("{error}; staging cleanup failed: {cleanup}"),
+                }),
+            },
         }
-
-        self.close_handle(handle)?;
-
-        Ok(offset)
+    }
+    fn publish_upload(&mut self, staging: &str, destination: &str) -> Result<(), SftpError> {
+        if !self
+            .server_extensions
+            .iter()
+            .any(|(name, version)| name == "posix-rename@openssh.com" && version == "1")
+        {
+            // SFTP v3 rename refuses existing targets. Never emulate replace by deleting them.
+            return self.rename(staging, destination);
+        }
+        let id = self.next_id();
+        let mut data = Vec::new();
+        write_string(&mut data, staging);
+        write_string(&mut data, destination);
+        self.send_packet(&SftpPacket::Extended {
+            id,
+            request: "posix-rename@openssh.com".into(),
+            data,
+        })?;
+        match self.read_packet()? {
+            SftpPacket::Status {
+                id: response,
+                code: StatusCode::Ok,
+                ..
+            } if response == id => Ok(()),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
     }
 
     /// Query remote file attributes.
@@ -2166,9 +2256,10 @@ impl SftpClient {
 
         match self.read_packet()? {
             SftpPacket::Status {
+                id: response,
                 code: StatusCode::Ok,
                 ..
-            } => Ok(()),
+            } if response == req_id => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
             other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
         }
@@ -3097,6 +3188,38 @@ mod tests {
             };
             server_side.write_all(&ok_pkt.encode()).unwrap();
             server_side.flush().unwrap();
+            // 10. Publish the completed staging file.
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (packet, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match packet {
+                SftpPacket::Rename {
+                    id,
+                    oldpath,
+                    newpath,
+                } => {
+                    assert!(oldpath.starts_with("/etc/.shellumi-transfer-"));
+                    assert_eq!(newpath, "/etc/config.txt");
+                    id
+                }
+                other => panic!("unexpected publish request: {other:?}"),
+            };
+            server_side
+                .write_all(
+                    &SftpPacket::Status {
+                        id,
+                        code: StatusCode::Ok,
+                        message: String::new(),
+                        tag: String::new(),
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            server_side.flush().unwrap();
         });
 
         let reader = Box::new(client_side.try_clone().unwrap());
@@ -3204,12 +3327,18 @@ mod transfer_completion_tests {
                 status(4, StatusCode::Eof),
             ];
             replies.extend(close);
+            std::fs::write(dir.path().join("output"), b"original").unwrap();
             assert!(
                 client(replies)
                     .download_file("/remote", &dir.path().join("output"), None::<fn(u64, u64)>)
                     .is_err(),
                 "Download must not report completion without the matching successful CLOSE"
             );
+            assert_eq!(
+                std::fs::read(dir.path().join("output")).unwrap(),
+                b"original"
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         }
     }
     #[test]
@@ -3227,5 +3356,182 @@ mod transfer_completion_tests {
                 ..
             })
         ));
+    }
+    #[test]
+    fn cancellation_preserves_download_and_removes_local_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("destination");
+        std::fs::write(&target, b"original").unwrap();
+        let control = TransferControl::default();
+        let result = client(vec![
+            SftpPacket::Attrs {
+                id: 1,
+                attrs: FileAttributes::new().with_size(7),
+            },
+            handle(2),
+            SftpPacket::Data {
+                id: 3,
+                data: b"payload".to_vec(),
+            },
+            status(4, StatusCode::Ok),
+        ])
+        .download_file_with_control(
+            "/remote",
+            &target,
+            &control,
+            Some(|_, _| {
+                assert!(control.cancel());
+            }),
+        );
+        assert!(matches!(result, Err(SftpError::Cancelled)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    #[test]
+    fn premature_eof_cannot_replace_existing_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("destination");
+        std::fs::write(&target, b"original").unwrap();
+        let result = client(vec![
+            SftpPacket::Attrs {
+                id: 1,
+                attrs: FileAttributes::new().with_size(100),
+            },
+            handle(2),
+            status(3, StatusCode::Eof),
+            status(4, StatusCode::Ok),
+        ])
+        .download_file("/remote", &target, None::<fn(u64, u64)>);
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    #[test]
+    fn cancelled_upload_closes_and_cleans_staging_without_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::write(&source, b"payload").unwrap();
+        let control = TransferControl::default();
+        let result = client(vec![
+            handle(1),
+            status(2, StatusCode::Ok),
+            status(3, StatusCode::Ok),
+            status(4, StatusCode::Ok),
+        ])
+        .upload_file_with_control(
+            &source,
+            "/remote",
+            &control,
+            Some(|_, _| {
+                assert!(control.cancel());
+            }),
+        );
+        assert!(matches!(result, Err(SftpError::Cancelled)));
+    }
+    #[test]
+    fn legacy_rename_failure_only_removes_staging_and_never_deletes_target() {
+        #[derive(Clone, Default)]
+        struct Recording(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Recording {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let replies = [
+            SftpPacket::Version {
+                version: 3,
+                extensions: vec![],
+            },
+            handle(1),
+            status(2, StatusCode::Ok),
+            status(3, StatusCode::Ok),
+            status(4, StatusCode::Failure),
+            status(5, StatusCode::Ok),
+        ];
+        let input = replies
+            .into_iter()
+            .flat_map(|packet| packet.encode())
+            .collect::<Vec<_>>();
+        let recording = Recording::default();
+        let mut client = SftpClient::from_reader_writer(
+            Box::new(Cursor::new(input)),
+            Box::new(recording.clone()),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::write(&source, b"payload").unwrap();
+        assert!(client
+            .upload_file(&source, "/remote", None::<fn(u64, u64)>)
+            .is_err());
+        let wire = recording.0.lock().unwrap();
+        let mut remainder = wire.as_slice();
+        let mut staging = None;
+        let mut removed = Vec::new();
+        while !remainder.is_empty() {
+            let (packet, consumed) = SftpPacket::decode(remainder).unwrap().unwrap();
+            match packet {
+                SftpPacket::Open {
+                    filename,
+                    pflags,
+                    attrs,
+                    ..
+                } => {
+                    assert!(filename.starts_with("/.shellumi-transfer-"));
+                    assert_eq!(pflags, SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL);
+                    assert_eq!(attrs.permissions, Some(0o600));
+                    staging = Some(filename);
+                }
+                SftpPacket::Rename {
+                    oldpath, newpath, ..
+                } => {
+                    assert_eq!(Some(oldpath), staging);
+                    assert_eq!(newpath, "/remote");
+                }
+                SftpPacket::Remove { filename, .. } => removed.push(filename),
+                _ => {}
+            }
+            remainder = &remainder[consumed..];
+        }
+        assert_eq!(removed, vec![staging.unwrap()]);
+    }
+    #[test]
+    fn live_reader_rejects_oversized_or_empty_frames_before_reading_payload() {
+        for size in [0u32, (MAX_SFTP_PACKET_LENGTH + 1) as u32] {
+            let result = SftpClient::from_reader_writer(
+                Box::new(Cursor::new(size.to_be_bytes().to_vec())),
+                Box::new(Vec::<u8>::new()),
+            );
+            assert!(
+                matches!(result, Err(SftpError::Protocol(SftpProtocolError::InvalidPacketLength(length))) if length == size as usize)
+            );
+        }
+    }
+    #[test]
+    fn transfer_entry_names_cannot_escape_the_selected_directory() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../secret",
+            "nested/file",
+            "nested\\file",
+            "/absolute",
+            "C:\\absolute",
+            "bad\0name",
+            "bad\nname",
+        ] {
+            assert!(
+                !PathUtils::is_safe_file_name(name),
+                "Unsafe entry was accepted: {name:?}"
+            );
+        }
+        for name in ["normal file.txt", ".hidden", "name;literal", "فارسی.txt"] {
+            assert!(PathUtils::is_safe_file_name(name));
+        }
     }
 }

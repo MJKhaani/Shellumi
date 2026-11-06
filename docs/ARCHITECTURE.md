@@ -90,6 +90,8 @@ crates/shellumi-app       GPUI desktop window with interactive host management
 - Displays detailed protocol information and prominent Telnet cleartext security warnings in `show <id>`.
 - Provides dedicated group management: `group add`, `group list`, `group show`, and `group delete`.
 - Provides dedicated tunnel management: `tunnel add`, `tunnel list`, and `tunnel delete`, with automatic localhost exposure detection and security warnings.
+- The `sftp queue` command is an explicit scheduling preview: it performs no
+  network/file transfer and reports zero transferred/completed work.
 - Provides dedicated SFTP commands: `sftp local-ls <path> [--all]`, `sftp history [--host-id <id>] [--limit <n>]`, `sftp clear-history [--host-id <id>]`, `sftp log <upload|download> <local-path> <remote-path> <bytes>`, `sftp packet <encode-init|decode|encode-open> [...]`, and `sftp queue <upload|download> <local-path> <remote-path> <bytes>`.
 - Provides dedicated snippet management: `snippet add <name> <cmd> [--desc <desc>] [--tags <t1,t2>]`, `snippet list [--tag <tag>] [--search <query>]`, `snippet show <id>`, `snippet render <id> [--var key=value] [--preview]`, `snippet delete <id>`, and `snippet batch <id> --hosts <h1,h2...> [--parallel|--sequential] [--dry-run]`.
 - Provides shell integration and autocomplete commands:
@@ -217,6 +219,18 @@ Legacy workspace destinations and Quick Connect use OpenSSH defaults.
 - **Terminal Session Recording & Interactive Replay Viewer:** Terminal panes feature an in-pane recording toggle button (`⏺ Record` / `⏹ Stop (MM:SS)`) capturing live ANSI/VT stream events into standard asciicast v2 recordings. The main toolbar includes a `[📼 Recordings]` action (and Command Palette action `PaletteAction::OpenSessionRecordings` / `Cmd+Shift+R`) opening the Session Replay Modal (`SessionReplayModalState`). All data operations run asynchronously on `cx.background_executor()` without UI lag:
   - *Recordings List tab:* lists recorded sessions with host links, duration (`MM:SS`), event count, formatted byte size, creation timestamp, launch playback button (`▶ Play`), export to `.cast` file (`⬇ Export`), and deletion.
   - *Replay Viewer tab:* interactive virtual terminal playback interface featuring status badge (`▶ PLAYING`, `⏸ PAUSED`, `⏹ STOPPED`), play/pause controls, seek scrubber pills (0%, 25%, 50%, 75%, 100%), 5-second step controls (`⏪ -5s`, `⏩ +5s`), playback speed selector (0.5x, 1x, 2x, 4x), elapsed time indicator, and a dedicated dark virtual terminal screen with live frame rendering.
+- **SFTP staged publication and cancellation:** `sftp::transfer` provides a one-shot
+  atomic cancellation/publication boundary and private same-directory local
+  staging. Downloads verify expected byte count, EOF and CLOSE, sync the staging
+  file, then rename it. Uploads exclusively create a private random remote sibling,
+  verify CLOSE, then publish with the OpenSSH posix-rename extension or standard
+  SFTP rename. There is no delete-target overwrite fallback. Errors/cancellation
+  clean staging where possible; uncertain/failed remote cleanup reports the path.
+  New files use private permissions; original modes/timestamps are not preserved.
+  `shellumi-app::sftp_transfer` dispatches at most two background workers per tab,
+  sends bounded progress updates, and acknowledges worker cancellation. Stable tab
+  IDs and listing generations reject stale asynchronous updates. Cancellation is
+  cooperative and cannot interrupt a blocked SSH read or undo publication.
 - **SFTP transfer completion:** Uploads, downloads and directory listings require a
   matching successful final CLOSE response. Close-time server errors, missing
   replies and mismatched request IDs propagate to callers. An optional explicit

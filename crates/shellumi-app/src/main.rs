@@ -3,6 +3,7 @@ mod connection;
 mod data_path;
 mod desktop;
 mod session;
+mod sftp_transfer;
 mod text_input;
 
 use gpui::{
@@ -278,6 +279,7 @@ struct TunnelModalState {
 }
 
 struct Shellumi {
+    sftp_jobs: std::collections::HashMap<(u64, u64), sftp_transfer::TransferJob>,
     connecting_hosts: std::collections::HashSet<i64>,
     desktop: desktop::DesktopUi,
     database: Option<String>,
@@ -390,6 +392,7 @@ enum SftpTabMode {
 
 #[derive(Clone, Debug, PartialEq)]
 struct SftpBrowserState {
+    listing_generation: u64,
     connection_options: SftpConnectOptions,
     host_name: String,
     destination: Option<SshDestination>,
@@ -529,6 +532,7 @@ impl Shellumi {
         let quick_connect_input = cx.new(|cx| TextInput::new(cx, "", "user@host[:port]"));
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
         Self {
+            sftp_jobs: std::collections::HashMap::new(),
             connecting_hosts: std::collections::HashSet::new(),
             desktop: desktop::DesktopUi::new(cx),
             database,
@@ -780,6 +784,7 @@ impl Shellumi {
             let remote_path = "/home".to_string();
             let remote_entries = Vec::new();
             Some(SftpBrowserState {
+                listing_generation: 0,
                 connection_options: SftpConnectOptions::default(),
                 host_name: name.clone(),
                 destination: None,
@@ -972,6 +977,14 @@ impl Shellumi {
 
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
+            self.sftp_jobs.retain(|(tab_id, _), job| {
+                if *tab_id == id {
+                    job.control.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
             self.tabs.remove(pos);
             if self.tabs.is_empty() {
                 self.active_tab_idx = None;
@@ -1161,7 +1174,7 @@ impl Shellumi {
     }
 
     fn sftp_refresh_remote(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        let (dest, jump_host, remote_path, show_hidden) = {
+        let (tab_id, generation, dest, jump_host, remote_path, show_hidden) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
@@ -1174,10 +1187,13 @@ impl Shellumi {
                 cx.notify();
                 return;
             };
+            sftp.listing_generation = sftp.listing_generation.wrapping_add(1);
             sftp.loading = true;
             sftp.error = None;
             cx.notify();
             (
+                tab.id,
+                sftp.listing_generation,
                 dest,
                 sftp.jump_host.clone(),
                 sftp.remote_path.clone(),
@@ -1208,8 +1224,11 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
-                if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                     if let Some(sftp) = &mut tab.sftp_state {
+                        if sftp.listing_generation != generation {
+                            return;
+                        }
                         sftp.loading = false;
                         match res {
                             Ok(entries) => {
@@ -1318,203 +1337,6 @@ impl Shellumi {
             }
         }
         self.sftp_refresh_remote(tab_idx, cx);
-    }
-
-    fn sftp_upload_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        let (dest, jump_host, local_file_str, remote_file_str, selected_name, task_id) = {
-            let Some(tab) = self.tabs.get_mut(tab_idx) else {
-                return;
-            };
-            let Some(sftp) = &mut tab.sftp_state else {
-                return;
-            };
-            let Some(selected_name) = sftp.selected_local.clone() else {
-                sftp.error = Some("Please select a local file to upload.".into());
-                cx.notify();
-                return;
-            };
-            let Some(dest) = sftp.destination.clone() else {
-                sftp.error = Some("Remote SFTP destination is not configured.".into());
-                cx.notify();
-                return;
-            };
-
-            let local_file_str = PathUtils::join_path(&sftp.local_path, &selected_name);
-            let remote_file_str = PathUtils::join_path(&sftp.remote_path, &selected_name);
-            let local_path_buf = std::path::PathBuf::from(&local_file_str);
-
-            let file_size = match std::fs::metadata(&local_path_buf) {
-                Ok(meta) => meta.len(),
-                Err(e) => {
-                    sftp.error = Some(format!("Cannot read local file: {e}"));
-                    cx.notify();
-                    return;
-                }
-            };
-
-            let task_id = sftp.queue.enqueue(
-                TransferDirection::Upload,
-                local_file_str.clone(),
-                remote_file_str.clone(),
-                file_size,
-            );
-            let _ = sftp.queue.dispatch_next();
-            sftp.status_message = Some(format!("Uploading '{selected_name}'…"));
-            sftp.error = None;
-            cx.notify();
-
-            (
-                dest,
-                sftp.jump_host.clone(),
-                local_file_str,
-                remote_file_str,
-                selected_name,
-                task_id,
-            )
-        };
-
-        let connection_options = self
-            .tabs
-            .get(tab_idx)
-            .and_then(|tab| tab.sftp_state.as_ref())
-            .map(|browser| browser.connection_options.clone())
-            .unwrap_or_default();
-        let task = cx.background_executor().spawn(async move {
-            let mut opts = connection_options;
-            opts.port = Some(dest.port().get());
-            if let Some(jump) = jump_host {
-                opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
-            }
-            let mut client = SftpClient::connect(&dest, &opts)?;
-            let local_path_buf = std::path::PathBuf::from(&local_file_str);
-            let transferred =
-                client.upload_file(&local_path_buf, &remote_file_str, None::<fn(u64, u64)>)?;
-            Ok::<u64, SftpError>(transferred)
-        });
-
-        cx.spawn(async move |app, cx| {
-            let res = task.await;
-            let _ = app.update(cx, |app, cx| {
-                if let Some(tab) = app.tabs.get_mut(tab_idx) {
-                    if let Some(sftp) = &mut tab.sftp_state {
-                        match res {
-                            Ok(bytes) => {
-                                sftp.queue.mark_completed(task_id);
-                                sftp.status_message =
-                                    Some(format!("Uploaded '{selected_name}' ({bytes} bytes)."));
-                                sftp.error = None;
-                            }
-                            Err(e) => {
-                                sftp.queue.mark_failed(task_id, e.to_string());
-                                sftp.error = Some(format!("Upload failed: {e}"));
-                            }
-                        }
-                        cx.notify();
-                    }
-                }
-                app.sftp_refresh_remote(tab_idx, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn sftp_download_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        let (dest, jump_host, remote_file_str, local_file_str, selected_name, task_id) = {
-            let Some(tab) = self.tabs.get_mut(tab_idx) else {
-                return;
-            };
-            let Some(sftp) = &mut tab.sftp_state else {
-                return;
-            };
-            let Some(selected_name) = sftp.selected_remote.clone() else {
-                sftp.error = Some("Please select a remote file to download.".into());
-                cx.notify();
-                return;
-            };
-            let Some(dest) = sftp.destination.clone() else {
-                sftp.error = Some("Remote SFTP destination is not configured.".into());
-                cx.notify();
-                return;
-            };
-
-            let remote_file_str = PathUtils::join_path(&sftp.remote_path, &selected_name);
-            let local_file_str = PathUtils::join_path(&sftp.local_path, &selected_name);
-
-            let file_size = sftp
-                .remote_entries
-                .iter()
-                .find(|e| e.name == selected_name)
-                .map(|e| e.size)
-                .unwrap_or(0);
-
-            let task_id = sftp.queue.enqueue(
-                TransferDirection::Download,
-                local_file_str.clone(),
-                remote_file_str.clone(),
-                file_size,
-            );
-            let _ = sftp.queue.dispatch_next();
-            sftp.status_message = Some(format!("Downloading '{selected_name}'…"));
-            sftp.error = None;
-            cx.notify();
-
-            (
-                dest,
-                sftp.jump_host.clone(),
-                remote_file_str,
-                local_file_str,
-                selected_name,
-                task_id,
-            )
-        };
-
-        let connection_options = self
-            .tabs
-            .get(tab_idx)
-            .and_then(|tab| tab.sftp_state.as_ref())
-            .map(|browser| browser.connection_options.clone())
-            .unwrap_or_default();
-        let task = cx.background_executor().spawn(async move {
-            let mut opts = connection_options;
-            opts.port = Some(dest.port().get());
-            if let Some(jump) = jump_host {
-                opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
-            }
-            let mut client = SftpClient::connect(&dest, &opts)?;
-            let local_path_buf = std::path::PathBuf::from(&local_file_str);
-            let transferred =
-                client.download_file(&remote_file_str, &local_path_buf, None::<fn(u64, u64)>)?;
-            Ok::<u64, SftpError>(transferred)
-        });
-
-        cx.spawn(async move |app, cx| {
-            let res = task.await;
-            let _ = app.update(cx, |app, cx| {
-                if let Some(tab) = app.tabs.get_mut(tab_idx) {
-                    if let Some(sftp) = &mut tab.sftp_state {
-                        match res {
-                            Ok(bytes) => {
-                                sftp.queue.mark_completed(task_id);
-                                sftp.status_message =
-                                    Some(format!("Downloaded '{selected_name}' ({bytes} bytes)."));
-                                sftp.error = None;
-                                if let Ok(entries) =
-                                    list_local_directory(&sftp.local_path, sftp.show_hidden)
-                                {
-                                    sftp.local_entries = entries;
-                                }
-                            }
-                            Err(e) => {
-                                sftp.queue.mark_failed(task_id, e.to_string());
-                                sftp.error = Some(format!("Download failed: {e}"));
-                            }
-                        }
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
     }
 
     fn sftp_clear_completed(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
@@ -11445,7 +11267,7 @@ impl Shellumi {
                 div()
                     .h_full()
                     .bg(rgb(0x10b981))
-                    .w(px((pct / 100.0) * 800.0)),
+                    .w(gpui::relative(pct / 100.0)),
             );
 
         queue_drawer = queue_drawer.child(queue_header).child(progress_bar);
@@ -11474,13 +11296,13 @@ impl Shellumi {
                     TransferStatus::Cancelled => div().text_color(rgb(0x6b7280)).child("Cancelled"),
                 };
 
-                let task_row = div()
+                let mut task_row = div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .text_xs()
                     .text_color(rgb(0x9ca3af))
-                    .child(div().child(format!(
+                    .child(div().flex_1().min_w_0().truncate().child(format!(
                         "#{} {} · {} → {}",
                         task.id, task.direction, task.local_path, task.remote_path
                     )))
@@ -11498,6 +11320,32 @@ impl Shellumi {
                             .child(status_badge),
                     );
 
+                if matches!(
+                    task.status,
+                    TransferStatus::Queued | TransferStatus::InProgress
+                ) {
+                    let task_id = task.id;
+                    let tab_id = self.tabs[tab_idx].id;
+                    let requested = self
+                        .sftp_jobs
+                        .get(&(tab_id, task_id))
+                        .is_some_and(|job| job.control.is_cancelled());
+                    if requested {
+                        task_row = task_row.child("Cancelling…");
+                    } else {
+                        task_row = task_row.child(
+                            div()
+                                .id(("cancel-transfer", task_id))
+                                .px_2()
+                                .py_1()
+                                .cursor_pointer()
+                                .child("Cancel")
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.sftp_cancel_transfer(tab_id, task_id, cx)
+                                })),
+                        );
+                    }
+                }
                 tasks_list = tasks_list.child(task_row);
             }
 
@@ -14219,6 +14067,7 @@ mod tests {
         use shellumi_core::{FileEntry, FileKind, PathUtils, TransferDirection, TransferQueue};
 
         let mut sftp_state = SftpBrowserState {
+            listing_generation: 0,
             host_name: "prod-server".to_string(),
             connection_options: SftpConnectOptions::default(),
             destination: None,

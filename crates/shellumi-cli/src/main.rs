@@ -2138,8 +2138,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let mut queue = TransferQueue::new(2);
                     let task_id = queue.enqueue(direction, local_path, remote_path, bytes);
                     let dispatched = queue.dispatch_next();
-                    queue.update_progress(task_id, bytes);
                     let summary = queue.summary();
+                    println!(
+                        "Queue preview only; no SSH connection or file transfer was performed."
+                    );
                     println!("Task ID: {task_id}");
                     println!("Dispatched: {dispatched:?}");
                     println!(

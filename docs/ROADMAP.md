@@ -36,7 +36,7 @@ The following work is included in the alpha source:
 
 ## Verification recorded for alpha
 
-- 301 automated workspace tests passed on macOS; two real-server tests are
+- 313 automated workspace tests passed on macOS; two real-server tests are
   opt-in. The self-contained SSH/SFTP acceptance test passed separately.
 - Local OpenSSH encrypted-key authentication through the app helper succeeded;
   the same setup refused an untrusted host. Self-contained real-server SFTP
@@ -63,8 +63,9 @@ The following work is included in the alpha source:
    notarization before broader distribution.
 4. **Credential and transport acceptance:** add stdin/masked CLI secret entry and GUI identity editing;
    verify saved-identity authentication and native keychains on actual Windows/Linux desktops. Exercise
-   SFTP GUI interaction/cancellation and atomic destination handling, and Drive
-   against a test account. Isolated macOS SFTP transport acceptance is recorded
+   SFTP GUI interaction, interruption of stalled reads, permission/timestamp
+   preservation, and Drive against a test account. Staged publication and
+   cooperative GUI cancellation are implemented; visual acceptance remains. Isolated macOS SFTP transport acceptance is recorded
    in [the test guide](development/ssh-integration.md).
    Secure credential fallback is opt-in with a user-supplied passphrase; Drive
    must not sync with a shared/default vault key.
@@ -97,5 +98,37 @@ identity resolver and actual askpass helper. The graphical transport passed
 listing, multi-packet binary and empty-file transfers, reconnect, wrong-passphrase
 failure and strict host-key rejection. Fixed false success on failed final CLOSE
 responses; ordinary tests cover server failure, mismatched request IDs and
-connection loss at completion. Failed transfers may leave partial destinations;
-atomic replacement/cancellation and GPUI interaction remain required follow-ups.
+connection loss at completion. The subsequent staged-transfer increment below
+addresses destination preservation and cooperative cancellation; GPUI interaction
+acceptance remains pending.
+
+## Staged transfer and cancellation follow-up (2026-11-06)
+
+- Downloads use exclusive private sibling staging, expected-size/EOF checks,
+  verified CLOSE, file sync and rename. Pre-publication failure/cancellation
+  leaves the existing destination intact and removes local staging.
+- Uploads use exclusive private remote staging and verified CLOSE, then
+  `posix-rename@openssh.com` or standard SFTP rename. There is no delete-target
+  fallback. Unsupported overwrite fails safely; failed remote cleanup retains
+  its temporary path in the error.
+- Added Cancel actions, acknowledged cancellation, live byte progress, actual
+  two-worker-per-tab scheduling, duplicate destination rejection and queued-work
+  dispatch after completion. Closing tabs requests cancellation. Asynchronous
+  transfer/listing updates use stable tab IDs and listing generations.
+- GUI transfer entries must have safe single-component filenames; malicious
+  server listing names cannot redirect a transfer outside its selected directory.
+- The live reader now uses the same 16 MiB frame limit as the packet codec,
+  rejecting oversized/empty frames before payload allocation.
+- Byte counts alone no longer mark a queue task completed. The CLI queue command
+  explicitly previews scheduling without claiming a transfer or completion.
+- Verified original-file preservation under cancellation, close failure and
+  premature EOF, cancellation/publication races, symlink replacement without
+  following the link, and safe legacy-server rename failure. Extended the real
+  OpenSSH acceptance test to check cancellation and staging cleanup in both
+  directions, plus successful replacement with an empty file.
+
+Remaining: cancellation cannot interrupt a stalled SSH read and is refused once
+publication begins. Abrupt shutdown/network loss may leave staging files. File
+permission/timestamp preservation, GUI click/focus acceptance, password/MFA and
+non-macOS validation remain. The next transfer increment is bounded interruption
+of stalled reads and recovery of abandoned staging files.

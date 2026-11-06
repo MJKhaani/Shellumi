@@ -72,7 +72,11 @@ Verified behavior:
   mode using an environment reference to a disposable test passphrase.
 - Negotiate SFTP v3, create/list/remove directories, and upload/download an exact
   131,079-byte binary payload across multiple SFTP packets.
-- Transfer empty files and reconnect with the same identity.
+- Transfer empty files, replace existing files only after verified publication,
+  and reconnect with the same identity.
+- Cancel uploads/downloads after a data packet: assert existing destinations are
+  unchanged both inside progress callbacks and after cancellation, and assert
+  that staging files are removed. Check private remote file permissions.
 - Report missing remote directories as failures.
 - Refuse changed and unknown host keys, and an incorrect key passphrase.
 
@@ -83,7 +87,18 @@ errors cannot be reported as successful completion.
 
 This establishes the graphical SFTP transport and helper behavior, not GPUI
 button/focus/layout acceptance. Real password/MFA authentication, native keychain
-access, cancellation during transfers, atomic destination replacement, and
-Windows/Linux server/runtime coverage remain separate work. A failed transfer
-can leave partial data at its destination; do not treat a failed task as a usable
-complete file.
+access and Windows/Linux server/runtime coverage remain separate work.
+
+Transfers now stage privately and publish by rename after verification. Local
+fault tests assert original-file preservation and cleanup after failed CLOSE,
+premature EOF and cancellation. Protocol tests verify that legacy-server rename
+failure removes only staging, never the old destination. Other tests exercise
+symlink replacement without following the link, cancellation/publication races,
+actual queue outcomes and retained cleanup warnings.
+
+Cancellation is cooperative at packet boundaries and cannot interrupt a stalled
+SSH read; once publication begins cancellation is refused. Network loss or abrupt
+shutdown can leave hidden staging files; remote cleanup errors report their path.
+The original destination's permissions/timestamps are not preserved. Non-OpenSSH
+servers without posix-rename can refuse replacement of existing remote files;
+Shellumi never deletes the original as an overwrite fallback.

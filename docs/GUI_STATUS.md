@@ -11,7 +11,7 @@ its sample data and prototype QA are not evidence of working application feature
 | Hosts | Search and group filtering, selection and inspector, host create/edit/delete, group default editing, clipboard OpenSSH config import/export, SSH and SFTP dispatch. Import ignores wildcard config blocks and imports destination metadata only. |
 | Workspaces | Create, edit/rename, duplicate, delete with confirmation, choose local and saved SSH sessions, select single/vertical/horizontal/grid layout, reopen saved sessions. Opening creates new sessions; it does not restore remote processes. |
 | Terminal | Real PTY sessions, measured grid dimensions and PTY resize, independent split panes, wheel scrollback with a visible position indicator, follow output when at the bottom, search, paste, recordings, snippets and broadcast controls. |
-| SFTP Files | Real local directory browsing, parent/path navigation, hidden files, copy local file paths, graphical dual-pane SFTP browser with live remote directory listings, upload/download queue, and live system SFTP terminal toggle. |
+| SFTP Files | Real local directory browsing, parent/path navigation, hidden files, copy local file paths, graphical dual-pane SFTP browser with live remote directory listings, upload/download queue with two-worker scheduling, live byte progress and Cancel actions, private staged publication, and live system SFTP terminal toggle. |
 | Snippets | Package/tag filtering, live search, selected-script preview, create/edit multi-line commands, template variables, delete confirmation, clipboard copy and JSON package import/export, explicit parameter/run confirmation, paste into an existing terminal. |
 | Keychain | Native credential-store status card (macOS `securityd`, Linux Secret Service via `secret-tool`, Windows Credential Manager `PasswordVault`) with active/fallback indicators; reusable database identities with OpenSSH certificate validation, secret reference badges (`🔐 Keychain`), and credential metadata; read public `.ssh/*.pub` metadata and fingerprints; copy public keys; start interactive system `ssh-keygen`; load a selected identity with `ssh-add`. Identity creation/editing remains CLI-driven. Host and group editors select existing identities; Refresh reloads CLI changes. SSH, SFTP (terminal and graphical), saved-host workspace restores and tunnels resolve the current binding in background tasks. Native service status indicators are not proof of end-to-end credential access. |
 | Port Forwarding | Persisted tunnel rules, host selection, local/remote/dynamic forwarding, rule editing and deletion, real OpenSSH tunnel session launch. Network readiness is determined by the SSH session rather than fabricated traffic counters. |
@@ -72,8 +72,8 @@ implemented application; those controls are not presented as functioning toggles
   validation and tests.
 - `README.md`, `docs/ROADMAP.md`, `docs/GUI_STATUS.md`: implementation status.
 
-Verification commands: `cargo test --locked --offline --workspace` (301 passed,
-2 opt-in tests ignored on macOS), app unit tests (44 passed, 1 ignored),
+Verification commands: `cargo test --locked --offline --workspace` (313 passed,
+2 opt-in tests ignored on macOS), app unit tests (47 passed, 1 ignored),
 `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, and the native macOS release build. Workspace
 integration tests requiring a loopback listener were run with loopback access.
@@ -146,3 +146,31 @@ request ID for uploads, downloads and directory listings. Failure, disconnect or
 a mismatched response propagates as an error instead of a successful task.
 Three automated regression tests cover those cases. The test guide and roadmap
 record remaining password/MFA, native credential and transfer safety work.
+
+## Staged transfer and GUI cancellation increment
+
+`crates/shellumi-app/src/sftp_transfer.rs` owns queued/running job snapshots,
+background transfer launch, bounded progress delivery and cancellation outcomes.
+Queued cancellation starts no connection. Running cancellation is requested in
+the UI and acknowledged only by the worker; a transfer already publishing cannot
+be relabelled cancelled. Closing a tab cancels its pending/running work. Cleanup
+failures remain visible as failed tasks with the temporary remote path.
+
+The dispatcher honors the actual queue limit of two workers per tab and starts
+waiting work after a worker finishes. Identical queued/running destinations are
+rejected. Transfer callbacks use stable tab IDs; remote listing generations also
+reject obsolete navigation responses. Local metadata refresh after a download
+runs in the background. Progress no longer implies completion, and the progress
+bar/path rows fit the available width.
+
+Core transfers now use private staging and publish by rename after verification.
+Tests cover destination preservation on failed CLOSE, premature EOF and cancel,
+no delete-target fallback, race exclusion between cancellation and publication,
+symlink safety and retained cleanup warnings. The real-server test checks both
+directions of cancellation and staging cleanup. These transport/helper tests do
+not establish visual, keyboard or screen-reader acceptance of the new Cancel UI.
+
+Cancellation is cooperative; stalled SSH reads can delay it indefinitely.
+Original permissions/timestamps are not preserved (new files use private modes).
+Abrupt shutdown/network loss can leave staging files; these cases still need
+bounded interruption/recovery work.
