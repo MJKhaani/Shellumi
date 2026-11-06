@@ -172,5 +172,6 @@ The workflow can now retry a supplied source tag using corrected packaging tools
 from the workflow revision. Binary builds and the dependency inventory remain on
 the unchanged source tag, and `release-provenance.json` records both revisions.
 The source tag's suite remains 318 tests; main has 321 after packaging regressions.
-See [release operations](development/releases.md). Artifact publication is pending
-the repaired workflow; abandoned-transfer recovery remains the next app increment.
+See [release operations](development/releases.md). The [repaired workflow](https://github.com/MJKhaani/Shellumi/actions/runs/42269432654) passed all four native jobs and published 15 assets.
+Checksum entries, GitHub asset digests and source/helper provenance were verified.
+Abandoned-transfer recovery remains the next app increment.

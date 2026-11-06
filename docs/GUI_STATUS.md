@@ -199,3 +199,7 @@ prerelease conversion and supports retries without changing the source tag.
 Three packaging-helper assembly tests bring main to 321 workspace tests. No GUI
 implementation changed in this repair. Release publication status and provenance
 are tracked in [the release guide](development/releases.md).
+
+The repaired [release run](https://github.com/MJKhaani/Shellumi/actions/runs/42269432654) passed every native build/package job and
+published all 15 assets. Checksums and source/helper provenance were verified.
+This establishes distribution availability, not additional GUI/runtime acceptance.

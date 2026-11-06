@@ -50,6 +50,9 @@ programs; the native CI build supplies the actual release binaries.
 - The packaging repair adds three regression tests on main (321 workspace tests
   in total); the source tag's application suite has 318 tests. No application
   source is changed by this packaging repair.
-- Retry/publication status must be checked on GitHub Actions before treating
-  release assets as available. Runtime acceptance on each OS remains separate
-  from successful compilation and packaging.
+- Retry [42269432654](https://github.com/MJKhaani/Shellumi/actions/runs/42269432654) passed all four native build/package jobs and publish.
+- [Published release](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.2-alpha): 15 nonempty uploaded assets. The checksum manifest
+  contains 14 entries; GitHub asset digests, downloaded metadata hashes, both
+  provenance commits and all five crate versions were verified.
+- The Debian archive was generated with root ownership and validated in native
+  Linux CI. Runtime acceptance on each OS remains separate from these checks.

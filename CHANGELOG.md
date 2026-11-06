@@ -2,13 +2,21 @@
 
 ## Unreleased
 
+## 0.0.2-alpha
+
+### Post-tag packaging repair
+
+- Verified and published the unchanged `v0.0.2-alpha` tag using the repaired
+  workflow: all four native build/package jobs passed, with 15 assets and
+  validated checksums/source provenance.
+
 - Repair Debian prerelease version conversion, validate package inputs before
   output cleanup, require both binaries, and generate root-owned Debian archives.
 - Add three actual-helper packaging regression tests (321 workspace tests on main).
 - Support manual release retries from unchanged source tags with corrected
   packaging tools and explicit source/helper provenance.
 
-## 0.0.2-alpha
+### Application changes
 
 - Interrupt blocked SSH pipe reads/writes on cancellation and enforce one bounded
   deadline per complete packet (30 seconds by default), including SFTP handshake.

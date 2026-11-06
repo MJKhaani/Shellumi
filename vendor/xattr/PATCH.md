@@ -15,4 +15,6 @@ it does not downgrade libc or add a new runtime dependency. Formatting may follo
 the workspace formatter. Remove the patch when the GPUI dependency chain moves
 to a maintained xattr version. Local macOS upstream tests validate the unchanged native behavior. A Linux-target
 compile check was attempted, but the Rust standard-library download failed DNS
-resolution. Native Linux compilation and full app validation remain with CI.
+resolution. Native Linux CI subsequently compiled both Shellumi binaries and generated a
+Debian archive successfully in release retry 42269432654. Linux desktop runtime
+validation remains separate.

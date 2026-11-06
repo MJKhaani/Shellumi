@@ -53,8 +53,9 @@ See [GUI implementation status](docs/GUI_STATUS.md) for screen-by-screen details
 Download an asset matching your operating system and CPU from
 [GitHub Releases](https://github.com/MJKhaani/Shellumi/releases). Tag builds run
 through GitHub Actions; an asset is available only after its build succeeds.
-Alpha tags are published as prereleases. `v0.0.2-alpha` starts a new four-target
-build; inspect its workflow result before treating release assets as available. The locally verified Intel macOS `0.0.2-alpha` build is unsigned and
+Alpha tags are published as prereleases. [`v0.0.2-alpha`](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.2-alpha) is published with all four platform builds, native packages,
+checksums and source/helper provenance. The locally verified Intel macOS
+`0.0.2-alpha` build is unsigned and
 not notarized.
 
 On macOS, extract the app archive or open the disk image and launch
