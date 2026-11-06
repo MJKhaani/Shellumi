@@ -962,9 +962,19 @@ pub fn default_fallback_vault_path() -> PathBuf {
     if let Ok(custom) = std::env::var("SHELLUMI_VAULT_PATH") {
         return PathBuf::from(custom);
     }
-    let dir = std::env::temp_dir().join("shellumi");
-    let _ = fs::create_dir_all(&dir);
-    dir.join("vault.enc")
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+    };
+    base.unwrap_or_default().join("Shellumi/credentials.enc")
 }
 
 /// Fallback-aware credential store pairing a platform native daemon with an encrypted file vault.
@@ -1024,7 +1034,7 @@ impl CredentialStore for DaemonWithFallbackStore {
     }
 }
 
-/// Returns the default platform-native credential store, falling back to ephemeral or encrypted file store.
+/// Returns the native credential store. Encrypted fallback requires an explicit user passphrase.
 pub fn default_credential_store() -> Box<dyn CredentialStore> {
     if let Ok(store_type) = std::env::var("SHELLUMI_CREDENTIAL_STORE") {
         if store_type == "ephemeral" {
@@ -1051,18 +1061,83 @@ pub fn default_credential_store() -> Box<dyn CredentialStore> {
         }
     };
 
-    let fallback_path = default_fallback_vault_path();
-    let fallback: Box<dyn CredentialStore> =
-        match EncryptedFileCredentialStore::new(fallback_path, "shellumi-local-credentials-key") {
-            Ok(store) => Box::new(store),
-            Err(_) => Box::new(EphemeralCredentialStore::new()),
-        };
+    configured_credential_store(
+        primary,
+        default_fallback_vault_path(),
+        std::env::var("SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE").ok(),
+    )
+}
 
-    Box::new(DaemonWithFallbackStore::new(primary, fallback))
+struct UnavailableCredentialStore(String);
+impl CredentialStore for UnavailableCredentialStore {
+    fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<(), CredentialError> {
+        Err(CredentialError::Storage(self.0.clone()))
+    }
+    fn get_secret(&self, _: &str, _: &str) -> Result<Option<SecretString>, CredentialError> {
+        Err(CredentialError::Storage(self.0.clone()))
+    }
+    fn delete_secret(&self, _: &str, _: &str) -> Result<bool, CredentialError> {
+        Err(CredentialError::Storage(self.0.clone()))
+    }
+}
+fn configured_credential_store(
+    primary: Box<dyn CredentialStore>,
+    path: PathBuf,
+    passphrase: Option<String>,
+) -> Box<dyn CredentialStore> {
+    let Some(passphrase) = passphrase.map(SecretString::new) else {
+        return primary;
+    };
+    if passphrase.expose_secret().chars().count() < 12 || !path.is_absolute() {
+        return Box::new(UnavailableCredentialStore("Encrypted fallback requires an absolute vault path and a passphrase of at least 12 characters.".into()));
+    }
+    match EncryptedFileCredentialStore::new(path, passphrase.expose_secret()) {
+        Ok(fallback) => Box::new(DaemonWithFallbackStore::new(primary, Box::new(fallback))),
+        Err(_) => Box::new(UnavailableCredentialStore(
+            "Could not initialize the configured encrypted credential fallback.".into(),
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fallback_requires_explicit_user_key_and_never_defaults_to_shared_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.enc");
+        let primary = || {
+            Box::new(super::UnavailableCredentialStore(
+                "native store unavailable".into(),
+            )) as Box<dyn super::CredentialStore>
+        };
+        let store = super::configured_credential_store(primary(), path.clone(), None);
+        assert!(store.set_secret("service", "account", "secret").is_err());
+        assert!(!path.exists());
+        let store =
+            super::configured_credential_store(primary(), path.clone(), Some("short".into()));
+        assert!(store.set_secret("service", "account", "secret").is_err());
+        assert!(!path.exists());
+        let store = super::configured_credential_store(
+            primary(),
+            path.clone(),
+            Some("user-selected-strong-key".into()),
+        );
+        store
+            .set_secret("service", "account", "private-value")
+            .unwrap();
+        assert_eq!(
+            store
+                .get_secret("service", "account")
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "private-value"
+        );
+        assert!(!std::fs::read_to_string(path)
+            .unwrap()
+            .contains("private-value"));
+    }
+
     use super::*;
 
     #[test]

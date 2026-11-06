@@ -60,7 +60,7 @@ crates/shellumi-app       GPUI desktop window with interactive host management
   - `WindowsCredentialManagerStore`: Windows Runtime `Windows.Security.Credentials.PasswordVault` API integration via non-interactive PowerShell with safe `stdin` piping.
   - `DaemonWithFallbackStore`: Fallback-aware store pairing platform-native daemon with authenticated AES-256-GCM encrypted file vault (`EncryptedFileCredentialStore`).
   - `probe_keychain_daemon`: Dynamic health prober returning `KeychainDaemonStatus` with reachability details.
-  - Canonical URI reference resolvers (`format_keychain_ref`, `parse_keychain_ref`, `resolve_secret_from_ref`, `store_secret_to_ref`, `delete_secret_by_ref`) supporting `keychain://<service>/<account>` and `env://<var>`, ensuring plaintext credentials never enter database tables or logs.
+  - Canonical URI reference resolvers (`format_keychain_ref`, `parse_keychain_ref`, `resolve_secret_from_ref`, `store_secret_to_ref`, `delete_secret_by_ref`) supporting `keychain://<service>/<account>` and `env://<var>`, keeping credential references separate from database metadata. The CLI still supports secret arguments; stdin-based CLI entry remains to be implemented to avoid process/history exposure.
 - **Terminal Session Logging, Redaction & Replay Subsystem:** Implements session recording models and playback engine in `shellumi-core::recording`:
   - `SessionRecordingMetadata` and `SessionRecordingSummary` modeling audit metadata, session IDs, durations, event counts, byte sizes, and host bindings.
   - `SessionRedactor` automated sensitive data redaction engine scanning terminal I/O streams to mask PEM private keys (`BEGIN ... PRIVATE KEY`), bearer authorization tokens (`Bearer ...`), AWS secret keys (`AKIA...`), GitHub/GitLab personal access tokens (`ghp_...`, `glpat-...`), configuration assignments (`password=`, `token=`, `secret=`, `api_key=`), and one-time MFA/TOTP codes (`[0-9]{6}`).
@@ -137,6 +137,25 @@ crates/shellumi-app       GPUI desktop window with interactive host management
 - Provides a protocol-aware `connect` command that dispatches to system OpenSSH, Mosh, Telnet, or Serial with host-key confirmation and agent forwarding disabled for SSH, resolving inherited destination parameters and chaining validated jump hosts. It enforces capability restrictions (e.g. startup snippets only on SSH) and emits cleartext warnings for Telnet.
 - Validates inputs before opening or mutating the database.
 
+### Saved identity connection boundary
+
+`shellumi-storage::desktop::resolve_connection` reopens current host/group/identity
+records in a background task and applies explicit-host then group identity
+precedence. `shellumi-core::connection::ConnectionPlan` validates metadata and
+builds SSH/SFTP arguments, including key/certificate selection, authentication
+preferences, IPv6 formatting, jump hosts and strict verification for secret use.
+The selected identity username overrides host username. SSH, graphical/terminal
+SFTP, workspace restores with host IDs, and tunnels consume the same plan.
+
+`shellumi-app::askpass` configures OpenSSH to invoke the app executable in helper
+mode. The helper resolves a secret reference outside the UI process execution
+path and supplies it through stdout to OpenSSH. Exact target/key prompt matching
+and `SSH_ASKPASS_PROMPT` checks reject confirmations, MFA, and arbitrary prompts.
+Secrets never appear in connection argv or terminal-output heuristics. Hosts must
+already be trusted for secret-assisted launches. Identity creation/editing stays
+in the CLI; desktop host/group editors bind existing identities and refresh them.
+Legacy workspace destinations and Quick Connect use OpenSSH defaults.
+
 ### `shellumi-app`
 - GPU-accelerated desktop user interface built with GPUI 0.2.2.
 - **Threading model:** All database operations execute on background tasks via `cx.background_executor().spawn()` with an isolated current-thread Tokio runtime, keeping the GPUI UI thread responsive.
@@ -147,7 +166,7 @@ crates/shellumi-app       GPUI desktop window with interactive host management
 - **Native OS Keychain Daemon & Identity Display:** In the Keychain view, renders an OS Credential Daemon Status card showing daemon backend (`macOS Keychain`, `Linux Secret Service`, `Windows Credential Manager`), daemon identifier (`securityd`, D-Bus, `VaultSvc`), active/fallback indicators (`ACTIVE` in green, `FALLBACK` in amber), and detailed status. Saved identity entries display `🔐 Keychain` badges when `password_secret_ref` or `passphrase_secret_ref` is present.
 - **Host list display:** Shows group, jump-host, startup-snippet, and protocol badges (`[🔒 SSH]`, `[⚡ Mosh]`, `[⚠️ Telnet]`, `[🔌 Serial]`) alongside host actions. SSH-exclusive actions like SFTP are hidden for non-SSH hosts. Startup snippets are validated, rendered, and monitored safely via `StartupSessionTracker`.
 - **Connection dispatch and startup snippets:** Protocol dispatch exists. Startup snippets are not automatically sent because prompt-like output cannot establish SSH authentication readiness.
-- **Port-Forwarding Tunnel Manager:** The main toolbar provides a `[🚇 Tunnels]` action opening the Tunnel Manager Modal (`TunnelModalState`) with Command Palette integration (`PaletteAction::AddNewTunnel`). Tracks live tunnel telemetry (uptime, bytes sent/received, active connections), OpenSSH command previewing (`ssh -N -L ...`), start/stop toggling, and configuration for Local (-L), Remote (-R), and Dynamic SOCKS5 (-D) tunnels with non-blocking database persistence via `cx.background_executor()`.
+- **Port-Forwarding Tunnel Manager:** The main toolbar provides a `[🚇 Tunnels]` action opening the Tunnel Manager Modal (`TunnelModalState`) with Command Palette integration (`PaletteAction::AddNewTunnel`). Tracks tunnel-session presence; traffic telemetry is not measured. Provides OpenSSH command previewing (`ssh -N -L ...`), start/stop toggling, and configuration for Local (-L), Remote (-R), and Dynamic SOCKS5 (-D) tunnels with non-blocking database persistence via `cx.background_executor()`.
 - **Text input:** Implements a native-feeling `TextInput` element supporting programmatic value assignment (`set_value`), mouse selection, drag selection, cursor navigation, keyboard shortcuts, copy/cut/paste, and input marking.
 - **Shortcuts:** Supports platform-aware keybindings (e.g. `Cmd-R` on macOS, `Ctrl-R` on Linux/Windows for refreshing the host list).
 - **Multi-Tab Sessions:** Manages multiple concurrent terminal sessions (`SessionTab`)
@@ -275,3 +294,15 @@ The intended dependency hierarchy is:
 3. Host-key decisions must be explicit and enforced (never silently accepted).
 4. Credentials must be stored in an OS-backed keychain or authenticated encrypted vault, never in the plain metadata database.
 5. Desktop accessibility requires ongoing validation: host list and input controls are not yet fully exposed in macOS VoiceOver/accessibility tree.
+
+
+### Security-hardening status
+
+The default credential store no longer encrypts fallback files with a built-in
+shared passphrase. Fallback is explicit and requires a user-selected key and
+persistent absolute path. Native backend access failures otherwise propagate.
+Drive sync requires an explicit passphrase and standard KDF iterations; curl
+receives authorization headers/body on stdin. SFTP batch connections disable
+agent forwarding and enforce known-host trust. Saved identities and secret
+references have persistence/CLI support, but GUI SSH launch wiring and live
+cross-platform/keychain/cloud acceptance still need work.

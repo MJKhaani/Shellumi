@@ -1578,6 +1578,7 @@ impl From<SftpProtocolError> for SftpError {
 /// Options for connecting to an SFTP subsystem over SSH.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SftpConnectOptions {
+    pub environment: Vec<(String, String)>,
     pub port: Option<u16>,
     pub identity_file: Option<String>,
     pub certificate_file: Option<String>,
@@ -1588,6 +1589,7 @@ pub struct SftpConnectOptions {
 impl Default for SftpConnectOptions {
     fn default() -> Self {
         Self {
+            environment: Vec::new(),
             port: None,
             identity_file: None,
             certificate_file: None,
@@ -1617,8 +1619,20 @@ impl SftpClient {
         cmd.arg("-s");
         cmd.arg("-e");
         cmd.arg("none");
-        cmd.arg("-o").arg("BatchMode=yes");
-        cmd.arg("-o").arg("ForwardAgent=yes");
+        let askpass = options
+            .environment
+            .iter()
+            .any(|(key, value)| key == "SHELLUMI_ASKPASS_MODE" && value == "1");
+        cmd.envs(options.environment.iter().cloned());
+        cmd.arg("-o").arg(if askpass {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        });
+        cmd.arg("-o")
+            .arg(format!("ConnectTimeout={}", options.timeout_seconds));
+        cmd.arg("-o").arg("ForwardAgent=no");
+        cmd.arg("-o").arg("StrictHostKeyChecking=yes");
 
         let effective_port = options.port.unwrap_or(destination.port().get());
         cmd.arg("-p").arg(effective_port.to_string());
@@ -1627,7 +1641,8 @@ impl SftpClient {
             cmd.arg("-i").arg(key);
         }
         if let Some(ref cert) = options.certificate_file {
-            cmd.arg("-o").arg(format!("CertificateFile={cert}"));
+            cmd.arg("-o")
+                .arg(crate::connection::certificate_option(cert));
         }
         for (k, v) in &options.extra_ssh_options {
             cmd.arg("-o").arg(format!("{k}={v}"));

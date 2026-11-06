@@ -1936,7 +1936,7 @@ pub fn parse_raw_http_response(raw: &[u8]) -> Result<HttpResponse, SyncError> {
     }
 }
 
-/// Concrete production HTTP transport utilizing the system `curl` binary without external dependencies.
+/// System curl HTTP transport for UTF-8 request bodies; private configuration uses stdin.
 #[derive(Clone, Debug)]
 pub struct SystemHttpTransport {
     timeout_secs: u64,
@@ -1959,13 +1959,51 @@ impl SystemHttpTransport {
     }
 }
 
+// Headers and JSON bodies travel over stdin, never the process command line.
+fn curl_private_config(request: &HttpRequest) -> Result<zeroize::Zeroizing<String>, SyncError> {
+    fn quoted(value: &str) -> Result<String, SyncError> {
+        if value.contains('\0') {
+            return Err(SyncError::Network(
+                "NUL is not supported in HTTP configuration.".into(),
+            ));
+        }
+        Ok(value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\r', "\\r")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t"))
+    }
+    let mut config = zeroize::Zeroizing::new(String::new());
+    for (name, value) in &request.headers {
+        if name.is_empty()
+            || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            || value.contains(['\r', '\n'])
+        {
+            return Err(SyncError::Network("Invalid HTTP header.".into()));
+        }
+        config.push_str(&format!(
+            "header = \"{}\"\n",
+            quoted(&format!("{name}: {value}"))?
+        ));
+    }
+    if !request.body.is_empty() {
+        let body = std::str::from_utf8(&request.body).map_err(|_| {
+            SyncError::Network("This transport requires a UTF-8 request body.".into())
+        })?;
+        config.push_str(&format!("data-raw = \"{}\"\n", quoted(body)?));
+    }
+    Ok(config)
+}
+
 impl HttpTransport for SystemHttpTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, SyncError> {
         use std::io::Write as _;
         use std::process::{Command, Stdio};
 
         let mut cmd = Command::new("curl");
-        cmd.arg("-s")
+        cmd.arg("-q")
+            .arg("-s")
             .arg("-S")
             .arg("-i")
             .arg("--max-time")
@@ -1973,17 +2011,9 @@ impl HttpTransport for SystemHttpTransport {
             .arg("-X")
             .arg(&request.method);
 
-        for (name, val) in &request.headers {
-            cmd.arg("-H").arg(format!("{name}: {val}"));
-        }
-
-        let has_body = !request.body.is_empty();
-        if has_body {
-            cmd.arg("--data-binary").arg("@-");
-            cmd.stdin(Stdio::piped());
-        } else {
-            cmd.stdin(Stdio::null());
-        }
+        let config = curl_private_config(&request)?;
+        cmd.arg("--config").arg("-");
+        cmd.stdin(Stdio::piped());
 
         cmd.arg("--").arg(&request.url);
         cmd.stdout(Stdio::piped());
@@ -1993,13 +2023,10 @@ impl HttpTransport for SystemHttpTransport {
             .spawn()
             .map_err(|e| SyncError::Network(format!("failed to spawn curl: {e}")))?;
 
-        if has_body {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&request.body).map_err(|e| {
-                    SyncError::Network(format!("failed to write request body to curl: {e}"))
-                })?;
-                let _ = stdin.flush();
-            }
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(config.as_bytes()).map_err(|_| {
+                SyncError::Network("Could not supply private curl configuration.".into())
+            })?;
         }
 
         let output = child
@@ -2120,6 +2147,21 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_http_config_escapes_data_and_rejects_header_injection() {
+        let request =
+            super::HttpRequest::post("https://example.org", b"{\"value\":\"hello\"}".to_vec())
+                .with_header("Authorization", "Bearer private-token");
+        let config = super::curl_private_config(&request).unwrap();
+        assert!(config.contains("header = \"Authorization: Bearer private-token\""));
+        assert!(config.contains("data-raw = "));
+        assert!(super::curl_private_config(
+            &super::HttpRequest::get("https://example.org")
+                .with_header("Authorization", "token\nurl=https://evil.example")
+        )
+        .is_err());
+    }
+
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

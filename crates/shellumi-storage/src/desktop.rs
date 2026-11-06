@@ -102,6 +102,7 @@ pub enum Command {
     ImportSnippets(String),
 }
 pub struct Snapshot {
+    pub identities: Vec<crate::SavedIdentity>,
     pub hosts: Vec<crate::SavedHost>,
     pub groups: Vec<shellumi_core::HostGroup>,
     pub snippets: Vec<SavedSnippet>,
@@ -320,6 +321,7 @@ pub async fn execute(database: &str, command: Command) -> Result<Snapshot, Strin
         }
     }
     Ok(Snapshot {
+        identities: store.list_identities().await.map_err(|e| e.to_string())?,
         hosts: store.list().await.map_err(|e| e.to_string())?,
         groups: store.list_groups().await.map_err(|e| e.to_string())?,
         snippets: store.list_snippets().await.map_err(|e| e.to_string())?,
@@ -688,5 +690,246 @@ pub fn public_ssh_records(home: &Path, keys: bool) -> Result<Vec<PublicSshRecord
                     .map(str::to_owned),
             })
             .collect())
+    }
+}
+
+/// Resolve metadata on a background task. Explicit host identity takes precedence
+/// over group inheritance; deleted references fail instead of selecting another account.
+pub async fn resolve_connection(
+    database: &str,
+    host_id: i64,
+) -> Result<shellumi_core::connection::ConnectionPlan, String> {
+    let store = HostStore::open(database).await.map_err(|e| e.to_string())?;
+    let host = store
+        .get_host(host_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Host no longer exists.")?;
+    if !host.is_ssh() {
+        return Err("The selected host is no longer an SSH host.".into());
+    }
+    let group = if let Some(name) = &host.group_name {
+        store.get_group(name).await.map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    let identity_id = host
+        .identity_id
+        .or_else(|| group.as_ref().and_then(|group| group.identity_id));
+    let mut identity = if let Some(id) = identity_id {
+        Some(
+            store
+                .get_identity(id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Selected identity no longer exists.")?
+                .to_identity(),
+        )
+    } else {
+        None
+    };
+    fn absolute(path: &str) -> Result<String, String> {
+        if path.trim().is_empty() || path.chars().any(char::is_control) {
+            return Err("Invalid identity file path.".into());
+        }
+        let path = if let Some(rest) = path.strip_prefix("~/") {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+                .ok_or("Cannot expand identity path without a home directory.")?
+                .join(rest)
+        } else {
+            PathBuf::from(path)
+        };
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(path)
+        };
+        path.into_os_string()
+            .into_string()
+            .map_err(|_| "Identity path is not valid UTF-8.".into())
+    }
+    if let Some(identity) = &mut identity {
+        if let Some(path) = &identity.key_path {
+            identity.key_path = Some(absolute(path)?);
+        }
+        if let Some(path) = &identity.certificate_path {
+            identity.certificate_path = Some(absolute(path)?);
+        }
+        match &mut identity.auth_method {
+            shellumi_core::AuthMethod::PublicKey { key_name }
+                if identity.key_path.is_none()
+                    && (key_name.contains('/') || key_name.contains('\\')) =>
+            {
+                identity.key_path = Some(absolute(key_name)?);
+            }
+            shellumi_core::AuthMethod::Certificate {
+                cert_path,
+                key_path,
+            } => {
+                *cert_path = absolute(cert_path)?;
+                if let Some(path) = key_path {
+                    *path = absolute(path)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    let destination = shellumi_core::resolve_effective_destination_with_identity(
+        host.destination.host(),
+        Some(host.destination.username()),
+        Some(host.destination.port().get()),
+        group.as_ref(),
+        identity.as_ref(),
+    )
+    .map_err(|e| e.to_string())?;
+    shellumi_core::connection::ConnectionPlan::new(
+        destination,
+        identity.as_ref(),
+        host.jump_host.as_deref(),
+    )
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use shellumi_core::{AuthMethod, HostGroup, NewIdentity, SshDestination};
+
+    #[tokio::test]
+    async fn connection_resolution_reopens_database_and_applies_host_over_group_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        let group_identity = store
+            .create_identity(&NewIdentity::new("Group", "group-user", AuthMethod::Agent).unwrap())
+            .await
+            .unwrap();
+        let mut identity = NewIdentity::new(
+            "Host",
+            "host-user",
+            AuthMethod::PublicKey {
+                key_name: "description".into(),
+            },
+        )
+        .unwrap();
+        identity.key_path = Some("keys/private key".into());
+        identity.passphrase_secret_ref = Some("env://SHELLUMI_TEST_PASSPHRASE".into());
+        let host_identity = store.create_identity(&identity).await.unwrap();
+        store
+            .add_group(
+                &HostGroup::new("Fleet", None, None, &[])
+                    .unwrap()
+                    .with_identity_id(Some(group_identity)),
+            )
+            .await
+            .unwrap();
+        let dest = SshDestination::new("2001:db8::1", "original", 2200).unwrap();
+        let inherited = store
+            .add_full(
+                "Inherited",
+                &dest,
+                Some("Fleet"),
+                &[],
+                Some("bastion.test"),
+                None,
+                "ssh",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let explicit = store
+            .add_full(
+                "Explicit",
+                &dest,
+                Some("Fleet"),
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                Some(host_identity),
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let inherited_plan = resolve_connection(path, inherited).await.unwrap();
+        assert_eq!(inherited_plan.destination.username(), "group-user");
+        assert!(inherited_plan
+            .ssh_arguments
+            .contains(&"bastion.test".into()));
+        assert!(inherited_plan
+            .sftp_arguments
+            .contains(&"group-user@[2001:db8::1]".into()));
+        let plan = resolve_connection(path, explicit).await.unwrap();
+        assert_eq!(plan.destination.username(), "host-user");
+        assert_eq!(plan.destination.port().get(), 2200);
+        assert!(Path::new(plan.identity_file.as_ref().unwrap()).is_absolute());
+        assert!(plan
+            .identity_file
+            .as_ref()
+            .unwrap()
+            .ends_with("keys/private key"));
+        assert!(plan.uses_askpass());
+        assert!(plan
+            .ssh_arguments
+            .contains(&"StrictHostKeyChecking=yes".into()));
+        assert!(!plan.ssh_arguments.iter().any(|arg| arg.contains("env://")));
+        // Refresh returns identities, so changes made by the CLI can be selected without restart.
+        assert_eq!(
+            execute(path, Command::Refresh)
+                .await
+                .unwrap()
+                .identities
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_hosts_and_invalid_bindings_are_rejected_and_defaults_remain_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        let dest = SshDestination::new("example.test", "user", 22).unwrap();
+        let normal = store
+            .add_full("Default", &dest, None, &[], None, None, "ssh", None, None)
+            .await
+            .unwrap();
+        let broken = store
+            .add_full(
+                "Missing",
+                &dest,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                Some(999),
+            )
+            .await;
+        assert!(
+            broken.is_err(),
+            "Foreign keys must reject a nonexistent identity binding"
+        );
+        let telnet = store
+            .add_full("Telnet", &dest, None, &[], None, None, "telnet", None, None)
+            .await
+            .unwrap();
+        drop(store);
+        assert!(resolve_connection(path, -1).await.is_err());
+        assert!(resolve_connection(path, telnet)
+            .await
+            .unwrap_err()
+            .contains("no longer an SSH host"));
+        let plan = resolve_connection(path, normal).await.unwrap();
+        assert_eq!(plan.ssh_arguments, dest.openssh_arguments());
+        assert!(!plan.uses_askpass());
     }
 }

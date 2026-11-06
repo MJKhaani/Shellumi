@@ -28,6 +28,7 @@ pub(super) struct Editor {
     pub layout: &'static str,
     pub host_ids: Vec<i64>,
     pub local_shell: bool,
+    pub identity_id: Option<i64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum EditorKind {
@@ -146,6 +147,7 @@ impl Shellumi {
                         app.desktop.groups = snapshot.groups;
                         app.snippets = snapshot.snippets;
                         app.workspaces = snapshot.workspaces;
+                        app.identities = snapshot.identities;
                         app.desktop.preferences = snapshot.preferences;
                         for tab in &mut app.tabs {
                             for pane in &mut tab.panes {
@@ -289,6 +291,7 @@ impl Shellumi {
             layout,
             host_ids,
             local_shell,
+            identity_id: None,
         });
         self.desktop.message = None;
         cx.notify();
@@ -433,7 +436,7 @@ impl Shellumi {
                     port,
                     &tags,
                 ) {
-                    Ok(group) => Command::SaveGroup(group),
+                    Ok(group) => Command::SaveGroup(group.with_identity_id(editor.identity_id)),
                     Err(error) => {
                         self.desktop.message = Some(error.to_string());
                         cx.notify();
@@ -1292,7 +1295,8 @@ impl Shellumi {
                         "Default port (optional)",
                         editor.lines[0].clone(),
                     ))
-                    .child(host_form_field("Inherited tags", editor.tags.clone()));
+                    .child(host_form_field("Inherited tags", editor.tags.clone()))
+                    .child(self.identity_picker(editor.identity_id, true, cx));
             } else if editor.kind == EditorKind::Workspace {
                 let mut layouts = div().flex().gap_2();
                 for layout in ["single", "vertical", "horizontal", "grid"] {
@@ -1827,6 +1831,7 @@ impl Shellumi {
                         })
                         .cloned();
                     if let (Some(group), Some(editor)) = (group, app.desktop.editor.as_mut()) {
+                        editor.identity_id = group.identity_id;
                         editor
                             .name
                             .update(cx, |input, cx| input.set_value(&group.name, cx));
@@ -2100,6 +2105,89 @@ impl Shellumi {
                                     })),
                             ),
                     ),
+            )
+    }
+}
+
+impl Shellumi {
+    pub(super) fn identity_picker(
+        &self,
+        selected: Option<i64>,
+        group: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut choices = div()
+            .id(if group {
+                "group-identities"
+            } else {
+                "host-identities"
+            })
+            .max_h(px(120.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1();
+        let mut entries = vec![(
+            None,
+            if group {
+                "System OpenSSH defaults".to_string()
+            } else {
+                "Inherit group identity / OpenSSH defaults".to_string()
+            },
+        )];
+        entries.extend(self.identities.iter().map(|identity| {
+            (
+                Some(identity.id),
+                format!(
+                    "{} · {} · {}",
+                    identity.name,
+                    identity.username,
+                    identity.auth_method.as_str()
+                ),
+            )
+        }));
+        for (index, (id, label)) in entries.into_iter().enumerate() {
+            choices = choices.child(
+                button(
+                    (
+                        if group {
+                            "group-identity"
+                        } else {
+                            "host-identity"
+                        },
+                        index,
+                    ),
+                    format!("{}{}", if selected == id { "✓ " } else { "" }, label),
+                )
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if group {
+                        if let Some(editor) = &mut app.desktop.editor {
+                            editor.identity_id = id;
+                        }
+                    } else if let Some(form) = &mut app.form {
+                        form.identity_id = id;
+                    }
+                    cx.notify();
+                })),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(heading("Connection identity"))
+            .child(muted("Identity username overrides host username. Saved secrets require a trusted host key."))
+            .child(choices)
+            .child(
+                button(
+                    if group {
+                        "refresh-group-identities"
+                    } else {
+                        "refresh-host-identities"
+                    },
+                    "Refresh identities",
+                )
+                .on_click(cx.listener(|app, _, _, cx| app.desktop_command(Command::Refresh, cx))),
             )
     }
 }

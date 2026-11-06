@@ -4,6 +4,7 @@ pub mod autocomplete;
 pub mod batch;
 pub mod bench;
 pub mod collaboration;
+pub mod connection;
 pub mod credential;
 pub mod csv;
 pub mod diagnostics;

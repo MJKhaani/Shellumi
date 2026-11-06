@@ -125,9 +125,50 @@ cargo run --locked -p shellumi-cli -- ./hosts.db export-ssh-config
 The desktop provides masked passphrase dialogs for encrypted backup operations.
 Keep backup files and their passphrases separately; a lost passphrase cannot be recovered.
 
+Native credential storage is used by default. An optional encrypted credential
+fallback requires `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE` (at least 12 characters);
+`SHELLUMI_VAULT_PATH` may select an absolute vault file path. Without a configured
+fallback key, native-store failures are reported rather than silently using a
+shared encryption key. Existing legacy fallback files are not automatically migrated.
+Drive sync requires an externally supplied OAuth token and an explicit
+`SHELLUMI_VAULT_PASSPHRASE`; there is no default sync encryption key.
+
+## Connect with a saved identity
+
+Create an identity using the CLI against the same database shown in desktop
+Settings → Storage. For example, to use a private key (no secret in the command):
+
+```sh
+cargo run --locked -p shellumi-cli -- /path/to/shellumi.db identity add "Production" --username deploy --auth publickey --key-path /path/to/id_ed25519
+```
+
+In **Hosts → Edit host → Connection identity**, click **Refresh identities** and
+select the identity, then save. **Group settings** can supply an inherited identity;
+a host's explicit selection takes precedence. Selecting the inherit/default row
+clears the explicit binding. The selected identity's username takes precedence
+over the saved host username. Host edits preserve the binding.
+
+Saved SSH sessions, SFTP terminals, graphical SFTP operations, restored workspace
+hosts, and tunnels use the same background connection resolver. Private-key and
+certificate paths are passed as separate arguments; agent identities use OpenSSH's
+agent authentication. Quick Connect has no saved identity and uses OpenSSH defaults.
+
+Password and encrypted-key identities can reference credentials using
+`keychain://service/account` or `env://VARIABLE` metadata. The app's separate
+OpenSSH askpass helper resolves the reference only for the matching target's
+password prompt or selected key's passphrase prompt. It never scans terminal
+output, stores a plaintext credential, or adds a secret to command arguments.
+Secret-assisted connections require an **already trusted host key**. Establish
+trust with a normal interactive SSH connection first, after verifying the server
+fingerprint. Unknown/changed keys fail closed. MFA and interactive identities
+remain manual; the helper refuses unrecognized prompts, including localized or
+alias-rewritten prompts that do not match the selected target. Jump-host
+credentials need their own OpenSSH/agent configuration. Native credential access
+can require an OS unlock/permission dialog.
+
 ## Verification and limitations
 
-The alpha implementation passed **270 automated tests**, with one additional
+The alpha implementation passed **298 automated tests**, with one additional
 isolated-server SSH test opt-in. The real-server test was also exercised during
 development. Local macOS GUI checks covered snippet creation, workspace saving
 and shell launch, preference changes, long terminal output, scrolling and split sizing.
@@ -143,11 +184,14 @@ Offline builds require dependencies to have been fetched beforehand.
 
 Remaining limitations include:
 
-- Graphical remote SFTP listing/transfer, Google Drive transport, authenticated
-  cloud discovery and network terminal collaboration are not connected.
+- Graphical SFTP and Drive transport implementations now exist, but still need
+  real-server/account acceptance tests. Drive authorization currently requires an
+  externally supplied OAuth token; there is no complete account setup flow.
+- Authenticated cloud inventory discovery and network collaboration remain unconnected.
 - Theme/language switching, launch-at-login integration, screen-reader support,
   and the full design-prototype dialog catalog are not complete.
-- Windows/Linux native credential backends and desktop behavior need further work.
+- Windows/Linux credential adapters exist but require real-platform verification.
+  Saved identity creation/editing remains CLI-driven; graphical selection is available.
 - Automatic startup-command execution is disabled until authentication readiness
   can be established safely.
 - Mobile FFI and native examples are prototypes, not released mobile clients.

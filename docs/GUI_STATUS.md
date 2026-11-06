@@ -13,14 +13,14 @@ its sample data and prototype QA are not evidence of working application feature
 | Terminal | Real PTY sessions, measured grid dimensions and PTY resize, independent split panes, wheel scrollback with a visible position indicator, follow output when at the bottom, search, paste, recordings, snippets and broadcast controls. |
 | SFTP Files | Real local directory browsing, parent/path navigation, hidden files, copy local file paths, graphical dual-pane SFTP browser with live remote directory listings, upload/download queue, and live system SFTP terminal toggle. |
 | Snippets | Package/tag filtering, live search, selected-script preview, create/edit multi-line commands, template variables, delete confirmation, clipboard copy and JSON package import/export, explicit parameter/run confirmation, paste into an existing terminal. |
-| Keychain | Native OS Keychain Daemon status card (macOS `securityd`, Linux Secret Service via `secret-tool`, Windows Credential Manager `PasswordVault`) with active/fallback indicators; reusable database identities with OpenSSH certificate validation, secret reference badges (`🔐 Keychain`), and credential metadata; read public `.ssh/*.pub` metadata and fingerprints; copy public keys; start interactive system `ssh-keygen`; load a selected identity with `ssh-add`. Plaintext secrets and private keys are never stored in database or unencrypted files. |
+| Keychain | Native credential-store status card (macOS `securityd`, Linux Secret Service via `secret-tool`, Windows Credential Manager `PasswordVault`) with active/fallback indicators; reusable database identities with OpenSSH certificate validation, secret reference badges (`🔐 Keychain`), and credential metadata; read public `.ssh/*.pub` metadata and fingerprints; copy public keys; start interactive system `ssh-keygen`; load a selected identity with `ssh-add`. Identity creation/editing remains CLI-driven. Host and group editors select existing identities; Refresh reloads CLI changes. SSH, SFTP (terminal and graphical), saved-host workspace restores and tunnels resolve the current binding in background tasks. Native service status indicators are not proof of end-to-end credential access. |
 | Port Forwarding | Persisted tunnel rules, host selection, local/remote/dynamic forwarding, rule editing and deletion, real OpenSSH tunnel session launch. Network readiness is determined by the SSH session rather than fabricated traffic counters. |
 | Known Hosts | Read actual OpenSSH trust entries; inspect public metadata and fingerprints; copy public keys; explicitly revoke an unmarked key. Revocation checks the original record before rewriting and refuses symlinks. |
 | Session Logs | Existing recording library, selected recording playback, transport controls, export and deletion through the recording manager. |
 | Vaults | Existing local vault and membership-record manager; real collaborator public keys are required. These are local records, not network invitations. |
 | Collaboration | Explicit unavailable state for network session sharing. Local membership administration is available in Vaults. |
 | Integrations | Existing provider-record, discovered-inventory and Ansible tools embedded in the navigation page. Provider records do not establish authenticated cloud API connections. |
-| Google Drive Sync | Zero-knowledge Google Drive cloud vault synchronization via SystemHttpTransport (system curl), AES-256-GCM encrypted diffing, interactive conflict resolution modal, and working encrypted local backup export and restore dialogs. Export refuses existing output files. Restore uses a transaction and rolls back decryption/import errors. |
+| Google Drive Sync | Initial Google Drive vault synchronization via SystemHttpTransport (system curl), AES-256-GCM encrypted diffing, interactive conflict resolution modal, and working encrypted local backup export and restore dialogs. Export refuses existing output files. Restore uses a transaction and rolls back decryption/import errors. |
 | Settings | Category rail; persistent interface and terminal font sizes, scrollback, default startup screen, local hidden-file preference; storage location, SSH security behavior, shell integration tools, shortcut reference and diagnostics. |
 
 Preferences are stored beside the selected database as `*.preferences.json`.
@@ -45,6 +45,9 @@ Authenticated cloud inventory discovery (AWS/GCP/DigitalOcean API synchronizatio
 and network collaboration (live multi-user terminal session transport) are not connected.
 The GUI must not show simulated cloud inventory or fake successful remote terminal sharing.
 
+Live identity/SFTP/Drive acceptance and native credential
+access tests on Windows/Linux remain. Drive account setup is not integrated.
+
 Full theme/language switching, launch-at-login integration, all prototype
 subdialogs, screen-reader accessibility and non-macOS visual verification are
 not complete. The design reference contains capabilities beyond the currently
@@ -58,13 +61,17 @@ implemented application; those controls are not presented as functioning toggles
   embedded managers, real tunnel sessions, measured terminal sizing/scrolling,
   workspace restoration, and removal of simulated SFTP output.
 - `crates/shellumi-app/src/text_input.rs`: masked passphrase entry.
+- `crates/shellumi-app/src/connection.rs` and `askpass.rs`: identity-aware launch
+  coordination and separate credential helper; `tests/askpass.rs` tests helper processes.
+- `crates/shellumi-core/src/connection.rs`: shared launch policy, strict prompt
+  matching, validated arguments and real OpenSSH configuration-parser coverage.
 - `crates/shellumi-storage/src/desktop.rs` and `src/lib.rs`: background desktop
   operations, preferences, atomic imports/restores, encrypted backups and tests.
 - `crates/shellumi-core/src/identity.rs` and `src/lib.rs`: public-key fingerprint
   validation and tests.
 - `README.md`, `docs/ROADMAP.md`, `docs/GUI_STATUS.md`: implementation status.
 
-Verification commands: `cargo test --locked --offline --workspace` (270 passed,
+Verification commands: `cargo test --locked --offline --workspace` (298 passed,
 1 opt-in test ignored), final app tests (44 passed, 1 ignored),
 `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, and the native macOS release build. Workspace
@@ -77,3 +84,48 @@ integration tests requiring a loopback listener were run with loopback access.
 of the running macOS development app with isolated test data. They are not design
 prototype renders, do not establish cross-platform behavior, and may differ in
 minor details from subsequent builds.
+
+
+## Credential and synchronization configuration
+
+Native credential storage is used by default. An encrypted fallback is enabled
+only with an explicit `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE` of at least 12
+characters. Its default file is under the platform's persistent application data
+directory; `SHELLUMI_VAULT_PATH` can select another absolute location. No shared
+fallback key or silent ephemeral fallback is used for default credential storage.
+Drive sync requires an OAuth token and an explicit `SHELLUMI_VAULT_PASSPHRASE`;
+missing configuration produces an error. Authorization headers and UTF-8 request
+bodies travel through curl stdin; binary request bodies are not supported by
+this transport. Graphical batch SFTP requires a previously trusted host key.
+
+## Identity connection increment
+
+Host identity selection overrides the group identity; selected identity username
+overrides host username. Clearing a host binding restores group inheritance or
+system OpenSSH defaults. Key/certificate files, authentication preferences and
+jump hosts are propagated consistently. Missing hosts/identities and malformed
+metadata fail before a session is started; workspace commands are all resolved
+before any panes launch. Legacy workspace destinations without host IDs retain
+OpenSSH defaults. Quick Connect does not select an identity.
+
+The app executable doubles as a minimal OpenSSH askpass helper. Only references
+are passed in its environment. It resolves secrets in the helper process and
+writes them solely to OpenSSH's helper pipe. Password and encrypted-key prompts
+must match the planned user/host or absolute key path. Trust confirmations and
+MFA prompts are rejected, and secret-assisted connections force strict host-key
+checking. Use an interactive connection to verify and trust a new server first.
+Graphical SFTP without a saved credential uses noninteractive OpenSSH/agent access.
+
+New automated checks exercise the actual helper subprocess, refusal of trust/MFA
+and wrong-target prompts, database reopen and host/group precedence, missing
+bindings, IPv6 SFTP formatting, and OpenSSH certificate paths with spaces/quotes.
+These checks do not replace live native-keychain authentication or visual testing
+of the new selectors. Existing README screenshots predate this increment.
+
+On the local macOS test fixture, real OpenSSH authenticated with an encrypted
+private key through the app helper (including a path with spaces), and refused
+an unknown host with the same secret-assisted launch settings. The test used
+isolated keys and known-hosts files; the loopback server was stopped afterward.
+The automated CLI credential CRUD test explicitly configures a temporary,
+user-keyed encrypted fallback, rather than relying on a shared fallback key or
+claiming native keychain acceptance.

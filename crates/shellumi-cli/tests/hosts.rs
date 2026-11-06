@@ -2263,6 +2263,11 @@ fn supports_keychain_crud_and_identity_binding_cli() {
 
     // 1. Set secret via CLI
     let set_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .env(
+            "SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE",
+            "isolated-cli-test-vault-passphrase",
+        )
+        .env("SHELLUMI_VAULT_PATH", dir.path().join("credentials.enc"))
         .args(["keychain", "set", svc, acc, secret])
         .output()
         .unwrap();
@@ -2272,6 +2277,11 @@ fn supports_keychain_crud_and_identity_binding_cli() {
 
     // 2. Get secret via CLI
     let get_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .env(
+            "SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE",
+            "isolated-cli-test-vault-passphrase",
+        )
+        .env("SHELLUMI_VAULT_PATH", dir.path().join("credentials.enc"))
         .args(["keychain", "get", svc, acc])
         .output()
         .unwrap();
@@ -2281,6 +2291,11 @@ fn supports_keychain_crud_and_identity_binding_cli() {
 
     // 3. Delete secret via CLI
     let del_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .env(
+            "SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE",
+            "isolated-cli-test-vault-passphrase",
+        )
+        .env("SHELLUMI_VAULT_PATH", dir.path().join("credentials.enc"))
         .args(["keychain", "delete", svc, acc])
         .output()
         .unwrap();
@@ -2288,6 +2303,11 @@ fn supports_keychain_crud_and_identity_binding_cli() {
 
     // 4. Add identity with password via CLI
     let id_add = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .env(
+            "SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE",
+            "isolated-cli-test-vault-passphrase",
+        )
+        .env("SHELLUMI_VAULT_PATH", dir.path().join("credentials.enc"))
         .arg(&db)
         .args([
             "identity",
@@ -2310,6 +2330,11 @@ fn supports_keychain_crud_and_identity_binding_cli() {
 
     // 5. Show identity and verify secret ref is present without plaintext password
     let id_show = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .env(
+            "SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE",
+            "isolated-cli-test-vault-passphrase",
+        )
+        .env("SHELLUMI_VAULT_PATH", dir.path().join("credentials.enc"))
         .arg(&db)
         .args(["identity", "show", &id.to_string()])
         .output()
@@ -2322,6 +2347,11 @@ fn supports_keychain_crud_and_identity_binding_cli() {
 
     // 6. Delete identity via CLI
     let id_del = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .env(
+            "SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE",
+            "isolated-cli-test-vault-passphrase",
+        )
+        .env("SHELLUMI_VAULT_PATH", dir.path().join("credentials.enc"))
         .arg(&db)
         .args(["identity", "delete", &id.to_string()])
         .output()

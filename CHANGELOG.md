@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Add host/group GUI identity selection with preserved bindings and refresh.
+- Apply saved identities to SSH, graphical/terminal SFTP, workspace restores and
+  tunnels using a shared background resolver and validated launch policy.
+- Support password/key-passphrase references through a separate OpenSSH askpass
+  helper; require existing host trust, reject MFA/trust prompts, and keep secrets
+  out of command arguments. Key/certificate paths support spaces and quotes.
+
+- Reconcile progress documents with the actual SFTP, identity, keychain and Drive
+  integration status; record missing live acceptance.
+- Remove shared credential-fallback and Drive vault encryption passphrases;
+  require explicit keys and standard Drive KDF settings.
+- Disable SFTP agent forwarding and require previously trusted host keys.
+- Pipe HTTP headers and UTF-8 bodies to curl through stdin rather than argv;
+  reject malformed header input and ignore user curl configuration.
+- Regression coverage: 298 workspace tests passed, one opt-in test ignored.
+
 ## 0.0.1-alpha
 
 First alpha milestone for Shellumi's local-first Rust/GPUI desktop.

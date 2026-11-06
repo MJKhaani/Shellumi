@@ -1,3 +1,5 @@
+mod askpass;
+mod connection;
 mod data_path;
 mod desktop;
 mod session;
@@ -276,6 +278,7 @@ struct TunnelModalState {
 }
 
 struct Shellumi {
+    connecting_hosts: std::collections::HashSet<i64>,
     desktop: desktop::DesktopUi,
     database: Option<String>,
     hosts: HostState,
@@ -387,6 +390,7 @@ enum SftpTabMode {
 
 #[derive(Clone, Debug, PartialEq)]
 struct SftpBrowserState {
+    connection_options: SftpConnectOptions,
     host_name: String,
     destination: Option<SshDestination>,
     jump_host: Option<String>,
@@ -416,6 +420,7 @@ struct SessionTab {
 }
 
 struct HostForm {
+    identity_id: Option<i64>,
     id: Option<i64>,
     name: Entity<TextInput>,
     hostname: Entity<TextInput>,
@@ -524,6 +529,7 @@ impl Shellumi {
         let quick_connect_input = cx.new(|cx| TextInput::new(cx, "", "user@host[:port]"));
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
         Self {
+            connecting_hosts: std::collections::HashSet::new(),
             desktop: desktop::DesktopUi::new(cx),
             database,
             hosts: HostState::NoDatabase,
@@ -774,6 +780,7 @@ impl Shellumi {
             let remote_path = "/home".to_string();
             let remote_entries = Vec::new();
             Some(SftpBrowserState {
+                connection_options: SftpConnectOptions::default(),
                 host_name: name.clone(),
                 destination: None,
                 jump_host: None,
@@ -990,35 +997,7 @@ impl Shellumi {
     fn connect(&mut self, host: &SavedHost, window: &mut Window, cx: &mut Context<Self>) {
         let proto = host.protocol();
         match proto {
-            ConnectionProtocol::Ssh => {
-                let arguments = match host
-                    .destination
-                    .openssh_arguments_with_jump(host.jump_host.as_deref())
-                {
-                    Ok(arguments) => arguments,
-                    Err(error) => {
-                        self.hosts = HostState::Error(format!("Invalid jump host: {error}"));
-                        cx.notify();
-                        return;
-                    }
-                };
-                let command = TerminalCommand::new("ssh").args(arguments);
-                let startup_snippet_name = host.startup_snippet_id.map(|sid| {
-                    self.snippets
-                        .iter()
-                        .find(|snippet| snippet.id == sid)
-                        .map(|snippet| snippet.name.clone())
-                        .unwrap_or_else(|| format!("#{sid}"))
-                });
-                self.start_session_with_startup(
-                    host.name.clone(),
-                    SessionKind::Ssh,
-                    command,
-                    startup_snippet_name,
-                    window,
-                    cx,
-                );
-            }
+            ConnectionProtocol::Ssh => self.launch_saved_connection(host, false, window, cx),
             ConnectionProtocol::Mosh => {
                 let mosh_cfg = host
                     .protocol_config
@@ -1092,26 +1071,7 @@ impl Shellumi {
     }
 
     fn connect_sftp(&mut self, host: &SavedHost, window: &mut Window, cx: &mut Context<Self>) {
-        let mut command = TerminalCommand::new("sftp");
-        command = command.args(["-P", &host.destination.port().to_string()]);
-        if let Some(jump) = &host.jump_host {
-            command = command.args(["-J", jump]);
-        }
-        command = command.arg(format!(
-            "{}@{}",
-            host.destination.username(),
-            host.destination.host()
-        ));
-        self.start_session(host.name.clone(), SessionKind::Sftp, command, window, cx);
-        if let Some(tab) = self.tabs.last_mut() {
-            if let Some(sftp) = &mut tab.sftp_state {
-                sftp.destination = Some(host.destination.clone());
-                sftp.jump_host = host.jump_host.clone();
-                sftp.mode = SftpTabMode::DualPane;
-            }
-        }
-        let tab_idx = self.tabs.len().saturating_sub(1);
-        self.sftp_refresh_remote(tab_idx, cx);
+        self.launch_saved_connection(host, true, window, cx);
     }
 
     fn sftp_select_local(&mut self, tab_idx: usize, name: String, cx: &mut Context<Self>) {
@@ -1225,11 +1185,15 @@ impl Shellumi {
             )
         };
 
+        let connection_options = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.sftp_state.as_ref())
+            .map(|browser| browser.connection_options.clone())
+            .unwrap_or_default();
         let task = cx.background_executor().spawn(async move {
-            let mut opts = SftpConnectOptions {
-                port: Some(dest.port().get()),
-                ..Default::default()
-            };
+            let mut opts = connection_options;
+            opts.port = Some(dest.port().get());
             if let Some(jump) = jump_host {
                 opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
             }
@@ -1409,11 +1373,15 @@ impl Shellumi {
             )
         };
 
+        let connection_options = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.sftp_state.as_ref())
+            .map(|browser| browser.connection_options.clone())
+            .unwrap_or_default();
         let task = cx.background_executor().spawn(async move {
-            let mut opts = SftpConnectOptions {
-                port: Some(dest.port().get()),
-                ..Default::default()
-            };
+            let mut opts = connection_options;
+            opts.port = Some(dest.port().get());
             if let Some(jump) = jump_host {
                 opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
             }
@@ -1500,11 +1468,15 @@ impl Shellumi {
             )
         };
 
+        let connection_options = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.sftp_state.as_ref())
+            .map(|browser| browser.connection_options.clone())
+            .unwrap_or_default();
         let task = cx.background_executor().spawn(async move {
-            let mut opts = SftpConnectOptions {
-                port: Some(dest.port().get()),
-                ..Default::default()
-            };
+            let mut opts = connection_options;
+            opts.port = Some(dest.port().get());
             if let Some(jump) = jump_host {
                 opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
             }
@@ -1756,6 +1728,7 @@ impl Shellumi {
             ),
         };
         self.form = Some(HostForm {
+            identity_id: host.and_then(|host| host.identity_id),
             id,
             name: cx.new(|cx| TextInput::new(cx, &name, "Display name")),
             hostname: cx.new(|cx| TextInput::new(cx, &hostname, "Hostname or IP")),
@@ -1862,6 +1835,27 @@ impl Shellumi {
             }
         };
 
+        let username = if username.trim().is_empty() && form.protocol == ConnectionProtocol::Ssh {
+            let inherited_id = form.identity_id.or_else(|| {
+                group
+                    .as_ref()
+                    .and_then(|name| self.desktop.groups.iter().find(|g| &g.name == name))
+                    .and_then(|g| g.identity_id)
+            });
+            self.identities
+                .iter()
+                .find(|identity| Some(identity.id) == inherited_id)
+                .map(|identity| identity.username.clone())
+                .or_else(|| {
+                    group
+                        .as_ref()
+                        .and_then(|name| self.desktop.groups.iter().find(|g| &g.name == name))
+                        .and_then(|g| g.default_username.clone())
+                })
+                .unwrap_or(username)
+        } else {
+            username
+        };
         let destination = match port
             .map_err(|_| "Enter a port between 1 and 65535.".to_owned())
             .and_then(|port| {
@@ -1882,6 +1876,7 @@ impl Shellumi {
         let proto = form.protocol;
         let proto_config = form.protocol_config.clone();
         let id = form.id;
+        let identity_id = form.identity_id;
         let Some(path) = self.database.clone() else {
             return;
         };
@@ -1899,7 +1894,7 @@ impl Shellumi {
                 match id {
                     Some(id) => {
                         if !store
-                            .update_with_protocol(
+                            .update_full(
                                 id,
                                 &name,
                                 &destination,
@@ -1909,6 +1904,7 @@ impl Shellumi {
                                 startup_snippet_id,
                                 proto.as_str(),
                                 proto_config.as_deref(),
+                                identity_id,
                             )
                             .await
                             .map_err(|error| error.to_string())?
@@ -1918,7 +1914,7 @@ impl Shellumi {
                     }
                     None => {
                         store
-                            .add_with_protocol(
+                            .add_full(
                                 &name,
                                 &destination,
                                 group.as_deref(),
@@ -1927,6 +1923,7 @@ impl Shellumi {
                                 startup_snippet_id,
                                 proto.as_str(),
                                 proto_config.as_deref(),
+                                identity_id,
                             )
                             .await
                             .map_err(|error| error.to_string())?;
@@ -2153,7 +2150,70 @@ impl Shellumi {
         else {
             return;
         };
+        let Some(database) = self.database.clone() else {
+            return;
+        };
+        let prepared = ws.clone();
+        let handle = window.window_handle();
+        self.desktop.message = Some("Resolving workspace identities…".into());
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async move {
+                let mut commands = Vec::new();
+                for session in &prepared.sessions {
+                    if session.kind == WorkspaceSessionKind::Local {
+                        commands.push(TerminalCommand::default_shell());
+                        continue;
+                    }
+                    let plan = if let Some(id) = session.host_id {
+                        shellumi_storage::desktop::resolve_connection(&database, id).await?
+                    } else {
+                        shellumi_core::connection::ConnectionPlan::new(
+                            session
+                                .destination
+                                .clone()
+                                .ok_or("Workspace session has no destination.")?,
+                            None,
+                            None,
+                        )?
+                    };
+                    let (program, args) = if session.kind == WorkspaceSessionKind::Sftp {
+                        ("sftp", plan.sftp_arguments.clone())
+                    } else {
+                        ("ssh", plan.ssh_arguments.clone())
+                    };
+                    commands.push(askpass::command(program, args, &plan)?);
+                }
+                Ok::<_, String>(commands)
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = app.update(cx, |app, cx| match result {
+                    Ok(commands) => {
+                        app.desktop.message = None;
+                        app.start_workspace(ws, commands, window, cx);
+                    }
+                    Err(error) => {
+                        app.desktop.message = Some(format!("Workspace could not start: {error}"));
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
+    }
 
+    fn start_workspace(
+        &mut self,
+        ws: SavedWorkspace,
+        commands: Vec<TerminalCommand>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ws.sessions.iter().any(|session| {
             session.kind != WorkspaceSessionKind::Local && session.destination.is_none()
         }) {
@@ -2188,38 +2248,15 @@ impl Shellumi {
             let pane_id = self.next_tab_id.wrapping_add(1);
             self.next_tab_id = pane_id;
 
-            let (cmd, kind) = match sess.kind {
-                WorkspaceSessionKind::Ssh => {
-                    if let Some(dest) = &sess.destination {
-                        (
-                            TerminalCommand::new("ssh").args(dest.openssh_arguments()),
-                            SessionKind::Ssh,
-                        )
-                    } else {
-                        (TerminalCommand::default_shell(), SessionKind::Local)
-                    }
-                }
-                WorkspaceSessionKind::Local => {
-                    (TerminalCommand::default_shell(), SessionKind::Local)
-                }
-                WorkspaceSessionKind::Sftp => {
-                    let Some(destination) = &sess.destination else {
-                        return;
-                    };
-                    let target = format!("{}@{}", destination.username(), destination.host());
-                    (
-                        TerminalCommand::new("sftp").args([
-                            "-o".to_owned(),
-                            "StrictHostKeyChecking=ask".to_owned(),
-                            "-o".to_owned(),
-                            "ForwardAgent=no".to_owned(),
-                            "-P".to_owned(),
-                            destination.port().to_string(),
-                            target,
-                        ]),
-                        SessionKind::Sftp,
-                    )
-                }
+            let kind = match sess.kind {
+                WorkspaceSessionKind::Local => SessionKind::Local,
+                WorkspaceSessionKind::Ssh => SessionKind::Ssh,
+                WorkspaceSessionKind::Sftp => SessionKind::Sftp,
+            };
+            let cmd = if sess.kind == WorkspaceSessionKind::Local {
+                TerminalCommand::default_shell()
+            } else {
+                commands[idx].clone()
             };
 
             let session = Session::start(cmd);
@@ -2325,8 +2362,16 @@ impl Shellumi {
             return;
         }
 
-        let passphrase = std::env::var("SHELLUMI_VAULT_PASSPHRASE")
-            .unwrap_or_else(|_| "default-shellumi-vault-key".to_string());
+        let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
+            Ok(value) if value.chars().count() >= 12 => shellumi_core::SecretString::new(value),
+            _ => {
+                self.sync_status = AppSyncStatus::Error(
+                    "Set a vault passphrase of at least 12 characters before syncing.".into(),
+                );
+                cx.notify();
+                return;
+            }
+        };
         let device_id =
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
 
@@ -2341,7 +2386,7 @@ impl Shellumi {
             runtime.block_on(async {
                 let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
                 let local_vault = store
-                    .export_vault_with_iterations(&passphrase, &device_id, 2_000)
+                    .export_vault(passphrase.expose_secret(), &device_id)
                     .await
                     .map_err(|e| e.to_string())?;
                 let client =
@@ -2350,7 +2395,7 @@ impl Shellumi {
                     &client,
                     &token,
                     &local_vault,
-                    &passphrase,
+                    passphrase.expose_secret(),
                     Some(&resolutions),
                 )
                 .map_err(|e| e.to_string())?;
@@ -2363,7 +2408,7 @@ impl Shellumi {
                         let mut merged_vault = SyncVault::new("cloud-vault", 0);
                         merged_vault.records = merged_records;
                         write_store
-                            .import_vault(&passphrase, &merged_vault)
+                            .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
                             .map_err(|e| e.to_string())?;
                         Ok(())
@@ -2419,8 +2464,16 @@ impl Shellumi {
             return;
         }
 
-        let passphrase = std::env::var("SHELLUMI_VAULT_PASSPHRASE")
-            .unwrap_or_else(|_| "default-shellumi-vault-key".to_string());
+        let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
+            Ok(value) if value.chars().count() >= 12 => shellumi_core::SecretString::new(value),
+            _ => {
+                self.sync_status = AppSyncStatus::Error(
+                    "Set a vault passphrase of at least 12 characters before syncing.".into(),
+                );
+                cx.notify();
+                return;
+            }
+        };
         let device_id =
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
 
@@ -2434,14 +2487,19 @@ impl Shellumi {
             runtime.block_on(async {
                 let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
                 let local_vault = store
-                    .export_vault_with_iterations(&passphrase, &device_id, 2_000)
+                    .export_vault(passphrase.expose_secret(), &device_id)
                     .await
                     .map_err(|e| e.to_string())?;
                 let client =
                     GoogleDriveSyncClient::new(SystemHttpTransport::default(), "shellumi-desktop");
-                let cycle_result =
-                    execute_cloud_vault_sync(&client, &token, &local_vault, &passphrase, None)
-                        .map_err(|e| e.to_string())?;
+                let cycle_result = execute_cloud_vault_sync(
+                    &client,
+                    &token,
+                    &local_vault,
+                    passphrase.expose_secret(),
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
 
                 match cycle_result {
                     SyncCycleResult::AlreadySynchronized => Ok((None, 0)),
@@ -2451,7 +2509,7 @@ impl Shellumi {
                         let mut merged_vault = SyncVault::new("cloud-vault", 0);
                         merged_vault.records = merged_records;
                         let summary = write_store
-                            .import_vault(&passphrase, &merged_vault)
+                            .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
                             .map_err(|e| e.to_string())?;
                         let count = summary.hosts_imported
@@ -5084,34 +5142,15 @@ impl Shellumi {
             return;
         };
         let (flag, value) = tunnel.rule.openssh_argument();
-        let mut args = vec![
+        let args = vec![
             "-N".to_string(),
             "-o".into(),
             "ExitOnForwardFailure=yes".into(),
             flag.into(),
             value,
         ];
-        match host
-            .destination
-            .openssh_arguments_with_jump(host.jump_host.as_deref())
-        {
-            Ok(destination) => args.extend(destination),
-            Err(error) => {
-                if let Some(modal) = &mut self.tunnel_modal {
-                    modal.error = Some(error.to_string());
-                }
-                cx.notify();
-                return;
-            }
-        }
         self.tunnel_modal = None;
-        self.start_session(
-            session_name,
-            SessionKind::Ssh,
-            TerminalCommand::new("ssh").args(args),
-            window,
-            cx,
-        );
+        self.launch_saved_tunnel(host, session_name, args, window, cx);
     }
 
     fn save_new_tunnel_modal(&mut self, cx: &mut Context<Self>) {
@@ -13343,6 +13382,8 @@ impl Render for Shellumi {
         if let Some(form) = &self.form {
             let mut editor =
                 div()
+                    .id("host-editor")
+                    .overflow_y_scroll()
                     .w(px(720.0))
                     .max_w_full()
                     .max_h(px(650.0))
@@ -13466,6 +13507,9 @@ impl Render for Shellumi {
                             form.startup_snippet.clone(),
                         )),
                 );
+            if form.protocol == ConnectionProtocol::Ssh {
+                editor = editor.child(self.identity_picker(form.identity_id, false, cx));
+            }
             if let Some(error) = &self.form_error {
                 editor = editor.child(div().text_color(rgb(0xfca5a5)).child(error.clone()));
             }
@@ -13571,6 +13615,9 @@ impl Render for Shellumi {
 }
 
 fn main() {
+    if std::env::var("SHELLUMI_ASKPASS_MODE").as_deref() == Ok("1") {
+        std::process::exit(askpass::run());
+    }
     let args: Vec<_> = std::env::args().skip(1).collect();
     let (database, create_parent, startup_error) = match args.as_slice() {
         [] => match data_path::default_data_file().and_then(|path| {
@@ -14173,6 +14220,7 @@ mod tests {
 
         let mut sftp_state = SftpBrowserState {
             host_name: "prod-server".to_string(),
+            connection_options: SftpConnectOptions::default(),
             destination: None,
             jump_host: None,
             loading: false,
