@@ -45,7 +45,8 @@ Authenticated cloud inventory discovery (AWS/GCP/DigitalOcean API synchronizatio
 and network collaboration (live multi-user terminal session transport) are not connected.
 The GUI must not show simulated cloud inventory or fake successful remote terminal sharing.
 
-Live identity/SFTP/Drive acceptance and native credential
+Isolated macOS identity/SFTP transport acceptance passed with an encrypted key.
+GUI interaction, real password/MFA, Drive-account acceptance and native credential
 access tests on Windows/Linux remain. Drive account setup is not integrated.
 
 Full theme/language switching, launch-at-login integration, all prototype
@@ -71,8 +72,8 @@ implemented application; those controls are not presented as functioning toggles
   validation and tests.
 - `README.md`, `docs/ROADMAP.md`, `docs/GUI_STATUS.md`: implementation status.
 
-Verification commands: `cargo test --locked --offline --workspace` (298 passed,
-1 opt-in test ignored), final app tests (44 passed, 1 ignored),
+Verification commands: `cargo test --locked --offline --workspace` (301 passed,
+2 opt-in tests ignored on macOS), app unit tests (44 passed, 1 ignored),
 `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, and the native macOS release build. Workspace
 integration tests requiring a loopback listener were run with loopback access.
@@ -129,3 +130,19 @@ isolated keys and known-hosts files; the loopback server was stopped afterward.
 The automated CLI credential CRUD test explicitly configures a temporary,
 user-keyed encrypted fallback, rather than relying on a shared fallback key or
 claiming native keychain acceptance.
+
+## SFTP completion and real-server acceptance increment
+
+The opt-in `crates/shellumi-app/tests/ssh_sftp_acceptance.rs` now creates and
+cleans up its own temporary macOS OpenSSH server, keys, Turso identity/group
+binding, known-hosts file and transfer files. The real app askpass helper unlocks
+an encrypted key. Listing, multi-packet binary and empty-file round-trips,
+reconnect, missing-directory errors, changed/unknown host-key refusal, and
+wrong-passphrase refusal passed. This exercises the same core transport used by
+the graphical SFTP page; it does not test GPUI clicks or layout.
+
+`crates/shellumi-core/src/sftp.rs` now checks the server's final CLOSE status and
+request ID for uploads, downloads and directory listings. Failure, disconnect or
+a mismatched response propagates as an error instead of a successful task.
+Three automated regression tests cover those cases. The test guide and roadmap
+record remaining password/MFA, native credential and transfer safety work.

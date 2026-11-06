@@ -1,4 +1,4 @@
-# Isolated OpenSSH integration test
+# Isolated OpenSSH integration tests
 
 The opt-in test exercises the GPUI app's PTY session worker and terminal grid
 against an OpenSSH server. It checks rejection and acceptance of an unknown host
@@ -44,3 +44,46 @@ If port 34567 is in use, choose another high port in both the config and test
 environment. Confirm the daemon is listening before running the test. Stop the
 daemon and remove the test directory afterward. The fixture keys are disposable
 and must not be used for actual host access.
+
+## Saved identity and SFTP acceptance (macOS)
+
+The self-contained acceptance test creates a temporary Turso database, reusable
+public-key identity and group binding, an encrypted client key with spaces in its
+path, and a separate temporary server host key. It starts `/usr/sbin/sshd` on an
+available loopback port with `internal-sftp`, using disposable authorized keys
+and no account password authentication. The test supplies the exact generated
+host public key to a private known-hosts file; verification is never disabled.
+An explicit OpenSSH config (`/dev/null`) isolates the test from user client config.
+
+```sh
+cargo test --locked --offline -p shellumi-app --test ssh_sftp_acceptance -- --ignored --nocapture
+```
+
+Run on macOS with OpenSSH client/server tools installed and permission to bind a
+loopback socket. The test is opt-in because ordinary CI/development environments
+may lack `sshd` or loopback permission. It does not skip failures when explicitly
+run. Its daemon guard stops and waits for the temporary server on completion or
+panic, and temporary keys, databases and files are removed afterward.
+
+Verified behavior:
+
+- Resolve a saved host's group identity after database reopen.
+- Unlock the encrypted private key through the actual app executable in askpass
+  mode using an environment reference to a disposable test passphrase.
+- Negotiate SFTP v3, create/list/remove directories, and upload/download an exact
+  131,079-byte binary payload across multiple SFTP packets.
+- Transfer empty files and reconnect with the same identity.
+- Report missing remote directories as failures.
+- Refuse changed and unknown host keys, and an incorrect key passphrase.
+
+The normal workspace suite also injects failed, mismatched and disconnected
+CLOSE replies into the protocol client. Upload/download completion and directory
+listing now require a matching successful CLOSE response; close-time disk/quota
+errors cannot be reported as successful completion.
+
+This establishes the graphical SFTP transport and helper behavior, not GPUI
+button/focus/layout acceptance. Real password/MFA authentication, native keychain
+access, cancellation during transfers, atomic destination replacement, and
+Windows/Linux server/runtime coverage remain separate work. A failed transfer
+can leave partial data at its destination; do not treat a failed task as a usable
+complete file.

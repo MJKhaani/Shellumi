@@ -217,7 +217,15 @@ Legacy workspace destinations and Quick Connect use OpenSSH defaults.
 - **Terminal Session Recording & Interactive Replay Viewer:** Terminal panes feature an in-pane recording toggle button (`⏺ Record` / `⏹ Stop (MM:SS)`) capturing live ANSI/VT stream events into standard asciicast v2 recordings. The main toolbar includes a `[📼 Recordings]` action (and Command Palette action `PaletteAction::OpenSessionRecordings` / `Cmd+Shift+R`) opening the Session Replay Modal (`SessionReplayModalState`). All data operations run asynchronously on `cx.background_executor()` without UI lag:
   - *Recordings List tab:* lists recorded sessions with host links, duration (`MM:SS`), event count, formatted byte size, creation timestamp, launch playback button (`▶ Play`), export to `.cast` file (`⬇ Export`), and deletion.
   - *Replay Viewer tab:* interactive virtual terminal playback interface featuring status badge (`▶ PLAYING`, `⏸ PAUSED`, `⏹ STOPPED`), play/pause controls, seek scrubber pills (0%, 25%, 50%, 75%, 100%), 5-second step controls (`⏪ -5s`, `⏩ +5s`), playback speed selector (0.5x, 1x, 2x, 4x), elapsed time indicator, and a dedicated dark virtual terminal screen with live frame rendering.
-- **Verification:** An opt-in [isolated OpenSSH test](development/ssh-integration.md)
+- **SFTP transfer completion:** Uploads, downloads and directory listings require a
+  matching successful final CLOSE response. Close-time server errors, missing
+  replies and mismatched request IDs propagate to callers. An optional explicit
+  OpenSSH config file allows isolated transport acceptance without reading user
+  client settings; ordinary desktop launches retain the normal user configuration.
+- **Verification:** A self-contained macOS [OpenSSH/SFTP acceptance test](development/ssh-integration.md)
+  exercises saved group identity resolution, the actual app askpass helper,
+  encrypted keys, binary/empty transfers, reconnect and strict host-key failure.
+  A separate opt-in [isolated OpenSSH test](development/ssh-integration.md)
   exercises host-key confirmation and public-key authentication through the PTY
   worker and terminal grid. Unit tests cover endpoint formatting, host search/group/tag
   filtering, ANSI key mapping, clipboard paste detection, styled text span rendering,

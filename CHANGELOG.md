@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add self-contained macOS OpenSSH/SFTP acceptance covering saved group identity
+  resolution, encrypted-key askpass, listing, binary/empty transfers, reconnect,
+  wrong-passphrase and changed/unknown server-key rejection.
+- Require a matching successful final SFTP CLOSE response before reporting upload,
+  download or directory-listing success; propagate close errors and disconnects.
+- Add optional explicit OpenSSH client configuration for isolated SFTP acceptance.
+
 - Add host/group GUI identity selection with preserved bindings and refresh.
 - Apply saved identities to SSH, graphical/terminal SFTP, workspace restores and
   tunnels using a shared background resolver and validated launch policy.
@@ -16,7 +23,8 @@
 - Disable SFTP agent forwarding and require previously trusted host keys.
 - Pipe HTTP headers and UTF-8 bodies to curl through stdin rather than argv;
   reject malformed header input and ignore user curl configuration.
-- Regression coverage: 298 workspace tests passed, one opt-in test ignored.
+- Regression coverage: 301 workspace tests passed on macOS, two opt-in tests ignored;
+  the self-contained real-server SSH/SFTP acceptance test passed separately.
 
 ## 0.0.1-alpha
 

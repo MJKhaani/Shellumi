@@ -36,11 +36,13 @@ The following work is included in the alpha source:
 
 ## Verification recorded for alpha
 
-- 298 automated workspace tests passed; one additional isolated-server SSH test
-  is opt-in and was exercised separately during development.
+- 301 automated workspace tests passed on macOS; two real-server tests are
+  opt-in. The self-contained SSH/SFTP acceptance test passed separately.
 - Local OpenSSH encrypted-key authentication through the app helper succeeded;
-  the same setup refused an untrusted host. Live password/MFA/native-store
-  and graphical SFTP acceptance remain pending.
+  the same setup refused an untrusted host. Self-contained real-server SFTP
+  listing, binary/empty transfers, reconnect, wrong-passphrase and changed/unknown
+  host-key rejection also passed. Password/MFA/native-store and GUI interaction
+  acceptance remain pending.
 - Formatting and workspace Clippy with `-D warnings` passed with 0 warnings.
 - An optimized Intel macOS app was built locally.
 - macOS GUI checks covered saving snippets/workspaces, launching a workspace
@@ -61,7 +63,9 @@ The following work is included in the alpha source:
    notarization before broader distribution.
 4. **Credential and transport acceptance:** add stdin/masked CLI secret entry and GUI identity editing;
    verify saved-identity authentication and native keychains on actual Windows/Linux desktops. Exercise
-   graphical SFTP against an isolated server and Drive against a test account.
+   SFTP GUI interaction/cancellation and atomic destination handling, and Drive
+   against a test account. Isolated macOS SFTP transport acceptance is recorded
+   in [the test guide](development/ssh-integration.md).
    Secure credential fallback is opt-in with a user-supplied passphrase; Drive
    must not sync with a shared/default vault key.
 5. **Optional infrastructure integrations:** implement authenticated AWS/GCP/DigitalOcean
@@ -85,3 +89,13 @@ standard KDF settings. Graphical SFTP disables agent forwarding and requires
 already trusted server keys; establish trust through the interactive SSH path
 first. HTTP authorization headers and UTF-8 bodies are piped to curl, not passed
 in command arguments. These corrections do not establish live service acceptance.
+
+## SFTP acceptance follow-up (2026-11-06)
+
+Added a repeatable, self-contained macOS OpenSSH/SFTP test using the saved
+identity resolver and actual askpass helper. The graphical transport passed
+listing, multi-packet binary and empty-file transfers, reconnect, wrong-passphrase
+failure and strict host-key rejection. Fixed false success on failed final CLOSE
+responses; ordinary tests cover server failure, mismatched request IDs and
+connection loss at completion. Failed transfers may leave partial destinations;
+atomic replacement/cancellation and GPUI interaction remain required follow-ups.

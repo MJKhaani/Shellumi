@@ -168,10 +168,11 @@ can require an OS unlock/permission dialog.
 
 ## Verification and limitations
 
-The alpha implementation passed **298 automated tests**, with one additional
-isolated-server SSH test opt-in. The real-server test was also exercised during
-development. Local macOS GUI checks covered snippet creation, workspace saving
-and shell launch, preference changes, long terminal output, scrolling and split sizing.
+The local macOS workspace suite passed **301 automated tests**, with two
+real-server tests opt-in. The self-contained SSH/SFTP acceptance test also passed
+separately; see [the test guide](docs/development/ssh-integration.md). Local macOS
+GUI checks covered snippet creation, workspace saving and shell launch, preference
+changes, long terminal output, scrolling and split sizing.
 
 ```sh
 cargo fmt --all -- --check
@@ -184,9 +185,12 @@ Offline builds require dependencies to have been fetched beforehand.
 
 Remaining limitations include:
 
-- Graphical SFTP and Drive transport implementations now exist, but still need
-  real-server/account acceptance tests. Drive authorization currently requires an
-  externally supplied OAuth token; there is no complete account setup flow.
+- The graphical SFTP transport passed isolated real-server encrypted-key,
+  listing, transfer, reconnect and host-key rejection tests. GUI interaction,
+  password/MFA, cancellation and atomic destination replacement remain to be
+  verified or implemented; failed transfers can leave partial destination data.
+- Drive still needs real-account acceptance. Authorization requires an externally
+  supplied OAuth token; there is no complete account setup flow.
 - Authenticated cloud inventory discovery and network collaboration remain unconnected.
 - Theme/language switching, launch-at-login integration, screen-reader support,
   and the full design-prototype dialog catalog are not complete.

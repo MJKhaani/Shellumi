@@ -1578,6 +1578,8 @@ impl From<SftpProtocolError> for SftpError {
 /// Options for connecting to an SFTP subsystem over SSH.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SftpConnectOptions {
+    /// Optional explicit OpenSSH config; None preserves the user's normal configuration.
+    pub ssh_config_file: Option<PathBuf>,
     pub environment: Vec<(String, String)>,
     pub port: Option<u16>,
     pub identity_file: Option<String>,
@@ -1589,6 +1591,7 @@ pub struct SftpConnectOptions {
 impl Default for SftpConnectOptions {
     fn default() -> Self {
         Self {
+            ssh_config_file: None,
             environment: Vec::new(),
             port: None,
             identity_file: None,
@@ -1616,6 +1619,9 @@ impl SftpClient {
         options: &SftpConnectOptions,
     ) -> Result<Self, SftpError> {
         let mut cmd = std::process::Command::new("ssh");
+        if let Some(config) = &options.ssh_config_file {
+            cmd.arg("-F").arg(config);
+        }
         cmd.arg("-s");
         cmd.arg("-e");
         cmd.arg("none");
@@ -1762,6 +1768,30 @@ impl SftpClient {
         }
     }
 
+    /// A successful write is not a completed transfer until the server accepts CLOSE.
+    /// Servers can report quota/disk errors only when closing a handle.
+    fn close_handle(&mut self, handle: Vec<u8>) -> Result<(), SftpError> {
+        let id = self.next_id();
+        self.send_packet(&SftpPacket::Close { id, handle })?;
+        match self.read_packet()? {
+            SftpPacket::Status {
+                id: response_id,
+                code,
+                message,
+                ..
+            } if response_id == id => {
+                if code == StatusCode::Ok {
+                    Ok(())
+                } else {
+                    Err(SftpError::Status { code, message })
+                }
+            }
+            other => Err(SftpError::UnexpectedResponse(format!(
+                "Expected status for CLOSE request {id}, received {other:?}"
+            ))),
+        }
+    }
+
     /// List entries in a remote directory, returning parsed `FileEntry` records sorted by directories first.
     pub fn list_remote_directory(
         &mut self,
@@ -1833,12 +1863,7 @@ impl SftpClient {
             }
         }
 
-        let close_id = self.next_id();
-        self.send_packet(&SftpPacket::Close {
-            id: close_id,
-            handle,
-        })?;
-        let _ = self.read_packet();
+        self.close_handle(handle)?;
 
         entries.sort_by(|a, b| match (a.kind.is_dir(), b.kind.is_dir()) {
             (true, false) => std::cmp::Ordering::Less,
@@ -1942,12 +1967,7 @@ impl SftpClient {
             }
         }
 
-        let close_id = self.next_id();
-        self.send_packet(&SftpPacket::Close {
-            id: close_id,
-            handle,
-        })?;
-        let _ = self.read_packet();
+        self.close_handle(handle)?;
 
         Ok(offset)
     }
@@ -2035,12 +2055,7 @@ impl SftpClient {
             }
         }
 
-        let close_id = self.next_id();
-        self.send_packet(&SftpPacket::Close {
-            id: close_id,
-            handle,
-        })?;
-        let _ = self.read_packet();
+        self.close_handle(handle)?;
 
         Ok(offset)
     }
@@ -3111,5 +3126,106 @@ mod tests {
         assert!(!workspace.is_dirty("/etc/config.txt").unwrap());
 
         server_thread.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod transfer_completion_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn client(mut replies: Vec<SftpPacket>) -> SftpClient {
+        replies.insert(
+            0,
+            SftpPacket::Version {
+                version: 3,
+                extensions: vec![],
+            },
+        );
+        let bytes: Vec<u8> = replies
+            .into_iter()
+            .flat_map(|packet| packet.encode())
+            .collect();
+        SftpClient::from_reader_writer(Box::new(Cursor::new(bytes)), Box::new(Vec::<u8>::new()))
+            .unwrap()
+    }
+    fn status(id: u32, code: StatusCode) -> SftpPacket {
+        SftpPacket::Status {
+            id,
+            code,
+            message: "fixture close status".into(),
+            tag: String::new(),
+        }
+    }
+    fn handle(id: u32) -> SftpPacket {
+        SftpPacket::Handle {
+            id,
+            handle: b"fixture-handle".to_vec(),
+        }
+    }
+    #[test]
+    fn upload_refuses_close_failure_wrong_request_and_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::write(&source, b"payload").unwrap();
+        for close in [
+            Some(status(3, StatusCode::Failure)),
+            Some(status(99, StatusCode::Ok)),
+            None,
+        ] {
+            let mut replies = vec![handle(1), status(2, StatusCode::Ok)];
+            replies.extend(close);
+            assert!(
+                client(replies)
+                    .upload_file(&source, "/remote", None::<fn(u64, u64)>)
+                    .is_err(),
+                "Upload must not report completion without the matching successful CLOSE"
+            );
+        }
+    }
+    #[test]
+    fn download_refuses_close_failure_wrong_request_and_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        for close in [
+            Some(status(5, StatusCode::Failure)),
+            Some(status(99, StatusCode::Ok)),
+            None,
+        ] {
+            let mut replies = vec![
+                SftpPacket::Attrs {
+                    id: 1,
+                    attrs: FileAttributes::new(),
+                },
+                handle(2),
+                SftpPacket::Data {
+                    id: 3,
+                    data: b"payload".to_vec(),
+                },
+                status(4, StatusCode::Eof),
+            ];
+            replies.extend(close);
+            assert!(
+                client(replies)
+                    .download_file("/remote", &dir.path().join("output"), None::<fn(u64, u64)>)
+                    .is_err(),
+                "Download must not report completion without the matching successful CLOSE"
+            );
+        }
+    }
+    #[test]
+    fn directory_listing_refuses_close_failure() {
+        let result = client(vec![
+            handle(1),
+            status(2, StatusCode::Eof),
+            status(3, StatusCode::Failure),
+        ])
+        .list_remote_directory("/remote");
+        assert!(matches!(
+            result,
+            Err(SftpError::Status {
+                code: StatusCode::Failure,
+                ..
+            })
+        ));
     }
 }
