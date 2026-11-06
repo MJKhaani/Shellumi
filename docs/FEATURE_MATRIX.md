@@ -27,8 +27,8 @@ finished user features. See [GUI_STATUS.md](GUI_STATUS.md) for workflow details.
 | Google Drive sync | Initial integration | Zero-knowledge cloud vault synchronization over Google Drive appDataFolder via SystemHttpTransport (system curl), encrypted diffing, visual conflict resolution modal, and desktop sync panel. OAuth tokens are externally configured; real-account sync/conflict/recovery acceptance remains. |
 | Mosh, Telnet, serial | Experimental | Models and dispatch paths exist; separate executables/hardware may be needed and acceptance testing remains. Telnet is unencrypted. |
 | Mobile | Prototype | Core FFI and native examples only; no released mobile client. |
-| Releases | Tag-driven CI | Four platform/architecture targets, native packaging, checksums and Cargo metadata manifest. The alpha tag is a prerelease; CI success and runtime validation are separate checks. |
+| Releases | Tag-driven CI | Four platform binary builds passed for v0.0.2-alpha; its first Linux package step failed. Corrected prerelease packaging, root archive ownership, regression tests, immutable-tag retries and source/helper provenance are on main. Publication is pending the repaired workflow; runtime validation remains separate. |
 
-The local macOS workspace suite passed 318 automated tests, with three opt-in
+The local macOS workspace suite passed 321 automated tests, with three opt-in
 real-server tests ignored in the normal suite. The self-contained SSH/SFTP
 acceptance test passed separately; see [the test guide](development/ssh-integration.md). See [ROADMAP.md](ROADMAP.md) for next steps.

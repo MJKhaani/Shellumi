@@ -191,7 +191,7 @@ the transfer retains a visible error with the temporary path.
 
 ## Verification and limitations
 
-The local macOS workspace suite passed **318 automated tests**, with three
+The local macOS workspace suite passed **321 automated tests**, with three
 real-server tests opt-in. The self-contained SSH/SFTP acceptance test also passed
 separately, including nonresponsive-connection cancellation/timeout checks;
 see [the test guide](docs/development/ssh-integration.md). Local macOS
@@ -258,6 +258,8 @@ acceptance evidence and unfinished work.
 
 The previous alpha's Linux build failed in the existing `xattr` 0.2.3 dependency.
 A local, license-preserving [compatibility patch](vendor/xattr/PATCH.md) fixes the
-removed Linux errno alias without downgrading libc. Native macOS upstream tests
-passed. A local Linux-target check could not run because the Rust target download
-failed DNS resolution; the tag workflow must establish the full Linux build.
+removed Linux errno alias without downgrading libc. Native macOS upstream tests passed, and the tag workflow subsequently compiled
+all four platform binaries. Linux packaging exposed a separate prerelease-version
+conversion bug; it is fixed on main with regression tests. The workflow supports
+retrying the unchanged tag with corrected packaging tools. See the
+[release guide](docs/development/releases.md) for provenance and publication status.

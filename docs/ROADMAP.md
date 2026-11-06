@@ -36,7 +36,7 @@ The following work is included in the alpha source:
 
 ## Verification recorded for alpha
 
-- 318 automated workspace tests passed on macOS; three real-server tests are
+- 321 automated workspace tests passed on macOS; three real-server tests are
   opt-in. The self-contained SSH/SFTP acceptance test passed separately.
 - Local OpenSSH encrypted-key authentication through the app helper succeeded;
   the same setup refused an untrusted host. Self-contained real-server SFTP
@@ -150,10 +150,27 @@ non-macOS validation remain. Recovery of abandoned staging files remains the nex
 - Patched the existing xattr 0.2.3 dependency used through GPUI's archive library
   to unblock the previous Linux compile failure. Upstream licenses and API remain.
   macOS upstream tests passed; the Linux-target download failed DNS locally,
-  so full Linux compilation remains a tag-CI verification item.
+  but tag CI subsequently compiled all four platform binaries. Linux packaging
+  then failed; the repair is recorded below.
 
 Local evidence: 318 workspace tests passed, 3 opt-in tests ignored; both tests in
 the self-contained SSH/SFTP acceptance target passed separately. The vendored
 xattr tests passed (4 integration tests and 1 doc test). Optimized macOS app/CLI builds, formatting and strict workspace Clippy passed.
 The `v0.0.2-alpha` tag triggers builds for Linux x86_64, Windows x86_64 and macOS
 arm64/x86_64; CI completion and platform runtime validation remain separate.
+
+## Immutable-tag packaging repair
+
+The initial `v0.0.2-alpha` run compiled all four platform binaries; Linux failed
+later while constructing its Debian control file. Bash's unquoted tilde
+replacement produced a home-directory path in the version. The corrected helper
+uses a literal conversion, validates inputs before output cleanup, requires both
+binaries and requests root ownership in Debian archives. Three actual-helper
+assembly tests cover prerelease/stable versions, architectures and rejected input.
+
+The workflow can now retry a supplied source tag using corrected packaging tools
+from the workflow revision. Binary builds and the dependency inventory remain on
+the unchanged source tag, and `release-provenance.json` records both revisions.
+The source tag's suite remains 318 tests; main has 321 after packaging regressions.
+See [release operations](development/releases.md). Artifact publication is pending
+the repaired workflow; abandoned-transfer recovery remains the next app increment.

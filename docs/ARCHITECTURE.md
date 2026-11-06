@@ -342,3 +342,13 @@ building. Crate/FFI/diagnostic and native package versions are aligned. The root
 to ENODATA and preserves native macOS/BSD behavior and upstream licenses; see
 `vendor/xattr/PATCH.md`. It is excluded from the Shellumi workspace and tested
 separately. Full target build results are established by tag-triggered CI.
+
+## Retrying immutable release tags
+
+`release.yml` accepts a manual `release_tag` input. Checkout/build and Cargo
+metadata use that source tag, while a separate sparse checkout obtains the Linux
+packaging helper from the workflow revision. Source and helper revisions are
+recorded in `release-provenance.json` and included in release checksums. The
+Debian helper uses literal prerelease conversion, early input validation and
+root-owned archives. This separates packaging repair from application source
+changes and avoids force-moving tags; see [release operations](development/releases.md).

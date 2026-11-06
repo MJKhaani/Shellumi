@@ -8,8 +8,11 @@ ARCH="${1:-amd64}"
 APP_BIN="${2:-target/release/shellumi-app}"
 CLI_BIN="${3:-target/release/shellumi-cli}"
 VERSION="${SHELLUMI_VERSION:-0.0.2-alpha}"
-case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
-DEB_VERSION="${VERSION/-/~}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Expected a semantic release version" >&2; exit 1; }
+case "$ARCH" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported package architecture" >&2; exit 1 ;; esac
+# Keep the replacement literal; Bash parameter substitution can expand ~ to HOME.
+DEB_VERSION="$(printf '%s\n' "$VERSION" | sed 's/-/~/')"
+[[ -f "$APP_BIN" && -f "$CLI_BIN" ]] || { echo "Both release binaries are required" >&2; exit 1; }
 PKG_DIR="dist/shellumi_${VERSION}_${ARCH}"
 
 echo "==> Preparing Debian package directory structure..."
@@ -51,7 +54,7 @@ fi
 # Build .deb
 if command -v dpkg-deb >/dev/null 2>&1; then
     echo "==> Building .deb package..."
-    dpkg-deb --build "${PKG_DIR}" "dist/shellumi_${VERSION}_${ARCH}.deb"
+    dpkg-deb --root-owner-group --build "${PKG_DIR}" "dist/shellumi_${VERSION}_${ARCH}.deb"
     echo "==> Successfully created dist/shellumi_${VERSION}_${ARCH}.deb"
 else
     echo "==> dpkg-deb not available, creating tar.gz release bundle..."

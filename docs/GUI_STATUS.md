@@ -72,7 +72,7 @@ implemented application; those controls are not presented as functioning toggles
   validation and tests.
 - `README.md`, `docs/ROADMAP.md`, `docs/GUI_STATUS.md`: implementation status.
 
-Verification commands: `cargo test --locked --offline --workspace` (318 passed,
+Verification commands: `cargo test --locked --offline --workspace` (321 passed,
 3 opt-in tests ignored on macOS), app unit tests (47 passed, 1 ignored),
 `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, and the native macOS release build. Workspace
@@ -190,3 +190,12 @@ cancellation checks while waiting and one deadline per packet. Read/write timeou
 or interruption terminates the SSH child, avoiding reuse of a partial frame.
 Normal transfer/cancellation and stalled-connect tests passed against actual
 OpenSSH. No new visual/keyboard acceptance is inferred from these tests.
+
+## Release packaging follow-up
+
+The `v0.0.2-alpha` source compiled on Linux, Windows and both macOS targets. The
+initial Debian package step failed before publication; main now repairs the
+prerelease conversion and supports retries without changing the source tag.
+Three packaging-helper assembly tests bring main to 321 workspace tests. No GUI
+implementation changed in this repair. Release publication status and provenance
+are tracked in [the release guide](development/releases.md).

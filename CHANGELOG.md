@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Repair Debian prerelease version conversion, validate package inputs before
+  output cleanup, require both binaries, and generate root-owned Debian archives.
+- Add three actual-helper packaging regression tests (321 workspace tests on main).
+- Support manual release retries from unchanged source tags with corrected
+  packaging tools and explicit source/helper provenance.
+
 ## 0.0.2-alpha
 
 - Interrupt blocked SSH pipe reads/writes on cancellation and enforce one bounded
