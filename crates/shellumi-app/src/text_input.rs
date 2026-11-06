@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, white, App, Bounds,
+    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
@@ -39,6 +39,7 @@ pub(crate) struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    masked: bool,
 }
 
 impl TextInput {
@@ -134,6 +135,9 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -141,6 +145,10 @@ impl TextInput {
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            self.replace_text_in_range(None, "", window, cx);
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -177,7 +185,13 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        let mut index = line
+            .closest_index_for_x(position.x - bounds.left())
+            .min(self.content.len());
+        while !self.content.is_char_boundary(index) {
+            index = index.saturating_sub(1);
+        }
+        index
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -433,9 +447,16 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.5))
+            (input.placeholder.clone(), hsla(0.58, 0.13, 0.60, 1.))
         } else {
-            (content, style.color)
+            (
+                if input.masked {
+                    "*".repeat(content.len()).into()
+                } else {
+                    content
+                },
+                style.color,
+            )
         };
 
         let run = TextRun {
@@ -575,16 +596,17 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0xeeeeee))
-            .text_color(rgb(0x111827))
-            .line_height(px(30.))
-            .text_size(px(24.))
+            .bg(rgb(0x192536))
+            .text_color(rgb(0xe9f0f9))
+            .rounded_md()
+            .line_height(px(24.))
+            .text_size(px(14.))
             .child(
                 div()
-                    .h(px(30. + 4. * 2.))
+                    .h(px(24. + 4. * 2.))
                     .w_full()
                     .p(px(4.))
-                    .bg(white())
+                    .bg(rgb(0x192536))
                     .child(TextElement { input: cx.entity() }),
             )
     }
@@ -608,7 +630,12 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            masked: false,
         }
+    }
+    pub(crate) fn masked(mut self) -> Self {
+        self.masked = true;
+        self
     }
     pub(crate) fn value(&self) -> &str {
         &self.content

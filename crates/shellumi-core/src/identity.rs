@@ -226,3 +226,48 @@ mod tests {
         assert_eq!(&wire[key_offset + 4..], &raw);
     }
 }
+
+/// Fingerprint the wire data in an OpenSSH public key without accessing private material.
+pub fn fingerprint_public_key(public_key: &str) -> Result<String, IdentityError> {
+    use base64::Engine;
+    let mut parts = public_key.split_whitespace();
+    let algorithm = parts.next().ok_or(IdentityError::InvalidKeyFormat)?;
+    let encoded = parts.next().ok_or(IdentityError::InvalidKeyFormat)?;
+    if encoded.len() > 16384 {
+        return Err(IdentityError::InvalidKeyFormat);
+    }
+    let wire = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| IdentityError::InvalidKeyFormat)?;
+    let header: [u8; 4] = wire
+        .get(..4)
+        .ok_or(IdentityError::InvalidKeyFormat)?
+        .try_into()
+        .map_err(|_| IdentityError::InvalidKeyFormat)?;
+    let length = u32::from_be_bytes(header) as usize;
+    if wire.get(
+        4..4usize
+            .checked_add(length)
+            .ok_or(IdentityError::InvalidKeyFormat)?,
+    ) != Some(algorithm.as_bytes())
+    {
+        return Err(IdentityError::InvalidKeyFormat);
+    }
+    Ok(compute_sha256_fingerprint(&wire))
+}
+#[cfg(test)]
+mod public_fingerprint_tests {
+    #[test]
+    fn public_key_fingerprint_matches_generated_key_and_rejects_bad_wire() {
+        let (_, key) = super::generate_ed25519_key(None).unwrap();
+        assert_eq!(
+            super::fingerprint_public_key(&key.public_key).unwrap(),
+            key.fingerprint
+        );
+        assert!(super::fingerprint_public_key("ssh-ed25519 broken").is_err());
+        assert!(
+            super::fingerprint_public_key(&key.public_key.replace("ssh-ed25519", "ssh-rsa"))
+                .is_err()
+        );
+    }
+}

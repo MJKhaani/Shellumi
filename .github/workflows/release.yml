@@ -28,12 +28,20 @@ jobs:
             target: aarch64-apple-darwin
             os_name: macos
             arch: arm64
-          - runner: macos-13
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             os_name: macos
             arch: x86_64
     steps:
       - uses: actions/checkout@v4
+      - name: Set release version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Expected a semantic version tag"; exit 1; }
+          echo "SHELLUMI_VERSION=$version" >> "$GITHUB_ENV"
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -41,7 +49,11 @@ jobs:
           sudo apt-get install -y pkg-config clang cmake libfontconfig1-dev libfreetype6-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev dpkg-dev
       - name: Check Metal compiler
         if: runner.os == 'macOS'
-        run: xcrun --find metal
+        run: |
+          if ! xcrun --find metal; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --find metal
       - name: Install Rust target
         run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
       - name: Build release binaries
@@ -51,7 +63,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          ./packaging/linux/build-deb.sh "${{ matrix.arch }}" "target/${{ matrix.target }}/release/shellumi-app" "target/${{ matrix.target }}/release/shellumi-cli"
+          bash packaging/linux/build-deb.sh "${{ matrix.arch }}" "target/${{ matrix.target }}/release/shellumi-app" "target/${{ matrix.target }}/release/shellumi-cli"
           cp "target/${{ matrix.target }}/release/shellumi-app" "dist/shellumi-app-linux-${{ matrix.arch }}"
           cp "target/${{ matrix.target }}/release/shellumi-cli" "dist/shellumi-cli-linux-${{ matrix.arch }}"
       - name: Package macOS assets
@@ -71,11 +83,17 @@ jobs:
           cp "target/${{ matrix.target }}/release/shellumi-app.exe" "dist/shellumi-app-windows-${{ matrix.arch }}.exe"
           cp "target/${{ matrix.target }}/release/shellumi-cli.exe" "dist/shellumi-cli-windows-${{ matrix.arch }}.exe"
           cd dist
-          7z a "shellumi-0.1.0-windows-${{ matrix.arch }}.zip" "shellumi-app-windows-${{ matrix.arch }}.exe" "shellumi-cli-windows-${{ matrix.arch }}.exe"
+          7z a "shellumi-${SHELLUMI_VERSION}-windows-${{ matrix.arch }}.zip" "shellumi-app-windows-${{ matrix.arch }}.exe" "shellumi-cli-windows-${{ matrix.arch }}.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: assets-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: dist/*
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.deb
+            dist/*.tar.gz
+            dist/shellumi-app-*
+            dist/shellumi-cli-*
           if-no-files-found: error
 
   publish:
@@ -93,7 +111,7 @@ jobs:
         run: |
           cargo metadata --format-version 1 --locked > dist/shellumi-sbom-metadata.json
           cd dist
-          sha256sum * > SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,6 +120,8 @@ jobs:
         run: |
           cd dist
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --generate-notes
+            flags=()
+            if [[ "$TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
+            gh release create "$TAG" --verify-tag --generate-notes "${flags[@]}"
           fi
           gh release upload "$TAG" * --clobber

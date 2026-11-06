@@ -1,6 +1,20 @@
 use std::process::Command;
 
 #[test]
+fn vault_sync_does_not_claim_success_without_a_remote_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("hosts.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&database)
+        .args(["vault", "sync", "--passphrase", "fixture-only-passphrase"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not implemented"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("already in sync"));
+}
+
+#[test]
 fn manages_hosts_across_processes() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("hosts.db");

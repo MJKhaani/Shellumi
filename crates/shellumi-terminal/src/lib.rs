@@ -28,6 +28,9 @@ pub struct Terminal {
     title: Option<String>,
     shell_integration: ShellIntegrationState,
     recorder: Option<SessionRecorder>,
+    foreground: Color,
+    background: Color,
+    attributes: CellAttributes,
 }
 
 impl Terminal {
@@ -39,6 +42,9 @@ impl Terminal {
             title: None,
             shell_integration: ShellIntegrationState::new(),
             recorder: None,
+            foreground: Color::Default,
+            background: Color::Default,
+            attributes: CellAttributes::default(),
         }
     }
 
@@ -49,9 +55,15 @@ impl Terminal {
         }
         let mut handler = TerminalHandler::new(&mut self.grid, &mut self.title)
             .with_shell_integration(&mut self.shell_integration);
+        handler.fg = self.foreground;
+        handler.bg = self.background;
+        handler.attrs = self.attributes;
         for &byte in bytes {
             self.parser.advance(&mut handler, byte);
         }
+        self.foreground = handler.fg;
+        self.background = handler.bg;
+        self.attributes = handler.attrs;
     }
 
     /// Feeds an incoming UTF-8 string into the VT parser.
@@ -207,6 +219,23 @@ impl Terminal {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn retains_text_attributes_across_input_chunks_until_reset() {
+        let mut terminal = Terminal::new(4, 40);
+        terminal.process_bytes(b"\x1b[1;31mfirst");
+        terminal.process_bytes(b" second");
+        terminal.process_bytes(b"\x1b[0m plain");
+        let first = terminal.grid().get_cell(0, 0).unwrap();
+        let second = terminal.grid().get_cell(0, 6).unwrap();
+        let plain = terminal.grid().get_cell(0, 13).unwrap();
+        assert_eq!(first.fg, Color::Named(NamedColor::Red));
+        assert!(first.attrs.bold);
+        assert_eq!(second.fg, Color::Named(NamedColor::Red));
+        assert!(second.attrs.bold);
+        assert_eq!(plain.fg, Color::Default);
+        assert!(!plain.attrs.bold);
+    }
 
     #[test]
     fn parses_plain_text_and_newlines() {

@@ -3,8 +3,8 @@
 //! Enforces safety-by-default rules:
 //! - Validates and renders template variables (substituting host properties `{{host.hostname}}`, etc.)
 //! - Blocks dangerous commands (destructive root filesystem changes, fork bombs, disk overwrites)
-//! - Tracks session authentication readiness via OSC 133 prompt markers and passive prompt detection
-//! - Prevents premature command injection into authentication, host-key, or password prompts
+//! - Detects prompt-like output as a hint, not proof of authentication
+//! - Requires explicit confirmation before dispatch; automatic dispatch is unavailable
 
 use crate::autocomplete::PasswordPromptDetector;
 use crate::workspace::check_dangerous_command;
@@ -14,7 +14,7 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartupExecutionPolicy {
-    /// Automatically dispatch command once authentication is confirmed and remote shell is idle.
+    /// Reserved for future authenticated session readiness; automatic dispatch is disabled.
     #[default]
     AutoAfterAuth,
     /// Require explicit 1-click user confirmation before sending command into the session.
@@ -27,7 +27,7 @@ pub enum StartupExecutionPolicy {
 pub enum StartupStatus {
     /// Waiting for remote host key / authentication sequence to conclude.
     PendingAuth,
-    /// Shell prompt verified; ready for safe command injection.
+    /// Prompt-like output observed; authentication is not verified.
     ReadyToDispatch,
     /// Command has been sent to the PTY stream.
     Dispatched,
@@ -228,23 +228,18 @@ impl StartupSessionTracker {
 
     /// Attempts to dispatch the startup command.
     ///
-    /// If policy is `AutoAfterAuth` and status is `ReadyToDispatch`, returns the payload
-    /// with trailing newline and transitions to `Dispatched`.
+    /// Only an explicit confirmation can dispatch a command. Prompt-like output
+    /// does not establish that SSH authentication or host-key verification completed.
     pub fn dispatch(&mut self, force: bool) -> Option<String> {
-        if self.policy == StartupExecutionPolicy::Disabled && !force {
+        if self.policy == StartupExecutionPolicy::Disabled
+            || !force
+            || self.status != StartupStatus::ReadyToDispatch
+        {
             return None;
         }
-
-        if force
-            || (self.policy == StartupExecutionPolicy::AutoAfterAuth
-                && self.status == StartupStatus::ReadyToDispatch)
-        {
-            self.status = StartupStatus::Dispatched;
-            self.attempts += 1;
-            Some(format!("{}\n", self.rendered_command))
-        } else {
-            None
-        }
+        self.status = StartupStatus::Dispatched;
+        self.attempts += 1;
+        Some(format!("{}\n", self.rendered_command))
     }
 
     /// Marks the startup snippet execution as completed.
@@ -300,8 +295,11 @@ mod tests {
         tracker.observe_output("Welcome to Ubuntu 24.04 LTS\r\nubuntu@bastion:~$ ");
         assert_eq!(tracker.status, StartupStatus::ReadyToDispatch);
 
-        // Now dispatch should emit payload
-        let cmd = tracker.dispatch(false).expect("command payload");
+        // A prompt is only a hint; it must not cause automatic dispatch.
+        assert!(tracker.dispatch(false).is_none());
+        let cmd = tracker
+            .dispatch(true)
+            .expect("explicitly confirmed payload");
         assert_eq!(cmd, "source ~/.bashrc && export ENV=prod\n");
         assert_eq!(tracker.status, StartupStatus::Dispatched);
 
@@ -320,7 +318,40 @@ mod tests {
 
         tracker.observe_output("\x1b]133;A\x07");
         assert_eq!(tracker.status, StartupStatus::ReadyToDispatch);
-        let cmd = tracker.dispatch(false).unwrap();
+        assert!(tracker.dispatch(false).is_none());
+        let cmd = tracker.dispatch(true).unwrap();
         assert_eq!(cmd, "docker ps -a\n");
+    }
+
+    #[test]
+    fn banner_or_password_prompt_never_causes_automatic_dispatch() {
+        let mut tracker = StartupSessionTracker::new(
+            None,
+            "test",
+            "secret-command",
+            StartupExecutionPolicy::AutoAfterAuth,
+        );
+        tracker.observe_output("Welcome to bastion >\nPassword: ");
+        assert!(tracker.dispatch(false).is_none());
+        tracker.observe_output("pre-login banner >");
+        assert!(tracker.dispatch(false).is_none());
+    }
+
+    #[test]
+    fn confirmation_cannot_dispatch_while_pending_or_disabled() {
+        let mut tracker = StartupSessionTracker::new(
+            None,
+            "test",
+            "echo safe",
+            StartupExecutionPolicy::RequireConfirmation,
+        );
+        assert!(tracker.dispatch(true).is_none());
+        tracker.observe_output("user@host:~$ ");
+        assert_eq!(tracker.dispatch(true).as_deref(), Some("echo safe\n"));
+        assert!(tracker.dispatch(true).is_none());
+        let mut disabled =
+            StartupSessionTracker::new(None, "test", "echo safe", StartupExecutionPolicy::Disabled);
+        disabled.observe_output("user@host:~$ ");
+        assert!(disabled.dispatch(true).is_none());
     }
 }

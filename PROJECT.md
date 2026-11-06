@@ -1,5 +1,11 @@
 # SHELLUMI — MASTER DEVELOPMENT AGENT PROMPT
 
+> Current milestone: **v0.0.1-alpha**. This document defines the target scope.
+> See [current feature status](docs/FEATURE_MATRIX.md),
+> [GUI implementation](docs/GUI_STATUS.md), and [roadmap](docs/ROADMAP.md)
+> for completed work, verification and remaining limitations.
+
+
 ## 1. Your Role and Mission
 
 You are a principal Rust engineer, desktop application architect, cybersecurity engineer, UI/UX designer, and open-source maintainer.

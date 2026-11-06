@@ -7,7 +7,9 @@ set -euo pipefail
 ARCH="${1:-amd64}"
 APP_BIN="${2:-target/release/shellumi-app}"
 CLI_BIN="${3:-target/release/shellumi-cli}"
-VERSION="0.1.0"
+VERSION="${SHELLUMI_VERSION:-0.0.1-alpha}"
+case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
+DEB_VERSION="${VERSION/-/~}"
 PKG_DIR="dist/shellumi_${VERSION}_${ARCH}"
 
 echo "==> Preparing Debian package directory structure..."
@@ -19,7 +21,7 @@ mkdir -p "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps"
 mkdir -p "${PKG_DIR}/usr/share/doc/shellumi"
 
 # Control file
-sed "s/Architecture: amd64/Architecture: ${ARCH}/" packaging/linux/debian/control > "${PKG_DIR}/DEBIAN/control"
+sed -e "s/Architecture: amd64/Architecture: ${ARCH}/" -e "s/^Version: .*/Version: ${DEB_VERSION}/" packaging/linux/debian/control > "${PKG_DIR}/DEBIAN/control"
 
 # Binaries
 if [ -f "${APP_BIN}" ]; then

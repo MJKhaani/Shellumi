@@ -6,10 +6,11 @@ set -euo pipefail
 
 ARCH="${1:-$(uname -m)}"
 BIN_PATH="${2:-target/release/shellumi-app}"
+VERSION="${SHELLUMI_VERSION:-0.0.1-alpha}"
 OUTPUT_DIR="dist"
 APP_NAME="Shellumi.app"
 APP_BUNDLE="${OUTPUT_DIR}/${APP_NAME}"
-DMG_NAME="Shellumi-0.1.0-macos-${ARCH}.dmg"
+DMG_NAME="Shellumi-${VERSION}-macos-${ARCH}.dmg"
 
 echo "==> Building macOS Application Bundle for ${ARCH}..."
 mkdir -p "${APP_BUNDLE}/Contents/MacOS"
@@ -34,5 +35,5 @@ if command -v hdiutil >/dev/null 2>&1; then
     echo "==> Successfully created ${OUTPUT_DIR}/${DMG_NAME}"
 else
     echo "==> hdiutil not found, packaging as ZIP archive..."
-    (cd "${OUTPUT_DIR}" && zip -r "Shellumi-0.1.0-macos-${ARCH}.zip" "${APP_NAME}")
+    (cd "${OUTPUT_DIR}" && zip -r "Shellumi-${VERSION}-macos-${ARCH}.zip" "${APP_NAME}")
 fi

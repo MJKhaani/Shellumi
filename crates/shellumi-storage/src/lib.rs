@@ -1,4 +1,5 @@
 //! Local Turso storage. Credentials are never stored in this database.
+pub mod desktop;
 use shellumi_core::{
     resolve_effective_destination, resolve_effective_tags, validate_jump_host, AuditAction,
     CollaborationError, DestinationError, ForwardingType, GroupError, HostGroup, LogBookmark,

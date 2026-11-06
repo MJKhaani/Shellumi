@@ -1,6 +1,6 @@
 [package]
 name = "shellumi-terminal"
-version = "0.1.0"
+version = "0.0.1-alpha"
 edition = "2021"
 license = "MIT"
 publish = false

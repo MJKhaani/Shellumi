@@ -59,8 +59,8 @@ pub use ffi::{
 };
 pub use group::{resolve_effective_destination, resolve_effective_tags, GroupError, HostGroup};
 pub use identity::{
-    compute_sha256_fingerprint, encode_openssh_public_key, generate_ed25519_key, AuthMethod,
-    Identity, IdentityError, KeyPair, KeyType, SshKey,
+    compute_sha256_fingerprint, encode_openssh_public_key, fingerprint_public_key,
+    generate_ed25519_key, AuthMethod, Identity, IdentityError, KeyPair, KeyType, SshKey,
 };
 pub use infrastructure::{
     AnsibleInventoryEngine, AwsEc2Parser, AzureVmParser, CloudProviderConfig, CloudProviderKind,

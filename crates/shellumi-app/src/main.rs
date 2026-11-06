@@ -1,3 +1,5 @@
+mod data_path;
+mod desktop;
 mod session;
 mod text_input;
 
@@ -6,25 +8,30 @@ use gpui::{
     FocusHandle, FontWeight, KeyBinding, KeyDownEvent, Window, WindowBounds, WindowOptions,
 };
 use session::{Session, SessionEvent};
+#[cfg(test)]
+use shellumi_core::ActiveTunnelStatus;
 use shellumi_core::{
-    build_ssh_tunnel_command, check_dangerous_command, execute_sync_cycle, format_duration_hms,
-    generate_bash_hook, generate_fish_hook, generate_zsh_hook, list_local_directory,
-    prepare_startup_snippet, validate_jump_host, AccessoryBarLayout, ActiveTunnelState,
-    ActiveTunnelStatus, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
-    AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus,
-    BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner, BenchmarkStatus,
-    BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine, CloudProviderConfig,
-    CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView, ConflictResolutionChoice,
-    ConnectionProtocol, DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, EncryptedEnvelope,
-    FileEntry, FileKind, ForwardingType, HostExportItem, MobileLifecycleEvent,
+    build_ssh_tunnel_command, check_dangerous_command, format_duration_hms, generate_bash_hook,
+    generate_fish_hook, generate_zsh_hook, list_local_directory, validate_jump_host,
+    AccessoryBarLayout, ActiveTunnelState, AnsibleInventoryEngine, AuditAction,
+    AutocompleteContext, AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary,
+    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner,
+    BenchmarkStatus, BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine,
+    CloudProviderConfig, CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView,
+    ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus, DiagnosticsReport,
+    DiagnosticsRunner, FileEntry, FileKind, ForwardingType, HostExportItem, MobileLifecycleEvent,
     MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession,
     PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
     PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule, SerialConfig,
     SessionRecordingSummary, SessionRedactor, SharedVault, SharingAuditRecord, SshDestination,
-    StartupExecutionPolicy, StartupSessionTracker, StartupSnippetContext, StartupStatus,
-    SyncCycleResult, SyncEntityType, SyncRecord, TeamMember, TeamRole, TelnetConfig,
-    TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey,
-    VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    TeamMember, TeamRole, TelnetConfig, TransferQueue, TransferStatus, VirtualAccessoryBar,
+    VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+};
+#[cfg(test)]
+use shellumi_core::{
+    execute_sync_cycle, prepare_startup_snippet, EncryptedEnvelope, StartupExecutionPolicy,
+    StartupSessionTracker, StartupSnippetContext, StartupStatus, SyncCycleResult, SyncEntityType,
+    SyncRecord,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedTunnel,
@@ -32,6 +39,13 @@ use shellumi_storage::{
 };
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
+
+#[cfg(target_os = "macos")]
+const MONOSPACE_FONT: &str = "Menlo";
+#[cfg(target_os = "windows")]
+const MONOSPACE_FONT: &str = "Consolas";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
 
 actions!(shellumi, [RefreshHosts, ToggleCommandPalette]);
 
@@ -127,6 +141,7 @@ struct TeamModalState {
     new_vault_desc: Entity<TextInput>,
     invite_user_id: Entity<TextInput>,
     invite_name: Entity<TextInput>,
+    invite_public_key: Entity<TextInput>,
     invite_role: TeamRole,
     error: Option<String>,
     status_message: Option<String>,
@@ -243,6 +258,7 @@ struct SessionReplayModalState {
 }
 
 struct TunnelModalState {
+    editing_id: Option<i64>,
     tunnels: Vec<SavedTunnel>,
     selected_index: usize,
     active_states: std::collections::HashMap<i64, ActiveTunnelState>,
@@ -259,8 +275,12 @@ struct TunnelModalState {
 }
 
 struct Shellumi {
+    desktop: desktop::DesktopUi,
     database: Option<String>,
     hosts: HostState,
+    selected_host_id: Option<i64>,
+    selected_group: Option<String>,
+    page: Option<&'static str>,
     focus: FocusHandle,
     form: Option<HostForm>,
     form_error: Option<String>,
@@ -301,6 +321,7 @@ enum AppSyncStatus {
     Error(String),
 }
 
+#[cfg(test)]
 impl AppSyncStatus {
     fn label(&self) -> String {
         match self {
@@ -335,6 +356,7 @@ enum SessionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitDirection {
+    Grid,
     Horizontal,
     Vertical,
 }
@@ -345,6 +367,7 @@ struct TerminalPane {
     #[allow(dead_code)]
     kind: SessionKind,
     terminal: Terminal,
+    scroll: gpui::ScrollHandle,
     session: Option<Session>,
     message: Option<String>,
     search_open: bool,
@@ -352,7 +375,6 @@ struct TerminalPane {
     search_query: String,
     search_matches: Vec<SearchMatch>,
     current_match_idx: Option<usize>,
-    startup_tracker: Option<StartupSessionTracker>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,8 +432,13 @@ fn format_endpoint(username: &str, hostname: &str, port: u16) -> String {
     }
 }
 
-fn render_terminal_spans(spans: Vec<StyledSpan>) -> gpui::Div {
-    let mut line = div().flex().flex_row().min_h(px(18.0));
+fn render_terminal_spans(spans: Vec<StyledSpan>, line_height: f32) -> gpui::Div {
+    let mut line = div()
+        .flex()
+        .flex_row()
+        .h(px(line_height))
+        .flex_shrink_0()
+        .whitespace_nowrap();
     if spans.is_empty() {
         return line.child(" ");
     }
@@ -490,9 +517,14 @@ impl Shellumi {
         let search_input =
             cx.new(|cx| TextInput::new(cx, "", "Filter hosts by name, host, group, or tag…"));
         let quick_connect_input = cx.new(|cx| TextInput::new(cx, "", "user@host[:port]"));
-        let mut app = Self {
+        cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
+        Self {
+            desktop: desktop::DesktopUi::new(cx),
             database,
             hosts: HostState::NoDatabase,
+            selected_host_id: None,
+            selected_group: None,
+            page: None,
             focus,
             form: None,
             form_error: None,
@@ -521,14 +553,54 @@ impl Shellumi {
             shell_integration_modal: None,
             session_replay_modal: None,
             tunnel_modal: None,
-        };
-        if app.database.is_some() {
-            app.load_hosts(cx);
-            app.load_snippets(cx);
-            app.load_workspaces(cx);
-            app.start_sync_scheduler_loop(cx);
         }
-        app
+    }
+
+    fn start_storage(&mut self, create_parent: bool, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        self.hosts = HostState::Loading;
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            if create_parent {
+                data_path::prepare_parent(std::path::Path::new(&path))?;
+            }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let hosts = store.list().await.map_err(|error| error.to_string())?;
+                let snippets = store
+                    .list_snippets()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let workspaces = store
+                    .list_workspaces()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>((hosts, snippets, workspaces))
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match result {
+                    Ok((hosts, snippets, workspaces)) => {
+                        app.hosts = HostState::Loaded(hosts);
+                        app.snippets = snippets;
+                        app.workspaces = workspaces;
+                        app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
+                    }
+                    Err(error) => app.hosts = HostState::Error(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn quick_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -565,27 +637,16 @@ impl Shellumi {
                             if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
                                 match event {
                                     SessionEvent::Output(bytes) => {
+                                        let follow = pane.scroll.max_offset().height
+                                            + pane.scroll.offset().y
+                                            <= px(24.0);
                                         pane.terminal.process_bytes(&bytes);
+                                        if follow {
+                                            pane.scroll.scroll_to_bottom();
+                                        }
                                         if !pane.search_query.is_empty() {
                                             pane.search_matches =
                                                 pane.terminal.search(&pane.search_query, false);
-                                        }
-
-                                        if let Some(ref mut tracker) = pane.startup_tracker {
-                                            if let Ok(text) = std::str::from_utf8(&bytes) {
-                                                tracker.observe_output(text);
-                                                if tracker.status == StartupStatus::ReadyToDispatch {
-                                                    if let Some(cmd) = tracker.dispatch(false) {
-                                                        if let Some(ref mut sess) = pane.session {
-                                                            let _ = sess.input(cmd.into_bytes());
-                                                            pane.message = Some(format!(
-                                                                "Startup snippet '{}' dispatched successfully upon shell prompt detection.",
-                                                                tracker.snippet_name
-                                                            ));
-                                                        }
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
                                     SessionEvent::Error(error) => {
@@ -627,7 +688,7 @@ impl Shellumi {
         name: String,
         kind: SessionKind,
         command: TerminalCommand,
-        startup_tracker: Option<StartupSessionTracker>,
+        startup_snippet_name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -643,17 +704,22 @@ impl Shellumi {
         let session = Session::start(command);
         let events = session.events.clone();
         let search_input = cx.new(|cx| TextInput::new(cx, "", "Search output…"));
-        let initial_message = startup_tracker.as_ref().map(|t| {
+        let initial_message = startup_snippet_name.as_ref().map(|name| {
             format!(
-                "Startup automation armed ('{}'): awaiting authenticated shell prompt…",
-                t.snippet_name
+                "Startup snippet '{}' was not run automatically; run it manually after authentication.",
+                name
             )
         });
         let pane = TerminalPane {
             id: pane_id,
             name: name.clone(),
             kind,
-            terminal: Terminal::new(24, 80),
+            scroll: gpui::ScrollHandle::new(),
+            terminal: {
+                let mut terminal = Terminal::new(24, 80);
+                terminal.set_scrollback_limit(self.desktop.preferences.scrollback_lines);
+                terminal
+            },
             session: Some(session),
             message: initial_message,
             search_open: false,
@@ -661,7 +727,6 @@ impl Shellumi {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
-            startup_tracker,
         };
 
         let sftp_state = if kind == SessionKind::Sftp {
@@ -671,32 +736,7 @@ impl Shellumi {
                 .to_string();
             let local_entries = list_local_directory(&local_path, false).unwrap_or_default();
             let remote_path = "/home".to_string();
-            let remote_entries = vec![
-                FileEntry {
-                    name: "web-app".to_string(),
-                    path: "/home/web-app".to_string(),
-                    size: 4096,
-                    kind: FileKind::Directory,
-                    modified: Some(1700000000),
-                    permissions: Some(0o755),
-                },
-                FileEntry {
-                    name: "config.yaml".to_string(),
-                    path: "/home/config.yaml".to_string(),
-                    size: 1240,
-                    kind: FileKind::File,
-                    modified: Some(1700000100),
-                    permissions: Some(0o644),
-                },
-                FileEntry {
-                    name: "deploy.sh".to_string(),
-                    path: "/home/deploy.sh".to_string(),
-                    size: 512,
-                    kind: FileKind::File,
-                    modified: Some(1700000200),
-                    permissions: Some(0o755),
-                },
-            ];
+            let remote_entries = Vec::new();
             Some(SftpBrowserState {
                 host_name: name.clone(),
                 local_path,
@@ -706,7 +746,7 @@ impl Shellumi {
                 selected_local: None,
                 selected_remote: None,
                 show_hidden: false,
-                mode: SftpTabMode::DualPane,
+                mode: SftpTabMode::Terminal,
                 error: None,
                 status_message: None,
                 queue: TransferQueue::new(2),
@@ -725,6 +765,7 @@ impl Shellumi {
             sftp_state,
             multiplayer: None,
         });
+        self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);
         window.focus(&self.focus);
         cx.notify();
@@ -758,7 +799,12 @@ impl Shellumi {
             id: pane_id,
             name: "Local terminal".into(),
             kind: SessionKind::Local,
-            terminal: Terminal::new(24, 80),
+            scroll: gpui::ScrollHandle::new(),
+            terminal: {
+                let mut terminal = Terminal::new(24, 80);
+                terminal.set_scrollback_limit(self.desktop.preferences.scrollback_lines);
+                terminal
+            },
             session: Some(session),
             message: None,
             search_open: false,
@@ -766,7 +812,6 @@ impl Shellumi {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
-            startup_tracker: None,
         };
 
         tab.panes.push(pane);
@@ -897,6 +942,7 @@ impl Shellumi {
     }
 
     fn select_tab(&mut self, idx: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = None;
         self.active_tab_idx = idx;
         window.focus(&self.focus);
         cx.notify();
@@ -918,35 +964,18 @@ impl Shellumi {
                     }
                 };
                 let command = TerminalCommand::new("ssh").args(arguments);
-                let startup_tracker = host.startup_snippet_id.and_then(|sid| {
-                    self.snippets.iter().find(|s| s.id == sid).and_then(|s| {
-                        let ctx = StartupSnippetContext::new(
-                            &host.name,
-                            host.destination.host(),
-                            host.destination.username(),
-                            host.destination.port().get(),
-                        )
-                        .with_host_id(host.id);
-
-                        match prepare_startup_snippet(&s.command, &ctx) {
-                            Ok(rendered) => Some(StartupSessionTracker::new(
-                                Some(sid),
-                                &s.name,
-                                rendered,
-                                StartupExecutionPolicy::AutoAfterAuth,
-                            )),
-                            Err(e) => {
-                                eprintln!("Startup snippet preparation failed: {e}");
-                                None
-                            }
-                        }
-                    })
+                let startup_snippet_name = host.startup_snippet_id.map(|sid| {
+                    self.snippets
+                        .iter()
+                        .find(|snippet| snippet.id == sid)
+                        .map(|snippet| snippet.name.clone())
+                        .unwrap_or_else(|| format!("#{sid}"))
                 });
                 self.start_session_with_startup(
                     host.name.clone(),
                     SessionKind::Ssh,
                     command,
-                    startup_tracker,
+                    startup_snippet_name,
                     window,
                     cx,
                 );
@@ -1173,15 +1202,22 @@ impl Shellumi {
     }
 
     fn sftp_toggle_mode(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            if let Some(sftp) = &mut tab.sftp_state {
-                sftp.mode = match sftp.mode {
-                    SftpTabMode::DualPane => SftpTabMode::Terminal,
-                    SftpTabMode::Terminal => SftpTabMode::DualPane,
-                };
-                cx.notify();
-            }
+        if let Some(browser) = self
+            .tabs
+            .get_mut(tab_idx)
+            .and_then(|tab| tab.sftp_state.as_mut())
+        {
+            browser.mode = SftpTabMode::Terminal;
+            browser.error=Some("Graphical remote browsing is not connected. Use the live SFTP terminal for file operations.".into());
         }
+        if let Some(pane) = self
+            .tabs
+            .get_mut(tab_idx)
+            .and_then(|tab| tab.panes.first_mut())
+        {
+            pane.message=Some("Use the live SFTP terminal for file operations; the graphical transport is not connected.".into());
+        }
+        cx.notify();
     }
 
     fn sftp_refresh(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
@@ -1198,69 +1234,31 @@ impl Shellumi {
     }
 
     fn sftp_upload_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            if let Some(sftp) = &mut tab.sftp_state {
-                if let Some(name) = sftp.selected_local.clone() {
-                    let file_entry = sftp.local_entries.iter().find(|e| e.name == name).cloned();
-                    if let Some(entry) = file_entry {
-                        let local_full = entry.path.clone();
-                        let remote_full = PathUtils::join_path(&sftp.remote_path, &entry.name);
-                        let tid = sftp.queue.enqueue(
-                            TransferDirection::Upload,
-                            &local_full,
-                            &remote_full,
-                            entry.size.max(1024),
-                        );
-                        sftp.queue.dispatch_next();
-                        sftp.queue.mark_completed(tid);
-                        sftp.status_message =
-                            Some(format!("Uploaded '{}' to remote successfully", entry.name));
-                        if !sftp.remote_entries.iter().any(|r| r.name == entry.name) {
-                            let now_secs = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            sftp.remote_entries.push(FileEntry {
-                                name: entry.name.clone(),
-                                path: remote_full,
-                                size: entry.size,
-                                kind: entry.kind,
-                                modified: Some(now_secs),
-                                permissions: entry.permissions,
-                            });
-                        }
-                        sftp.error = None;
-                        cx.notify();
-                    }
-                }
-            }
+        if let Some(browser) = self
+            .tabs
+            .get_mut(tab_idx)
+            .and_then(|tab| tab.sftp_state.as_mut())
+        {
+            browser.error = Some(
+                "Graphical transfers are not connected. Use put/get in the live SFTP terminal."
+                    .into(),
+            );
         }
+        cx.notify();
     }
 
     fn sftp_download_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            if let Some(sftp) = &mut tab.sftp_state {
-                if let Some(name) = sftp.selected_remote.clone() {
-                    let file_entry = sftp.remote_entries.iter().find(|e| e.name == name).cloned();
-                    if let Some(entry) = file_entry {
-                        let remote_full = entry.path.clone();
-                        let local_full = PathUtils::join_path(&sftp.local_path, &entry.name);
-                        let tid = sftp.queue.enqueue(
-                            TransferDirection::Download,
-                            &local_full,
-                            &remote_full,
-                            entry.size.max(1024),
-                        );
-                        sftp.queue.dispatch_next();
-                        sftp.queue.mark_completed(tid);
-                        sftp.status_message =
-                            Some(format!("Downloaded '{}' to local successfully", entry.name));
-                        sftp.error = None;
-                        cx.notify();
-                    }
-                }
-            }
+        if let Some(browser) = self
+            .tabs
+            .get_mut(tab_idx)
+            .and_then(|tab| tab.sftp_state.as_mut())
+        {
+            browser.error = Some(
+                "Graphical transfers are not connected. Use put/get in the live SFTP terminal."
+                    .into(),
+            );
         }
+        cx.notify();
     }
 
     fn sftp_clear_completed(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
@@ -1716,6 +1714,7 @@ impl Shellumi {
         self.hosts = HostState::Loading;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
+            data_path::prepare_parent(std::path::Path::new(&path))?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
@@ -1731,31 +1730,6 @@ impl Shellumi {
                     Ok(hosts) => HostState::Loaded(hosts),
                     Err(error) => HostState::Error(error),
                 };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn load_snippets(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
-            return;
-        };
-        let task = cx.background_executor().spawn(async move {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .map_err(|e| e.to_string())?;
-            runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                store.list_snippets().await.map_err(|e| e.to_string())
-            })
-        });
-        cx.spawn(async move |app, cx| {
-            let result = task.await;
-            let _ = app.update(cx, |app, cx| {
-                if let Ok(snippets) = result {
-                    app.snippets = snippets;
-                }
                 cx.notify();
             });
         })
@@ -1801,6 +1775,7 @@ impl Shellumi {
         let layout = match tab.split {
             Some(SplitDirection::Vertical) => WorkspaceLayout::SplitVertical,
             Some(SplitDirection::Horizontal) => WorkspaceLayout::SplitHorizontal,
+            Some(SplitDirection::Grid) => WorkspaceLayout::DualGrid,
             None => {
                 if tab.panes.len() >= 4 {
                     WorkspaceLayout::DualGrid
@@ -1824,11 +1799,15 @@ impl Shellumi {
                     SessionKind::Serial | SessionKind::Local => WorkspaceSessionKind::Local,
                     SessionKind::Sftp => WorkspaceSessionKind::Sftp,
                 };
+                let host = match &self.hosts {
+                    HostState::Loaded(hosts) => hosts.iter().find(|host| host.name == pane.name),
+                    _ => None,
+                };
                 WorkspaceSession {
                     name: pane.name.clone(),
                     kind,
-                    destination: None,
-                    host_id: None,
+                    destination: host.map(|host| host.destination.clone()),
+                    host_id: host.map(|host| host.id),
                     startup_command: None,
                     working_directory: None,
                     pane_index: idx,
@@ -1837,6 +1816,15 @@ impl Shellumi {
             })
             .collect();
 
+        if sessions.iter().any(|session| {
+            session.kind != WorkspaceSessionKind::Local && session.destination.is_none()
+        }) {
+            self.desktop.message = Some(
+                "Save this layout in Workspaces and choose the remote hosts explicitly.".into(),
+            );
+            cx.notify();
+            return;
+        }
         let ws_name = format!("{} Workspace", tab.name);
         let layout_str = layout.as_str().to_string();
         let tags = vec!["workspace".to_string(), layout_str.clone()];
@@ -1882,6 +1870,13 @@ impl Shellumi {
             return;
         };
 
+        if ws.sessions.iter().any(|session| {
+            session.kind != WorkspaceSessionKind::Local && session.destination.is_none()
+        }) {
+            self.desktop.message = Some("This workspace has a remote session without a destination. Edit the workspace and select its hosts again.".into());
+            cx.notify();
+            return;
+        }
         let tab_id = self.next_tab_id.wrapping_add(1);
         self.next_tab_id = tab_id;
 
@@ -1923,7 +1918,24 @@ impl Shellumi {
                 WorkspaceSessionKind::Local => {
                     (TerminalCommand::default_shell(), SessionKind::Local)
                 }
-                WorkspaceSessionKind::Sftp => (TerminalCommand::default_shell(), SessionKind::Sftp),
+                WorkspaceSessionKind::Sftp => {
+                    let Some(destination) = &sess.destination else {
+                        return;
+                    };
+                    let target = format!("{}@{}", destination.username(), destination.host());
+                    (
+                        TerminalCommand::new("sftp").args([
+                            "-o".to_owned(),
+                            "StrictHostKeyChecking=ask".to_owned(),
+                            "-o".to_owned(),
+                            "ForwardAgent=no".to_owned(),
+                            "-P".to_owned(),
+                            destination.port().to_string(),
+                            target,
+                        ]),
+                        SessionKind::Sftp,
+                    )
+                }
             };
 
             let session = Session::start(cmd);
@@ -1933,7 +1945,12 @@ impl Shellumi {
                 id: pane_id,
                 name: sess.name.clone(),
                 kind,
-                terminal: Terminal::new(24, 80),
+                scroll: gpui::ScrollHandle::new(),
+                terminal: {
+                    let mut terminal = Terminal::new(24, 80);
+                    terminal.set_scrollback_limit(self.desktop.preferences.scrollback_lines);
+                    terminal
+                },
                 session: Some(session),
                 message: None,
                 search_open: false,
@@ -1941,7 +1958,6 @@ impl Shellumi {
                 search_query: String::new(),
                 search_matches: Vec::new(),
                 current_match_idx: None,
-                startup_tracker: None,
             };
 
             if sess.excluded_from_broadcast {
@@ -1954,7 +1970,7 @@ impl Shellumi {
         let split = match WorkspaceLayout::parse(&ws.layout).unwrap_or(WorkspaceLayout::Single) {
             WorkspaceLayout::SplitVertical => Some(SplitDirection::Vertical),
             WorkspaceLayout::SplitHorizontal => Some(SplitDirection::Horizontal),
-            WorkspaceLayout::DualGrid => Some(SplitDirection::Vertical),
+            WorkspaceLayout::DualGrid => Some(SplitDirection::Grid),
             WorkspaceLayout::Single => None,
         };
 
@@ -1970,6 +1986,7 @@ impl Shellumi {
         };
 
         self.tabs.push(tab);
+        self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);
 
         window.focus(&self.focus);
@@ -1978,22 +1995,6 @@ impl Shellumi {
         for (pane_id, events) in events_to_bind {
             self.bind_pane_events(tab_id, pane_id, events, cx);
         }
-    }
-
-    fn open_conflict_modal(
-        &mut self,
-        file_id: String,
-        items: Vec<ConflictItemView>,
-        cx: &mut Context<Self>,
-    ) {
-        let count = items.len();
-        self.conflict_modal = Some(ConflictModalState {
-            items,
-            selected_index: 0,
-            resolutions: vec![ConflictResolutionChoice::KeepLocal; count],
-            file_id,
-        });
-        cx.notify();
     }
 
     fn select_conflict_item(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -2021,214 +2022,15 @@ impl Shellumi {
     }
 
     fn apply_conflict_resolutions(&mut self, cx: &mut Context<Self>) {
-        if let Some(modal) = self.conflict_modal.take() {
-            let mut resolutions = Vec::new();
-            for choice in &modal.resolutions {
-                resolutions.push(*choice);
-            }
-
-            let mut local_records = Vec::new();
-            let mut remote_records = Vec::new();
-            let dummy_env = EncryptedEnvelope {
-                salt: "s".into(),
-                nonce: "n".into(),
-                ciphertext: "c".into(),
-                associated_data: "host".into(),
-                kdf_iterations: 1000,
-            };
-
-            for item in &modal.items {
-                let loc = SyncRecord::new(
-                    &item.object_id,
-                    item.entity_type,
-                    item.local_version,
-                    "dev-local",
-                    item.local_updated_at,
-                    dummy_env.clone(),
-                );
-                local_records.push(loc);
-
-                let rem = SyncRecord::new(
-                    &item.object_id,
-                    item.entity_type,
-                    item.remote_version,
-                    "dev-remote",
-                    item.remote_updated_at,
-                    dummy_env.clone(),
-                );
-                remote_records.push(rem);
-            }
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            match execute_sync_cycle(
-                &local_records,
-                &remote_records,
-                "default-vault-pass",
-                Some(&resolutions),
-            ) {
-                SyncCycleResult::Success { .. } | SyncCycleResult::AlreadySynchronized => {
-                    self.sync_status = AppSyncStatus::UpToDate {
-                        last_sync_time: now,
-                    };
-                }
-                SyncCycleResult::Conflicts(conflicts) => {
-                    self.open_conflict_modal(modal.file_id, conflicts, cx);
-                }
-                SyncCycleResult::Error(err) => {
-                    self.sync_status = AppSyncStatus::Error(err);
-                }
-            }
-            cx.notify();
-        }
+        self.conflict_modal = None;
+        self.sync_status =
+            AppSyncStatus::Error("Cloud conflict resolution is not connected.".into());
+        cx.notify();
     }
 
     fn trigger_sync(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.sync_status, AppSyncStatus::Syncing) {
-            return;
-        }
-        let Some(path) = self.database.clone() else {
-            self.sync_status = AppSyncStatus::LocalOnly;
-            cx.notify();
-            return;
-        };
-
-        self.sync_status = AppSyncStatus::Syncing;
+        self.sync_status = AppSyncStatus::Error("Cloud sync is not connected.".into());
         cx.notify();
-
-        let task = cx.background_executor().spawn(async move {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .map_err(|e| e.to_string())?;
-            runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                let hosts = store.list().await.map_err(|e| e.to_string())?;
-                let snippets = store.list_snippets().await.map_err(|e| e.to_string())?;
-                let tunnels = store.list_tunnels().await.map_err(|e| e.to_string())?;
-
-                let dummy_env = EncryptedEnvelope {
-                    salt: "s".into(),
-                    nonce: "n".into(),
-                    ciphertext: "c".into(),
-                    associated_data: "host".into(),
-                    kdf_iterations: 1000,
-                };
-
-                let mut local_records = Vec::new();
-                for h in hosts {
-                    let rec = SyncRecord::new(
-                        format!("host:{}", h.id),
-                        SyncEntityType::Host,
-                        1,
-                        "device-local",
-                        1000,
-                        dummy_env.clone(),
-                    );
-                    local_records.push(rec);
-                }
-                for s in snippets {
-                    let rec = SyncRecord::new(
-                        format!("snippet:{}", s.id),
-                        SyncEntityType::Snippet,
-                        1,
-                        "device-local",
-                        1000,
-                        dummy_env.clone(),
-                    );
-                    local_records.push(rec);
-                }
-                for t in tunnels {
-                    let rec = SyncRecord::new(
-                        format!("tunnel:{}", t.id),
-                        SyncEntityType::Tunnel,
-                        1,
-                        "device-local",
-                        1000,
-                        dummy_env.clone(),
-                    );
-                    local_records.push(rec);
-                }
-
-                // In offline/local-first mode without remote endpoint configured,
-                // local records are synchronized with local vault snapshot.
-                let remote_records = local_records.clone();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let sync_res =
-                    execute_sync_cycle(&local_records, &remote_records, "default-vault-pass", None);
-
-                Ok((sync_res, now))
-            })
-        });
-
-        cx.spawn(async move |app, cx| {
-            let res: Result<(SyncCycleResult, u64), String> = task.await;
-            let _ = app.update(cx, |app, cx| {
-                match res {
-                    Ok((
-                        SyncCycleResult::AlreadySynchronized | SyncCycleResult::Success { .. },
-                        now,
-                    )) => {
-                        app.sync_status = AppSyncStatus::UpToDate {
-                            last_sync_time: now,
-                        };
-                    }
-                    Ok((SyncCycleResult::Conflicts(conflicts), _)) => {
-                        app.sync_status = AppSyncStatus::Conflict {
-                            message: format!(
-                                "{} conflict(s) require manual resolution",
-                                conflicts.len()
-                            ),
-                        };
-                        app.open_conflict_modal("cloud_vault".into(), conflicts, cx);
-                    }
-                    Ok((SyncCycleResult::Error(msg), _)) => {
-                        app.sync_status = AppSyncStatus::Error(msg);
-                    }
-                    Err(e) => {
-                        app.sync_status = AppSyncStatus::Error(e);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn check_sync_schedule(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.sync_status, AppSyncStatus::Syncing) || self.conflict_modal.is_some() {
-            return;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if let Some(_trigger) = self.sync_scheduler.check_trigger(now) {
-            self.trigger_sync(cx);
-        }
-    }
-
-    fn start_sync_scheduler_loop(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |app, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(2))
-                .await;
-            if app
-                .update(cx, |app, cx| {
-                    app.check_sync_schedule(cx);
-                })
-                .is_err()
-            {
-                break;
-            }
-        })
-        .detach();
     }
 
     fn insert_snippet(&mut self, snippet_id: i64, execute: bool, cx: &mut Context<Self>) {
@@ -2973,6 +2775,8 @@ impl Shellumi {
             new_vault_desc,
             invite_user_id,
             invite_name,
+            invite_public_key: cx
+                .new(|cx| TextInput::new(cx, "", "Collaborator OpenSSH public key")),
             invite_role: TeamRole::Editor,
             error: None,
             status_message: None,
@@ -3320,6 +3124,12 @@ impl Shellumi {
         let user_id = modal.invite_user_id.read(cx).value().trim().to_string();
         let display_name = modal.invite_name.read(cx).value().trim().to_string();
         let role = modal.invite_role;
+        let public_key = modal.invite_public_key.read(cx).value().trim().to_owned();
+        if shellumi_core::fingerprint_public_key(&public_key).is_err() {
+            modal.error = Some("Provide a valid OpenSSH public key for this member.".into());
+            cx.notify();
+            return;
+        }
 
         if user_id.is_empty() || display_name.is_empty() {
             modal.error = Some("User ID and display name are required".into());
@@ -3340,7 +3150,7 @@ impl Shellumi {
             &vid,
             &user_id,
             &display_name,
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleSharedPublicKey",
+            &public_key,
             role,
             &now_iso,
             "local_owner",
@@ -4681,6 +4491,7 @@ impl Shellumi {
         let target_port_input = cx.new(|cx| TextInput::new(cx, "", "Target Port (e.g. 5432)"));
 
         self.tunnel_modal = Some(TunnelModalState {
+            editing_id: None,
             tunnels: Vec::new(),
             selected_index: 0,
             active_states: std::collections::HashMap::new(),
@@ -4689,7 +4500,12 @@ impl Shellumi {
             target_host_input,
             target_port_input,
             forwarding_type: ForwardingType::Local,
-            selected_host_id: None,
+            selected_host_id: match &self.hosts {
+                HostState::Loaded(hosts) => {
+                    hosts.iter().find(|host| host.is_ssh()).map(|host| host.id)
+                }
+                _ => None,
+            },
             auto_start: false,
             error: None,
             status_message: None,
@@ -4763,23 +4579,68 @@ impl Shellumi {
         }
     }
 
-    fn toggle_tunnel_state(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
-        if let Some(ref mut modal) = self.tunnel_modal {
-            if let Some(state) = modal.active_states.get_mut(&tunnel_id) {
-                if state.status == ActiveTunnelStatus::Active {
-                    state.stop();
-                    modal.status_message = Some(format!("Tunnel '{}' stopped.", state.name));
-                } else {
-                    state.start();
-                    state.uptime_seconds = 1;
-                    state.record_traffic(1024, 2048);
-                    state.connection_count = 1;
-                    modal.status_message =
-                        Some(format!("Tunnel '{}' started and active.", state.name));
+    fn toggle_tunnel_state(&mut self, tunnel_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tunnel) = self
+            .tunnel_modal
+            .as_ref()
+            .and_then(|modal| modal.tunnels.iter().find(|tunnel| tunnel.id == tunnel_id))
+            .cloned()
+        else {
+            return;
+        };
+        let session_name = format!("Tunnel: {}", tunnel.name);
+        if let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.name == session_name)
+            .map(|tab| tab.id)
+        {
+            self.close_tab(tab_id, window, cx);
+            return;
+        }
+        let host = match &self.hosts {
+            HostState::Loaded(hosts) => hosts
+                .iter()
+                .find(|host| Some(host.id) == tunnel.host_id)
+                .cloned(),
+            _ => None,
+        };
+        let Some(host) = host else {
+            if let Some(modal) = &mut self.tunnel_modal {
+                modal.error = Some("Choose a saved SSH host for this tunnel.".into());
+            }
+            cx.notify();
+            return;
+        };
+        let (flag, value) = tunnel.rule.openssh_argument();
+        let mut args = vec![
+            "-N".to_string(),
+            "-o".into(),
+            "ExitOnForwardFailure=yes".into(),
+            flag.into(),
+            value,
+        ];
+        match host
+            .destination
+            .openssh_arguments_with_jump(host.jump_host.as_deref())
+        {
+            Ok(destination) => args.extend(destination),
+            Err(error) => {
+                if let Some(modal) = &mut self.tunnel_modal {
+                    modal.error = Some(error.to_string());
                 }
                 cx.notify();
+                return;
             }
         }
+        self.tunnel_modal = None;
+        self.start_session(
+            session_name,
+            SessionKind::Ssh,
+            TerminalCommand::new("ssh").args(args),
+            window,
+            cx,
+        );
     }
 
     fn save_new_tunnel_modal(&mut self, cx: &mut Context<Self>) {
@@ -4893,6 +4754,17 @@ impl Shellumi {
             }
         };
 
+        if host_id.is_none() {
+            if let Some(modal) = &mut self.tunnel_modal {
+                modal.error = Some("Select a saved SSH host.".into());
+            }
+            cx.notify();
+            return;
+        }
+        let editing_id = self
+            .tunnel_modal
+            .as_ref()
+            .and_then(|modal| modal.editing_id);
         if let Some(path) = self.database.clone() {
             let name_clone = name.clone();
             let rule_clone = rule.clone();
@@ -4902,10 +4774,18 @@ impl Shellumi {
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
                     let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                    store
-                        .add_tunnel(&name_clone, host_id, &rule_clone, auto_start)
-                        .await
-                        .map_err(|e| e.to_string())
+                    if let Some(id) = editing_id {
+                        store
+                            .update_tunnel(id, &name_clone, host_id, &rule_clone, auto_start)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok(id)
+                    } else {
+                        store
+                            .add_tunnel(&name_clone, host_id, &rule_clone, auto_start)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
                 })
             });
 
@@ -4932,10 +4812,12 @@ impl Shellumi {
                                         auto_start,
                                     ),
                                 );
+                                modal.tunnels.retain(|tunnel| tunnel.id != new_id);
                                 modal.tunnels.push(new_tunnel);
+                                modal.editing_id = None;
                                 modal.selected_index = modal.tunnels.len().saturating_sub(1);
                                 modal.status_message =
-                                    Some(format!("Created tunnel '{name}' (ID {new_id})"));
+                                    Some(format!("Saved tunnel '{name}' (ID {new_id})"));
                                 modal.error = None;
                             }
                             Err(e) => {
@@ -4948,6 +4830,39 @@ impl Shellumi {
             })
             .detach();
         }
+    }
+
+    fn edit_saved_tunnel(&mut self, id: i64, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.tunnel_modal {
+            if let Some(tunnel) = modal.tunnels.iter().find(|tunnel| tunnel.id == id).cloned() {
+                modal.editing_id = Some(id);
+                modal.selected_host_id = tunnel.host_id;
+                modal.forwarding_type = tunnel.rule.forwarding_type;
+                modal
+                    .name_input
+                    .update(cx, |input, cx| input.set_value(&tunnel.name, cx));
+                modal.bind_port_input.update(cx, |input, cx| {
+                    input.set_value(&tunnel.rule.bind_port.to_string(), cx)
+                });
+                modal.target_host_input.update(cx, |input, cx| {
+                    input.set_value(tunnel.rule.target_host.as_deref().unwrap_or(""), cx)
+                });
+                modal.target_port_input.update(cx, |input, cx| {
+                    input.set_value(
+                        &tunnel
+                            .rule
+                            .target_port
+                            .map(|port| port.to_string())
+                            .unwrap_or_default(),
+                        cx,
+                    )
+                });
+                modal.status_message = Some(
+                    "Editing the saved rule. Reopen its tunnel session to apply changes.".into(),
+                );
+            }
+        }
+        cx.notify();
     }
 
     fn delete_tunnel_modal(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
@@ -5400,7 +5315,7 @@ impl Shellumi {
             .child(
                 div()
                     .text_xs()
-                    .font_family("monospace")
+                    .font_family(MONOSPACE_FONT)
                     .text_color(rgb(0x38bdf8))
                     .child(format!("Template: {}", modal.command_template)),
             );
@@ -5610,7 +5525,7 @@ impl Shellumi {
             .child(
                 div()
                     .text_xs()
-                    .font_family("monospace")
+                    .font_family(MONOSPACE_FONT)
                     .text_color(rgb(0xc084fc))
                     .child(format!("Template: {}", modal.command_template)),
             );
@@ -5935,7 +5850,7 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_xs()
-                                .font_family("monospace")
+                                .font_family(MONOSPACE_FONT)
                                 .text_color(rgb(0x94a3b8))
                                 .child(host.output.clone()),
                         );
@@ -6229,7 +6144,7 @@ impl Shellumi {
                             .border_1()
                             .border_color(rgb(0x374151))
                             .text_xs()
-                            .font_family("monospace")
+                            .font_family(MONOSPACE_FONT)
                             .text_color(rgb(0x94a3b8))
                             .child(sc.clone()),
                     );
@@ -6291,7 +6206,7 @@ impl Shellumi {
             .max_h(px(680.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(0x141e2c))
             .border_1()
             .border_color(rgb(0x6366f1))
             .rounded_lg()
@@ -6304,7 +6219,7 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
@@ -6318,10 +6233,11 @@ impl Shellumi {
             .child(
                 div()
                     .id("dismiss-team-modal-btn")
+                    .when(self.page == Some("Vaults"), |element| element.hidden())
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .bg(rgb(0x263346))
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
                     .cursor_pointer()
@@ -6343,7 +6259,7 @@ impl Shellumi {
                 .bg(if is_vaults {
                     rgb(0x4338ca)
                 } else {
-                    rgb(0x334155)
+                    rgb(0x263346)
                 })
                 .text_sm()
                 .font_weight(if is_vaults {
@@ -6372,7 +6288,7 @@ impl Shellumi {
                 .bg(if is_members {
                     rgb(0x4338ca)
                 } else {
-                    rgb(0x334155)
+                    rgb(0x263346)
                 })
                 .text_sm()
                 .font_weight(if is_members {
@@ -6401,7 +6317,7 @@ impl Shellumi {
                 .bg(if is_audit {
                     rgb(0x4338ca)
                 } else {
-                    rgb(0x334155)
+                    rgb(0x263346)
                 })
                 .text_sm()
                 .font_weight(if is_audit {
@@ -6497,7 +6413,7 @@ impl Shellumi {
                             .border_color(if is_selected {
                                 rgb(0x6366f1)
                             } else {
-                                rgb(0x1e293b)
+                                rgb(0x141e2c)
                             });
 
                         let left = div()
@@ -6620,7 +6536,7 @@ impl Shellumi {
                     .rounded_md()
                     .bg(rgb(0x0f172a))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(0x141e2c))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -6666,7 +6582,7 @@ impl Shellumi {
                                 "⚠️ Please select a shared vault from the 'Shared Vaults' tab first.",
                             ),
                     );
-                    return overlay.child(modal_box);
+                    return overlay.child(modal_box).into_any_element();
                 };
 
                 let selected_vault_name = modal
@@ -6717,7 +6633,7 @@ impl Shellumi {
                             .border_color(if is_revoked {
                                 rgb(0x450a0a)
                             } else {
-                                rgb(0x1e293b)
+                                rgb(0x141e2c)
                             });
 
                         let (badge_bg, badge_fg) = match m.role {
@@ -6840,7 +6756,7 @@ impl Shellumi {
                     .rounded_md()
                     .bg(rgb(0x0f172a))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(0x141e2c))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -6849,10 +6765,11 @@ impl Shellumi {
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(0x94a3b8))
-                            .child("INVITE COLLABORATOR"),
+                            .child("ADD LOCAL MEMBERSHIP RECORD"),
                     )
                     .child(modal.invite_user_id.clone())
                     .child(modal.invite_name.clone())
+                    .child(modal.invite_public_key.clone())
                     .child(
                         div()
                             .flex()
@@ -6963,7 +6880,7 @@ impl Shellumi {
                                 "⚠️ Please select a shared vault from the 'Shared Vaults' tab first.",
                             ),
                     );
-                    return overlay.child(modal_box);
+                    return overlay.child(modal_box).into_any_element();
                 };
 
                 let selected_vault_name = modal
@@ -7004,9 +6921,9 @@ impl Shellumi {
                             .rounded_sm()
                             .bg(rgb(0x0f172a))
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(rgb(0x141e2c))
                             .text_xs()
-                            .font_family("monospace")
+                            .font_family(MONOSPACE_FONT)
                             .text_color(rgb(0xc7d2fe))
                             .child(formatted);
                         audit_list = audit_list.child(row);
@@ -7016,7 +6933,14 @@ impl Shellumi {
             }
         }
 
-        overlay.child(modal_box)
+        if self.page == Some("Vaults") {
+            div()
+                .w_full()
+                .child(modal_box.w_full().max_h(px(1800.0)))
+                .into_any_element()
+        } else {
+            overlay.child(modal_box).into_any_element()
+        }
     }
 
     fn render_infra_modal(
@@ -7042,7 +6966,7 @@ impl Shellumi {
             .max_h(px(680.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(0x141e2c))
             .border_1()
             .border_color(rgb(0x0e7490))
             .rounded_lg()
@@ -7055,7 +6979,7 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
@@ -7063,16 +6987,19 @@ impl Shellumi {
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(0xf8fafc))
-                        .child("☁️ Cloud Providers & Infrastructure Inventory"),
+                        .child("Infrastructure inventory"),
                 ),
             )
             .child(
                 div()
                     .id("dismiss-infra-modal-btn")
+                    .when(self.page == Some("Integrations"), |element| {
+                        element.hidden()
+                    })
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .bg(rgb(0x263346))
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
                     .cursor_pointer()
@@ -7114,7 +7041,7 @@ impl Shellumi {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .pb_2()
             .child(
                 div()
@@ -7125,7 +7052,7 @@ impl Shellumi {
                     .bg(if current_tab == InfraModalTab::Providers {
                         rgb(0x0e7490)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
@@ -7148,7 +7075,7 @@ impl Shellumi {
                     .bg(if current_tab == InfraModalTab::Discovered {
                         rgb(0x0e7490)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
@@ -7171,7 +7098,7 @@ impl Shellumi {
                     .bg(if current_tab == InfraModalTab::Ansible {
                         rgb(0x0e7490)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
@@ -7292,7 +7219,7 @@ impl Shellumi {
                     .bg(rgb(0x0f172a))
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0x334155))
+                    .border_color(rgb(0x263346))
                     .child(
                         div()
                             .text_xs()
@@ -7372,7 +7299,7 @@ impl Shellumi {
                             .rounded_md()
                             .bg(rgb(0x0f172a))
                             .border_1()
-                            .border_color(rgb(0x334155))
+                            .border_color(rgb(0x263346))
                             .child(
                                 div().flex().flex_col().gap_0p5().child(
                                     div()
@@ -7392,7 +7319,7 @@ impl Shellumi {
                                                 .px_1p5()
                                                 .py_0p5()
                                                 .rounded_sm()
-                                                .bg(rgb(0x1e293b))
+                                                .bg(rgb(0x141e2c))
                                                 .text_xs()
                                                 .text_color(rgb(0x38bdf8))
                                                 .child(p.provider_kind.to_uppercase()),
@@ -7479,7 +7406,7 @@ impl Shellumi {
                             .rounded_md()
                             .bg(rgb(0x0f172a))
                             .border_1()
-                            .border_color(rgb(0x334155))
+                            .border_color(rgb(0x263346))
                             .child(
                                 div()
                                     .flex()
@@ -7502,7 +7429,7 @@ impl Shellumi {
                                                     .px_1p5()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x1e293b))
+                                                    .bg(rgb(0x141e2c))
                                                     .text_xs()
                                                     .text_color(rgb(0x94a3b8))
                                                     .child(state_badge),
@@ -7518,7 +7445,7 @@ impl Shellumi {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .font_family("monospace")
+                                            .font_family(MONOSPACE_FONT)
                                             .text_color(rgb(0x38bdf8))
                                             .child(format!(
                                                 "{}@{}:{}",
@@ -7573,7 +7500,7 @@ impl Shellumi {
                     .rounded_md()
                     .bg(rgb(0x0f172a))
                     .border_1()
-                    .border_color(rgb(0x334155))
+                    .border_color(rgb(0x263346))
                     .child(
                         div()
                             .text_sm()
@@ -7628,7 +7555,14 @@ impl Shellumi {
             }
         }
 
-        overlay.child(modal_box)
+        if self.page == Some("Integrations") {
+            div()
+                .w_full()
+                .child(modal_box.w_full().max_h(px(1800.0)))
+                .into_any_element()
+        } else {
+            overlay.child(modal_box).into_any_element()
+        }
     }
 
     fn render_diagnostics_modal(
@@ -9260,9 +9194,9 @@ impl Shellumi {
             .max_h(px(660.0))
             .p_6()
             .rounded_xl()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(0x141e2c))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -9283,7 +9217,7 @@ impl Shellumi {
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(0xf8fafc))
-                            .child("📼 Terminal Session Recordings & Cast Replay Engine"),
+                            .child("Session logs"),
                     )
                     .child(
                         div()
@@ -9296,11 +9230,11 @@ impl Shellumi {
             )
             .child(
                 div()
-                    .id("dismiss-session-replay-modal-btn")
+                    .id("dismiss-session-replay-modal-btn").when(self.page == Some("Session Logs"), |element|element.hidden())
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .bg(rgb(0x263346))
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
                     .cursor_pointer()
@@ -9383,7 +9317,7 @@ impl Shellumi {
                             .rounded_md()
                             .bg(rgb(0x0f172a))
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(rgb(0x141e2c))
                             .flex()
                             .flex_col()
                             .items_center()
@@ -9432,7 +9366,7 @@ impl Shellumi {
                             .border_color(if is_selected {
                                 rgb(0x3b82f6)
                             } else {
-                                rgb(0x1e293b)
+                                rgb(0x141e2c)
                             })
                             .flex()
                             .items_center()
@@ -9459,7 +9393,7 @@ impl Shellumi {
                                                     .px_1p5()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x334155))
+                                                    .bg(rgb(0x263346))
                                                     .text_xs()
                                                     .text_color(rgb(0x94a3b8))
                                                     .child(format!(
@@ -9472,7 +9406,7 @@ impl Shellumi {
                                                     .px_1p5()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x1e293b))
+                                                    .bg(rgb(0x141e2c))
                                                     .text_xs()
                                                     .text_color(rgb(0x64748b))
                                                     .child(rec.formatted_size()),
@@ -9515,7 +9449,7 @@ impl Shellumi {
                                             .px_2p5()
                                             .py_1()
                                             .rounded_sm()
-                                            .bg(rgb(0x334155))
+                                            .bg(rgb(0x263346))
                                             .text_xs()
                                             .text_color(rgb(0xd1d5db))
                                             .cursor_pointer()
@@ -9635,7 +9569,7 @@ impl Shellumi {
                         .rounded_lg()
                         .bg(rgb(0x0f172a))
                         .border_1()
-                        .border_color(rgb(0x1e293b))
+                        .border_color(rgb(0x141e2c))
                         .flex()
                         .items_center()
                         .justify_between();
@@ -9670,7 +9604,7 @@ impl Shellumi {
                                 .px_2p5()
                                 .py_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x334155))
+                                .bg(rgb(0x263346))
                                 .text_xs()
                                 .text_color(rgb(0xd1d5db))
                                 .cursor_pointer()
@@ -9685,7 +9619,7 @@ impl Shellumi {
                                 .px_2p5()
                                 .py_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x334155))
+                                .bg(rgb(0x263346))
                                 .text_xs()
                                 .text_color(rgb(0xd1d5db))
                                 .cursor_pointer()
@@ -9705,7 +9639,7 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(0x141e2c))
                                 .text_xs()
                                 .text_color(rgb(0x94a3b8))
                                 .cursor_pointer()
@@ -9720,7 +9654,7 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(0x141e2c))
                                 .text_xs()
                                 .text_color(rgb(0x94a3b8))
                                 .cursor_pointer()
@@ -9735,7 +9669,7 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(0x141e2c))
                                 .text_xs()
                                 .text_color(rgb(0x94a3b8))
                                 .cursor_pointer()
@@ -9750,7 +9684,7 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(0x141e2c))
                                 .text_xs()
                                 .text_color(rgb(0x94a3b8))
                                 .cursor_pointer()
@@ -9765,7 +9699,7 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(0x141e2c))
                                 .text_xs()
                                 .text_color(rgb(0x94a3b8))
                                 .cursor_pointer()
@@ -9816,7 +9750,7 @@ impl Shellumi {
                         .rounded_lg()
                         .bg(rgb(0x020617))
                         .border_1()
-                        .border_color(rgb(0x1e293b))
+                        .border_color(rgb(0x141e2c))
                         .min_h(px(240.0))
                         .max_h(px(320.0))
                         .overflow_y_scroll()
@@ -9852,7 +9786,7 @@ impl Shellumi {
                             .rounded_md()
                             .bg(rgb(0x0f172a))
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(rgb(0x141e2c))
                             .flex()
                             .flex_col()
                             .items_center()
@@ -9886,7 +9820,7 @@ impl Shellumi {
             .justify_between()
             .pt_3()
             .border_t_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .child(
                 div()
                     .text_xs()
@@ -9901,7 +9835,14 @@ impl Shellumi {
             );
         modal_box = modal_box.child(footer);
 
-        overlay.child(modal_box)
+        if self.page == Some("Session Logs") {
+            div()
+                .w_full()
+                .child(modal_box.w_full().max_h(px(1800.0)))
+                .into_any_element()
+        } else {
+            overlay.child(modal_box).into_any_element()
+        }
     }
 
     fn render_tunnel_modal(
@@ -9927,7 +9868,7 @@ impl Shellumi {
             .max_h(px(720.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(0x141e2c))
             .border_1()
             .border_color(rgb(0x0284c7))
             .rounded_lg()
@@ -9940,7 +9881,7 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
@@ -9948,16 +9889,19 @@ impl Shellumi {
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(0xf8fafc))
-                        .child("🚇 Port-Forwarding Tunnel Manager"),
+                        .child("Port forwarding"),
                 ),
             )
             .child(
                 div()
                     .id("dismiss-tunnel-modal-btn")
+                    .when(self.page == Some("Port Forwarding"), |element| {
+                        element.hidden()
+                    })
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .bg(rgb(0x263346))
                     .text_xs()
                     .text_color(rgb(0xf8fafc))
                     .cursor_pointer()
@@ -10004,7 +9948,7 @@ impl Shellumi {
             .w(px(380.0))
             .gap_2()
             .border_r_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .pr_4();
 
         list_col = list_col.child(
@@ -10039,14 +9983,15 @@ impl Shellumi {
             for (idx, tunnel) in modal.tunnels.iter().enumerate() {
                 let is_selected = idx == modal.selected_index;
                 let tid = tunnel.id;
-                let active_state = modal.active_states.get(&tid);
-                let is_active = active_state
-                    .map(|s| s.status == ActiveTunnelStatus::Active)
-                    .unwrap_or(false);
-
-                let status_pill = active_state
-                    .map(|s| s.status_pill())
-                    .unwrap_or(("⚪ Stopped", "stopped"));
+                let is_active = self.tabs.iter().any(|tab| {
+                    tab.name == format!("Tunnel: {}", tunnel.name)
+                        && tab.panes.iter().any(|pane| pane.session.is_some())
+                });
+                let status_pill = if is_active {
+                    ("Session open", "open")
+                } else {
+                    ("Stopped", "stopped")
+                };
 
                 let (flag_str, rule_summary) = match tunnel.rule.forwarding_type {
                     ForwardingType::Local => (
@@ -10097,7 +10042,7 @@ impl Shellumi {
                     .border_color(if is_selected {
                         rgb(0x3b82f6)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .cursor_pointer()
                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -10124,7 +10069,7 @@ impl Shellumi {
                             .bg(if is_active {
                                 rgb(0x065f46)
                             } else {
-                                rgb(0x334155)
+                                rgb(0x263346)
                             })
                             .text_xs()
                             .text_color(if is_active {
@@ -10168,8 +10113,8 @@ impl Shellumi {
                             .text_xs()
                             .text_color(rgb(0xffffff))
                             .cursor_pointer()
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.toggle_tunnel_state(tid, cx);
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.toggle_tunnel_state(tid, window, cx);
                             }))
                             .child(if is_active { "⏹ Stop" } else { "▶ Start" }),
                     )
@@ -10188,6 +10133,17 @@ impl Shellumi {
                             }))
                             .child("🗑 Delete"),
                     );
+                card = card.child(
+                    div()
+                        .id(("edit-tunnel", tid as u64))
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .cursor_pointer()
+                        .text_color(rgb(0x91a0b7))
+                        .on_click(cx.listener(move |app, _, _, cx| app.edit_saved_tunnel(tid, cx)))
+                        .child("Edit rule"),
+                );
                 card = card.child(actions_row);
 
                 scroll_list = scroll_list.child(card);
@@ -10207,15 +10163,32 @@ impl Shellumi {
 
         // Selected tunnel details panel (if one is selected)
         if let Some(selected_tunnel) = modal.tunnels.get(modal.selected_index) {
-            let tid = selected_tunnel.id;
-            let active = modal.active_states.get(&tid);
-            let uptime = active.map(|a| a.uptime_seconds).unwrap_or(0);
-            let bytes_in = active.map(|a| a.bytes_received).unwrap_or(0);
-            let bytes_out = active.map(|a| a.bytes_sent).unwrap_or(0);
-            let conns = active.map(|a| a.connection_count).unwrap_or(0);
-
-            let preview_cmd = build_ssh_tunnel_command(&selected_tunnel.rule, "remote-host", None);
-            let preview_str = format!("ssh {}", preview_cmd.join(" "));
+            let host = match &self.hosts {
+                HostState::Loaded(hosts) => hosts
+                    .iter()
+                    .find(|host| Some(host.id) == selected_tunnel.host_id),
+                _ => None,
+            };
+            let preview_str = if let Some(host) = host {
+                let target = format!(
+                    "{}@{}",
+                    host.destination.username(),
+                    host.destination.host()
+                );
+                let mut args = build_ssh_tunnel_command(
+                    &selected_tunnel.rule,
+                    &target,
+                    host.jump_host.as_deref(),
+                );
+                let insert = args.len().saturating_sub(1);
+                args.splice(
+                    insert..insert,
+                    ["-p".to_string(), host.destination.port().to_string()],
+                );
+                format!("ssh {}", args.join(" "))
+            } else {
+                "Select a saved host to start this rule.".into()
+            };
 
             let details_box = div()
                 .flex()
@@ -10225,26 +10198,15 @@ impl Shellumi {
                 .rounded_md()
                 .bg(rgb(0x0f172a))
                 .border_1()
-                .border_color(rgb(0x334155))
+                .border_color(rgb(0x263346))
                 .child(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(0x38bdf8))
-                        .child(format!("Active Telemetry: {}", selected_tunnel.name)),
+                        .child(format!("Saved rule: {}", selected_tunnel.name)),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .text_xs()
-                        .text_color(rgb(0x94a3b8))
-                        .child(format!("⏱ Uptime: {}s", uptime))
-                        .child(format!("🔗 Active Connections: {}", conns))
-                        .child(format!("⬇ Recv: {} B", bytes_in))
-                        .child(format!("⬆ Sent: {} B", bytes_out)),
-                )
+                .child(div().text_xs().text_color(rgb(0x91a0b7)).child("Open the tunnel terminal to inspect authentication and forwarding errors. Traffic counters are not measured."))
                 .child(
                     div()
                         .flex()
@@ -10278,7 +10240,7 @@ impl Shellumi {
             .rounded_md()
             .bg(rgb(0x0f172a))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(0x263346))
             .child(
                 div()
                     .text_sm()
@@ -10287,6 +10249,36 @@ impl Shellumi {
                     .child("➕ Configure New Tunnel"),
             );
 
+        let mut host_picker = div().flex().flex_wrap().gap_2();
+        if let HostState::Loaded(hosts) = &self.hosts {
+            for host in hosts.iter().filter(|host| host.is_ssh()) {
+                let id = host.id;
+                host_picker = host_picker.child(
+                    div()
+                        .id(("tunnel-host", id as u64))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_sm()
+                        .bg(if modal.selected_host_id == Some(id) {
+                            rgb(0x1c373d)
+                        } else {
+                            rgb(0x192536)
+                        })
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if let Some(modal) = &mut app.tunnel_modal {
+                                modal.selected_host_id = Some(id);
+                            }
+                            cx.notify();
+                        }))
+                        .child(host.name.clone()),
+                );
+            }
+        }
+        form_box = form_box
+            .child(div().text_xs().text_color(rgb(0x91a0b7)).child("SSH host"))
+            .child(host_picker);
         // Forwarding Type Buttons
         let ftype_row = div()
             .flex()
@@ -10301,7 +10293,7 @@ impl Shellumi {
                     .bg(if modal.forwarding_type == ForwardingType::Local {
                         rgb(0x0284c7)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .text_xs()
                     .text_color(rgb(0xffffff))
@@ -10320,7 +10312,7 @@ impl Shellumi {
                     .bg(if modal.forwarding_type == ForwardingType::Remote {
                         rgb(0x0284c7)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .text_xs()
                     .text_color(rgb(0xffffff))
@@ -10339,7 +10331,7 @@ impl Shellumi {
                     .bg(if modal.forwarding_type == ForwardingType::Dynamic {
                         rgb(0x0284c7)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x263346)
                     })
                     .text_xs()
                     .text_color(rgb(0xffffff))
@@ -10429,14 +10421,25 @@ impl Shellumi {
                 .on_click(cx.listener(|app, _, _, cx| {
                     app.save_new_tunnel_modal(cx);
                 }))
-                .child("Add Tunnel"),
+                .child(if modal.editing_id.is_some() {
+                    "Save changes"
+                } else {
+                    "Add tunnel"
+                }),
         );
 
         right_col = right_col.child(form_box);
         body = body.child(right_col);
         modal_box = modal_box.child(body);
 
-        overlay.child(modal_box)
+        if self.page == Some("Port Forwarding") {
+            div()
+                .w_full()
+                .child(modal_box.w_full().max_h(px(1800.0)))
+                .into_any_element()
+        } else {
+            overlay.child(modal_box).into_any_element()
+        }
     }
 
     fn render_sftp_dual_pane(
@@ -10988,16 +10991,185 @@ impl Shellumi {
     }
 }
 
+fn host_form_field(label: &'static str, input: Entity<TextInput>) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_sm().text_color(rgb(0x91a0b7)).child(label))
+        .child(input)
+}
+
+fn group_matches(host_group: Option<&str>, selected_group: Option<&str>) -> bool {
+    selected_group.is_none_or(|group| host_group == Some(group))
+}
+
+fn host_detail(label: &'static str, value: String) -> gpui::Div {
+    div()
+        .flex()
+        .justify_between()
+        .gap_2()
+        .border_b_1()
+        .border_color(rgb(0x263346))
+        .pb_2()
+        .child(div().text_xs().text_color(rgb(0x697c94)).child(label))
+        .child(div().text_xs().text_color(rgb(0xe9f0f9)).child(value))
+}
+
+fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::Div {
+    let mut links = div()
+        .id("navigation-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap_1();
+    for (group, pages) in [
+        (
+            "WORKSPACE",
+            vec!["Overview", "Hosts", "Workspaces", "Terminal", "SFTP Files"],
+        ),
+        (
+            "TOOLS",
+            vec![
+                "Snippets",
+                "Keychain",
+                "Port Forwarding",
+                "Known Hosts",
+                "Session Logs",
+            ],
+        ),
+        (
+            "ORGANIZATION",
+            vec![
+                "Vaults",
+                "Collaboration",
+                "Integrations",
+                "Google Drive Sync",
+            ],
+        ),
+    ] {
+        links = links.child(
+            div()
+                .px_3()
+                .pt_4()
+                .pb_2()
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0x697c94))
+                .child(group),
+        );
+        for page in pages {
+            links = links.child(
+                div()
+                    .id(gpui::SharedString::from(format!("nav-{page}")))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .bg(if page == active {
+                        rgb(0x1c373d)
+                    } else {
+                        rgb(0x101824)
+                    })
+                    .text_color(if page == active {
+                        rgb(0x59ddc1)
+                    } else {
+                        rgb(0x91a0b7)
+                    })
+                    .hover(|style| style.bg(rgb(0x192536)))
+                    .on_click(
+                        cx.listener(move |app, _, window, cx| app.navigate_page(page, window, cx)),
+                    )
+                    .child(page),
+            );
+        }
+    }
+    div()
+        .w(px(210.0))
+        .h_full()
+        .flex_shrink_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .bg(rgb(0x101824))
+        .border_r_1()
+        .border_color(rgb(0x263346))
+        .child(
+            div()
+                .px_2()
+                .py_2()
+                .text_lg()
+                .font_weight(FontWeight::BOLD)
+                .child("▸  shellumi"),
+        )
+        .child(links)
+        .child(
+            div()
+                .id("nav-settings")
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .text_sm()
+                .cursor_pointer()
+                .text_color(rgb(0x91a0b7))
+                .on_click(
+                    cx.listener(|app, _, window, cx| app.navigate_page("Settings", window, cx)),
+                )
+                .child("Settings"),
+        )
+        .child(
+            div()
+                .border_1()
+                .border_color(rgb(0x263346))
+                .rounded_md()
+                .p_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Personal workspace"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x697c94))
+                        .child("Local only"),
+                ),
+        )
+}
+
 impl Render for Shellumi {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut root = div()
             .id("shellumi-root")
             .size_full()
+            .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(rgb(0x111827))
-            .text_color(rgb(0xf3f4f6));
+            .bg(rgb(0x0b111c))
+            .text_color(rgb(0xe9f0f9))
+            .text_size(px(self.desktop.preferences.ui_font_size as f32));
 
+        if let Some(page) = self.page {
+            let body = self.render_desktop_page(page, cx);
+            let result = root.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(workspace_sidebar(cx, page))
+                    .child(body),
+            );
+            return self.desktop_overlays(result, cx);
+        }
         if !self.tabs.is_empty() {
             let mut tab_bar = div()
                 .id("tab-bar")
@@ -11031,7 +11203,10 @@ impl Render for Shellumi {
                     } else {
                         FontWeight::NORMAL
                     })
-                    .on_click(cx.listener(|app, _, window, cx| app.select_tab(None, window, cx)))
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.page = None;
+                        app.select_tab(None, window, cx);
+                    }))
                     .child("Hosts"),
             );
 
@@ -11109,7 +11284,6 @@ impl Render for Shellumi {
 
         if let Some(active_idx) = self.active_tab_idx {
             if let Some(tab) = self.tabs.get(active_idx) {
-                let tab_id = tab.id;
                 let is_sftp = tab.kind == SessionKind::Sftp;
                 let is_sftp_dual_pane = is_sftp
                     && tab
@@ -11151,12 +11325,15 @@ impl Render for Shellumi {
 
                 let mut body = div()
                     .id("terminal-view")
+                    .min_h_0()
+                    .overflow_hidden()
                     .track_focus(&self.focus)
                     .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
                         app.toggle_command_palette(window, cx);
                     }))
                     .on_key_down(cx.listener(Self::terminal_input))
-                    .size_full()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -11277,7 +11454,7 @@ impl Render for Shellumi {
                                                         cx,
                                                     )
                                                 }))
-                                                .child("[ | ] Split vertical"),
+                                                .child("Split vertical"),
                                         )
                                         .child(
                                             div()
@@ -11295,7 +11472,7 @@ impl Render for Shellumi {
                                                         cx,
                                                     )
                                                 }))
-                                                .child("[ — ] Split horizontal"),
+                                                .child("Split horizontal"),
                                         )
                                         .child(
                                             div()
@@ -11314,7 +11491,7 @@ impl Render for Shellumi {
                                                         !app.snippets_panel_open;
                                                     cx.notify();
                                                 }))
-                                                .child("📜 Snippets"),
+                                                .child("Snippets"),
                                         );
                                 }
 
@@ -11363,64 +11540,7 @@ impl Render for Shellumi {
                                     );
                                 }
 
-                                if !is_sftp_dual_pane {
-                                    let mp_active = tab.multiplayer.is_some();
-                                    actions_bar = actions_bar.child(
-                                        div()
-                                            .id("toggle-multiplayer-btn")
-                                            .px_3()
-                                            .py_2()
-                                            .rounded_md()
-                                            .bg(if mp_active {
-                                                rgb(0x059669)
-                                            } else {
-                                                rgb(0x374151)
-                                            })
-                                            .text_sm()
-                                            .text_color(rgb(0xffffff))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.toggle_multiplayer_on_active_tab(cx);
-                                            }))
-                                            .child(if mp_active {
-                                                "👥 Multiplayer (Active)"
-                                            } else {
-                                                "👥 Collaborate"
-                                            }),
-                                    );
-                                }
-
-                                actions_bar = actions_bar.child(
-                                    div()
-                                        .id("terminal-palette-btn")
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x1e3a8a))
-                                        .text_sm()
-                                        .text_color(rgb(0xffffff))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|app, _, window, cx| {
-                                            app.open_command_palette(window, cx);
-                                        }))
-                                        .child("🔍 Palette (Cmd+K)"),
-                                );
-
-                                actions_bar.child(
-                                    div()
-                                        .id("disconnect")
-                                        .w(px(100.0))
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x7f1d1d))
-                                        .text_color(rgb(0xfecaca))
-                                        .text_center()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.close_tab(tab_id, window, cx);
-                                        }))
-                                        .child("Close tab"),
-                                )
+                                actions_bar
                             }),
                     );
 
@@ -11612,7 +11732,7 @@ impl Render for Shellumi {
                                     div()
                                         .text_xs()
                                         .text_color(rgb(0x9ca3af))
-                                        .font_family("monospace")
+                                        .font_family(MONOSPACE_FONT)
                                         .child(if snip_cmd.len() > 30 {
                                             format!("{}…", &snip_cmd[..30])
                                         } else {
@@ -11707,9 +11827,21 @@ impl Render for Shellumi {
                 }
 
                 let mut panes_container = match tab.split {
-                    Some(SplitDirection::Vertical) => div().flex().flex_row().gap_3().flex_1(),
-                    Some(SplitDirection::Horizontal) => div().flex().flex_col().gap_3().flex_1(),
-                    None => div().flex().flex_col().flex_1(),
+                    Some(SplitDirection::Grid) => div()
+                        .grid()
+                        .grid_cols(2)
+                        .grid_rows(2)
+                        .gap_3()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0(),
+                    Some(SplitDirection::Vertical) => {
+                        div().min_h_0().min_w_0().flex().flex_row().gap_3().flex_1()
+                    }
+                    Some(SplitDirection::Horizontal) => {
+                        div().min_h_0().min_w_0().flex().flex_col().gap_3().flex_1()
+                    }
+                    None => div().min_h_0().min_w_0().flex().flex_col().flex_1(),
                 };
 
                 for (pane_idx, pane) in tab.panes.iter().enumerate() {
@@ -11719,18 +11851,21 @@ impl Render for Shellumi {
 
                     let mut pane_el = div()
                         .id(("terminal-pane", pane_id))
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_hidden()
                         .flex_1()
                         .flex()
                         .flex_col()
                         .gap_2()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0x0f172a))
-                        .border_2()
+                        .bg(rgb(0x141e2c))
+                        .border_1()
                         .border_color(if is_active_pane {
-                            rgb(0x3b82f6)
+                            rgb(0x3c746f)
                         } else {
-                            rgb(0x1f2937)
+                            rgb(0x263346)
                         })
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if let Some(active_idx) = app.active_tab_idx {
@@ -11830,23 +11965,6 @@ impl Render for Shellumi {
                     pane_controls = pane_controls.child(pane_info_group);
 
                     let mut pane_btn_group = div().flex().items_center().gap_1();
-                    pane_btn_group = pane_btn_group.child(
-                        div()
-                            .id(("open-shell-integration", pane_id))
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .text_xs()
-                            .cursor_pointer()
-                            .bg(rgb(0x374151))
-                            .text_color(rgb(0xd1d5db))
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.open_shell_integration_modal(cx);
-                                cx.stop_propagation();
-                            }))
-                            .child("⚡ Integration"),
-                    );
-
                     let is_recording = pane.terminal.is_recording();
                     let record_btn_label = if is_recording {
                         let dur = pane.terminal.recording_duration();
@@ -11878,38 +11996,6 @@ impl Render for Shellumi {
 
                     pane_btn_group = pane_btn_group.child(
                         div()
-                            .id(("open-recordings-modal", pane_id))
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .text_xs()
-                            .cursor_pointer()
-                            .bg(rgb(0x374151))
-                            .text_color(rgb(0xd1d5db))
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.open_session_replay_modal(cx);
-                                cx.stop_propagation();
-                            }))
-                            .child("📼 Recordings"),
-                    );
-                    pane_btn_group = pane_btn_group.child(
-                        div()
-                            .id("tab-tunnels-btn")
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .text_xs()
-                            .cursor_pointer()
-                            .bg(rgb(0x374151))
-                            .text_color(rgb(0xd1d5db))
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.open_tunnel_modal(cx);
-                                cx.stop_propagation();
-                            }))
-                            .child("🚇 Tunnels"),
-                    );
-                    pane_btn_group = pane_btn_group.child(
-                        div()
                             .id(("toggle-search", pane_id))
                             .px_2()
                             .py_0p5()
@@ -11926,7 +12012,7 @@ impl Render for Shellumi {
                                 app.toggle_search(pane_id, cx);
                                 cx.stop_propagation();
                             }))
-                            .child("🔍 Search"),
+                            .child("Search"),
                     );
 
                     if tab.panes.len() > 1 && self.broadcast_manager.is_enabled() {
@@ -12057,18 +12143,26 @@ impl Render for Shellumi {
                     }
 
                     // Terminal screen rendering with search highlights
+                    let font_size = self.desktop.preferences.terminal_font_size as f32;
+                    let line_height = font_size * 1.5;
                     let mut screen = div()
                         .id(("terminal-screen", pane_id))
+                        .line_height(px(line_height))
+                        .track_scroll(&pane.scroll)
+                        .text_size(px(self.desktop.preferences.terminal_font_size as f32))
+                        .min_h_0()
+                        .min_w_0()
                         .flex_1()
                         .overflow_y_scroll()
-                        .font_family("monospace")
+                        .font_family(MONOSPACE_FONT)
                         .bg(rgb(0x090f1c))
                         .p_3()
                         .flex()
                         .flex_col();
 
                     let scrollback_len = pane.terminal.scrollback_count();
-                    let start_scrollback = scrollback_len.saturating_sub(500);
+                    let start_scrollback =
+                        scrollback_len.saturating_sub(self.desktop.preferences.scrollback_lines);
 
                     for i in start_scrollback..scrollback_len {
                         let mut highlight_ranges = Vec::new();
@@ -12085,7 +12179,7 @@ impl Render for Shellumi {
                             pane.terminal
                                 .scrollback_row_spans_highlighted(i, &highlight_ranges)
                         } {
-                            screen = screen.child(render_terminal_spans(spans));
+                            screen = screen.child(render_terminal_spans(spans, line_height));
                         }
                     }
 
@@ -12103,19 +12197,122 @@ impl Render for Shellumi {
                         } else {
                             pane.terminal.row_spans_highlighted(r, &highlight_ranges)
                         } {
-                            screen = screen.child(render_terminal_spans(spans));
+                            screen = screen.child(render_terminal_spans(spans, line_height));
                         }
                     }
 
-                    pane_el = pane_el.child(screen);
+                    let view = cx.entity().downgrade();
+                    let old_dimensions = (grid.rows(), grid.cols());
+                    let resize_sensor = gpui::canvas(
+                        move |bounds, window, cx| {
+                            let font = gpui::font(MONOSPACE_FONT);
+                            let font_id = window.text_system().resolve_font(&font);
+                            let width = window
+                                .text_system()
+                                .advance(font_id, px(font_size), 'M')
+                                .map(|s| f32::from(s.width))
+                                .unwrap_or(font_size * 0.6);
+                            let dimensions = desktop::terminal_dimensions(
+                                f32::from(bounds.size.width) - 24.0,
+                                f32::from(bounds.size.height) - 24.0,
+                                width,
+                                line_height,
+                            );
+                            if dimensions != old_dimensions {
+                                cx.defer(move |cx| {
+                                    let _ = view.update(cx, |app, cx| {
+                                        if let Some(pane) = app
+                                            .tabs
+                                            .iter_mut()
+                                            .flat_map(|tab| &mut tab.panes)
+                                            .find(|pane| pane.id == pane_id)
+                                        {
+                                            if (
+                                                pane.terminal.grid().rows(),
+                                                pane.terminal.grid().cols(),
+                                            ) != dimensions
+                                            {
+                                                pane.terminal.resize(dimensions.0, dimensions.1);
+                                                if let Some(session) = &pane.session {
+                                                    let _ = session.resize(
+                                                        dimensions.0 as u16,
+                                                        dimensions.1 as u16,
+                                                    );
+                                                }
+                                                cx.notify();
+                                            }
+                                        }
+                                    });
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0();
+                    let scroll_handle = pane.scroll.clone();
+                    let scrollbar = gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let maximum = f32::from(scroll_handle.max_offset().height);
+                            if maximum > 0.0 {
+                                let height = f32::from(bounds.size.height);
+                                let thumb_height =
+                                    (height * height / (height + maximum)).max(24.0).min(height);
+                                let fraction = (-f32::from(scroll_handle.offset().y) / maximum)
+                                    .clamp(0.0, 1.0);
+                                let origin = gpui::point(
+                                    bounds.origin.x,
+                                    bounds.origin.y + px((height - thumb_height) * fraction),
+                                );
+                                window.paint_quad(gpui::fill(
+                                    gpui::Bounds::new(origin, size(px(4.0), px(thumb_height))),
+                                    rgb(0x52647a),
+                                ));
+                            }
+                        },
+                    )
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(5.0));
+                    pane_el = pane_el.child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .child(screen)
+                            .child(resize_sensor)
+                            .child(scrollbar),
+                    );
                     panes_container = panes_container.child(pane_el);
                 }
 
                 let mut result = if is_sftp_dual_pane {
                     let sftp_state = tab.sftp_state.as_ref().unwrap();
-                    root.child(body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)))
+                    root.child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(workspace_sidebar(cx, "Terminal"))
+                            .child(
+                                body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
+                            ),
+                    )
                 } else {
-                    root.child(body.child(panes_container))
+                    root.child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(workspace_sidebar(cx, "Terminal"))
+                            .child(body.child(panes_container)),
+                    )
                 };
                 if let Some(modal) = &self.conflict_modal {
                     result = result.child(self.render_conflict_modal(modal, cx));
@@ -12153,454 +12350,456 @@ impl Render for Shellumi {
                 return result;
             }
         }
-        let content = match &self.hosts {
-            HostState::NoDatabase => div()
-                .child("To view saved hosts, launch with --hosts <database-path>.")
-                .child(div().mt_2().child("Manage host records with shellumi-cli.")),
-            HostState::Loading => div().child("Loading hosts…"),
-            HostState::Error(error) => div()
-                .text_color(rgb(0xfca5a5))
-                .child(format!("Could not load hosts: {error}")),
-            HostState::Loaded(hosts) if hosts.is_empty() => {
-                div().child("No saved hosts yet. Add one with shellumi-cli or the Add host button.")
-            }
-            HostState::Loaded(hosts) => {
-                let search_query = self.search_input.read(cx).value().trim().to_lowercase();
-                let filtered: Vec<&SavedHost> = if search_query.is_empty() {
-                    hosts.iter().collect()
-                } else {
-                    hosts
-                        .iter()
-                        .filter(|h| {
-                            h.name.to_lowercase().contains(&search_query)
-                                || h.destination.host().to_lowercase().contains(&search_query)
-                                || h.destination
-                                    .username()
-                                    .to_lowercase()
-                                    .contains(&search_query)
-                                || h.group_name
-                                    .as_ref()
-                                    .is_some_and(|g| g.to_lowercase().contains(&search_query))
-                                || h.tags
-                                    .iter()
-                                    .any(|t| t.to_lowercase().contains(&search_query))
-                        })
-                        .collect()
-                };
+        let hosts = match &self.hosts {
+            HostState::Loaded(hosts) => hosts.as_slice(),
+            _ => &[],
+        };
+        let query = self.search_input.read(cx).value().trim().to_lowercase();
+        let filtered: Vec<&SavedHost> = hosts
+            .iter()
+            .filter(|host| {
+                group_matches(host.group_name.as_deref(), self.selected_group.as_deref())
+                    && (query.is_empty()
+                        || host.name.to_lowercase().contains(&query)
+                        || host.destination.host().to_lowercase().contains(&query)
+                        || host.destination.username().to_lowercase().contains(&query)
+                        || host
+                            .group_name
+                            .as_ref()
+                            .is_some_and(|group| group.to_lowercase().contains(&query))
+                        || host
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query)))
+            })
+            .collect();
+        let selected = filtered
+            .iter()
+            .copied()
+            .find(|host| Some(host.id) == self.selected_host_id)
+            .or_else(|| filtered.first().copied());
 
-                if filtered.is_empty() {
-                    div()
-                        .text_color(rgb(0x9ca3af))
-                        .child("No hosts match your search filter.")
-                } else {
-                    let mut list = div().flex().flex_col().gap_3();
-                    for host in filtered {
-                        let selected = host.clone();
-                        let connection = host.clone();
-                        let sftp_connection = host.clone();
-                        let host_id = host.id;
-                        let mut card = div()
-                            .rounded_md()
-                            .p_3()
-                            .bg(rgb(0x1f2937))
+        let mut rows = div().flex().flex_col();
+        for host in &filtered {
+            let id = host.id;
+            let active = selected.is_some_and(|selected| selected.id == id);
+            rows = rows.child(
+                div()
+                    .id(("host-row", id as u64))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(0x263346))
+                    .bg(if active { rgb(0x1c373d) } else { rgb(0x141e2c) })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.selected_host_id = Some(id);
+                        cx.notify();
+                    }))
+                    .child(div().text_color(rgb(0x91a0b7)).child("▤"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap_1();
-
-                        let mut title_row = div().flex().items_center().gap_2();
-                        title_row = title_row.child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::BOLD)
-                                .child(host.name.clone()),
-                        );
-                        if let Some(group) = &host.group_name {
-                            title_row = title_row.child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(rgb(0x1e3a8a))
-                                    .text_xs()
-                                    .text_color(rgb(0x93c5fd))
-                                    .child(format!("Group: {group}")),
-                            );
-                        }
-                        if let Some(jump) = &host.jump_host {
-                            title_row = title_row.child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(rgb(0x064e3b))
-                                    .text_xs()
-                                    .text_color(rgb(0xa7f3d0))
-                                    .child(format!("via {jump}")),
-                            );
-                        }
-                        let proto = host.protocol();
-                        let (badge_bg, badge_fg) = match proto {
-                            ConnectionProtocol::Ssh => (rgb(0x1e3a8a), rgb(0x93c5fd)),
-                            ConnectionProtocol::Mosh => (rgb(0x713f12), rgb(0xfef08a)),
-                            ConnectionProtocol::Telnet => (rgb(0x7f1d1d), rgb(0xfecaca)),
-                            ConnectionProtocol::Serial => (rgb(0x14532d), rgb(0xbbf7d0)),
-                            ConnectionProtocol::Local => (rgb(0x374151), rgb(0xd1d5db)),
-                        };
-                        title_row = title_row.child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(badge_bg)
-                                .text_xs()
-                                .text_color(badge_fg)
-                                .child(format!("{} {}", proto.badge_icon(), proto.display_name())),
-                        );
-
-                        if let Some(snip_id) = host.startup_snippet_id {
-                            let snip_name = self
-                                .snippets
-                                .iter()
-                                .find(|s| s.id == snip_id)
-                                .map(|s| s.name.as_str())
-                                .unwrap_or("Snippet");
-                            title_row = title_row.child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(rgb(0x4c1d95))
-                                    .text_xs()
-                                    .text_color(rgb(0xd8b4fe))
-                                    .child(format!("📜 Startup: {snip_name}")),
-                            );
-                        }
-                        card = card.child(title_row);
-                        card = card.child(div().text_color(rgb(0x9ca3af)).child(format_endpoint(
-                            host.destination.username(),
-                            host.destination.host(),
-                            host.destination.port().get(),
-                        )));
-
-                        if !host.tags.is_empty() {
-                            let mut tag_row = div().flex().flex_row().gap_1().items_center().mt_1();
-                            for tag in &host.tags {
-                                tag_row = tag_row.child(
-                                    div()
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .bg(rgb(0x374151))
-                                        .text_xs()
-                                        .text_color(rgb(0xd1d5db))
-                                        .child(tag.clone()),
-                                );
-                            }
-                            card = card.child(tag_row);
-                        }
-
-                        let mut btn_row = div()
-                            .flex()
-                            .gap_2()
-                            .mt_2()
                             .child(
                                 div()
-                                    .id(("edit", host.id as u64))
-                                    .w(px(80.0))
-                                    .p_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x374151))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.edit_host(Some(&selected), cx)
-                                    }))
-                                    .child("Edit"),
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(host.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .id(("connect", host.id as u64))
-                                    .w(px(100.0))
-                                    .p_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x2563eb))
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.connect(&connection, window, cx)
-                                    }))
-                                    .child("Connect"),
-                            );
-
-                        if proto.supports_sftp() {
-                            btn_row = btn_row.child(
-                                div()
-                                    .id(("sftp", host.id as u64))
-                                    .w(px(80.0))
-                                    .p_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x065f46))
-                                    .text_color(rgb(0xd1fae5))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.connect_sftp(&sftp_connection, window, cx)
-                                    }))
-                                    .child("SFTP"),
-                            );
-                        }
-
-                        btn_row = btn_row.child(
-                            div()
-                                .id(("delete", host.id as u64))
-                                .w(px(80.0))
-                                .p_2()
-                                .rounded_md()
-                                .bg(rgb(0x991b1b))
-                                .text_color(rgb(0xfecaca))
-                                .cursor_pointer()
-                                .on_click(
-                                    cx.listener(move |app, _, _, cx| app.delete_host(host_id, cx)),
-                                )
-                                .child("Delete"),
-                        );
-                        card = card.child(btn_row);
-                        list = list.child(card);
-                    }
-                    list
+                            .child(div().text_xs().text_color(rgb(0x697c94)).child(
+                                format_endpoint(
+                                    host.destination.username(),
+                                    host.destination.host(),
+                                    host.destination.port().get(),
+                                ),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w(px(120.0))
+                            .text_xs()
+                            .text_color(rgb(0x91a0b7))
+                            .child(host.group_name.clone().unwrap_or_else(|| "—".into())),
+                    )
+                    .child(
+                        div()
+                            .w(px(75.0))
+                            .text_xs()
+                            .text_color(rgb(0x91a0b7))
+                            .child(host.protocol().display_name()),
+                    ),
+            );
+        }
+        if filtered.is_empty() {
+            let message = match &self.hosts {
+                HostState::Loading => "Loading hosts…".to_string(),
+                HostState::Error(error) => format!("Could not load hosts: {error}"),
+                HostState::NoDatabase => "Host storage is unavailable.".to_string(),
+                HostState::Loaded(hosts) if hosts.is_empty() => {
+                    "No saved hosts yet. Add your first connection to get started.".to_string()
                 }
-            }
-        };
-        let mut body = div()
-            .id("shellumi")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(|app, _: &RefreshHosts, _, cx| app.load_hosts(cx)))
-            .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
-                app.toggle_command_palette(window, cx);
-            }))
-            .on_key_down(cx.listener(Self::handle_palette_key_down))
-            .size_full()
+                _ => "No hosts match your search.".to_string(),
+            };
+            rows = rows.child(
+                div()
+                    .p_6()
+                    .text_sm()
+                    .text_color(rgb(0x91a0b7))
+                    .child(message),
+            );
+        }
+        let inventory = div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
-            .gap_4()
-            .p_6()
-            .bg(rgb(0x111827))
-            .text_color(rgb(0xf3f4f6))
-            .child(div().text_2xl().child("Shellumi"))
-            .child(div().text_color(rgb(0x9ca3af)).child("Saved hosts"));
-        let mut actions = div().flex().gap_3();
-        actions = actions.child(
-            div()
-                .id("local-terminal")
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .bg(rgb(0x374151))
-                .cursor_pointer()
-                .on_click(cx.listener(|app, _, window, cx| app.open_local_terminal(window, cx)))
-                .child("Local terminal"),
-        );
-        actions = actions.child(
-            div()
-                .id("command-palette-btn")
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .bg(rgb(0x1e3a8a))
-                .text_color(rgb(0xffffff))
-                .cursor_pointer()
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.open_command_palette(window, cx);
-                }))
-                .child("🔍 Command Palette (Cmd+K)"),
-        );
-        if self.database.is_some() && !matches!(self.hosts, HostState::Loading) {
-            actions = actions
-                .child(
-                    div()
-                        .id("refresh")
-                        .w(px(100.0))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x374151))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| app.load_hosts(cx)))
-                        .child("Refresh"),
-                )
-                .child(
-                    div()
-                        .id("add-host")
-                        .w(px(120.0))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x374151))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
-                        .child("Add host"),
-                )
-                .child(
-                    div()
-                        .id("sync-button")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb({
-                            let (r, g, b) = self.sync_status.badge_color();
-                            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-                        }))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            if matches!(app.sync_status, AppSyncStatus::Conflict { .. }) {
-                                if app.conflict_modal.is_none() {
-                                    let sample = vec![ConflictItemView {
-                                        object_id: "conflicted-host".into(),
-                                        entity_type: SyncEntityType::Host,
-                                        local_version: 2,
-                                        remote_version: 2,
-                                        local_updated_at: 1000,
-                                        remote_updated_at: 1050,
-                                        local_summary: "Production Bastion (alice@bastion:22)"
-                                            .into(),
-                                        remote_summary: "Production Bastion (bob@bastion:2222)"
-                                            .into(),
-                                    }];
-                                    app.open_conflict_modal("vault_file_1".into(), sample, cx);
-                                }
-                            } else {
-                                app.trigger_sync(cx);
-                            }
-                        }))
-                        .child(self.sync_status.label()),
-                )
-                .child(
-                    div()
-                        .id("team-collab-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x4338ca))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.open_team_modal(cx);
-                        }))
-                        .child("👥 Team Vaults"),
-                )
-                .child(
-                    div()
-                        .id("cloud-infra-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x0e7490))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.open_infra_modal(cx);
-                        }))
-                        .child("☁️ Cloud & Infra"),
-                )
-                .child(
-                    div()
-                        .id("diagnostics-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x0f766e))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.open_diagnostics_modal(cx);
-                        }))
-                        .child("🩺 Health Check"),
-                )
-                .child(
-                    div()
-                        .id("mobile-sim-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x831843))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.open_mobile_modal(cx);
-                        }))
-                        .child("📱 Mobile Sim"),
-                )
-                .child(
-                    div()
-                        .id("session-recordings-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x4338ca))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.open_session_replay_modal(cx);
-                        }))
-                        .child("📼 Recordings"),
-                )
-                .child(
-                    div()
-                        .id("tunnels-manager-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x0284c7))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.open_tunnel_modal(cx);
-                        }))
-                        .child("🚇 Tunnels"),
-                );
-
-            if matches!(self.sync_status, AppSyncStatus::Conflict { .. }) {
-                actions = actions.child(
-                    div()
-                        .id("resolve-conflict-btn")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0xb45309))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            if app.conflict_modal.is_none() {
-                                let sample = vec![ConflictItemView {
-                                    object_id: "conflicted-host".into(),
-                                    entity_type: SyncEntityType::Host,
-                                    local_version: 2,
-                                    remote_version: 2,
-                                    local_updated_at: 1000,
-                                    remote_updated_at: 1050,
-                                    local_summary: "Production Bastion (alice@bastion:22)".into(),
-                                    remote_summary: "Production Bastion (bob@bastion:2222)".into(),
-                                }];
-                                app.open_conflict_modal("vault_file_1".into(), sample, cx);
-                            }
-                        }))
-                        .child("Resolve Conflict"),
-                );
-            }
-        }
-        body = body.child(actions);
-
-        // Quick connect toolbar
-        let mut qc_row = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .p_3()
-            .rounded_md()
-            .bg(rgb(0x1f2937))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x263346))
+            .bg(rgb(0x141e2c))
+            .overflow_hidden()
             .child(
                 div()
-                    .text_sm()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(rgb(0x263346))
+                    .child(self.search_input.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .px_4()
+                    .py_2()
+                    .bg(rgb(0x192536))
+                    .text_xs()
+                    .text_color(rgb(0x697c94))
+                    .child(div().w(px(15.0)))
+                    .child(div().flex_1().child("NAME"))
+                    .child(div().w(px(120.0)).child("GROUP"))
+                    .child(div().w(px(75.0)).child("PROTOCOL")),
+            )
+            .child(div().id("host-list").overflow_y_scroll().child(rows));
+
+        let mut collections = div()
+            .w(px(165.0))
+            .flex_shrink_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x263346))
+            .bg(rgb(0x141e2c))
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .child("Quick connect:"),
+                    .text_color(rgb(0x697c94))
+                    .child("COLLECTIONS"),
+            )
+            .child(
+                div()
+                    .id("all-hosts")
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(if self.selected_group.is_none() {
+                        rgb(0x1c373d)
+                    } else {
+                        rgb(0x141e2c)
+                    })
+                    .text_sm()
+                    .text_color(if self.selected_group.is_none() {
+                        rgb(0x59ddc1)
+                    } else {
+                        rgb(0x91a0b7)
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.selected_group = None;
+                        cx.notify();
+                    }))
+                    .child(format!("All hosts     {}", hosts.len())),
+            );
+        let mut groups: Vec<&str> = hosts
+            .iter()
+            .filter_map(|host| host.group_name.as_deref())
+            .collect();
+        groups.extend(self.desktop.groups.iter().map(|group| group.name.as_str()));
+        groups.sort_unstable();
+        groups.dedup();
+        for (index, group) in groups.into_iter().enumerate() {
+            let group_name = group.to_owned();
+            let active = self.selected_group.as_deref() == Some(group);
+            collections = collections.child(
+                div()
+                    .id(("collection-group", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .bg(if active { rgb(0x1c373d) } else { rgb(0x141e2c) })
+                    .text_color(if active { rgb(0x59ddc1) } else { rgb(0x91a0b7) })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.selected_group = Some(group_name.clone());
+                        cx.notify();
+                    }))
+                    .child(format!("▹  {group}")),
+            );
+        }
+        collections = collections
+            .child(
+                div()
+                    .mt_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(0x263346))
+                    .text_xs()
+                    .text_color(rgb(0x697c94))
+                    .child("LOCAL STORAGE"),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .text_sm()
+                    .text_color(rgb(0x91a0b7))
+                    .child("Personal workspace"),
+            );
+
+        let mut inspector = div()
+            .w(px(235.0))
+            .flex_shrink_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x263346))
+            .bg(rgb(0x141e2c))
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
+        if let Some(host) = selected {
+            let edit_host = host.clone();
+            let connect_host = host.clone();
+            let sftp_host = host.clone();
+            let id = host.id;
+            inspector = inspector
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::BOLD)
+                        .child(host.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x697c94))
+                        .child(host.destination.host().to_owned()),
+                )
+                .child(div().h(px(1.0)).bg(rgb(0x263346)))
+                .child(host_detail(
+                    "Protocol",
+                    host.protocol().display_name().to_string(),
+                ))
+                .child(host_detail(
+                    "Username",
+                    host.destination.username().to_string(),
+                ))
+                .child(host_detail("Port", host.destination.port().to_string()))
+                .child(host_detail(
+                    "Group",
+                    host.group_name.clone().unwrap_or_else(|| "—".into()),
+                ))
+                .child(host_detail(
+                    "Tags",
+                    if host.tags.is_empty() {
+                        "—".into()
+                    } else {
+                        host.tags.join(", ")
+                    },
+                ))
+                .child(div().h(px(1.0)).bg(rgb(0x263346)))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("connect-selected")
+                                .flex_1()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(0x59ddc1))
+                                .text_color(rgb(0x0b2928))
+                                .text_sm()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.connect(&connect_host, window, cx)
+                                }))
+                                .child("Connect"),
+                        )
+                        .child(
+                            div()
+                                .id("edit-selected")
+                                .flex_1()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(0x192536))
+                                .text_sm()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.edit_host(Some(&edit_host), cx)
+                                }))
+                                .child("Edit"),
+                        ),
+                );
+            if host.protocol().supports_sftp() {
+                inspector = inspector.child(
+                    div()
+                        .id("sftp-selected")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x192536))
+                        .text_sm()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.connect_sftp(&sftp_host, window, cx)
+                        }))
+                        .child("Open SFTP"),
+                );
+            }
+            inspector = inspector.child(
+                div()
+                    .id("delete-selected")
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(rgb(0xff858c))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| app.delete_host(id, cx)))
+                    .child("Delete host"),
+            );
+        } else {
+            inspector = inspector.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x91a0b7))
+                    .child("Select a host to view its details."),
+            );
+        }
+        let sidebar = workspace_sidebar(cx, "Hosts");
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_6()
+            .py_4()
+            .border_b_1()
+            .border_color(rgb(0x263346))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("Hosts"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x91a0b7))
+                            .child("Infrastructure inventory"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("command-palette-btn")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0x34465c))
+                    .bg(rgb(0x192536))
+                    .text_sm()
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)),
+                    )
+                    .child("⌕   Search anything"),
+            );
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child("Infrastructure inventory"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x91a0b7))
+                            .child("Your saved connections, organized locally"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(self.host_library_actions(cx))
+                    .child(
+                        div()
+                            .id("refresh")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(0x34465c))
+                            .text_sm()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| app.load_hosts(cx)))
+                            .child("Refresh"),
+                    )
+                    .child(
+                        div()
+                            .id("add-host")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(0x59ddc1))
+                            .text_color(rgb(0x0b2928))
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
+                            .child("+   New host"),
+                    ),
+            );
+        let mut quick = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .mt_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x91a0b7))
+                    .child("Quick connect"),
             )
             .child(div().flex_1().child(self.quick_connect_input.clone()))
             .child(
@@ -12609,77 +12808,117 @@ impl Render for Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x2563eb))
-                    .text_color(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x34465c))
+                    .text_sm()
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, window, cx| app.quick_connect(window, cx)))
                     .child("Connect"),
             );
-        if let Some(err) = &self.quick_connect_error {
-            qc_row = qc_row.child(div().text_sm().text_color(rgb(0xfca5a5)).child(err.clone()));
+        if let Some(error) = &self.quick_connect_error {
+            quick = quick.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xff858c))
+                    .child(error.clone()),
+            );
         }
-        body = body.child(qc_row);
-
-        // Search / filter bar
-        let search_row = div()
+        let body = div()
+            .id("shellumi")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|app, _: &RefreshHosts, _, cx| app.load_hosts(cx)))
+            .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
+                app.toggle_command_palette(window, cx)
+            }))
+            .on_key_down(cx.listener(Self::handle_palette_key_down))
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
-            .items_center()
-            .gap_3()
-            .p_3()
-            .rounded_md()
-            .bg(rgb(0x1f2937))
+            .flex_col()
+            .bg(rgb(0x0b111c))
+            .child(header)
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::BOLD)
-                    .child("Filter:"),
-            )
-            .child(div().flex_1().child(self.search_input.clone()));
-        body = body.child(search_row);
-
+                    .id("inventory-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(toolbar)
+                    .child(quick)
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_3()
+                            .child(collections)
+                            .child(inventory)
+                            .child(inspector),
+                    ),
+            );
+        let mut result = root.child(div().flex().flex_1().min_h_0().child(sidebar).child(body));
         if let Some(form) = &self.form {
-            let mut editor = div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .bg(rgb(0x1f2937))
-                .child(if form.id.is_some() {
-                    "Edit host"
-                } else {
-                    "Add host"
-                })
-                .child("Protocol")
-                .child({
-                    let mut proto_row = div().flex().flex_row().gap_2().mb_1();
-                    let protocols = [
-                        (ConnectionProtocol::Ssh, "🔒 SSH"),
-                        (ConnectionProtocol::Mosh, "⚡ Mosh"),
-                        (ConnectionProtocol::Telnet, "⚠️ Telnet"),
-                        (ConnectionProtocol::Serial, "🔌 Serial"),
-                    ];
-                    for (idx, (p, label)) in protocols.into_iter().enumerate() {
-                        let is_sel = form.protocol == p;
-                        let btn_bg = if is_sel { rgb(0x2563eb) } else { rgb(0x374151) };
-                        let btn_fg = if is_sel { rgb(0xffffff) } else { rgb(0x9ca3af) };
-                        proto_row = proto_row.child(
-                            div()
-                                .id(("proto-select", idx))
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(btn_bg)
-                                .text_color(btn_fg)
-                                .text_xs()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.set_form_protocol(p, cx);
-                                }))
-                                .child(label),
-                        );
-                    }
-                    proto_row
-                });
+            let mut editor =
+                div()
+                    .w(px(720.0))
+                    .max_w_full()
+                    .max_h(px(650.0))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(0x34465c))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_6()
+                    .bg(rgb(0x141e2c))
+                    .child(div().text_lg().font_weight(FontWeight::BOLD).child(
+                        if form.id.is_some() {
+                            "Edit host"
+                        } else {
+                            "New host"
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x91a0b7))
+                            .child("Connection details are stored locally on this device."),
+                    )
+                    .child(div().text_sm().text_color(rgb(0x91a0b7)).child("Protocol"))
+                    .child({
+                        let mut proto_row = div().flex().flex_row().gap_2().mb_1();
+                        let protocols = [
+                            (ConnectionProtocol::Ssh, "SSH"),
+                            (ConnectionProtocol::Mosh, "Mosh"),
+                            (ConnectionProtocol::Telnet, "Telnet"),
+                            (ConnectionProtocol::Serial, "Serial"),
+                        ];
+                        for (idx, (p, label)) in protocols.into_iter().enumerate() {
+                            let is_sel = form.protocol == p;
+                            let btn_bg = if is_sel { rgb(0x1d383c) } else { rgb(0x192536) };
+                            let btn_fg = if is_sel { rgb(0x59ddc1) } else { rgb(0x91a0b7) };
+                            proto_row = proto_row.child(
+                                div()
+                                    .id(("proto-select", idx))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(btn_bg)
+                                    .text_color(btn_fg)
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.set_form_protocol(p, cx);
+                                    }))
+                                    .child(label),
+                            );
+                        }
+                        proto_row
+                    });
 
             if form.protocol == ConnectionProtocol::Telnet {
                 editor = editor.child(
@@ -12703,31 +12942,51 @@ impl Render for Shellumi {
                 );
             }
 
+            let hostname_label = if form.protocol == ConnectionProtocol::Serial {
+                "Serial device port"
+            } else {
+                "Hostname or IP"
+            };
+            let port_label = if form.protocol == ConnectionProtocol::Serial {
+                "Baud rate"
+            } else {
+                "Port"
+            };
             editor = editor
-                .child("Name")
-                .child(form.name.clone())
-                .child(if form.protocol == ConnectionProtocol::Serial {
-                    "Serial Device Port"
-                } else {
-                    "Hostname or IP"
-                })
-                .child(form.hostname.clone())
-                .child("Username")
-                .child(form.username.clone())
-                .child(if form.protocol == ConnectionProtocol::Serial {
-                    "Baud Rate"
-                } else {
-                    "Port"
-                })
-                .child(form.port.clone())
-                .child("Group (optional)")
-                .child(form.group.clone())
-                .child("Jump host (optional, e.g. jump.corp:2222)")
-                .child(form.jump_host.clone())
-                .child("Startup Snippet ID (optional)")
-                .child(form.startup_snippet.clone())
-                .child("Tags (comma-separated, optional)")
-                .child(form.tags.clone());
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(host_form_field("Display name", form.name.clone()))
+                        .child(host_form_field("Group (optional)", form.group.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(host_form_field(hostname_label, form.hostname.clone()))
+                        .child(host_form_field(port_label, form.port.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(host_form_field("Username", form.username.clone()))
+                        .child(host_form_field("Tags (comma-separated)", form.tags.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(host_form_field(
+                            "Jump host (optional)",
+                            form.jump_host.clone(),
+                        ))
+                        .child(host_form_field(
+                            "Startup snippet ID (optional)",
+                            form.startup_snippet.clone(),
+                        )),
+                );
             if let Some(error) = &self.form_error {
                 editor = editor.child(div().text_color(rgb(0xfca5a5)).child(error.clone()));
             }
@@ -12743,7 +13002,8 @@ impl Render for Shellumi {
                                 .id("save-host")
                                 .p_2()
                                 .rounded_md()
-                                .bg(rgb(0x374151))
+                                .bg(rgb(0x59ddc1))
+                                .text_color(rgb(0x0b2928))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| app.save_host(cx)))
                                 .child("Save"),
@@ -12764,17 +13024,21 @@ impl Render for Shellumi {
                         ),
                 );
             }
-            body = body.child(editor);
-        }
-        let mut result = root.child(
-            body.child(
+            result = result.child(
                 div()
-                    .id("hosts")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(content),
-            ),
-        );
+                    .id("host-editor-overlay")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(rgba(0x030913dd))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .child(editor),
+            );
+        }
         if let Some(modal) = &self.conflict_modal {
             result = result.child(self.render_conflict_modal(modal, cx));
         }
@@ -12808,16 +13072,38 @@ impl Render for Shellumi {
         if let Some(modal) = &self.tunnel_modal {
             result = result.child(self.render_tunnel_modal(modal, cx));
         }
+        if self.desktop.editor.is_some() || self.desktop.confirm.is_some() {
+            result = self.desktop_overlays(result, cx);
+        }
+        if let Some(message) = &self.desktop.message {
+            result = result.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .p_3()
+                    .bg(rgb(0x141e2c))
+                    .text_sm()
+                    .child(message.clone()),
+            );
+        }
         result
     }
 }
 
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let database = match args.as_slice() {
-        [] => None,
+    let (database, create_parent, startup_error) = match args.as_slice() {
+        [] => match data_path::default_data_file().and_then(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "The Shellumi data path is not valid UTF-8.".to_owned())
+        }) {
+            Ok(path) => (Some(path), true, None),
+            Err(error) => (None, false, Some(error)),
+        },
         [flag, path] if flag == "--hosts" && !path.is_empty() && path != ":memory:" => {
-            Some(path.clone())
+            (Some(path.clone()), false, None)
         }
         _ => {
             eprintln!("Usage: shellumi-app [--hosts <database-path>]");
@@ -12840,13 +13126,25 @@ fn main() {
             KeyBinding::new(refresh_shortcut, RefreshHosts, None),
             KeyBinding::new(palette_shortcut, ToggleCommandPalette, None),
         ]);
-        let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(940.0), px(650.0))),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Shellumi::new(database, window, cx)),
+            |window, cx| {
+                let view = cx.new(|cx| Shellumi::new(database, window, cx));
+                view.update(cx, |app, cx| {
+                    if let Some(error) = startup_error {
+                        app.hosts = HostState::Error(error);
+                        cx.notify();
+                    } else {
+                        app.start_storage(create_parent, cx);
+                    }
+                });
+                view
+            },
         )
         .expect("failed to open Shellumi window");
         cx.activate(true);
@@ -12855,6 +13153,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collection_filter_matches_only_the_selected_group() {
+        assert!(super::group_matches(Some("Production"), None));
+        assert!(super::group_matches(None, None));
+        assert!(super::group_matches(Some("Production"), Some("Production")));
+        assert!(!super::group_matches(Some("Production"), Some("Staging")));
+        assert!(!super::group_matches(None, Some("Production")));
+    }
+
     use super::{format_endpoint, is_paste_keystroke, key_bytes, render_terminal_spans, SavedHost};
     use gpui::Keystroke;
     use shellumi_core::PlaybackSpeed;
@@ -12961,9 +13268,9 @@ mod tests {
                 ..Default::default()
             },
         }];
-        let _ = render_terminal_spans(spans);
+        let _ = render_terminal_spans(spans, 21.0);
         let empty_spans = Vec::new();
-        let _ = render_terminal_spans(empty_spans);
+        let _ = render_terminal_spans(empty_spans, 21.0);
     }
 
     #[test]
@@ -14516,8 +14823,11 @@ mod tests {
         tracker.observe_output("Last login: Thu Nov 5 10:00:00 2026\r\nubuntu@web01:~$ ");
         assert_eq!(tracker.status, StartupStatus::ReadyToDispatch);
 
-        // Dispatch command
-        let cmd = tracker.dispatch(false).expect("should dispatch command");
+        // Prompt-like output alone must not dispatch a startup command.
+        assert!(tracker.dispatch(false).is_none());
+        let cmd = tracker
+            .dispatch(true)
+            .expect("explicitly confirmed command");
         assert_eq!(cmd, "uptime\n");
         assert_eq!(tracker.status, StartupStatus::Dispatched);
 

@@ -1,19 +1,19 @@
 use shellumi_core::{
     build_google_drive_auth_url, build_ssh_tunnel_command, diff_sync_records_with_passphrase,
-    discover_serial_ports, execute_sync_cycle, export_csv, export_ssh_config, format_duration_hms,
-    generate_bash_hook, generate_ed25519_key, generate_fish_hook, generate_pkce_challenge,
-    generate_zsh_hook, list_local_directory, parse_csv, parse_quick_connect_target,
-    parse_ssh_config, render_command, render_preview, AccessoryBarLayout, AnsibleInventoryEngine,
-    AuditAction, AutocompleteContext, AutocompleteEngine, AwsEc2Parser, AzureVmParser,
-    BatchExecutionPlan, BatchHostTarget, BatchPolicy, BenchmarkCategory, BenchmarkRunner,
-    CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, ConnectionProtocol,
-    DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType, HostConfigEntry,
-    HostExportItem, HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager,
-    MobilePlatform, MoshConfig, MoshPredictMode, MultiplayerSession, OpenFlags, PaletteAction,
-    PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector, PlaybackSpeed,
-    PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor, SftpPacket,
-    SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncCycleResult, SyncVault,
-    TeamMember, TeamRole, TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar,
+    discover_serial_ports, export_csv, export_ssh_config, format_duration_hms, generate_bash_hook,
+    generate_ed25519_key, generate_fish_hook, generate_pkce_challenge, generate_zsh_hook,
+    list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
+    render_preview, AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
+    AutocompleteEngine, AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget,
+    BatchPolicy, BenchmarkCategory, BenchmarkRunner, CastPlaybackEngine, CloudProviderConfig,
+    CloudProviderKind, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes,
+    ForwardingType, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
+    MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
+    PasswordPromptDetector, PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError,
+    SerialConfig, SessionRedactor, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
+    SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
+    TransferQueue, VirtualAccessoryBar,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
@@ -2284,63 +2284,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 "sync" => {
-                    let extra = &args[3..];
-                    let remote_path = extract_flag(extra, "--remote");
-                    let passphrase = extract_flag(extra, "--passphrase")
-                        .filter(|passphrase| !passphrase.is_empty())
-                        .ok_or_else(|| invalid("A non-empty --passphrase is required."))?;
-                    let device_id = extract_flag(extra, "--device-id")
-                        .unwrap_or_else(|| "shellumi-cli-sync".to_string());
-                    let dry_run = extra.iter().any(|a| a == "--dry-run");
-
-                    let local_vault = store
-                        .export_vault_with_iterations(&passphrase, &device_id, 2000)
-                        .await?;
-
-                    let remote_vault = if let Some(ref path) = remote_path {
-                        let json = fs::read_to_string(path)?;
-                        SyncVault::from_json(&json)?
-                    } else {
-                        local_vault.clone()
-                    };
-
-                    let result = execute_sync_cycle(
-                        &local_vault.records,
-                        &remote_vault.records,
-                        &passphrase,
-                        None,
-                    );
-                    match result {
-                        SyncCycleResult::AlreadySynchronized => {
-                            println!("Vaults are already in sync. No changes needed.");
-                        }
-                        SyncCycleResult::Success {
-                            report,
-                            merged_records,
-                        } => {
-                            println!("{}", report.message);
-                            if !dry_run {
-                                if let Some(rpath) = remote_path.as_ref() {
-                                    let mut updated_vault = remote_vault;
-                                    updated_vault.records = merged_records;
-                                    fs::write(rpath, updated_vault.to_json()?)?;
-                                    println!("Updated remote vault file written.");
-                                }
-                            }
-                        }
-                        SyncCycleResult::Conflicts(conflicts) => {
-                            println!("Sync conflicts detected ({} items):", conflicts.len());
-                            for c in conflicts {
-                                println!(
-                                    "  - {} ({}): local v{} vs remote v{}",
-                                    c.object_id, c.entity_type, c.local_version, c.remote_version
-                                );
-                            }
-                        }
-                        SyncCycleResult::Error(err) => {
-                            eprintln!("Sync error: {err}");
-                        }
-                    }
+                    return Err(invalid(
+                        "Vault sync is not implemented; use vault diff to compare snapshots.",
+                    )
+                    .into());
                 }
                 _ => unreachable!(),
             }

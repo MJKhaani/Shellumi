@@ -1,5 +1,5 @@
 Package: shellumi
-Version: 0.1.0
+Version: 0.0.1~alpha
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -8,4 +8,4 @@ Maintainer: Shellumi Contributors <contributors@shellumi.org>
 Description: Free, open-source, local-first SSH client and remote infrastructure manager
  Shellumi provides a GPU-accelerated desktop interface built with GPUI in Rust,
  supporting multi-tab and split-pane SSH, Mosh, Telnet, Serial, and SFTP sessions,
- with local metadata persistence, team collaboration, and cloud discovery.
+ with local metadata persistence and encrypted backups.
