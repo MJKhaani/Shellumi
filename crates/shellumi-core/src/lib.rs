@@ -43,8 +43,11 @@ pub use collaboration::{
 #[cfg(target_os = "macos")]
 pub use credential::MacOsKeychainStore;
 pub use credential::{
-    default_credential_store, CredentialError, CredentialStore, CredentialType,
-    EncryptedFileCredentialStore, EphemeralCredentialStore, SecretString,
+    default_credential_store, default_fallback_vault_path, delete_secret_by_ref,
+    format_keychain_ref, parse_keychain_ref, probe_keychain_daemon, resolve_secret_from_ref,
+    store_secret_to_ref, CredentialError, CredentialStore, CredentialType, DaemonWithFallbackStore,
+    EncryptedFileCredentialStore, EphemeralCredentialStore, KeychainDaemonStatus,
+    LinuxSecretServiceStore, SecretString, WindowsCredentialManagerStore, DEFAULT_KEYCHAIN_SERVICE,
 };
 pub use csv::{export_csv, parse_csv};
 pub use diagnostics::{
@@ -57,10 +60,14 @@ pub use ffi::{
     shellumi_parse_destination_c, shellumi_string_free, shellumi_translate_virtual_key_c,
     SHELLUMI_MODIFIER_ALT, SHELLUMI_MODIFIER_CTRL, SHELLUMI_MODIFIER_SHIFT,
 };
-pub use group::{resolve_effective_destination, resolve_effective_tags, GroupError, HostGroup};
+pub use group::{
+    resolve_effective_destination, resolve_effective_destination_with_identity,
+    resolve_effective_tags, GroupError, HostGroup,
+};
 pub use identity::{
-    compute_sha256_fingerprint, encode_openssh_public_key, fingerprint_public_key,
-    generate_ed25519_key, AuthMethod, Identity, IdentityError, KeyPair, KeyType, SshKey,
+    compute_sha256_fingerprint, create_test_ed25519_certificate, encode_openssh_public_key,
+    fingerprint_public_key, generate_ed25519_key, AuthMethod, CertificateType, Identity,
+    IdentityError, KeyPair, KeyType, NewIdentity, OpenSshCertificate, SshKey,
 };
 pub use infrastructure::{
     AnsibleInventoryEngine, AwsEc2Parser, AzureVmParser, CloudProviderConfig, CloudProviderKind,
@@ -94,10 +101,12 @@ pub use recording::{
 };
 pub use sftp::{
     format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,
-    NameEntry, OpenFlags, PathUtils, SftpPacket, SftpProtocolError, StatusCode, TransferDirection,
+    NameEntry, OpenFlags, PathUtils, RemoteEditorWorkspace, RemoteTrackedFile, SftpClient,
+    SftpConnectOptions, SftpError, SftpPacket, SftpProtocolError, StatusCode, TransferDirection,
     TransferQueue, TransferQueueSummary, TransferStatus, TransferTask, SSH_FILEXFER_ATTR_ACMODTIME,
     SSH_FILEXFER_ATTR_EXTENDED, SSH_FILEXFER_ATTR_PERMISSIONS, SSH_FILEXFER_ATTR_SIZE,
-    SSH_FILEXFER_ATTR_UIDGID, SSH_FXP_ATTRS, SSH_FXP_CLOSE, SSH_FXP_DATA, SSH_FXP_EXTENDED,
+    SSH_FILEXFER_ATTR_UIDGID, SSH_FXF_APPEND, SSH_FXF_CREAT, SSH_FXF_EXCL, SSH_FXF_READ,
+    SSH_FXF_TRUNC, SSH_FXF_WRITE, SSH_FXP_ATTRS, SSH_FXP_CLOSE, SSH_FXP_DATA, SSH_FXP_EXTENDED,
     SSH_FXP_EXTENDED_REPLY, SSH_FXP_FSETSTAT, SSH_FXP_FSTAT, SSH_FXP_HANDLE, SSH_FXP_INIT,
     SSH_FXP_LSTAT, SSH_FXP_MKDIR, SSH_FXP_NAME, SSH_FXP_OPEN, SSH_FXP_OPENDIR, SSH_FXP_READ,
     SSH_FXP_READDIR, SSH_FXP_READLINK, SSH_FXP_REALPATH, SSH_FXP_REMOVE, SSH_FXP_RENAME,
@@ -119,16 +128,17 @@ pub use sync::{
     build_oauth_callback_response, build_token_exchange_request, build_token_refresh_request,
     build_update_file_request, decrypt_entity, determine_sync_action, diff_sync_records,
     diff_sync_records_with_passphrase, encrypt_entity, encrypt_entity_with_iterations,
-    execute_sync_cycle, format_record_summary, generate_nonce, generate_pkce_challenge,
-    generate_salt, parse_download_file_response, parse_list_files_response,
-    parse_oauth_callback_request, parse_token_exchange_response, parse_token_refresh_response,
-    parse_upload_file_response, plan_sync_cycle, resolve_record_conflict, url_encode,
-    ConflictItemView, ConflictResolutionChoice, DiffStatus, DriveFileMetadata, EncryptedEnvelope,
+    execute_cloud_vault_sync, execute_sync_cycle, format_record_summary, generate_nonce,
+    generate_pkce_challenge, generate_salt, parse_download_file_response,
+    parse_list_files_response, parse_oauth_callback_request, parse_raw_http_response,
+    parse_token_exchange_response, parse_token_refresh_response, parse_upload_file_response,
+    plan_sync_cycle, resolve_record_conflict, url_encode, ConflictItemView,
+    ConflictResolutionChoice, DiffStatus, DriveFileMetadata, EncryptedEnvelope,
     GoogleDriveSyncClient, HttpRequest, HttpResponse, HttpTransport, OAuthCallbackListener,
     OAuthTokenBundle, PkceChallenge, RecordDiffSummary, SyncAction, SyncBackoff, SyncCycleResult,
     SyncEntityType, SyncError, SyncExecutionReport, SyncPlan, SyncRecord, SyncScheduler,
-    SyncTrigger, SyncVault, DEFAULT_KDF_ITERATIONS, DRIVE_APPDATA_FILENAME, KEY_LEN,
-    MIN_PASSPHRASE_LENGTH, OAUTH_TOKEN_ACCOUNT, OAUTH_TOKEN_SERVICE, SALT_LEN,
+    SyncTrigger, SyncVault, SystemHttpTransport, DEFAULT_KDF_ITERATIONS, DRIVE_APPDATA_FILENAME,
+    KEY_LEN, MIN_PASSPHRASE_LENGTH, OAUTH_TOKEN_ACCOUNT, OAUTH_TOKEN_SERVICE, SALT_LEN,
 };
 pub use tunnel::{
     build_ssh_tunnel_command, validate_jump_host, ActiveTunnelState, ActiveTunnelStatus,

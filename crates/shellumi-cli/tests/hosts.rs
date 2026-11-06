@@ -2090,3 +2090,241 @@ fn supports_performance_benchmarks_via_cli() {
         .unwrap();
     assert!(out_db.status.success());
 }
+
+#[test]
+fn supports_identity_cli_lifecycle_and_host_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("identity_test.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Add identity
+    let added = run(&[
+        "identity",
+        "add",
+        "DevOps Lead",
+        "--username",
+        "devops",
+        "--auth",
+        "publickey",
+        "--key-path",
+        "/home/devops/.ssh/id_ed25519",
+        "--tags",
+        "infra,cloud",
+        "--comment",
+        "Primary infra access key",
+    ]);
+    assert!(
+        added.status.success(),
+        "identity add failed: {:?}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let id_str = String::from_utf8(added.stdout).unwrap().trim().to_string();
+    assert!(!id_str.is_empty());
+
+    // 2. List identities
+    let listed = run(&["identity", "list"]);
+    assert!(listed.status.success());
+    let list_out = String::from_utf8(listed.stdout).unwrap();
+    assert!(list_out.contains("DevOps Lead"));
+    assert!(list_out.contains("devops"));
+
+    // 3. Show identity
+    let shown = run(&["identity", "show", &id_str]);
+    assert!(shown.status.success());
+    let show_out = String::from_utf8(shown.stdout).unwrap();
+    assert!(show_out.contains("DevOps Lead"));
+    assert!(show_out.contains("devops"));
+    assert!(show_out.contains("/home/devops/.ssh/id_ed25519"));
+
+    // 4. Add host referencing identity
+    let host_added = run(&[
+        "add",
+        "K8s Bastion",
+        "bastion.k8s.org",
+        "placeholder_user",
+        "22",
+        "--identity-id",
+        &id_str,
+    ]);
+    assert!(host_added.status.success());
+    let host_id = String::from_utf8(host_added.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let host_shown = run(&["show", &host_id]);
+    assert!(host_shown.status.success());
+    let h_show_out = String::from_utf8(host_shown.stdout).unwrap();
+    assert!(h_show_out.contains(&format!("Identity ID:     {id_str}")));
+
+    // 5. Delete identity
+    let deleted = run(&["identity", "delete", &id_str]);
+    assert!(deleted.status.success());
+    assert!(String::from_utf8(deleted.stdout)
+        .unwrap()
+        .contains("deleted"));
+}
+
+#[test]
+fn supports_vault_file_sync_cli_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let db1 = dir.path().join("db1.db");
+    let db2 = dir.path().join("db2.db");
+    let remote_vault_file = dir.path().join("synced_vault.json");
+    let passphrase = "integration-sync-passphrase";
+
+    let run_db1 = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db1)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let run_db2 = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+            .arg(&db2)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Add host to DB1
+    let added = run_db1(&["add", "Cluster Bastion", "bastion.corp.net", "admin", "22"]);
+    assert!(added.status.success());
+
+    // 2. Export DB1 as initial remote vault
+    let exported = run_db1(&[
+        "vault",
+        "export",
+        remote_vault_file.to_str().unwrap(),
+        "--passphrase",
+        passphrase,
+    ]);
+    assert!(exported.status.success());
+
+    // 3. Sync DB2 against remote vault file
+    let synced_db2 = run_db2(&[
+        "vault",
+        "sync",
+        "--remote",
+        remote_vault_file.to_str().unwrap(),
+        "--passphrase",
+        passphrase,
+    ]);
+    assert!(synced_db2.status.success());
+
+    // 4. Verify DB2 imported the host
+    let list_db2 = run_db2(&["list"]);
+    assert!(list_db2.status.success());
+    let out2 = String::from_utf8(list_db2.stdout).unwrap();
+    assert!(out2.contains("Cluster Bastion"));
+}
+
+#[test]
+fn supports_keychain_status_cli() {
+    // 1. Text format
+    let status_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["keychain", "status"])
+        .output()
+        .unwrap();
+    assert!(status_out.status.success());
+    let text = String::from_utf8(status_out.stdout).unwrap();
+    assert!(text.contains("Native OS Keychain Daemon Status:"));
+    assert!(text.contains("Backend:"));
+    assert!(text.contains("Daemon ID:"));
+
+    // 2. JSON format
+    let json_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["keychain", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(json_out.status.success());
+    let json_text = String::from_utf8(json_out.stdout).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json_text).expect("valid JSON status output");
+    assert!(parsed.get("backend_name").is_some());
+    assert!(parsed.get("daemon_identifier").is_some());
+    assert!(parsed.get("is_available").is_some());
+}
+
+#[test]
+fn supports_keychain_crud_and_identity_binding_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("id_keychain.db");
+    let svc = "org.shellumi.test";
+    let acc = "test-account-xyz";
+    let secret = "cli-super-secret-token";
+
+    // 1. Set secret via CLI
+    let set_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["keychain", "set", svc, acc, secret])
+        .output()
+        .unwrap();
+    assert!(set_out.status.success());
+    let set_text = String::from_utf8(set_out.stdout).unwrap();
+    assert!(set_text.contains("Stored secret with reference:"));
+
+    // 2. Get secret via CLI
+    let get_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["keychain", "get", svc, acc])
+        .output()
+        .unwrap();
+    assert!(get_out.status.success());
+    let get_text = String::from_utf8(get_out.stdout).unwrap();
+    assert!(get_text.contains(secret));
+
+    // 3. Delete secret via CLI
+    let del_out = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .args(["keychain", "delete", svc, acc])
+        .output()
+        .unwrap();
+    assert!(del_out.status.success());
+
+    // 4. Add identity with password via CLI
+    let id_add = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args([
+            "identity",
+            "add",
+            "Secure Infra Bastion",
+            "--username",
+            "bastion-admin",
+            "--auth",
+            "password",
+            "--password",
+            "bastion-pass-123",
+            "--tags",
+            "prod,secure",
+        ])
+        .output()
+        .unwrap();
+    assert!(id_add.status.success());
+    let id_str = String::from_utf8(id_add.stdout).unwrap();
+    let id: i64 = id_str.trim().parse().expect("parsed identity ID");
+
+    // 5. Show identity and verify secret ref is present without plaintext password
+    let id_show = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["identity", "show", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(id_show.status.success());
+    let show_text = String::from_utf8(id_show.stdout).unwrap();
+    assert!(show_text.contains("Password Ref:"));
+    assert!(show_text.contains("keychain://"));
+    assert!(!show_text.contains("bastion-pass-123"));
+
+    // 6. Delete identity via CLI
+    let id_del = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))
+        .arg(&db)
+        .args(["identity", "delete", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(id_del.status.success());
+}

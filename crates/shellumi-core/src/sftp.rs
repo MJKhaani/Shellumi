@@ -371,6 +371,14 @@ pub const SSH_FILEXFER_ATTR_PERMISSIONS: u32 = 0x0000_0004;
 pub const SSH_FILEXFER_ATTR_ACMODTIME: u32 = 0x0000_0008;
 pub const SSH_FILEXFER_ATTR_EXTENDED: u32 = 0x8000_0000;
 
+/// Open flags (pflags) according to SFTP v3 (draft-ietf-secsh-filexfer-02).
+pub const SSH_FXF_READ: u32 = 0x0000_0001;
+pub const SSH_FXF_WRITE: u32 = 0x0000_0002;
+pub const SSH_FXF_APPEND: u32 = 0x0000_0004;
+pub const SSH_FXF_CREAT: u32 = 0x0000_0008;
+pub const SSH_FXF_TRUNC: u32 = 0x0000_0010;
+pub const SSH_FXF_EXCL: u32 = 0x0000_0020;
+
 /// Standard SFTP status codes according to RFC draft-ietf-secsh-filexfer-02.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusCode {
@@ -1521,6 +1529,758 @@ pub struct TransferQueueSummary {
     pub overall_percentage: f32,
 }
 
+/// Comprehensive errors for the SFTP client transport engine.
+#[derive(Debug)]
+pub enum SftpError {
+    Protocol(SftpProtocolError),
+    Status { code: StatusCode, message: String },
+    Io(std::io::Error),
+    ProcessSpawn(String),
+    HandshakeFailed(String),
+    UnexpectedResponse(String),
+    FileNotFound(String),
+    PermissionDenied(String),
+    Cancelled,
+}
+
+impl fmt::Display for SftpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Protocol(err) => write!(f, "SFTP protocol error: {err}"),
+            Self::Status { code, message } => {
+                write!(f, "SFTP server returned error {:?}: {}", code, message)
+            }
+            Self::Io(err) => write!(f, "I/O error during SFTP transfer: {err}"),
+            Self::ProcessSpawn(msg) => write!(f, "failed to spawn SSH subsystem: {msg}"),
+            Self::HandshakeFailed(msg) => write!(f, "SFTP initialization failed: {msg}"),
+            Self::UnexpectedResponse(msg) => write!(f, "unexpected SFTP response: {msg}"),
+            Self::FileNotFound(path) => write!(f, "remote file or directory not found: {path}"),
+            Self::PermissionDenied(path) => write!(f, "permission denied for path: {path}"),
+            Self::Cancelled => f.write_str("SFTP operation cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for SftpError {}
+
+impl From<std::io::Error> for SftpError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<SftpProtocolError> for SftpError {
+    fn from(err: SftpProtocolError) -> Self {
+        Self::Protocol(err)
+    }
+}
+
+/// Options for connecting to an SFTP subsystem over SSH.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SftpConnectOptions {
+    pub port: Option<u16>,
+    pub identity_file: Option<String>,
+    pub certificate_file: Option<String>,
+    pub timeout_seconds: u32,
+    pub extra_ssh_options: Vec<(String, String)>,
+}
+
+impl Default for SftpConnectOptions {
+    fn default() -> Self {
+        Self {
+            port: None,
+            identity_file: None,
+            certificate_file: None,
+            timeout_seconds: 30,
+            extra_ssh_options: Vec::new(),
+        }
+    }
+}
+
+/// High-level client for live SFTP v3 wire streaming and remote filesystem operations.
+pub struct SftpClient {
+    reader: Box<dyn std::io::Read + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    child_process: Option<std::process::Child>,
+    next_request_id: u32,
+    server_version: u32,
+    server_extensions: Vec<(String, String)>,
+}
+
+impl SftpClient {
+    /// Connect to remote host over OpenSSH subsystem `sftp` with piped binary streams.
+    pub fn connect(
+        destination: &crate::SshDestination,
+        options: &SftpConnectOptions,
+    ) -> Result<Self, SftpError> {
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.arg("-s");
+        cmd.arg("-e");
+        cmd.arg("none");
+        cmd.arg("-o").arg("BatchMode=yes");
+        cmd.arg("-o").arg("ForwardAgent=yes");
+
+        let effective_port = options.port.unwrap_or(destination.port().get());
+        cmd.arg("-p").arg(effective_port.to_string());
+
+        if let Some(ref key) = options.identity_file {
+            cmd.arg("-i").arg(key);
+        }
+        if let Some(ref cert) = options.certificate_file {
+            cmd.arg("-o").arg(format!("CertificateFile={cert}"));
+        }
+        for (k, v) in &options.extra_ssh_options {
+            cmd.arg("-o").arg(format!("{k}={v}"));
+        }
+
+        let target = format!("{}@{}", destination.username(), destination.host());
+        cmd.arg(&target);
+        cmd.arg("sftp");
+
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            SftpError::ProcessSpawn(format!("failed to spawn ssh sftp subsystem: {e}"))
+        })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            SftpError::ProcessSpawn("failed to open stdin pipe to ssh".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            SftpError::ProcessSpawn("failed to open stdout pipe from ssh".to_string())
+        })?;
+
+        let mut client = Self {
+            reader: Box::new(std::io::BufReader::new(stdout)),
+            writer: Box::new(std::io::BufWriter::new(stdin)),
+            child_process: Some(child),
+            next_request_id: 1,
+            server_version: 0,
+            server_extensions: Vec::new(),
+        };
+
+        client.init()?;
+        Ok(client)
+    }
+
+    /// Construct an SFTP client around arbitrary readable/writable streams (ideal for mock testing).
+    pub fn from_reader_writer(
+        reader: Box<dyn std::io::Read + Send>,
+        writer: Box<dyn std::io::Write + Send>,
+    ) -> Result<Self, SftpError> {
+        let mut client = Self {
+            reader,
+            writer,
+            child_process: None,
+            next_request_id: 1,
+            server_version: 0,
+            server_extensions: Vec::new(),
+        };
+        client.init()?;
+        Ok(client)
+    }
+
+    /// Version negotiated with the remote SFTP server.
+    pub fn server_version(&self) -> u32 {
+        self.server_version
+    }
+
+    /// Server extensions reported in `SSH_FXP_VERSION`.
+    pub fn server_extensions(&self) -> &[(String, String)] {
+        &self.server_extensions
+    }
+
+    fn next_id(&mut self) -> u32 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        id
+    }
+
+    pub fn send_packet(&mut self, packet: &SftpPacket) -> Result<(), SftpError> {
+        let wire = packet.encode();
+        self.writer.write_all(&wire)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    pub fn read_packet(&mut self) -> Result<SftpPacket, SftpError> {
+        let mut len_bytes = [0u8; 4];
+        self.reader.read_exact(&mut len_bytes)?;
+        let length = u32::from_be_bytes(len_bytes) as usize;
+        if length > 256 * 1024 * 1024 {
+            return Err(SftpError::Protocol(SftpProtocolError::InvalidPacketLength(
+                length,
+            )));
+        }
+
+        let mut payload = vec![0u8; length];
+        self.reader.read_exact(&mut payload)?;
+
+        let mut full_wire = Vec::with_capacity(4 + length);
+        full_wire.extend_from_slice(&len_bytes);
+        full_wire.extend_from_slice(&payload);
+
+        let (packet, _consumed) = SftpPacket::decode(&full_wire)
+            .map_err(SftpError::Protocol)?
+            .ok_or(SftpError::Protocol(SftpProtocolError::UnexpectedEof))?;
+        Ok(packet)
+    }
+
+    fn init(&mut self) -> Result<(), SftpError> {
+        let init_packet = SftpPacket::Init { version: 3 };
+        self.send_packet(&init_packet)?;
+        match self.read_packet()? {
+            SftpPacket::Version {
+                version,
+                extensions,
+            } => {
+                self.server_version = version;
+                self.server_extensions = extensions;
+                Ok(())
+            }
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::HandshakeFailed(format!(
+                "expected SSH_FXP_VERSION, received {other:?}"
+            ))),
+        }
+    }
+
+    /// List entries in a remote directory, returning parsed `FileEntry` records sorted by directories first.
+    pub fn list_remote_directory(
+        &mut self,
+        remote_path: &str,
+    ) -> Result<Vec<FileEntry>, SftpError> {
+        let opendir_id = self.next_id();
+        self.send_packet(&SftpPacket::OpenDir {
+            id: opendir_id,
+            path: remote_path.to_string(),
+        })?;
+
+        let handle = match self.read_packet()? {
+            SftpPacket::Handle { handle, .. } => handle,
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => return Err(SftpError::FileNotFound(remote_path.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => return Err(SftpError::PermissionDenied(remote_path.to_string())),
+            SftpPacket::Status { code, message, .. } => {
+                return Err(SftpError::Status { code, message })
+            }
+            other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        };
+
+        let mut entries = Vec::new();
+        loop {
+            let readdir_id = self.next_id();
+            self.send_packet(&SftpPacket::ReadDir {
+                id: readdir_id,
+                handle: handle.clone(),
+            })?;
+
+            match self.read_packet()? {
+                SftpPacket::Name {
+                    entries: name_entries,
+                    ..
+                } => {
+                    for entry in name_entries {
+                        if entry.filename != "." && entry.filename != ".." {
+                            entries.push(entry.to_file_entry(remote_path));
+                        }
+                    }
+                }
+                SftpPacket::Status {
+                    code: StatusCode::Eof,
+                    ..
+                } => break,
+                SftpPacket::Status { code, message, .. } => {
+                    let close_id = self.next_id();
+                    let _ = self.send_packet(&SftpPacket::Close {
+                        id: close_id,
+                        handle,
+                    });
+                    let _ = self.read_packet();
+                    return Err(SftpError::Status { code, message });
+                }
+                other => {
+                    let close_id = self.next_id();
+                    let _ = self.send_packet(&SftpPacket::Close {
+                        id: close_id,
+                        handle,
+                    });
+                    let _ = self.read_packet();
+                    return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                }
+            }
+        }
+
+        let close_id = self.next_id();
+        self.send_packet(&SftpPacket::Close {
+            id: close_id,
+            handle,
+        })?;
+        let _ = self.read_packet();
+
+        entries.sort_by(|a, b| match (a.kind.is_dir(), b.kind.is_dir()) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+
+        Ok(entries)
+    }
+
+    /// Download a remote file to a local destination, invoking an optional progress callback.
+    pub fn download_file<F>(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        progress_callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
+        let total_size = self
+            .stat(remote_path)
+            .map(|a| a.size.unwrap_or(0))
+            .unwrap_or(0);
+
+        let open_id = self.next_id();
+        self.send_packet(&SftpPacket::Open {
+            id: open_id,
+            filename: remote_path.to_string(),
+            pflags: SSH_FXF_READ,
+            attrs: FileAttributes::new(),
+        })?;
+
+        let handle = match self.read_packet()? {
+            SftpPacket::Handle { handle, .. } => handle,
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => return Err(SftpError::FileNotFound(remote_path.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => return Err(SftpError::PermissionDenied(remote_path.to_string())),
+            SftpPacket::Status { code, message, .. } => {
+                return Err(SftpError::Status { code, message })
+            }
+            other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        };
+
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut local_file = std::fs::File::create(local_path)?;
+        let chunk_size = 32768u32;
+        let mut offset = 0u64;
+
+        loop {
+            let read_id = self.next_id();
+            self.send_packet(&SftpPacket::Read {
+                id: read_id,
+                handle: handle.clone(),
+                offset,
+                len: chunk_size,
+            })?;
+
+            match self.read_packet()? {
+                SftpPacket::Data { data, .. } => {
+                    if data.is_empty() {
+                        break;
+                    }
+                    use std::io::Write as _;
+                    local_file.write_all(&data)?;
+                    offset += data.len() as u64;
+                    if let Some(ref cb) = progress_callback {
+                        cb(offset, total_size.max(offset));
+                    }
+                }
+                SftpPacket::Status {
+                    code: StatusCode::Eof,
+                    ..
+                } => break,
+                SftpPacket::Status { code, message, .. } => {
+                    let close_id = self.next_id();
+                    let _ = self.send_packet(&SftpPacket::Close {
+                        id: close_id,
+                        handle,
+                    });
+                    let _ = self.read_packet();
+                    return Err(SftpError::Status { code, message });
+                }
+                other => {
+                    let close_id = self.next_id();
+                    let _ = self.send_packet(&SftpPacket::Close {
+                        id: close_id,
+                        handle,
+                    });
+                    let _ = self.read_packet();
+                    return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                }
+            }
+        }
+
+        let close_id = self.next_id();
+        self.send_packet(&SftpPacket::Close {
+            id: close_id,
+            handle,
+        })?;
+        let _ = self.read_packet();
+
+        Ok(offset)
+    }
+
+    /// Upload a local file to a remote destination path.
+    pub fn upload_file<F>(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        progress_callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
+        use std::io::Read as _;
+        let mut local_file = std::fs::File::open(local_path)?;
+        let total_size = local_file.metadata().map(|m| m.len()).unwrap_or(0);
+
+        let open_id = self.next_id();
+        self.send_packet(&SftpPacket::Open {
+            id: open_id,
+            filename: remote_path.to_string(),
+            pflags: SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC,
+            attrs: FileAttributes::new(),
+        })?;
+
+        let handle = match self.read_packet()? {
+            SftpPacket::Handle { handle, .. } => handle,
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => return Err(SftpError::PermissionDenied(remote_path.to_string())),
+            SftpPacket::Status { code, message, .. } => {
+                return Err(SftpError::Status { code, message })
+            }
+            other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        };
+
+        let chunk_size = 32768;
+        let mut buf = vec![0u8; chunk_size];
+        let mut offset = 0u64;
+
+        loop {
+            let bytes_read = local_file.read(&mut buf)?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            let write_id = self.next_id();
+            self.send_packet(&SftpPacket::Write {
+                id: write_id,
+                handle: handle.clone(),
+                offset,
+                data: buf[..bytes_read].to_vec(),
+            })?;
+
+            match self.read_packet()? {
+                SftpPacket::Status {
+                    code: StatusCode::Ok,
+                    ..
+                } => {
+                    offset += bytes_read as u64;
+                    if let Some(ref cb) = progress_callback {
+                        cb(offset, total_size);
+                    }
+                }
+                SftpPacket::Status { code, message, .. } => {
+                    let close_id = self.next_id();
+                    let _ = self.send_packet(&SftpPacket::Close {
+                        id: close_id,
+                        handle,
+                    });
+                    let _ = self.read_packet();
+                    return Err(SftpError::Status { code, message });
+                }
+                other => {
+                    let close_id = self.next_id();
+                    let _ = self.send_packet(&SftpPacket::Close {
+                        id: close_id,
+                        handle,
+                    });
+                    let _ = self.read_packet();
+                    return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                }
+            }
+        }
+
+        let close_id = self.next_id();
+        self.send_packet(&SftpPacket::Close {
+            id: close_id,
+            handle,
+        })?;
+        let _ = self.read_packet();
+
+        Ok(offset)
+    }
+
+    /// Query remote file attributes.
+    pub fn stat(&mut self, path: &str) -> Result<FileAttributes, SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Stat {
+            id: req_id,
+            path: path.to_string(),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Attrs { attrs, .. } => Ok(attrs),
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => Err(SftpError::FileNotFound(path.to_string())),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Canonicalize a remote path.
+    pub fn realpath(&mut self, path: &str) -> Result<String, SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::RealPath {
+            id: req_id,
+            path: path.to_string(),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Name { mut entries, .. } => {
+                if let Some(first) = entries.pop() {
+                    Ok(first.filename)
+                } else {
+                    Ok(path.to_string())
+                }
+            }
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Create a remote directory.
+    pub fn mkdir(&mut self, path: &str) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Mkdir {
+            id: req_id,
+            path: path.to_string(),
+            attrs: FileAttributes::new().with_permissions(0o755),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Ok(()),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Remove a remote directory.
+    pub fn rmdir(&mut self, path: &str) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Rmdir {
+            id: req_id,
+            path: path.to_string(),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Ok(()),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Remove a remote file.
+    pub fn remove_file(&mut self, filename: &str) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Remove {
+            id: req_id,
+            filename: filename.to_string(),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Ok(()),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Rename or move a remote file/directory.
+    pub fn rename(&mut self, oldpath: &str, newpath: &str) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Rename {
+            id: req_id,
+            oldpath: oldpath.to_string(),
+            newpath: newpath.to_string(),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Ok(()),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+}
+
+impl Drop for SftpClient {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Metadata and state for a remote file checked out for editing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteTrackedFile {
+    pub remote_path: String,
+    pub local_path: PathBuf,
+    pub original_sha256: String,
+    pub last_checked_at: u64,
+}
+
+/// Workspace manager for safely downloading, tracking local modifications, and uploading remote files.
+pub struct RemoteEditorWorkspace {
+    workspace_dir: PathBuf,
+    tracked: std::collections::HashMap<String, RemoteTrackedFile>,
+}
+
+impl RemoteEditorWorkspace {
+    pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
+        let dir = workspace_dir.into();
+        let _ = std::fs::create_dir_all(&dir);
+        Self {
+            workspace_dir: dir,
+            tracked: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn workspace_dir(&self) -> &Path {
+        &self.workspace_dir
+    }
+
+    /// Checkout a remote file to a local cache copy, returning its local path.
+    pub fn checkout_file(
+        &mut self,
+        client: &mut SftpClient,
+        remote_path: &str,
+    ) -> Result<PathBuf, SftpError> {
+        use ring::digest::{digest, SHA256};
+
+        let file_name = Path::new(remote_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("remote_file");
+
+        let path_hash = hex_digest(digest(&SHA256, remote_path.as_bytes()).as_ref());
+        let safe_dir = self.workspace_dir.join(&path_hash[..12]);
+        std::fs::create_dir_all(&safe_dir)?;
+        let local_path = safe_dir.join(file_name);
+
+        client.download_file(remote_path, &local_path, None::<fn(u64, u64)>)?;
+
+        let content = std::fs::read(&local_path)?;
+        let sha256_hex = hex_digest(digest(&SHA256, &content).as_ref());
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        self.tracked.insert(
+            remote_path.to_string(),
+            RemoteTrackedFile {
+                remote_path: remote_path.to_string(),
+                local_path: local_path.clone(),
+                original_sha256: sha256_hex,
+                last_checked_at: now,
+            },
+        );
+
+        Ok(local_path)
+    }
+
+    /// Check if the local checkout of the remote file has unsaved edits.
+    pub fn is_dirty(&self, remote_path: &str) -> Result<bool, SftpError> {
+        use ring::digest::{digest, SHA256};
+        let Some(tracked) = self.tracked.get(remote_path) else {
+            return Err(SftpError::FileNotFound(remote_path.to_string()));
+        };
+
+        if !tracked.local_path.exists() {
+            return Ok(false);
+        }
+
+        let content = std::fs::read(&tracked.local_path)?;
+        let current_sha256 = hex_digest(digest(&SHA256, &content).as_ref());
+        Ok(current_sha256 != tracked.original_sha256)
+    }
+
+    /// Save the edited local file back to the remote server if dirty.
+    /// Returns `Ok(true)` if modified and uploaded, `Ok(false)` if unchanged.
+    pub fn save_file(
+        &mut self,
+        client: &mut SftpClient,
+        remote_path: &str,
+    ) -> Result<bool, SftpError> {
+        use ring::digest::{digest, SHA256};
+        if !self.is_dirty(remote_path)? {
+            return Ok(false);
+        }
+
+        let local_path = {
+            let tracked = self
+                .tracked
+                .get(remote_path)
+                .ok_or_else(|| SftpError::FileNotFound(remote_path.to_string()))?;
+            tracked.local_path.clone()
+        };
+
+        client.upload_file(&local_path, remote_path, None::<fn(u64, u64)>)?;
+
+        let content = std::fs::read(&local_path)?;
+        let new_hash = hex_digest(digest(&SHA256, &content).as_ref());
+        if let Some(tracked) = self.tracked.get_mut(remote_path) {
+            tracked.original_sha256 = new_hash;
+        }
+
+        Ok(true)
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1983,5 +2743,358 @@ mod tests {
         // Clear completed
         queue.clear_completed();
         assert_eq!(queue.summary().total_tasks, 2);
+    }
+
+    #[test]
+    fn verifies_sftp_client_handshake_and_directory_listing() {
+        use std::io::{Read as _, Write as _};
+        let (client_side, mut server_side) = std::os::unix::net::UnixStream::pair().unwrap();
+
+        let server_thread = std::thread::spawn(move || {
+            // 1. Read Init { version: 3 }
+            let mut len_buf = [0u8; 4];
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+
+            // Reply Version { version: 3, extensions: vec![] }
+            let version_pkt = SftpPacket::Version {
+                version: 3,
+                extensions: vec![("posix-rename@openssh.com".to_string(), "1".to_string())],
+            };
+            server_side.write_all(&version_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 2. Read OpenDir
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let mut full = len_buf.to_vec();
+            full.extend_from_slice(&payload);
+            let (pkt, _) = SftpPacket::decode(&full).unwrap().unwrap();
+            let id = match pkt {
+                SftpPacket::OpenDir { id, path } => {
+                    assert_eq!(path, "/var/log");
+                    id
+                }
+                other => panic!("unexpected: {other:?}"),
+            };
+
+            let handle_pkt = SftpPacket::Handle {
+                id,
+                handle: vec![1, 2, 3],
+            };
+            server_side.write_all(&handle_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 3. Read ReadDir
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let mut full = len_buf.to_vec();
+            full.extend_from_slice(&payload);
+            let (pkt, _) = SftpPacket::decode(&full).unwrap().unwrap();
+            let id = match pkt {
+                SftpPacket::ReadDir { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+
+            let name_pkt = SftpPacket::Name {
+                id,
+                entries: vec![
+                    NameEntry {
+                        filename: "syslog".to_string(),
+                        longname: "-rw-r--r-- 1 root root 1024 Jan 1 00:00 syslog".to_string(),
+                        attrs: FileAttributes::new().with_size(1024),
+                    },
+                    NameEntry {
+                        filename: "nginx".to_string(),
+                        longname: "drwxr-xr-x 2 root root 4096 Jan 1 00:00 nginx".to_string(),
+                        attrs: FileAttributes::new().with_size(4096),
+                    },
+                ],
+            };
+            server_side.write_all(&name_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 4. Read ReadDir (EOF)
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let mut full = len_buf.to_vec();
+            full.extend_from_slice(&payload);
+            let (pkt, _) = SftpPacket::decode(&full).unwrap().unwrap();
+            let id = match pkt {
+                SftpPacket::ReadDir { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+
+            let eof_pkt = SftpPacket::Status {
+                id,
+                code: StatusCode::Eof,
+                message: "EOF".to_string(),
+                tag: "".to_string(),
+            };
+            server_side.write_all(&eof_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 5. Read Close
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let mut full = len_buf.to_vec();
+            full.extend_from_slice(&payload);
+            let (pkt, _) = SftpPacket::decode(&full).unwrap().unwrap();
+            let id = match pkt {
+                SftpPacket::Close { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+
+            let ok_pkt = SftpPacket::Status {
+                id,
+                code: StatusCode::Ok,
+                message: "OK".to_string(),
+                tag: "".to_string(),
+            };
+            server_side.write_all(&ok_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+        });
+
+        let reader = Box::new(client_side.try_clone().unwrap());
+        let writer = Box::new(client_side);
+        let mut client = SftpClient::from_reader_writer(reader, writer).unwrap();
+
+        assert_eq!(client.server_version(), 3);
+        assert_eq!(
+            client.server_extensions(),
+            &[("posix-rename@openssh.com".to_string(), "1".to_string())]
+        );
+
+        let entries = client.list_remote_directory("/var/log").unwrap();
+        assert_eq!(entries.len(), 2);
+        // Directories sorted first
+        assert_eq!(entries[0].name, "nginx");
+        assert!(entries[0].kind.is_dir());
+        assert_eq!(entries[1].name, "syslog");
+        assert_eq!(entries[1].size, 1024);
+
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn verifies_remote_editor_workspace_dirty_tracking_and_save() {
+        use std::io::{Read as _, Write as _};
+        let (client_side, mut server_side) = std::os::unix::net::UnixStream::pair().unwrap();
+
+        let server_thread = std::thread::spawn(move || {
+            let mut len_buf = [0u8; 4];
+            // 1. Handshake
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let version_pkt = SftpPacket::Version {
+                version: 3,
+                extensions: vec![],
+            };
+            server_side.write_all(&version_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 2. Stat
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Stat { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let attrs_pkt = SftpPacket::Attrs {
+                id,
+                attrs: FileAttributes::new().with_size(12),
+            };
+            server_side.write_all(&attrs_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 3. Open for Read
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Open { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let handle_pkt = SftpPacket::Handle {
+                id,
+                handle: vec![42],
+            };
+            server_side.write_all(&handle_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 4. Read Data
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Read { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let data_pkt = SftpPacket::Data {
+                id,
+                data: b"hello world\n".to_vec(),
+            };
+            server_side.write_all(&data_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 5. Read EOF
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Read { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let eof_pkt = SftpPacket::Status {
+                id,
+                code: StatusCode::Eof,
+                message: "".into(),
+                tag: "".into(),
+            };
+            server_side.write_all(&eof_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 6. Close read handle
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Close { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let ok_pkt = SftpPacket::Status {
+                id,
+                code: StatusCode::Ok,
+                message: "".into(),
+                tag: "".into(),
+            };
+            server_side.write_all(&ok_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 7. Open for Write (on save)
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Open { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let write_handle_pkt = SftpPacket::Handle {
+                id,
+                handle: vec![43],
+            };
+            server_side.write_all(&write_handle_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 8. Write Data
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Write { id, data, .. } => {
+                    assert_eq!(&data, b"hello edited\n");
+                    id
+                }
+                other => panic!("unexpected: {other:?}"),
+            };
+            let write_ok_pkt = SftpPacket::Status {
+                id,
+                code: StatusCode::Ok,
+                message: "".into(),
+                tag: "".into(),
+            };
+            server_side.write_all(&write_ok_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+
+            // 9. Close write handle
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            let id = match pkt {
+                SftpPacket::Close { id, .. } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let ok_pkt = SftpPacket::Status {
+                id,
+                code: StatusCode::Ok,
+                message: "".into(),
+                tag: "".into(),
+            };
+            server_side.write_all(&ok_pkt.encode()).unwrap();
+            server_side.flush().unwrap();
+        });
+
+        let reader = Box::new(client_side.try_clone().unwrap());
+        let writer = Box::new(client_side);
+        let mut client = SftpClient::from_reader_writer(reader, writer).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut workspace = RemoteEditorWorkspace::new(temp_dir.path());
+
+        // Checkout file
+        let local_path = workspace
+            .checkout_file(&mut client, "/etc/config.txt")
+            .unwrap();
+        assert!(local_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&local_path).unwrap(),
+            "hello world\n"
+        );
+        assert!(!workspace.is_dirty("/etc/config.txt").unwrap());
+
+        // Modify local file
+        std::fs::write(&local_path, "hello edited\n").unwrap();
+        assert!(workspace.is_dirty("/etc/config.txt").unwrap());
+
+        // Save file back to remote
+        assert!(workspace.save_file(&mut client, "/etc/config.txt").unwrap());
+        assert!(!workspace.is_dirty("/etc/config.txt").unwrap());
+
+        server_thread.join().unwrap();
     }
 }

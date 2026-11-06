@@ -54,6 +54,13 @@ crates/shellumi-app       GPUI desktop window with interactive host management
   - `PasswordPromptDetector` for passive classification (`Sudo`, `Ssh`, `KeyPassphrase`, `MfaCode`, `GenericPassword`) strictly adhering to safety-by-default rules (no automatic secret injection into arbitrary terminal streams).
   - Shell hook generators (`generate_bash_hook`, `generate_zsh_hook`, `generate_fish_hook`) emitting zero-config scripts for OSC 133 and OSC 7 integration.
   - Registers `PaletteAction::OpenShellIntegrationModal` (`Cmd+Shift+I`) in the command palette.
+- **Native Keychain Daemons & Secure Credential Storage Subsystem:** Implements UI-independent platform-native keychain daemon integrations in `shellumi-core::credential`:
+  - `MacOsKeychainStore`: Apple Security Framework `securityd` generic password management with transparent upsert handling on duplicate items (`errSecDuplicateItem`).
+  - `LinuxSecretServiceStore`: FreeDesktop Secret Service daemon integration via `secret-tool` over D-Bus with safe `stdin` piping (never passing secrets as command-line arguments).
+  - `WindowsCredentialManagerStore`: Windows Runtime `Windows.Security.Credentials.PasswordVault` API integration via non-interactive PowerShell with safe `stdin` piping.
+  - `DaemonWithFallbackStore`: Fallback-aware store pairing platform-native daemon with authenticated AES-256-GCM encrypted file vault (`EncryptedFileCredentialStore`).
+  - `probe_keychain_daemon`: Dynamic health prober returning `KeychainDaemonStatus` with reachability details.
+  - Canonical URI reference resolvers (`format_keychain_ref`, `parse_keychain_ref`, `resolve_secret_from_ref`, `store_secret_to_ref`, `delete_secret_by_ref`) supporting `keychain://<service>/<account>` and `env://<var>`, ensuring plaintext credentials never enter database tables or logs.
 - **Terminal Session Logging, Redaction & Replay Subsystem:** Implements session recording models and playback engine in `shellumi-core::recording`:
   - `SessionRecordingMetadata` and `SessionRecordingSummary` modeling audit metadata, session IDs, durations, event counts, byte sizes, and host bindings.
   - `SessionRedactor` automated sensitive data redaction engine scanning terminal I/O streams to mask PEM private keys (`BEGIN ... PRIVATE KEY`), bearer authorization tokens (`Bearer ...`), AWS secret keys (`AKIA...`), GitHub/GitLab personal access tokens (`ghp_...`, `glpat-...`), configuration assignments (`password=`, `token=`, `secret=`, `api_key=`), and one-time MFA/TOTP codes (`[0-9]{6}`).
@@ -109,6 +116,12 @@ crates/shellumi-app       GPUI desktop window with interactive host management
   - `team member invite <vault-id> <user-id> <name> <role> [--public-key <key>] [--invited-by <by>]`, `team member list <vault-id>`, `team member role <vault-id> <member-id> <new-role>`, and `team member revoke <vault-id> <member-id>`.
   - `team audit <vault-id> [--limit <n>]`.
   - `team session start <session-id> <owner-id> [--vault-id <id>]`, `team session join <session-id> <user-id> <name>`, `team session grant <session-id> <requester-id> <target-user-id>`, `team session revoke <session-id> <requester-id>`, and `team session status <session-id>`.
+- Provides dedicated native keychain subcommands:
+  - `keychain status [--json]`: audits reachability of the native OS keychain daemon (`securityd`, Secret Service, `VaultSvc`).
+  - `keychain set <service> <account> <secret>`: stores secrets in the platform keychain and returns canonical `keychain://` references.
+  - `keychain get <service> <account> | <keychain://uri>`: retrieves and exposes stored secrets.
+  - `keychain delete <service> <account> | <keychain://uri>`: removes secrets from the native keychain.
+  - `identity add ... [--password <p>] [--passphrase <p>] [--password-ref <uri>] [--passphrase-ref <uri>]`: binds identity credentials without storing plaintext passwords in the database.
 - Provides dedicated session recording subcommands:
   - `session list [--host-id <id>] [--limit <n>]`: lists persistent session logs with duration and event stats.
   - `session show <id>`: displays session recording metadata, timestamps, and redaction verification.
@@ -131,6 +144,7 @@ crates/shellumi-app       GPUI desktop window with interactive host management
 - **Search & Filter:** Features a real-time host search and filtering input bar that dynamically filters hosts by name, hostname, username, group, jump host, or tags.
 - **Quick Connect:** Features an immediate Quick Connect bar (`user@host[:port]`) in the Hosts management view.
 - **Sync status & 3-Way Conflict Resolution:** Cloud sync orchestrates full sync cycles via `execute_sync_cycle` in `shellumi-core::sync`. When conflicting records are detected, `shellumi-app` presents the interactive Conflict Resolution Modal (`ConflictModalState`) displaying side-by-side local vs remote entity diffs and interactive resolution choices (`KeepLocal`, `AcceptRemote`), updating records and marking sync status as `UpToDate`.
+- **Native OS Keychain Daemon & Identity Display:** In the Keychain view, renders an OS Credential Daemon Status card showing daemon backend (`macOS Keychain`, `Linux Secret Service`, `Windows Credential Manager`), daemon identifier (`securityd`, D-Bus, `VaultSvc`), active/fallback indicators (`ACTIVE` in green, `FALLBACK` in amber), and detailed status. Saved identity entries display `🔐 Keychain` badges when `password_secret_ref` or `passphrase_secret_ref` is present.
 - **Host list display:** Shows group, jump-host, startup-snippet, and protocol badges (`[🔒 SSH]`, `[⚡ Mosh]`, `[⚠️ Telnet]`, `[🔌 Serial]`) alongside host actions. SSH-exclusive actions like SFTP are hidden for non-SSH hosts. Startup snippets are validated, rendered, and monitored safely via `StartupSessionTracker`.
 - **Connection dispatch and startup snippets:** Protocol dispatch exists. Startup snippets are not automatically sent because prompt-like output cannot establish SSH authentication readiness.
 - **Port-Forwarding Tunnel Manager:** The main toolbar provides a `[🚇 Tunnels]` action opening the Tunnel Manager Modal (`TunnelModalState`) with Command Palette integration (`PaletteAction::AddNewTunnel`). Tracks live tunnel telemetry (uptime, bytes sent/received, active connections), OpenSSH command previewing (`ssh -N -L ...`), start/stop toggling, and configuration for Local (-L), Remote (-R), and Dynamic SOCKS5 (-D) tunnels with non-blocking database persistence via `cx.background_executor()`.

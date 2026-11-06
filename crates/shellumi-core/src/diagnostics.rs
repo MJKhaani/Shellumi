@@ -397,46 +397,38 @@ impl DiagnosticsRunner {
     /// Checks the OS credential store backend.
     pub fn check_os_keychain(&self) -> DiagnosticCheck {
         let start = Instant::now();
-        let os = std::env::consts::OS;
+        let daemon = crate::credential::probe_keychain_daemon();
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        match os {
-            "macos" => DiagnosticCheck {
+        if daemon.is_available {
+            DiagnosticCheck {
                 id: "os_keychain".into(),
                 name: "OS Credential Store".into(),
                 category: DiagnosticCategory::Security,
                 status: DiagnosticStatus::Passed,
-                message: "macOS Keychain Services backend available".into(),
+                message: format!(
+                    "{} ({}) is available: {}",
+                    daemon.backend_name, daemon.daemon_identifier, daemon.details
+                ),
                 remediation: None,
                 duration_ms,
-            },
-            "linux" => DiagnosticCheck {
+            }
+        } else {
+            DiagnosticCheck {
                 id: "os_keychain".into(),
                 name: "OS Credential Store".into(),
                 category: DiagnosticCategory::Security,
                 status: DiagnosticStatus::Warning,
-                message: "Linux Secret Service integration is under development; using encrypted file fallback".into(),
-                remediation: Some("Ensure `gnome-keyring` or `ksecretservice` is active for future native unlock".into()),
+                message: format!(
+                    "{} ({}) unavailable: {}",
+                    daemon.backend_name, daemon.daemon_identifier, daemon.details
+                ),
+                remediation: Some(
+                    "Ensure native keychain daemon is running or using encrypted vault fallback"
+                        .into(),
+                ),
                 duration_ms,
-            },
-            "windows" => DiagnosticCheck {
-                id: "os_keychain".into(),
-                name: "OS Credential Store".into(),
-                category: DiagnosticCategory::Security,
-                status: DiagnosticStatus::Warning,
-                message: "Windows Credential Manager integration is under development; using encrypted file fallback".into(),
-                remediation: Some("Native Windows Credential Vault support scheduled for Phase 10 validation".into()),
-                duration_ms,
-            },
-            _ => DiagnosticCheck {
-                id: "os_keychain".into(),
-                name: "OS Credential Store".into(),
-                category: DiagnosticCategory::Security,
-                status: DiagnosticStatus::Warning,
-                message: format!("Platform '{os}' uses encrypted authenticated vault file store"),
-                remediation: None,
-                duration_ms,
-            },
+            }
         }
     }
 

@@ -11,31 +11,32 @@ use session::{Session, SessionEvent};
 #[cfg(test)]
 use shellumi_core::ActiveTunnelStatus;
 use shellumi_core::{
-    build_ssh_tunnel_command, check_dangerous_command, format_duration_hms, generate_bash_hook,
-    generate_fish_hook, generate_zsh_hook, list_local_directory, validate_jump_host,
-    AccessoryBarLayout, ActiveTunnelState, AnsibleInventoryEngine, AuditAction,
-    AutocompleteContext, AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary,
-    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner,
-    BenchmarkStatus, BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine,
-    CloudProviderConfig, CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView,
-    ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus, DiagnosticsReport,
-    DiagnosticsRunner, FileEntry, FileKind, ForwardingType, HostExportItem, MobileLifecycleEvent,
-    MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession,
-    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
-    PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule, SerialConfig,
-    SessionRecordingSummary, SessionRedactor, SharedVault, SharingAuditRecord, SshDestination,
-    TeamMember, TeamRole, TelnetConfig, TransferQueue, TransferStatus, VirtualAccessoryBar,
+    build_ssh_tunnel_command, check_dangerous_command, execute_cloud_vault_sync,
+    format_duration_hms, generate_bash_hook, generate_fish_hook, generate_zsh_hook,
+    list_local_directory, validate_jump_host, AccessoryBarLayout, ActiveTunnelState,
+    AnsibleInventoryEngine, AuditAction, AutocompleteContext, AutocompleteEngine,
+    BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy,
+    BatchRunner, BenchmarkReport, BenchmarkRunner, BenchmarkStatus, BroadcastManager,
+    BroadcastSafetyCheck, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind,
+    CompletionItem, CompletionKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol,
+    DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry, FileKind, ForwardingType,
+    GoogleDriveSyncClient, HostExportItem, MobileLifecycleEvent, MobileLifecycleManager,
+    MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession, PaletteAction,
+    PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector, PasswordPromptKind,
+    PathUtils, PlaybackStatus, PortForwardRule, SerialConfig, SessionRecordingSummary,
+    SessionRedactor, SftpClient, SftpConnectOptions, SftpError, SharedVault, SharingAuditRecord,
+    SshDestination, SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole,
+    TelnetConfig, TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar,
     VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 #[cfg(test)]
 use shellumi_core::{
     execute_sync_cycle, prepare_startup_snippet, EncryptedEnvelope, StartupExecutionPolicy,
-    StartupSessionTracker, StartupSnippetContext, StartupStatus, SyncCycleResult, SyncEntityType,
-    SyncRecord,
+    StartupSessionTracker, StartupSnippetContext, StartupStatus, SyncEntityType, SyncRecord,
 };
 use shellumi_storage::{
-    CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedSnippet, SavedTunnel,
-    SavedWorkspace, SessionRecordingRecord,
+    CloudProviderRecord, DiscoveredHostRecord, HostStore, SavedHost, SavedIdentity, SavedSnippet,
+    SavedTunnel, SavedWorkspace, SessionRecordingRecord,
 };
 use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, TerminalCommand};
 use text_input::TextInput;
@@ -294,6 +295,7 @@ struct Shellumi {
     snippets: Vec<SavedSnippet>,
     snippets_panel_open: bool,
     workspaces: Vec<SavedWorkspace>,
+    identities: Vec<SavedIdentity>,
     broadcast_manager: BroadcastManager,
     broadcast_warning: Option<String>,
     sync_status: AppSyncStatus,
@@ -386,6 +388,9 @@ enum SftpTabMode {
 #[derive(Clone, Debug, PartialEq)]
 struct SftpBrowserState {
     host_name: String,
+    destination: Option<SshDestination>,
+    jump_host: Option<String>,
+    loading: bool,
     local_path: String,
     remote_path: String,
     local_entries: Vec<FileEntry>,
@@ -538,6 +543,7 @@ impl Shellumi {
             snippets: Vec::new(),
             snippets_panel_open: false,
             workspaces: Vec::new(),
+            identities: Vec::new(),
             broadcast_manager: BroadcastManager::new(0),
             broadcast_warning: None,
             sync_status: AppSyncStatus::LocalOnly,
@@ -582,22 +588,52 @@ impl Shellumi {
                     .list_workspaces()
                     .await
                     .map_err(|error| error.to_string())?;
-                Ok::<_, String>((hosts, snippets, workspaces))
+                let identities = store
+                    .list_identities()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>((hosts, snippets, workspaces, identities))
             })
         });
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
                 match result {
-                    Ok((hosts, snippets, workspaces)) => {
+                    Ok((hosts, snippets, workspaces, identities)) => {
                         app.hosts = HostState::Loaded(hosts);
                         app.snippets = snippets;
                         app.workspaces = workspaces;
+                        app.identities = identities;
                         app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
                     }
                     Err(error) => app.hosts = HostState::Error(error),
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_identities(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                store.list_identities().await.map_err(|e| e.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Ok(ids) = res {
+                    app.identities = ids;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -739,6 +775,9 @@ impl Shellumi {
             let remote_entries = Vec::new();
             Some(SftpBrowserState {
                 host_name: name.clone(),
+                destination: None,
+                jump_host: None,
+                loading: false,
                 local_path,
                 remote_path,
                 local_entries,
@@ -1064,6 +1103,15 @@ impl Shellumi {
             host.destination.host()
         ));
         self.start_session(host.name.clone(), SessionKind::Sftp, command, window, cx);
+        if let Some(tab) = self.tabs.last_mut() {
+            if let Some(sftp) = &mut tab.sftp_state {
+                sftp.destination = Some(host.destination.clone());
+                sftp.jump_host = host.jump_host.clone();
+                sftp.mode = SftpTabMode::DualPane;
+            }
+        }
+        let tab_idx = self.tabs.len().saturating_sub(1);
+        self.sftp_refresh_remote(tab_idx, cx);
     }
 
     fn sftp_select_local(&mut self, tab_idx: usize, name: String, cx: &mut Context<Self>) {
@@ -1152,14 +1200,82 @@ impl Shellumi {
         }
     }
 
+    fn sftp_refresh_remote(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        let (dest, jump_host, remote_path, show_hidden) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let Some(sftp) = &mut tab.sftp_state else {
+                return;
+            };
+            let Some(dest) = sftp.destination.clone() else {
+                sftp.status_message =
+                    Some("No remote host destination configured for graphical browsing.".into());
+                cx.notify();
+                return;
+            };
+            sftp.loading = true;
+            sftp.error = None;
+            cx.notify();
+            (
+                dest,
+                sftp.jump_host.clone(),
+                sftp.remote_path.clone(),
+                sftp.show_hidden,
+            )
+        };
+
+        let task = cx.background_executor().spawn(async move {
+            let mut opts = SftpConnectOptions {
+                port: Some(dest.port().get()),
+                ..Default::default()
+            };
+            if let Some(jump) = jump_host {
+                opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
+            }
+            let mut client = SftpClient::connect(&dest, &opts)?;
+            let mut entries = client.list_remote_directory(&remote_path)?;
+            if !show_hidden {
+                entries.retain(|e| !e.is_hidden());
+            }
+            Ok::<Vec<FileEntry>, SftpError>(entries)
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                    if let Some(sftp) = &mut tab.sftp_state {
+                        sftp.loading = false;
+                        match res {
+                            Ok(entries) => {
+                                sftp.remote_entries = entries;
+                                sftp.error = None;
+                                sftp.status_message = Some(format!(
+                                    "Fetched {} remote items.",
+                                    sftp.remote_entries.len()
+                                ));
+                            }
+                            Err(err) => {
+                                sftp.error = Some(format!("Remote SFTP error: {err}"));
+                            }
+                        }
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     fn sftp_open_remote_dir(&mut self, tab_idx: usize, dir_name: String, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(sftp) = &mut tab.sftp_state {
                 sftp.remote_path = PathUtils::join_path(&sftp.remote_path, &dir_name);
                 sftp.selected_remote = None;
-                cx.notify();
             }
         }
+        self.sftp_refresh_remote(tab_idx, cx);
     }
 
     fn sftp_navigate_remote(
@@ -1172,20 +1288,29 @@ impl Shellumi {
             if let Some(sftp) = &mut tab.sftp_state {
                 sftp.remote_path = target_path;
                 sftp.selected_remote = None;
-                cx.notify();
             }
         }
+        self.sftp_refresh_remote(tab_idx, cx);
     }
 
     fn sftp_navigate_remote_up(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+        let has_parent = if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(sftp) = &mut tab.sftp_state {
                 if let Some(parent) = PathUtils::parent_path(&sftp.remote_path) {
                     sftp.remote_path = parent;
                     sftp.selected_remote = None;
-                    cx.notify();
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if has_parent {
+            self.sftp_refresh_remote(tab_idx, cx);
         }
     }
 
@@ -1199,6 +1324,7 @@ impl Shellumi {
                 cx.notify();
             }
         }
+        self.sftp_refresh_remote(tab_idx, cx);
     }
 
     fn sftp_toggle_mode(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
@@ -1207,15 +1333,11 @@ impl Shellumi {
             .get_mut(tab_idx)
             .and_then(|tab| tab.sftp_state.as_mut())
         {
-            browser.mode = SftpTabMode::Terminal;
-            browser.error=Some("Graphical remote browsing is not connected. Use the live SFTP terminal for file operations.".into());
-        }
-        if let Some(pane) = self
-            .tabs
-            .get_mut(tab_idx)
-            .and_then(|tab| tab.panes.first_mut())
-        {
-            pane.message=Some("Use the live SFTP terminal for file operations; the graphical transport is not connected.".into());
+            browser.mode = match browser.mode {
+                SftpTabMode::DualPane => SftpTabMode::Terminal,
+                SftpTabMode::Terminal => SftpTabMode::DualPane,
+            };
+            browser.error = None;
         }
         cx.notify();
     }
@@ -1231,34 +1353,196 @@ impl Shellumi {
                 cx.notify();
             }
         }
+        self.sftp_refresh_remote(tab_idx, cx);
     }
 
     fn sftp_upload_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        if let Some(browser) = self
-            .tabs
-            .get_mut(tab_idx)
-            .and_then(|tab| tab.sftp_state.as_mut())
-        {
-            browser.error = Some(
-                "Graphical transfers are not connected. Use put/get in the live SFTP terminal."
-                    .into(),
+        let (dest, jump_host, local_file_str, remote_file_str, selected_name, task_id) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let Some(sftp) = &mut tab.sftp_state else {
+                return;
+            };
+            let Some(selected_name) = sftp.selected_local.clone() else {
+                sftp.error = Some("Please select a local file to upload.".into());
+                cx.notify();
+                return;
+            };
+            let Some(dest) = sftp.destination.clone() else {
+                sftp.error = Some("Remote SFTP destination is not configured.".into());
+                cx.notify();
+                return;
+            };
+
+            let local_file_str = PathUtils::join_path(&sftp.local_path, &selected_name);
+            let remote_file_str = PathUtils::join_path(&sftp.remote_path, &selected_name);
+            let local_path_buf = std::path::PathBuf::from(&local_file_str);
+
+            let file_size = match std::fs::metadata(&local_path_buf) {
+                Ok(meta) => meta.len(),
+                Err(e) => {
+                    sftp.error = Some(format!("Cannot read local file: {e}"));
+                    cx.notify();
+                    return;
+                }
+            };
+
+            let task_id = sftp.queue.enqueue(
+                TransferDirection::Upload,
+                local_file_str.clone(),
+                remote_file_str.clone(),
+                file_size,
             );
-        }
-        cx.notify();
+            let _ = sftp.queue.dispatch_next();
+            sftp.status_message = Some(format!("Uploading '{selected_name}'…"));
+            sftp.error = None;
+            cx.notify();
+
+            (
+                dest,
+                sftp.jump_host.clone(),
+                local_file_str,
+                remote_file_str,
+                selected_name,
+                task_id,
+            )
+        };
+
+        let task = cx.background_executor().spawn(async move {
+            let mut opts = SftpConnectOptions {
+                port: Some(dest.port().get()),
+                ..Default::default()
+            };
+            if let Some(jump) = jump_host {
+                opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
+            }
+            let mut client = SftpClient::connect(&dest, &opts)?;
+            let local_path_buf = std::path::PathBuf::from(&local_file_str);
+            let transferred =
+                client.upload_file(&local_path_buf, &remote_file_str, None::<fn(u64, u64)>)?;
+            Ok::<u64, SftpError>(transferred)
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                    if let Some(sftp) = &mut tab.sftp_state {
+                        match res {
+                            Ok(bytes) => {
+                                sftp.queue.mark_completed(task_id);
+                                sftp.status_message =
+                                    Some(format!("Uploaded '{selected_name}' ({bytes} bytes)."));
+                                sftp.error = None;
+                            }
+                            Err(e) => {
+                                sftp.queue.mark_failed(task_id, e.to_string());
+                                sftp.error = Some(format!("Upload failed: {e}"));
+                            }
+                        }
+                        cx.notify();
+                    }
+                }
+                app.sftp_refresh_remote(tab_idx, cx);
+            });
+        })
+        .detach();
     }
 
     fn sftp_download_selected(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
-        if let Some(browser) = self
-            .tabs
-            .get_mut(tab_idx)
-            .and_then(|tab| tab.sftp_state.as_mut())
-        {
-            browser.error = Some(
-                "Graphical transfers are not connected. Use put/get in the live SFTP terminal."
-                    .into(),
+        let (dest, jump_host, remote_file_str, local_file_str, selected_name, task_id) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let Some(sftp) = &mut tab.sftp_state else {
+                return;
+            };
+            let Some(selected_name) = sftp.selected_remote.clone() else {
+                sftp.error = Some("Please select a remote file to download.".into());
+                cx.notify();
+                return;
+            };
+            let Some(dest) = sftp.destination.clone() else {
+                sftp.error = Some("Remote SFTP destination is not configured.".into());
+                cx.notify();
+                return;
+            };
+
+            let remote_file_str = PathUtils::join_path(&sftp.remote_path, &selected_name);
+            let local_file_str = PathUtils::join_path(&sftp.local_path, &selected_name);
+
+            let file_size = sftp
+                .remote_entries
+                .iter()
+                .find(|e| e.name == selected_name)
+                .map(|e| e.size)
+                .unwrap_or(0);
+
+            let task_id = sftp.queue.enqueue(
+                TransferDirection::Download,
+                local_file_str.clone(),
+                remote_file_str.clone(),
+                file_size,
             );
-        }
-        cx.notify();
+            let _ = sftp.queue.dispatch_next();
+            sftp.status_message = Some(format!("Downloading '{selected_name}'…"));
+            sftp.error = None;
+            cx.notify();
+
+            (
+                dest,
+                sftp.jump_host.clone(),
+                remote_file_str,
+                local_file_str,
+                selected_name,
+                task_id,
+            )
+        };
+
+        let task = cx.background_executor().spawn(async move {
+            let mut opts = SftpConnectOptions {
+                port: Some(dest.port().get()),
+                ..Default::default()
+            };
+            if let Some(jump) = jump_host {
+                opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
+            }
+            let mut client = SftpClient::connect(&dest, &opts)?;
+            let local_path_buf = std::path::PathBuf::from(&local_file_str);
+            let transferred =
+                client.download_file(&remote_file_str, &local_path_buf, None::<fn(u64, u64)>)?;
+            Ok::<u64, SftpError>(transferred)
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                    if let Some(sftp) = &mut tab.sftp_state {
+                        match res {
+                            Ok(bytes) => {
+                                sftp.queue.mark_completed(task_id);
+                                sftp.status_message =
+                                    Some(format!("Downloaded '{selected_name}' ({bytes} bytes)."));
+                                sftp.error = None;
+                                if let Ok(entries) =
+                                    list_local_directory(&sftp.local_path, sftp.show_hidden)
+                                {
+                                    sftp.local_entries = entries;
+                                }
+                            }
+                            Err(e) => {
+                                sftp.queue.mark_failed(task_id, e.to_string());
+                                sftp.error = Some(format!("Download failed: {e}"));
+                            }
+                        }
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn sftp_clear_completed(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
@@ -2022,15 +2306,202 @@ impl Shellumi {
     }
 
     fn apply_conflict_resolutions(&mut self, cx: &mut Context<Self>) {
-        self.conflict_modal = None;
-        self.sync_status =
-            AppSyncStatus::Error("Cloud conflict resolution is not connected.".into());
+        let Some(modal) = self.conflict_modal.take() else {
+            return;
+        };
+        let Some(path) = self.database.clone() else {
+            self.sync_status = AppSyncStatus::Error("Database not open.".into());
+            cx.notify();
+            return;
+        };
+
+        let token = std::env::var("SHELLUMI_GDRIVE_TOKEN")
+            .or_else(|_| std::env::var("GOOGLE_DRIVE_TOKEN"))
+            .unwrap_or_default();
+
+        if token.trim().is_empty() {
+            self.sync_status = AppSyncStatus::Error("Google Drive OAuth token not found.".into());
+            cx.notify();
+            return;
+        }
+
+        let passphrase = std::env::var("SHELLUMI_VAULT_PASSPHRASE")
+            .unwrap_or_else(|_| "default-shellumi-vault-key".to_string());
+        let device_id =
+            std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
+
+        let resolutions = modal.resolutions;
+        self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let local_vault = store
+                    .export_vault_with_iterations(&passphrase, &device_id, 2_000)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let client =
+                    GoogleDriveSyncClient::new(SystemHttpTransport::default(), "shellumi-desktop");
+                let cycle_result = execute_cloud_vault_sync(
+                    &client,
+                    &token,
+                    &local_vault,
+                    &passphrase,
+                    Some(&resolutions),
+                )
+                .map_err(|e| e.to_string())?;
+
+                match cycle_result {
+                    SyncCycleResult::AlreadySynchronized => Ok(()),
+                    SyncCycleResult::Success { merged_records, .. } => {
+                        let mut write_store =
+                            HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                        let mut merged_vault = SyncVault::new("cloud-vault", 0);
+                        merged_vault.records = merged_records;
+                        write_store
+                            .import_vault(&passphrase, &merged_vault)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok(())
+                    }
+                    SyncCycleResult::Conflicts(_) => {
+                        Err("Unexpected unresolved conflicts after resolution choices.".into())
+                    }
+                    SyncCycleResult::Error(err) => Err(err),
+                }
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok(()) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        app.sync_status = AppSyncStatus::UpToDate {
+                            last_sync_time: now,
+                        };
+                        app.start_storage(false, cx);
+                    }
+                    Err(e) => {
+                        app.sync_status = AppSyncStatus::Error(format!("Resolution error: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn trigger_sync(&mut self, cx: &mut Context<Self>) {
-        self.sync_status = AppSyncStatus::Error("Cloud sync is not connected.".into());
+        let Some(path) = self.database.clone() else {
+            self.sync_status = AppSyncStatus::Error("Database not open.".into());
+            cx.notify();
+            return;
+        };
+
+        let token = std::env::var("SHELLUMI_GDRIVE_TOKEN")
+            .or_else(|_| std::env::var("GOOGLE_DRIVE_TOKEN"))
+            .unwrap_or_default();
+
+        if token.trim().is_empty() {
+            self.sync_status = AppSyncStatus::Error(
+                "Google Drive OAuth token not found. Set GOOGLE_DRIVE_TOKEN or SHELLUMI_GDRIVE_TOKEN environment variable.".into(),
+            );
+            cx.notify();
+            return;
+        }
+
+        let passphrase = std::env::var("SHELLUMI_VAULT_PASSPHRASE")
+            .unwrap_or_else(|_| "default-shellumi-vault-key".to_string());
+        let device_id =
+            std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
+
+        self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let local_vault = store
+                    .export_vault_with_iterations(&passphrase, &device_id, 2_000)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let client =
+                    GoogleDriveSyncClient::new(SystemHttpTransport::default(), "shellumi-desktop");
+                let cycle_result =
+                    execute_cloud_vault_sync(&client, &token, &local_vault, &passphrase, None)
+                        .map_err(|e| e.to_string())?;
+
+                match cycle_result {
+                    SyncCycleResult::AlreadySynchronized => Ok((None, 0)),
+                    SyncCycleResult::Success { merged_records, .. } => {
+                        let mut write_store =
+                            HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                        let mut merged_vault = SyncVault::new("cloud-vault", 0);
+                        merged_vault.records = merged_records;
+                        let summary = write_store
+                            .import_vault(&passphrase, &merged_vault)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let count = summary.hosts_imported
+                            + summary.groups_imported
+                            + summary.tunnels_imported
+                            + summary.snippets_imported;
+                        Ok((None, count))
+                    }
+                    SyncCycleResult::Conflicts(conflict_views) => Ok((Some(conflict_views), 0)),
+                    SyncCycleResult::Error(err) => Err(err),
+                }
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok((Some(conflict_items), _)) => {
+                        let total_conflicts = conflict_items.len();
+                        let default_resolutions =
+                            vec![ConflictResolutionChoice::KeepLocal; total_conflicts];
+                        app.conflict_modal = Some(ConflictModalState {
+                            items: conflict_items,
+                            selected_index: 0,
+                            resolutions: default_resolutions,
+                            file_id: "google-drive-sync".into(),
+                        });
+                        app.sync_status = AppSyncStatus::Conflict {
+                            message: format!("{total_conflicts} conflicting changes detected"),
+                        };
+                    }
+                    Ok((None, _count)) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        app.sync_status = AppSyncStatus::UpToDate {
+                            last_sync_time: now,
+                        };
+                        app.start_storage(false, cx);
+                    }
+                    Err(e) => {
+                        app.sync_status = AppSyncStatus::Error(e);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn insert_snippet(&mut self, snippet_id: i64, execute: bool, cx: &mut Context<Self>) {
@@ -10728,7 +11199,15 @@ impl Shellumi {
             .flex_1()
             .overflow_y_scroll();
 
-        if state.remote_entries.is_empty() {
+        if state.loading {
+            remote_list_div = remote_list_div.child(
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(rgb(0x93c5fd))
+                    .child("Loading remote directory…"),
+            );
+        } else if state.remote_entries.is_empty() {
             remote_list_div = remote_list_div.child(
                 div()
                     .p_4()
@@ -13328,6 +13807,7 @@ mod tests {
                 startup_snippet_id: Some(42),
                 protocol: "ssh".into(),
                 protocol_config: None,
+                identity_id: None,
             },
             SavedHost {
                 id: 2,
@@ -13339,6 +13819,7 @@ mod tests {
                 startup_snippet_id: None,
                 protocol: "ssh".into(),
                 protocol_config: None,
+                identity_id: None,
             },
             SavedHost {
                 id: 3,
@@ -13350,6 +13831,7 @@ mod tests {
                 startup_snippet_id: None,
                 protocol: "ssh".into(),
                 protocol_config: None,
+                identity_id: None,
             },
         ];
 
@@ -13691,6 +14173,9 @@ mod tests {
 
         let mut sftp_state = SftpBrowserState {
             host_name: "prod-server".to_string(),
+            destination: None,
+            jump_host: None,
+            loading: false,
             local_path: "/Users/test/workspace".to_string(),
             remote_path: "/var/www".to_string(),
             local_entries: vec![
@@ -14113,6 +14598,7 @@ mod tests {
             startup_snippet_id: Some(99),
             protocol: "ssh".into(),
             protocol_config: None,
+            identity_id: None,
         };
 
         let template = "echo 'Welcome {{host.user}} to {{host.name}} ({{host.hostname}}:{{host.port}}) [{{host.group}}] tags: {{host.tags}} id: {{host.id}}'";

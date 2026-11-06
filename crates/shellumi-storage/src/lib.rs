@@ -1,17 +1,17 @@
 //! Local Turso storage. Credentials are never stored in this database.
 pub mod desktop;
 use shellumi_core::{
-    resolve_effective_destination, resolve_effective_tags, validate_jump_host, AuditAction,
-    CollaborationError, DestinationError, ForwardingType, GroupError, HostGroup, LogBookmark,
-    LogComment, PortForwardRule, SessionRecordingSummary, SharedSessionLog, SharedVault,
-    SharingAuditRecord, Snippet, SnippetError, SnippetVariable, SshDestination, TeamMember,
-    TeamRole, TransferDirection, TunnelError, WorkspaceError, WorkspaceSession,
+    resolve_effective_tags, validate_jump_host, AuditAction, CollaborationError, DestinationError,
+    ForwardingType, GroupError, HostGroup, LogBookmark, LogComment, PortForwardRule,
+    SessionRecordingSummary, SharedSessionLog, SharedVault, SharingAuditRecord, Snippet,
+    SnippetError, SnippetVariable, SshDestination, TeamMember, TeamRole, TransferDirection,
+    TunnelError, WorkspaceError, WorkspaceSession,
 };
 use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -30,6 +30,8 @@ pub enum StorageError {
     InvalidWorkspace(WorkspaceError),
     InvalidCollaboration(CollaborationError),
     InvalidRecording(String),
+    InvalidIdentity(shellumi_core::IdentityError),
+    InvalidCredential(shellumi_core::CredentialError),
     Serialization(String),
     InvalidSync(shellumi_core::SyncError),
     SnapshotNotFound(String),
@@ -58,11 +60,25 @@ impl fmt::Display for StorageError {
                 write!(f, "invalid collaboration operation: {error}")
             }
             Self::InvalidRecording(msg) => write!(f, "invalid session recording: {msg}"),
+            Self::InvalidIdentity(error) => write!(f, "invalid identity: {error}"),
+            Self::InvalidCredential(error) => write!(f, "credential store error: {error}"),
             Self::Serialization(error) => write!(f, "serialization error: {error}"),
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
             Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
             Self::MissingSchemaVersion => f.write_str("database did not return a schema version"),
         }
+    }
+}
+
+impl From<shellumi_core::IdentityError> for StorageError {
+    fn from(error: shellumi_core::IdentityError) -> Self {
+        Self::InvalidIdentity(error)
+    }
+}
+
+impl From<shellumi_core::CredentialError> for StorageError {
+    fn from(error: shellumi_core::CredentialError) -> Self {
+        Self::InvalidCredential(error)
     }
 }
 
@@ -115,6 +131,42 @@ pub struct SavedHost {
     pub startup_snippet_id: Option<i64>,
     pub protocol: String,
     pub protocol_config: Option<String>,
+    pub identity_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedIdentity {
+    pub id: i64,
+    pub name: String,
+    pub username: String,
+    pub auth_method: shellumi_core::AuthMethod,
+    pub password_secret_ref: Option<String>,
+    pub key_path: Option<String>,
+    pub passphrase_secret_ref: Option<String>,
+    pub certificate_path: Option<String>,
+    pub tags: Vec<String>,
+    pub comment: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl SavedIdentity {
+    pub fn to_identity(&self) -> shellumi_core::Identity {
+        shellumi_core::Identity {
+            id: self.id,
+            name: self.name.clone(),
+            username: self.username.clone(),
+            auth_method: self.auth_method.clone(),
+            password_secret_ref: self.password_secret_ref.clone(),
+            key_path: self.key_path.clone(),
+            passphrase_secret_ref: self.passphrase_secret_ref.clone(),
+            certificate_path: self.certificate_path.clone(),
+            tags: self.tags.clone(),
+            comment: self.comment.clone(),
+            created_at: Some(self.created_at.clone()),
+            updated_at: Some(self.updated_at.clone()),
+        }
+    }
 }
 
 impl SavedHost {
@@ -232,6 +284,8 @@ pub struct SyncHostPayload {
     pub protocol: String,
     #[serde(default)]
     pub protocol_config: Option<String>,
+    #[serde(default)]
+    pub identity_id: Option<i64>,
 }
 
 fn default_host_protocol() -> String {
@@ -244,6 +298,27 @@ pub struct SyncGroupPayload {
     pub default_username: Option<String>,
     pub default_port: Option<u16>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub identity_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SyncIdentityPayload {
+    pub name: String,
+    pub username: String,
+    pub auth_method: shellumi_core::AuthMethod,
+    #[serde(default)]
+    pub password_secret_ref: Option<String>,
+    #[serde(default)]
+    pub key_path: Option<String>,
+    #[serde(default)]
+    pub passphrase_secret_ref: Option<String>,
+    #[serde(default)]
+    pub certificate_path: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -398,6 +473,24 @@ impl HostStore {
         }
         if version == 0 {
             tx.execute(
+                "CREATE TABLE IF NOT EXISTS identities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE CHECK(length(trim(name)) > 0),
+                    username TEXT NOT NULL CHECK(length(trim(username)) > 0),
+                    auth_method TEXT NOT NULL,
+                    password_secret_ref TEXT,
+                    key_path TEXT,
+                    passphrase_secret_ref TEXT,
+                    certificate_path TEXT,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    comment TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
                 "CREATE TABLE snippets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL CHECK(length(name) > 0),
@@ -423,7 +516,8 @@ impl HostStore {
                     jump_host TEXT,
                     startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL,
                     protocol TEXT NOT NULL DEFAULT 'ssh',
-                    protocol_config TEXT
+                    protocol_config TEXT,
+                    identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL
                 )",
                 (),
             )
@@ -433,7 +527,8 @@ impl HostStore {
                     name TEXT PRIMARY KEY NOT NULL CHECK(length(name) > 0),
                     default_username TEXT,
                     default_port INTEGER CHECK(default_port IS NULL OR (default_port BETWEEN 1 AND 65535)),
-                    tags TEXT NOT NULL DEFAULT ''
+                    tags TEXT NOT NULL DEFAULT '',
+                    identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL
                 )",
                 (),
             )
@@ -605,7 +700,7 @@ impl HostStore {
                 (),
             )
             .await?;
-            tx.execute("PRAGMA user_version = 13", ()).await?;
+            tx.execute("PRAGMA user_version = 14", ()).await?;
         } else if version == 1 {
             // Migrate schema version 1 to 8
             tx.execute("ALTER TABLE hosts ADD COLUMN group_name TEXT", ())
@@ -1134,7 +1229,7 @@ impl HostStore {
             tx.execute("PRAGMA user_version = 10", ()).await?;
         }
 
-        if version > 0 && version < 13 {
+        if version > 0 && version < 14 {
             if version < 12 {
                 // Migrate schema to version 11: Shared Vaults & Team Collaboration
                 tx.execute(
@@ -1233,30 +1328,157 @@ impl HostStore {
                 .await?;
             }
 
-            // Migrate schema to version 13: Terminal Session Recordings
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS session_recordings (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
-                    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
-                    duration_secs REAL NOT NULL CHECK(duration_secs >= 0.0),
-                    event_count INTEGER NOT NULL CHECK(event_count >= 0),
-                    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
-                    cast_data TEXT NOT NULL,
-                    recorded_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-                )",
-                (),
-            )
-            .await?;
-            tx.execute("PRAGMA user_version = 13", ()).await?;
+            if version < 13 {
+                // Migrate schema to version 13: Terminal Session Recordings
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS session_recordings (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+                        title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                        duration_secs REAL NOT NULL CHECK(duration_secs >= 0.0),
+                        event_count INTEGER NOT NULL CHECK(event_count >= 0),
+                        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                        cast_data TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )",
+                    (),
+                )
+                .await?;
+            }
+
+            if version < 14 {
+                // Migrate schema to version 14: Reusable Identities & OpenSSH Certificates
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS identities (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE CHECK(length(trim(name)) > 0),
+                        username TEXT NOT NULL CHECK(length(trim(username)) > 0),
+                        auth_method TEXT NOT NULL,
+                        password_secret_ref TEXT,
+                        key_path TEXT,
+                        passphrase_secret_ref TEXT,
+                        certificate_path TEXT,
+                        tags TEXT NOT NULL DEFAULT '[]',
+                        comment TEXT,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )",
+                    (),
+                )
+                .await?;
+
+                let mut has_host_identity_id = false;
+                let mut h_rows = tx.query("PRAGMA table_info(hosts)", ()).await?;
+                while let Some(row) = h_rows.next().await? {
+                    let col: String = row.get(1)?;
+                    if col == "identity_id" {
+                        has_host_identity_id = true;
+                        break;
+                    }
+                }
+                if !has_host_identity_id {
+                    tx.execute(
+                        "ALTER TABLE hosts ADD COLUMN identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL",
+                        (),
+                    )
+                    .await?;
+                }
+
+                let mut has_groups_table = false;
+                let mut g_table_rows = tx
+                    .query(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='groups'",
+                        (),
+                    )
+                    .await?;
+                if g_table_rows.next().await?.is_some() {
+                    has_groups_table = true;
+                }
+
+                if has_groups_table {
+                    let mut has_group_identity_id = false;
+                    let mut g_rows = tx.query("PRAGMA table_info(groups)", ()).await?;
+                    while let Some(row) = g_rows.next().await? {
+                        let col: String = row.get(1)?;
+                        if col == "identity_id" {
+                            has_group_identity_id = true;
+                            break;
+                        }
+                    }
+                    if !has_group_identity_id {
+                        tx.execute(
+                            "ALTER TABLE groups ADD COLUMN identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL",
+                            (),
+                        )
+                        .await?;
+                    }
+                } else {
+                    tx.execute(
+                        "CREATE TABLE IF NOT EXISTS groups (
+                            name TEXT PRIMARY KEY NOT NULL CHECK(length(name) > 0),
+                            default_username TEXT,
+                            default_port INTEGER CHECK(default_port IS NULL OR (default_port BETWEEN 1 AND 65535)),
+                            tags TEXT NOT NULL DEFAULT '',
+                            identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL
+                        )",
+                        (),
+                    )
+                    .await?;
+                }
+            }
+            tx.execute("PRAGMA user_version = 14", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {
             _database: database,
             connection,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_full(
+        &mut self,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+        identity_id: Option<i64>,
+    ) -> Result<i64, StorageError> {
+        let name = validated_name(name)?;
+        let group = validated_group(group_name)?;
+        let tags_serialized = validated_tags(tags)?;
+        let jump = validated_jump_host(jump_host)?;
+        let proto = if protocol.trim().is_empty() {
+            "ssh"
+        } else {
+            protocol.trim()
+        };
+
+        self.connection
+            .execute(
+                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (
+                    name,
+                    destination.host(),
+                    destination.username(),
+                    i64::from(destination.port().get()),
+                    group,
+                    tags_serialized,
+                    jump,
+                    startup_snippet_id,
+                    proto,
+                    protocol_config,
+                    identity_id,
+                ),
+            )
+            .await?;
+        Ok(self.connection.last_insert_rowid())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1271,34 +1493,18 @@ impl HostStore {
         protocol: &str,
         protocol_config: Option<&str>,
     ) -> Result<i64, StorageError> {
-        let name = validated_name(name)?;
-        let group = validated_group(group_name)?;
-        let tags_serialized = validated_tags(tags)?;
-        let jump = validated_jump_host(jump_host)?;
-        let proto = if protocol.trim().is_empty() {
-            "ssh"
-        } else {
-            protocol.trim()
-        };
-
-        self.connection
-            .execute(
-                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                (
-                    name,
-                    destination.host(),
-                    destination.username(),
-                    i64::from(destination.port().get()),
-                    group,
-                    tags_serialized,
-                    jump,
-                    startup_snippet_id,
-                    proto,
-                    protocol_config,
-                ),
-            )
-            .await?;
-        Ok(self.connection.last_insert_rowid())
+        self.add_full(
+            name,
+            destination,
+            group_name,
+            tags,
+            jump_host,
+            startup_snippet_id,
+            protocol,
+            protocol_config,
+            None,
+        )
+        .await
     }
 
     pub async fn add(
@@ -1323,9 +1529,9 @@ impl HostStore {
         .await
     }
 
-    /// Update an existing host, returning false if its ID is not present.
+    /// Update an existing host with full options including protocol and identity.
     #[allow(clippy::too_many_arguments)]
-    pub async fn update_with_protocol(
+    pub async fn update_full(
         &mut self,
         id: i64,
         name: &str,
@@ -1336,6 +1542,7 @@ impl HostStore {
         startup_snippet_id: Option<i64>,
         protocol: &str,
         protocol_config: Option<&str>,
+        identity_id: Option<i64>,
     ) -> Result<bool, StorageError> {
         let name = validated_name(name)?;
         let group = validated_group(group_name)?;
@@ -1350,7 +1557,7 @@ impl HostStore {
         Ok(self
             .connection
             .execute(
-                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10 WHERE id = ?11",
+                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10, identity_id = ?11 WHERE id = ?12",
                 (
                     name,
                     destination.host(),
@@ -1362,11 +1569,41 @@ impl HostStore {
                     startup_snippet_id,
                     proto,
                     protocol_config,
+                    identity_id,
                     id,
                 ),
             )
             .await?
             != 0)
+    }
+
+    /// Update an existing host, returning false if its ID is not present.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_with_protocol(
+        &mut self,
+        id: i64,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        self.update_full(
+            id,
+            name,
+            destination,
+            group_name,
+            tags,
+            jump_host,
+            startup_snippet_id,
+            protocol,
+            protocol_config,
+            None,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1398,7 +1635,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config FROM hosts ORDER BY id",
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id FROM hosts ORDER BY id",
                 (),
             )
             .await?;
@@ -1415,6 +1652,7 @@ impl HostStore {
             let startup_snippet_id: Option<i64> = row.get(8)?;
             let protocol: Option<String> = row.get(9)?;
             let protocol_config: Option<String> = row.get(10)?;
+            let identity_id: Option<i64> = row.get(11)?;
 
             if name.trim().is_empty() || name.chars().any(char::is_control) {
                 return Err(StorageError::InvalidName);
@@ -1433,6 +1671,7 @@ impl HostStore {
                 startup_snippet_id,
                 protocol: protocol.unwrap_or_else(|| "ssh".to_string()),
                 protocol_config,
+                identity_id,
             });
         }
         Ok(hosts)
@@ -1442,7 +1681,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config FROM hosts WHERE id = ?1",
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id FROM hosts WHERE id = ?1",
                 (id,),
             )
             .await?;
@@ -1458,6 +1697,7 @@ impl HostStore {
             let startup_snippet_id: Option<i64> = row.get(8)?;
             let protocol: Option<String> = row.get(9)?;
             let protocol_config: Option<String> = row.get(10)?;
+            let identity_id: Option<i64> = row.get(11)?;
 
             if name.trim().is_empty() || name.chars().any(char::is_control) {
                 return Err(StorageError::InvalidName);
@@ -1476,6 +1716,7 @@ impl HostStore {
                 startup_snippet_id,
                 protocol: protocol.unwrap_or_else(|| "ssh".to_string()),
                 protocol_config,
+                identity_id,
             }))
         } else {
             Ok(None)
@@ -1528,12 +1769,13 @@ impl HostStore {
         let default_port = group.default_port.map(|p| i64::from(p.get()));
         self.connection
             .execute(
-                "INSERT INTO groups (name, default_username, default_port, tags) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO groups (name, default_username, default_port, tags, identity_id) VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
                     group.name.as_str(),
                     group.default_username.as_deref(),
                     default_port,
                     tags_serialized,
+                    group.identity_id,
                 ),
             )
             .await?;
@@ -1546,11 +1788,12 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE groups SET default_username = ?1, default_port = ?2, tags = ?3 WHERE name = ?4",
+                "UPDATE groups SET default_username = ?1, default_port = ?2, tags = ?3, identity_id = ?4 WHERE name = ?5",
                 (
                     group.default_username.as_deref(),
                     default_port,
                     tags_serialized,
+                    group.identity_id,
                     group.name.as_str(),
                 ),
             )
@@ -1562,7 +1805,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT name, default_username, default_port, tags FROM groups WHERE name = ?1",
+                "SELECT name, default_username, default_port, tags, identity_id FROM groups WHERE name = ?1",
                 (name.trim(),),
             )
             .await?;
@@ -1571,6 +1814,7 @@ impl HostStore {
             let default_username: Option<String> = row.get(1)?;
             let default_port: Option<i64> = row.get(2)?;
             let tags_str: String = row.get(3)?;
+            let identity_id: Option<i64> = row.get(4)?;
             let tags = parse_tags(&tags_str);
             let port = match default_port {
                 Some(p) => {
@@ -1580,7 +1824,8 @@ impl HostStore {
                 None => None,
             };
             let group = HostGroup::new(&name, default_username.as_deref(), port, &tags)
-                .map_err(StorageError::InvalidGroup)?;
+                .map_err(StorageError::InvalidGroup)?
+                .with_identity_id(identity_id);
             Ok(Some(group))
         } else {
             Ok(None)
@@ -1591,7 +1836,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT name, default_username, default_port, tags FROM groups ORDER BY name",
+                "SELECT name, default_username, default_port, tags, identity_id FROM groups ORDER BY name",
                 (),
             )
             .await?;
@@ -1601,6 +1846,7 @@ impl HostStore {
             let default_username: Option<String> = row.get(1)?;
             let default_port: Option<i64> = row.get(2)?;
             let tags_str: String = row.get(3)?;
+            let identity_id: Option<i64> = row.get(4)?;
             let tags = parse_tags(&tags_str);
             let port = match default_port {
                 Some(p) => {
@@ -1610,7 +1856,8 @@ impl HostStore {
                 None => None,
             };
             let group = HostGroup::new(&name, default_username.as_deref(), port, &tags)
-                .map_err(StorageError::InvalidGroup)?;
+                .map_err(StorageError::InvalidGroup)?
+                .with_identity_id(identity_id);
             groups.push(group);
         }
         Ok(groups)
@@ -1624,22 +1871,296 @@ impl HostStore {
         Ok(rows != 0)
     }
 
+    pub async fn create_identity(
+        &mut self,
+        identity: &shellumi_core::NewIdentity,
+    ) -> Result<i64, StorageError> {
+        let name = validated_name(&identity.name)?;
+        let username = identity.username.trim();
+        if username.is_empty()
+            || username
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(StorageError::InvalidIdentity(
+                shellumi_core::IdentityError::InvalidIdentityField(
+                    "username must not be empty or contain whitespace".to_string(),
+                ),
+            ));
+        }
+        let auth_method_json = serde_json::to_string(&identity.auth_method)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags_json = serde_json::to_string(&identity.tags)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        self.connection
+            .execute(
+                "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (
+                    name,
+                    username,
+                    auth_method_json,
+                    identity.password_secret_ref.as_deref(),
+                    identity.key_path.as_deref(),
+                    identity.passphrase_secret_ref.as_deref(),
+                    identity.certificate_path.as_deref(),
+                    tags_json,
+                    identity.comment.as_deref(),
+                ),
+            )
+            .await?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    pub async fn get_identity(&self, id: i64) -> Result<Option<SavedIdentity>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            Self::parse_identity_row(&row).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn get_identity_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SavedIdentity>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE name = ?1",
+                (name.trim(),),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            Self::parse_identity_row(&row).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_identities(&self) -> Result<Vec<SavedIdentity>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities ORDER BY name",
+                (),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            list.push(Self::parse_identity_row(&row)?);
+        }
+        Ok(list)
+    }
+
+    pub async fn update_identity(
+        &mut self,
+        id: i64,
+        identity: &shellumi_core::NewIdentity,
+    ) -> Result<bool, StorageError> {
+        let name = validated_name(&identity.name)?;
+        let username = identity.username.trim();
+        if username.is_empty()
+            || username
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(StorageError::InvalidIdentity(
+                shellumi_core::IdentityError::InvalidIdentityField(
+                    "username must not be empty or contain whitespace".to_string(),
+                ),
+            ));
+        }
+        let auth_method_json = serde_json::to_string(&identity.auth_method)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags_json = serde_json::to_string(&identity.tags)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE identities SET name = ?1, username = ?2, auth_method = ?3, password_secret_ref = ?4, key_path = ?5, passphrase_secret_ref = ?6, certificate_path = ?7, tags = ?8, comment = ?9, updated_at = datetime('now') WHERE id = ?10",
+                (
+                    name,
+                    username,
+                    auth_method_json,
+                    identity.password_secret_ref.as_deref(),
+                    identity.key_path.as_deref(),
+                    identity.passphrase_secret_ref.as_deref(),
+                    identity.certificate_path.as_deref(),
+                    tags_json,
+                    identity.comment.as_deref(),
+                    id,
+                ),
+            )
+            .await?;
+        Ok(rows != 0)
+    }
+
+    pub async fn delete_identity(&mut self, id: i64) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute("DELETE FROM identities WHERE id = ?1", (id,))
+            .await?;
+        Ok(rows != 0)
+    }
+
+    /// Creates an identity, persisting any provided plaintext password or passphrase into the
+    /// native credential store using canonical `keychain://` references, ensuring no secrets
+    /// ever enter the database or disk in plaintext.
+    pub async fn create_identity_with_secrets(
+        &mut self,
+        mut identity: shellumi_core::NewIdentity,
+        password: Option<&str>,
+        passphrase: Option<&str>,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<i64, StorageError> {
+        let account_base = format!("identity:{}", identity.name.trim());
+        if let Some(pw) = password {
+            let acc = format!("{account_base}:password");
+            let uri = shellumi_core::store_secret_to_ref(
+                store,
+                shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
+                &acc,
+                pw,
+            )?;
+            identity.password_secret_ref = Some(uri);
+        }
+        if let Some(pp) = passphrase {
+            let acc = format!("{account_base}:passphrase");
+            let uri = shellumi_core::store_secret_to_ref(
+                store,
+                shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
+                &acc,
+                pp,
+            )?;
+            identity.passphrase_secret_ref = Some(uri);
+        }
+        self.create_identity(&identity).await
+    }
+
+    /// Resolves the password secret for an identity from the configured credential store.
+    pub fn resolve_identity_password(
+        &self,
+        identity: &SavedIdentity,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<Option<shellumi_core::SecretString>, StorageError> {
+        match &identity.password_secret_ref {
+            Some(ref_uri) => Ok(shellumi_core::resolve_secret_from_ref(store, ref_uri)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Resolves the private key passphrase for an identity from the configured credential store.
+    pub fn resolve_identity_passphrase(
+        &self,
+        identity: &SavedIdentity,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<Option<shellumi_core::SecretString>, StorageError> {
+        match &identity.passphrase_secret_ref {
+            Some(ref_uri) => Ok(shellumi_core::resolve_secret_from_ref(store, ref_uri)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Deletes an identity along with any secrets referenced in native credential store.
+    pub async fn delete_identity_with_secrets(
+        &mut self,
+        id: i64,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<bool, StorageError> {
+        if let Some(identity) = self.get_identity(id).await? {
+            if let Some(ref_uri) = &identity.password_secret_ref {
+                let _ = shellumi_core::delete_secret_by_ref(store, ref_uri);
+            }
+            if let Some(ref_uri) = &identity.passphrase_secret_ref {
+                let _ = shellumi_core::delete_secret_by_ref(store, ref_uri);
+            }
+        }
+        self.delete_identity(id).await
+    }
+
+    fn parse_identity_row(row: &turso::Row) -> Result<SavedIdentity, StorageError> {
+        let id: i64 = row.get(0)?;
+        let name: String = row.get(1)?;
+        let username: String = row.get(2)?;
+        let auth_method_str: String = row.get(3)?;
+        let password_secret_ref: Option<String> = row.get(4)?;
+        let key_path: Option<String> = row.get(5)?;
+        let passphrase_secret_ref: Option<String> = row.get(6)?;
+        let certificate_path: Option<String> = row.get(7)?;
+        let tags_str: String = row.get(8)?;
+        let comment: Option<String> = row.get(9)?;
+        let created_at: String = row.get(10)?;
+        let updated_at: String = row.get(11)?;
+
+        let auth_method: shellumi_core::AuthMethod = serde_json::from_str(&auth_method_str)
+            .or_else(|_| shellumi_core::AuthMethod::parse(&auth_method_str, None))
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags: Vec<String> =
+            serde_json::from_str(&tags_str).unwrap_or_else(|_| parse_tags(&tags_str));
+
+        Ok(SavedIdentity {
+            id,
+            name,
+            username,
+            auth_method,
+            password_secret_ref,
+            key_path,
+            passphrase_secret_ref,
+            certificate_path,
+            tags,
+            comment,
+            created_at,
+            updated_at,
+        })
+    }
+
     pub async fn get_effective_destination(
         &self,
         host: &SavedHost,
     ) -> Result<SshDestination, StorageError> {
-        if let Some(group_name) = &host.group_name {
-            if let Some(group) = self.get_group(group_name).await? {
-                return resolve_effective_destination(
-                    host.destination.host(),
-                    Some(host.destination.username()),
-                    Some(host.destination.port().get()),
-                    Some(&group),
-                )
-                .map_err(StorageError::InvalidDestination);
+        let identity = if let Some(id) = host.identity_id {
+            self.get_identity(id).await?.map(|i| i.to_identity())
+        } else {
+            None
+        };
+
+        let group = if let Some(group_name) = &host.group_name {
+            self.get_group(group_name).await?
+        } else {
+            None
+        };
+
+        let fallback_identity = if identity.is_none() {
+            if let Some(ref g) = group {
+                if let Some(gid) = g.identity_id {
+                    self.get_identity(gid).await?.map(|i| i.to_identity())
+                } else {
+                    None
+                }
+            } else {
+                None
             }
-        }
-        Ok(host.destination.clone())
+        } else {
+            identity
+        };
+
+        shellumi_core::resolve_effective_destination_with_identity(
+            host.destination.host(),
+            Some(host.destination.username()),
+            Some(host.destination.port().get()),
+            group.as_ref(),
+            fallback_identity.as_ref(),
+        )
+        .map_err(StorageError::InvalidDestination)
     }
 
     pub async fn get_effective_tags(&self, host: &SavedHost) -> Result<Vec<String>, StorageError> {
@@ -2945,6 +3466,37 @@ impl HostStore {
             .as_secs();
         let mut vault = shellumi_core::SyncVault::new(format!("vault-{device_id}-{now}"), now);
 
+        // Export identities
+        let identities = self.list_identities().await?;
+        for ident in identities {
+            let payload = SyncIdentityPayload {
+                name: ident.name.clone(),
+                username: ident.username.clone(),
+                auth_method: ident.auth_method.clone(),
+                password_secret_ref: ident.password_secret_ref.clone(),
+                key_path: ident.key_path.clone(),
+                passphrase_secret_ref: ident.passphrase_secret_ref.clone(),
+                certificate_path: ident.certificate_path.clone(),
+                tags: ident.tags.clone(),
+                comment: ident.comment.clone(),
+            };
+            let envelope = shellumi_core::encrypt_entity_with_iterations(
+                passphrase,
+                "identity",
+                &ident.name,
+                &payload,
+                iterations,
+            )?;
+            vault.records.push(shellumi_core::SyncRecord::new(
+                ident.name,
+                shellumi_core::SyncEntityType::Identity,
+                1,
+                device_id,
+                now,
+                envelope,
+            ));
+        }
+
         // Export groups
         let groups = self.list_groups().await?;
         for group in groups {
@@ -2953,6 +3505,7 @@ impl HostStore {
                 default_username: group.default_username.clone(),
                 default_port: group.default_port.map(|p| p.get()),
                 tags: group.tags.clone(),
+                identity_id: group.identity_id,
             };
             let envelope = shellumi_core::encrypt_entity_with_iterations(
                 passphrase,
@@ -2985,6 +3538,7 @@ impl HostStore {
                 startup_snippet_id: host.startup_snippet_id,
                 protocol: host.protocol.clone(),
                 protocol_config: host.protocol_config.clone(),
+                identity_id: host.identity_id,
             };
             let object_id = format!("{}:{}", host.name, host.destination.host());
             let envelope = shellumi_core::encrypt_entity_with_iterations(
@@ -3378,6 +3932,36 @@ impl HostStore {
                         Err(e) => summary
                             .errors
                             .push(format!("CloudProvider {}: {e}", record.object_id)),
+                    }
+                }
+                shellumi_core::SyncEntityType::Identity => {
+                    match shellumi_core::decrypt_entity::<SyncIdentityPayload>(passphrase, envelope)
+                    {
+                        Ok(payload) => {
+                            if let Ok(mut new_id) = shellumi_core::NewIdentity::new(
+                                &payload.name,
+                                &payload.username,
+                                payload.auth_method,
+                            ) {
+                                new_id.password_secret_ref = payload.password_secret_ref;
+                                new_id.key_path = payload.key_path;
+                                new_id.passphrase_secret_ref = payload.passphrase_secret_ref;
+                                new_id.certificate_path = payload.certificate_path;
+                                new_id.tags = payload.tags;
+                                new_id.comment = payload.comment;
+
+                                if let Ok(Some(existing)) =
+                                    self.get_identity_by_name(&new_id.name).await
+                                {
+                                    let _ = self.update_identity(existing.id, &new_id).await;
+                                } else {
+                                    let _ = self.create_identity(&new_id).await;
+                                }
+                            }
+                        }
+                        Err(e) => summary
+                            .errors
+                            .push(format!("Identity {}: {e}", record.object_id)),
                     }
                 }
             }
@@ -4766,6 +5350,7 @@ mod tests {
                 startup_snippet_id: None,
                 protocol: "ssh".into(),
                 protocol_config: None,
+                identity_id: None,
             }]
         );
 
@@ -4851,6 +5436,7 @@ mod tests {
                 startup_snippet_id: None,
                 protocol: "ssh".into(),
                 protocol_config: None,
+                identity_id: None,
             }]
         );
     }
@@ -5370,7 +5956,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Reopen database; should auto-migrate to version 13
+        // Reopen database; should auto-migrate to version 14
         let mut store = HostStore::open(path_str).await.unwrap();
         let mut rows = store
             .connection
@@ -5378,7 +5964,7 @@ mod tests {
             .await
             .unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
 
         // Add a host
         let dest = SshDestination::new("10.0.0.50", "admin", 22).unwrap();
@@ -5479,5 +6065,213 @@ mod tests {
             created_at: "now".to_string(),
         };
         assert!(store.save_session_recording(&invalid).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn migrates_schema_to_version_14_and_manages_identities_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v13.db");
+        let path_str = path.to_str().unwrap();
+
+        // 1. Create a database with user_version = 13 without identities table
+        {
+            let store = HostStore::open(path_str).await.unwrap();
+            store
+                .connection
+                .execute("PRAGMA user_version = 13", ())
+                .await
+                .unwrap();
+            store
+                .connection
+                .execute("DROP TABLE IF EXISTS identities", ())
+                .await
+                .unwrap();
+        }
+
+        // 2. Reopen database; should auto-migrate to version 14
+        let mut store = HostStore::open(path_str).await.unwrap();
+        let mut rows = store
+            .connection
+            .query("PRAGMA user_version", ())
+            .await
+            .unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(version, 14);
+
+        // 3. Create identities
+        let mut new_id1 = shellumi_core::NewIdentity::new(
+            "Cloud Ops",
+            "ubuntu",
+            shellumi_core::AuthMethod::PublicKey {
+                key_name: "ops_ed25519".into(),
+            },
+        )
+        .unwrap()
+        .with_tags(&["cloud".to_string(), "infra".to_string()])
+        .unwrap();
+        new_id1.key_path = Some("/home/user/.ssh/ops_ed25519".into());
+        new_id1.comment = Some("Primary devops identity".into());
+
+        let id1 = store.create_identity(&new_id1).await.unwrap();
+        assert!(id1 > 0);
+
+        let mut new_id2 = shellumi_core::NewIdentity::new(
+            "Bastion Certificate User",
+            "cert-admin",
+            shellumi_core::AuthMethod::Certificate {
+                cert_path: "/etc/ssh/user-cert.pub".into(),
+                key_path: Some("/etc/ssh/user-key".into()),
+            },
+        )
+        .unwrap();
+        new_id2.certificate_path = Some("/etc/ssh/user-cert.pub".into());
+        let id2 = store.create_identity(&new_id2).await.unwrap();
+        assert!(id2 > id1);
+
+        // 4. Retrieve and verify identities
+        let fetched1 = store.get_identity(id1).await.unwrap().unwrap();
+        assert_eq!(fetched1.name, "Cloud Ops");
+        assert_eq!(fetched1.username, "ubuntu");
+        assert_eq!(
+            fetched1.key_path,
+            Some("/home/user/.ssh/ops_ed25519".into())
+        );
+        assert_eq!(fetched1.tags, vec!["cloud", "infra"]);
+
+        let fetched_by_name = store
+            .get_identity_by_name("Bastion Certificate User")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched_by_name.id, id2);
+        assert_eq!(fetched_by_name.username, "cert-admin");
+
+        let all_identities = store.list_identities().await.unwrap();
+        assert_eq!(all_identities.len(), 2);
+
+        // 5. Update identity
+        new_id1.username = "admin_user".into();
+        assert!(store.update_identity(id1, &new_id1).await.unwrap());
+        let updated1 = store.get_identity(id1).await.unwrap().unwrap();
+        assert_eq!(updated1.username, "admin_user");
+
+        // 6. Bind identity to a host and to a group
+        let group = HostGroup::new("Cloud Cluster", None, Some(22), &["cloud".into()])
+            .unwrap()
+            .with_identity_id(Some(id1));
+        store.add_group(&group).await.unwrap();
+
+        let host_dest = SshDestination::new("10.0.1.10", "default_placeholder", 22).unwrap();
+        let host_id = store
+            .add_full(
+                "App Server",
+                &host_dest,
+                Some("Cloud Cluster"),
+                &["web".into()],
+                None,
+                None,
+                "ssh",
+                None,
+                Some(id2),
+            )
+            .await
+            .unwrap();
+
+        let saved_host = store.get_host(host_id).await.unwrap().unwrap();
+        assert_eq!(saved_host.identity_id, Some(id2));
+
+        // Effective destination should use host's identity username ("cert-admin")
+        let effective_dest = store.get_effective_destination(&saved_host).await.unwrap();
+        assert_eq!(effective_dest.username(), "cert-admin");
+
+        // 7. Test group identity inheritance when host identity is None
+        let host_id2 = store
+            .add_full(
+                "DB Server",
+                &host_dest,
+                Some("Cloud Cluster"),
+                &["db".into()],
+                None,
+                None,
+                "ssh",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let saved_host2 = store.get_host(host_id2).await.unwrap().unwrap();
+        assert_eq!(saved_host2.identity_id, None);
+        // Effective destination should inherit from group's identity username ("admin_user")
+        let effective_dest2 = store.get_effective_destination(&saved_host2).await.unwrap();
+        assert_eq!(effective_dest2.username(), "admin_user");
+
+        // 8. Delete identity: foreign key should set host and group identity_id to NULL
+        assert!(store.delete_identity(id2).await.unwrap());
+        let host_after_delete = store.get_host(host_id).await.unwrap().unwrap();
+        assert_eq!(host_after_delete.identity_id, None);
+    }
+
+    #[tokio::test]
+    async fn manages_identity_keychain_secrets_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets_test.db");
+        let path_str = path.to_str().unwrap();
+
+        let mut host_store = HostStore::open(path_str).await.unwrap();
+        let key_store = shellumi_core::EphemeralCredentialStore::new();
+
+        let new_id = shellumi_core::NewIdentity::new(
+            "Production Bastion",
+            "deployer",
+            shellumi_core::AuthMethod::Password,
+        )
+        .unwrap();
+
+        let id = host_store
+            .create_identity_with_secrets(
+                new_id,
+                Some("very-secure-password-123"),
+                Some("key-passphrase-456"),
+                &key_store,
+            )
+            .await
+            .unwrap();
+
+        let saved = host_store.get_identity(id).await.unwrap().unwrap();
+        assert!(saved.password_secret_ref.is_some());
+        assert!(saved.passphrase_secret_ref.is_some());
+
+        let pw_ref = saved.password_secret_ref.as_ref().unwrap();
+        assert!(pw_ref.starts_with("keychain://"));
+        let pp_ref = saved.passphrase_secret_ref.as_ref().unwrap();
+        assert!(pp_ref.starts_with("keychain://"));
+
+        // Resolve secrets via HostStore
+        let resolved_pw = host_store
+            .resolve_identity_password(&saved, &key_store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_pw.expose_secret(), "very-secure-password-123");
+
+        let resolved_pp = host_store
+            .resolve_identity_passphrase(&saved, &key_store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_pp.expose_secret(), "key-passphrase-456");
+
+        // Delete identity and verify secrets are purged from keychain
+        assert!(host_store
+            .delete_identity_with_secrets(id, &key_store)
+            .await
+            .unwrap());
+        assert!(host_store.get_identity(id).await.unwrap().is_none());
+
+        // Verifying keychain secret deleted
+        let (pw_svc, pw_acc) = shellumi_core::parse_keychain_ref(pw_ref).unwrap();
+        use shellumi_core::CredentialStore;
+        assert_eq!(key_store.get_secret(&pw_svc, &pw_acc).unwrap(), None);
+
+        let (pp_svc, pp_acc) = shellumi_core::parse_keychain_ref(pp_ref).unwrap();
+        assert_eq!(key_store.get_secret(&pp_svc, &pp_acc).unwrap(), None);
     }
 }

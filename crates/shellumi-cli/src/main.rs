@@ -1,19 +1,24 @@
 use shellumi_core::{
-    build_google_drive_auth_url, build_ssh_tunnel_command, diff_sync_records_with_passphrase,
-    discover_serial_ports, export_csv, export_ssh_config, format_duration_hms, generate_bash_hook,
-    generate_ed25519_key, generate_fish_hook, generate_pkce_challenge, generate_zsh_hook,
-    list_local_directory, parse_csv, parse_quick_connect_target, parse_ssh_config, render_command,
-    render_preview, AccessoryBarLayout, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
-    AutocompleteEngine, AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget,
-    BatchPolicy, BenchmarkCategory, BenchmarkRunner, CastPlaybackEngine, CloudProviderConfig,
-    CloudProviderKind, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes,
-    ForwardingType, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
-    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
-    MultiplayerSession, OpenFlags, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
-    PasswordPromptDetector, PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError,
-    SerialConfig, SessionRedactor, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
-    SshDestination, SyncVault, TeamMember, TeamRole, TelnetConfig, TransferDirection,
-    TransferQueue, VirtualAccessoryBar,
+    build_google_drive_auth_url, build_ssh_tunnel_command, default_credential_store,
+    delete_secret_by_ref, diff_sync_records_with_passphrase, discover_serial_ports,
+    execute_cloud_vault_sync, execute_sync_cycle, export_csv, export_ssh_config,
+    format_duration_hms, generate_bash_hook, generate_ed25519_key, generate_fish_hook,
+    generate_pkce_challenge, generate_zsh_hook, list_local_directory, parse_csv,
+    parse_quick_connect_target, parse_ssh_config, probe_keychain_daemon, render_command,
+    render_preview, resolve_secret_from_ref, store_secret_to_ref, AccessoryBarLayout,
+    AnsibleInventoryEngine, AuditAction, AuthMethod, AutocompleteContext, AutocompleteEngine,
+    AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget, BatchPolicy,
+    BenchmarkCategory, BenchmarkRunner, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind,
+    ConflictResolutionChoice, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser,
+    FileAttributes, ForwardingType, GoogleDriveSyncClient, HostConfigEntry, HostExportItem,
+    HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
+    MoshConfig, MoshPredictMode, MultiplayerSession, NewIdentity, OpenFlags, OpenSshCertificate,
+    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
+    PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor,
+    SftpClient, SftpConnectOptions, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
+    SshDestination, SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole,
+    TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar, DEFAULT_KDF_ITERATIONS,
+    DEFAULT_KEYCHAIN_SERVICE,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
@@ -24,10 +29,14 @@ use std::{collections::HashMap, env, error::Error, fs, io, process::Command};
 const USAGE: &str = "Usage:
   shellumi-cli <database-path> list [--group <group>] [--tag <tag>] [--search <query>]
   shellumi-cli <database-path> show <id>
-  shellumi-cli <database-path> add <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>] [--protocol <ssh|mosh|telnet|serial>] [--protocol-config <config>]
-  shellumi-cli <database-path> update <id> <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>] [--protocol <ssh|mosh|telnet|serial>] [--protocol-config <config>]
+  shellumi-cli <database-path> add <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>] [--protocol <ssh|mosh|telnet|serial>] [--protocol-config <config>] [--identity-id <id>]
+  shellumi-cli <database-path> update <id> <name> <hostname> <username> <port> [--group <group>] [--tags <tag1,tag2>] [--jump-host <jump>] [--startup-snippet <id>] [--protocol <ssh|mosh|telnet|serial>] [--protocol-config <config>] [--identity-id <id>]
   shellumi-cli <database-path> delete <id>
-  shellumi-cli <database-path> group add <name> [--username <user>] [--port <port>] [--tags <tag1,tag2>]
+  shellumi-cli <database-path> identity add <name> [--username <user>] [--auth <password|publickey|agent|certificate>] [--key-path <path>] [--cert-path <path>] [--password <secret>] [--passphrase <secret>] [--password-ref <uri>] [--passphrase-ref <uri>] [--tags <tag1,tag2>] [--comment <comment>]
+  shellumi-cli <database-path> identity list [--tag <tag>]
+  shellumi-cli <database-path> identity show <id>
+  shellumi-cli <database-path> identity delete <id>
+  shellumi-cli <database-path> group add <name> [--username <user>] [--port <port>] [--tags <tag1,tag2>] [--identity-id <id>]
   shellumi-cli <database-path> group list
   shellumi-cli <database-path> group show <name>
   shellumi-cli <database-path> group delete <name>
@@ -36,6 +45,9 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> tunnel start <id> [--dry-run]
   shellumi-cli <database-path> tunnel delete <id>
   shellumi-cli <database-path> sftp local-ls <path> [--all]
+  shellumi-cli <database-path> sftp remote-ls <destination> [path]
+  shellumi-cli <database-path> sftp get <destination> <remote-path> <local-path>
+  shellumi-cli <database-path> sftp put <destination> <local-path> <remote-path>
   shellumi-cli <database-path> sftp history [--host-id <id>] [--limit <n>]
   shellumi-cli <database-path> sftp clear-history [--host-id <id>]
   shellumi-cli <database-path> sftp log <upload|download> <local-path> <remote-path> <bytes> [--total-bytes <bytes>] [--status <status>] [--host-id <id>]
@@ -66,6 +78,7 @@ const USAGE: &str = "Usage:
   shellumi-cli <database-path> vault rollback <snapshot-id> --passphrase <pass>
   shellumi-cli <database-path> vault status
   shellumi-cli <database-path> vault sync [--remote <path>] --passphrase <pass> [--device-id <id>] [--dry-run]
+  shellumi-cli <database-path> vault cloud-sync --token <oauth-token> --passphrase <pass> [--resolve <keep-local|accept-remote>]
   shellumi-cli <database-path> vault oauth-url [--client-id <id>] [--redirect-uri <uri>]
   shellumi-cli <database-path> team vault create <name> [--desc <desc>] [--owner <owner-id>]
   shellumi-cli <database-path> team vault list
@@ -107,7 +120,12 @@ const USAGE: &str = "Usage:
   shellumi-cli complete <query> [--dir <dir>]
   shellumi-cli <database-path> complete <query>
   shellumi-cli prompt-detect \"<prompt-line>\"
-  shellumi-cli shell-hook <bash|zsh|fish>";
+  shellumi-cli shell-hook <bash|zsh|fish>
+  shellumi-cli keychain status [--json]
+  shellumi-cli keychain set <service> <account> <secret>
+  shellumi-cli keychain get <service> <account>
+  shellumi-cli keychain delete <service> <account>
+  shellumi-cli <database-path> keychain <status|set|get|delete>";
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -125,6 +143,114 @@ fn parse_destination(fields: &[String]) -> Result<SshDestination, Box<dyn Error>
         .parse()
         .map_err(|_| invalid("Port must be between 1 and 65535."))?;
     Ok(SshDestination::new(&fields[0], &fields[1], port)?)
+}
+
+fn handle_keychain_command(args: &[String]) -> Result<(), Box<dyn Error>> {
+    if args.is_empty() {
+        println!("Usage: shellumi-cli keychain <status|get|set|delete> [...]");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "status" => {
+            let is_json = args.iter().any(|a| a == "--json");
+            let status = probe_keychain_daemon();
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "backend_name": status.backend_name,
+                        "daemon_identifier": status.daemon_identifier,
+                        "is_available": status.is_available,
+                        "details": status.details,
+                    })
+                );
+            } else {
+                println!("Native OS Keychain Daemon Status:");
+                println!("  Backend:    {}", status.backend_name);
+                println!("  Daemon ID:  {}", status.daemon_identifier);
+                println!(
+                    "  Available:  {}",
+                    if status.is_available {
+                        "YES (active)"
+                    } else {
+                        "NO (inactive/fallback)"
+                    }
+                );
+                println!("  Details:    {}", status.details);
+            }
+            Ok(())
+        }
+        "set" => {
+            if args.len() < 4 {
+                return Err(invalid(
+                    "Usage: shellumi-cli keychain set <service> <account> <secret>",
+                )
+                .into());
+            }
+            let service = &args[1];
+            let account = &args[2];
+            let secret = &args[3];
+            let store = default_credential_store();
+            let uri = store_secret_to_ref(&*store, service, account, secret)?;
+            println!("Stored secret with reference: {uri}");
+            Ok(())
+        }
+        "get" => {
+            if args.len() < 2 {
+                return Err(invalid(
+                    "Usage: shellumi-cli keychain get <service> <account> | <keychain://uri>",
+                )
+                .into());
+            }
+            let store = default_credential_store();
+            let secret = if args[1].starts_with("keychain://") || args[1].starts_with("env://") {
+                resolve_secret_from_ref(&*store, &args[1])?
+            } else {
+                if args.len() < 3 {
+                    return Err(
+                        invalid("Usage: shellumi-cli keychain get <service> <account>").into(),
+                    );
+                }
+                store.get_secret(&args[1], &args[2])?
+            };
+
+            match secret {
+                Some(s) => println!("{}", s.expose_secret()),
+                None => println!("(secret not found)"),
+            }
+            Ok(())
+        }
+        "delete" => {
+            if args.len() < 2 {
+                return Err(invalid(
+                    "Usage: shellumi-cli keychain delete <service> <account> | <keychain://uri>",
+                )
+                .into());
+            }
+            let store = default_credential_store();
+            let deleted = if args[1].starts_with("keychain://") {
+                delete_secret_by_ref(&*store, &args[1])?
+            } else {
+                if args.len() < 3 {
+                    return Err(
+                        invalid("Usage: shellumi-cli keychain delete <service> <account>").into(),
+                    );
+                }
+                store.delete_secret(&args[1], &args[2])?
+            };
+            if deleted {
+                println!("Secret deleted successfully.");
+            } else {
+                println!("Secret not found or could not be deleted.");
+            }
+            Ok(())
+        }
+        other => Err(invalid(&format!(
+            "Unknown keychain subcommand: '{other}'. Use status, set, get, delete."
+        ))
+        .into()),
+    }
 }
 
 fn extract_flag(args: &[String], flag: &str) -> Option<String> {
@@ -452,6 +578,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    if args[0] == "keychain" {
+        return handle_keychain_command(&args[1..]);
+    }
+
     if args.len() < 2 {
         return Err(invalid(USAGE).into());
     }
@@ -461,7 +591,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Early command validation
     match command {
-        "list" | "export-ssh-config" | "export-csv" => {}
+        "list" | "export-ssh-config" | "export-csv" | "keychain" => {}
         "import-ssh-config" | "import-csv" => {
             if args.len() < 3 {
                 return Err(invalid(USAGE).into());
@@ -489,6 +619,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
             args[2]
                 .parse::<i64>()
                 .map_err(|_| invalid("ID must be an integer."))?;
+        }
+        "identity" => {
+            if args.len() < 3 {
+                return Err(invalid(USAGE).into());
+            }
+            match args[2].as_str() {
+                "list" => {}
+                "add" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                }
+                "show" | "delete" => {
+                    if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                    args[3]
+                        .parse::<i64>()
+                        .map_err(|_| invalid("Identity ID must be an integer."))?;
+                }
+                _ => return Err(invalid(USAGE).into()),
+            }
         }
         "group" => {
             if args.len() < 3 {
@@ -539,8 +691,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 return Err(invalid(USAGE).into());
             }
             match args[2].as_str() {
-                "local-ls" => {
+                "local-ls" | "remote-ls" => {
                     if args.len() < 4 {
+                        return Err(invalid(USAGE).into());
+                    }
+                }
+                "get" | "put" => {
+                    if args.len() < 6 {
                         return Err(invalid(USAGE).into());
                     }
                 }
@@ -649,7 +806,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         return Err(invalid(USAGE).into());
                     }
                 }
-                "status" | "oauth-url" | "history" | "sync" => {}
+                "status" | "oauth-url" | "history" | "sync" | "cloud-sync" => {}
                 _ => return Err(invalid(USAGE).into()),
             }
         }
@@ -811,6 +968,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
         "doctor" | "mobile" | "complete" | "bench" => {}
         _ => return Err(invalid(USAGE).into()),
+    }
+
+    if command == "keychain" {
+        return handle_keychain_command(&args[2..]);
     }
 
     if command == "bench" {
@@ -1052,6 +1213,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     None => "-".to_string(),
                 };
                 println!("Startup Snippet: {}", snippet_info);
+                println!(
+                    "Identity ID:     {}",
+                    host.identity_id
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                );
                 println!("Protocol:        {}", host.protocol);
                 if let Some(conf) = &host.protocol_config {
                     println!("Protocol Config: {}", conf);
@@ -1079,6 +1246,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .unwrap_or_default();
             let protocol = extract_flag(extra, "--protocol").unwrap_or_else(|| "ssh".to_string());
             let protocol_config = extract_flag(extra, "--protocol-config");
+            let identity_id: Option<i64> = extract_flag(extra, "--identity-id")
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| invalid("Identity ID must be an integer."))
+                })
+                .transpose()?;
             let proto: ConnectionProtocol = protocol
                 .parse()
                 .map_err(|e: ProtocolError| invalid(&e.to_string()))?;
@@ -1086,7 +1259,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             println!(
                 "{}",
                 store
-                    .add_with_protocol(
+                    .add_full(
                         &args[2],
                         &destination,
                         group.as_deref(),
@@ -1095,6 +1268,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         startup_snippet,
                         proto.as_str(),
                         protocol_config.as_deref(),
+                        identity_id,
                     )
                     .await?
             );
@@ -1116,23 +1290,35 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .unwrap_or_default();
             let protocol = extract_flag(extra, "--protocol");
             let protocol_config = extract_flag(extra, "--protocol-config");
+            let identity_flag: Option<i64> = extract_flag(extra, "--identity-id")
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| invalid("Identity ID must be an integer."))
+                })
+                .transpose()?;
 
-            let (final_proto, final_conf) = if let Some(p) = protocol {
+            let existing_host = store.get_host(id).await?;
+            let (final_proto, final_conf, final_identity) = if let Some(p) = protocol {
                 let parsed: ConnectionProtocol = p
                     .parse()
                     .map_err(|e: ProtocolError| invalid(&e.to_string()))?;
-                (parsed.as_str().to_string(), protocol_config)
-            } else if let Some(existing) = store.get_host(id).await? {
                 (
-                    existing.protocol,
-                    protocol_config.or(existing.protocol_config),
+                    parsed.as_str().to_string(),
+                    protocol_config,
+                    identity_flag.or_else(|| existing_host.as_ref().and_then(|h| h.identity_id)),
+                )
+            } else if let Some(ref existing) = existing_host {
+                (
+                    existing.protocol.clone(),
+                    protocol_config.or(existing.protocol_config.clone()),
+                    identity_flag.or(existing.identity_id),
                 )
             } else {
-                ("ssh".to_string(), protocol_config)
+                ("ssh".to_string(), protocol_config, identity_flag)
             };
 
             if !store
-                .update_with_protocol(
+                .update_full(
                     id,
                     &args[3],
                     &destination,
@@ -1142,6 +1328,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     startup_snippet,
                     &final_proto,
                     final_conf.as_deref(),
+                    final_identity,
                 )
                 .await?
             {
@@ -1324,6 +1511,179 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 );
             }
         }
+        "identity" => {
+            let sub = args[2].as_str();
+            match sub {
+                "add" => {
+                    let name = &args[3];
+                    let extra = &args[4..];
+                    let username =
+                        extract_flag(extra, "--username").unwrap_or_else(|| "root".to_string());
+                    let auth_str =
+                        extract_flag(extra, "--auth").unwrap_or_else(|| "publickey".to_string());
+                    let key_path = extract_flag(extra, "--key-path");
+                    let cert_path = extract_flag(extra, "--cert-path");
+                    let auth_method = match auth_str.to_ascii_lowercase().as_str() {
+                        "password" => AuthMethod::Password,
+                        "publickey" | "public_key" | "key" => AuthMethod::PublicKey {
+                            key_name: key_path.clone().unwrap_or_else(|| "id_ed25519".to_string()),
+                        },
+                        "agent" => AuthMethod::Agent,
+                        "certificate" | "cert" => AuthMethod::Certificate {
+                            cert_path: cert_path.clone().unwrap_or_default(),
+                            key_path: key_path.clone(),
+                        },
+                        "interactive" => AuthMethod::Interactive,
+                        other => {
+                            return Err(invalid(&format!(
+                                "Invalid auth method: {other}. Use password, publickey, agent, certificate."
+                            ))
+                            .into())
+                        }
+                    };
+                    let tags: Vec<String> = extract_flag(extra, "--tags")
+                        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+                    let comment = extract_flag(extra, "--comment");
+
+                    let password_opt = extract_flag(extra, "--password");
+                    let passphrase_opt = extract_flag(extra, "--passphrase");
+                    let mut password_secret_ref = extract_flag(extra, "--password-ref");
+                    let mut passphrase_secret_ref = extract_flag(extra, "--passphrase-ref");
+
+                    let keychain_store = default_credential_store();
+                    if let Some(pw) = password_opt {
+                        let acc = format!("identity:{name}:password");
+                        let uri = store_secret_to_ref(
+                            &*keychain_store,
+                            DEFAULT_KEYCHAIN_SERVICE,
+                            &acc,
+                            &pw,
+                        )?;
+                        password_secret_ref = Some(uri);
+                    }
+                    if let Some(pp) = passphrase_opt {
+                        let acc = format!("identity:{name}:passphrase");
+                        let uri = store_secret_to_ref(
+                            &*keychain_store,
+                            DEFAULT_KEYCHAIN_SERVICE,
+                            &acc,
+                            &pp,
+                        )?;
+                        passphrase_secret_ref = Some(uri);
+                    }
+
+                    let new_id = NewIdentity {
+                        name: name.to_string(),
+                        username,
+                        auth_method,
+                        password_secret_ref,
+                        key_path,
+                        passphrase_secret_ref,
+                        certificate_path: cert_path,
+                        tags,
+                        comment,
+                    };
+                    let id = store.create_identity(&new_id).await?;
+                    println!("{id}");
+                }
+                "list" => {
+                    let extra = &args[3..];
+                    let tag_filter = extract_flag(extra, "--tag");
+                    let identities = store.list_identities().await?;
+                    for id in identities {
+                        if let Some(ref tag) = tag_filter {
+                            if !id.tags.contains(tag) {
+                                continue;
+                            }
+                        }
+                        let user = &id.username;
+                        let key = id.key_path.as_deref().unwrap_or("-");
+                        let cert = id.certificate_path.as_deref().unwrap_or("-");
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            id.id, id.name, id.auth_method, user, key, cert
+                        );
+                    }
+                }
+                "show" => {
+                    let id: i64 = args[3].parse()?;
+                    if let Some(ident) = store.get_identity(id).await? {
+                        println!("ID:          {}", ident.id);
+                        println!("Name:        {}", ident.name);
+                        println!("Auth Method: {}", ident.auth_method);
+                        println!("Username:    {}", ident.username);
+                        println!(
+                            "Key Path:    {}",
+                            ident.key_path.as_deref().unwrap_or("(none)")
+                        );
+                        println!(
+                            "Cert Path:   {}",
+                            ident.certificate_path.as_deref().unwrap_or("(none)")
+                        );
+                        println!(
+                            "Tags:        {}",
+                            if ident.tags.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                ident.tags.join(", ")
+                            }
+                        );
+                        println!(
+                            "Password Ref: {}",
+                            ident.password_secret_ref.as_deref().unwrap_or("(none)")
+                        );
+                        println!(
+                            "Passphrase Ref: {}",
+                            ident.passphrase_secret_ref.as_deref().unwrap_or("(none)")
+                        );
+                        println!(
+                            "Comment:     {}",
+                            ident.comment.as_deref().unwrap_or("(none)")
+                        );
+
+                        if let Some(ref cp) = ident.certificate_path {
+                            if let Ok(cert_str) = fs::read_to_string(cp) {
+                                if let Ok(parsed_cert) = OpenSshCertificate::parse(cert_str.trim())
+                                {
+                                    println!("Certificate Details:");
+                                    println!("  Key ID:     {}", parsed_cert.key_id);
+                                    println!("  Cert Type:  {}", parsed_cert.cert_type);
+                                    println!("  Principals: {}", parsed_cert.principals.join(", "));
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    let expired = parsed_cert.is_expired(now);
+                                    println!(
+                                        "  Expired:    {}",
+                                        if expired {
+                                            "YES (Expired)"
+                                        } else {
+                                            "No (Valid)"
+                                        }
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(invalid("Identity not found.").into());
+                    }
+                }
+                "delete" => {
+                    let id: i64 = args[3].parse()?;
+                    let keychain_store = default_credential_store();
+                    if !store
+                        .delete_identity_with_secrets(id, &*keychain_store)
+                        .await?
+                    {
+                        return Err(invalid("Identity not found.").into());
+                    }
+                    println!("Identity {id} deleted.");
+                }
+                _ => unreachable!(),
+            }
+        }
         "group" => {
             let sub = args[2].as_str();
             match sub {
@@ -1356,7 +1716,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let tags: Vec<String> = extract_flag(extra, "--tags")
                         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
                         .unwrap_or_default();
-                    let group = HostGroup::new(name, username.as_deref(), port, &tags)?;
+                    let identity_id: Option<i64> = extract_flag(extra, "--identity-id")
+                        .map(|i| {
+                            i.parse()
+                                .map_err(|_| invalid("Identity ID must be an integer."))
+                        })
+                        .transpose()?;
+                    let mut group = HostGroup::new(name, username.as_deref(), port, &tags)?;
+                    if let Some(iid) = identity_id {
+                        group = group.with_identity_id(Some(iid));
+                    }
                     store.add_group(&group).await?;
                     println!("Group '{}' added.", group.name);
                 }
@@ -1373,6 +1742,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             group
                                 .default_port
                                 .map(|p| p.to_string())
+                                .unwrap_or_else(|| "(none)".to_string())
+                        );
+                        println!(
+                            "Identity ID:      {}",
+                            group
+                                .identity_id
+                                .map(|i| i.to_string())
                                 .unwrap_or_else(|| "(none)".to_string())
                         );
                         println!(
@@ -1774,6 +2150,95 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         "Completed: {}/{}",
                         summary.completed_tasks, summary.total_tasks
                     );
+                }
+                "remote-ls" => {
+                    let dest_str = &args[3];
+                    let remote_path = args.get(4).map(|s| s.as_str()).unwrap_or(".");
+                    let dest = parse_quick_connect_target(dest_str)?;
+                    let mut client = SftpClient::connect(&dest, &SftpConnectOptions::default())?;
+                    let entries = client.list_remote_directory(remote_path)?;
+                    for entry in entries {
+                        println!(
+                            "{}\t{:>10}\t{}",
+                            entry.formatted_permissions(),
+                            entry.formatted_size(),
+                            entry.name
+                        );
+                    }
+                }
+                "get" => {
+                    let dest_str = &args[3];
+                    let remote_path = &args[4];
+                    let local_path = &args[5];
+                    let dest = parse_quick_connect_target(dest_str)?;
+                    let mut client = SftpClient::connect(&dest, &SftpConnectOptions::default())?;
+                    println!("Downloading '{remote_path}' to '{local_path}'...");
+                    client.download_file(
+                        remote_path,
+                        std::path::Path::new(local_path),
+                        Some(|bytes_done, total_bytes| {
+                            use std::io::Write as _;
+                            if total_bytes > 0 {
+                                let pct = (bytes_done as f64 / total_bytes as f64 * 100.0) as u32;
+                                print!("\rProgress: {bytes_done}/{total_bytes} bytes ({pct}%)");
+                            } else {
+                                print!("\rProgress: {bytes_done} bytes");
+                            }
+                            let _ = io::stdout().flush();
+                        }),
+                    )?;
+                    println!("\nDownload completed.");
+                    let total_bytes = fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
+                    let _ = store
+                        .log_transfer(&NewTransfer {
+                            host_id: None,
+                            direction: TransferDirection::Download,
+                            local_path,
+                            remote_path,
+                            bytes_transferred: total_bytes,
+                            total_bytes,
+                            status: "completed",
+                            error_message: None,
+                        })
+                        .await;
+                }
+                "put" => {
+                    let dest_str = &args[3];
+                    let local_path = &args[4];
+                    let remote_path = &args[5];
+                    let total_bytes = fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
+                    let dest = parse_quick_connect_target(dest_str)?;
+                    let mut client = SftpClient::connect(&dest, &SftpConnectOptions::default())?;
+                    println!(
+                        "Uploading '{local_path}' to '{remote_path}' ({total_bytes} bytes)..."
+                    );
+                    client.upload_file(
+                        std::path::Path::new(local_path),
+                        remote_path,
+                        Some(|bytes_done, total_bytes| {
+                            use std::io::Write as _;
+                            if total_bytes > 0 {
+                                let pct = (bytes_done as f64 / total_bytes as f64 * 100.0) as u32;
+                                print!("\rProgress: {bytes_done}/{total_bytes} bytes ({pct}%)");
+                            } else {
+                                print!("\rProgress: {bytes_done} bytes");
+                            }
+                            let _ = io::stdout().flush();
+                        }),
+                    )?;
+                    println!("\nUpload completed.");
+                    let _ = store
+                        .log_transfer(&NewTransfer {
+                            host_id: None,
+                            direction: TransferDirection::Upload,
+                            local_path,
+                            remote_path,
+                            bytes_transferred: total_bytes,
+                            total_bytes,
+                            status: "completed",
+                            error_message: None,
+                        })
+                        .await;
                 }
                 _ => unreachable!(),
             }
@@ -2283,11 +2748,217 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
+                "cloud-sync" => {
+                    let extra = &args[3..];
+                    let token = extract_flag(extra, "--token").ok_or_else(|| {
+                        invalid("Missing required flag --token <oauth_access_token>.")
+                    })?;
+                    let passphrase = extract_flag(extra, "--passphrase").ok_or_else(|| {
+                        invalid("Missing required flag --passphrase <passphrase>.")
+                    })?;
+                    let resolve_str = extract_flag(extra, "--resolve");
+                    let resolutions = match resolve_str.as_deref() {
+                        Some("keep-local") => Some(vec![ConflictResolutionChoice::KeepLocal]),
+                        Some("accept-remote") => Some(vec![ConflictResolutionChoice::AcceptRemote]),
+                        None => None,
+                        Some(other) => {
+                            return Err(invalid(&format!(
+                                "Invalid resolution '{other}'. Use 'keep-local' or 'accept-remote'."
+                            ))
+                            .into())
+                        }
+                    };
+
+                    let device_id = extract_flag(extra, "--device-id")
+                        .unwrap_or_else(|| "shellumi-cli".to_string());
+                    let local_vault = store
+                        .export_vault_with_iterations(
+                            &passphrase,
+                            &device_id,
+                            DEFAULT_KDF_ITERATIONS,
+                        )
+                        .await?;
+
+                    let transport = SystemHttpTransport::new();
+                    let client = GoogleDriveSyncClient::new(transport, "shellumi-cli");
+
+                    println!("Connecting to Google Drive Application Data folder...");
+                    let result = execute_cloud_vault_sync(
+                        &client,
+                        &token,
+                        &local_vault,
+                        &passphrase,
+                        resolutions.as_deref(),
+                    )?;
+
+                    match result {
+                        SyncCycleResult::AlreadySynchronized => {
+                            println!("Cloud vault is already synchronized. No changes needed.");
+                        }
+                        SyncCycleResult::Success {
+                            report,
+                            merged_records,
+                        } => {
+                            println!("{}", report.message);
+                            if report.local_updated > 0 {
+                                let mut updated_vault = local_vault.clone();
+                                updated_vault.records = merged_records;
+                                store.import_vault(&passphrase, &updated_vault).await?;
+                                println!(
+                                    "Imported {} updated record(s) into local store.",
+                                    report.local_updated
+                                );
+                            }
+                        }
+                        SyncCycleResult::Conflicts(conflicts) => {
+                            println!("Sync conflicts detected ({}):", conflicts.len());
+                            for c in conflicts {
+                                println!(
+                                    "  Conflict on {} ({}): local v{} vs remote v{}",
+                                    c.object_id, c.entity_type, c.local_version, c.remote_version
+                                );
+                            }
+                            println!(
+                                "Re-run with --resolve keep-local or --resolve accept-remote."
+                            );
+                        }
+                        SyncCycleResult::Error(msg) => {
+                            return Err(invalid(&format!("Sync error: {msg}")).into());
+                        }
+                    }
+                }
                 "sync" => {
-                    return Err(invalid(
-                        "Vault sync is not implemented; use vault diff to compare snapshots.",
-                    )
-                    .into());
+                    let extra = &args[3..];
+                    if let Some(token) = extract_flag(extra, "--token") {
+                        let passphrase = extract_flag(extra, "--passphrase").ok_or_else(|| {
+                            invalid("Missing required flag --passphrase <passphrase>.")
+                        })?;
+                        let resolve_str = extract_flag(extra, "--resolve");
+                        let resolutions = match resolve_str.as_deref() {
+                            Some("keep-local") => Some(vec![ConflictResolutionChoice::KeepLocal]),
+                            Some("accept-remote") => {
+                                Some(vec![ConflictResolutionChoice::AcceptRemote])
+                            }
+                            None => None,
+                            Some(other) => {
+                                return Err(invalid(&format!(
+                                    "Invalid resolution '{other}'. Use 'keep-local' or 'accept-remote'."
+                                ))
+                                .into())
+                            }
+                        };
+                        let device_id = extract_flag(extra, "--device-id")
+                            .unwrap_or_else(|| "shellumi-cli".to_string());
+                        let local_vault = store
+                            .export_vault_with_iterations(
+                                &passphrase,
+                                &device_id,
+                                DEFAULT_KDF_ITERATIONS,
+                            )
+                            .await?;
+                        let transport = SystemHttpTransport::new();
+                        let client = GoogleDriveSyncClient::new(transport, "shellumi-cli");
+                        let result = execute_cloud_vault_sync(
+                            &client,
+                            &token,
+                            &local_vault,
+                            &passphrase,
+                            resolutions.as_deref(),
+                        )?;
+                        match result {
+                            SyncCycleResult::AlreadySynchronized => {
+                                println!("Cloud vault is already synchronized.");
+                            }
+                            SyncCycleResult::Success {
+                                report,
+                                merged_records,
+                            } => {
+                                println!("{}", report.message);
+                                if report.local_updated > 0 {
+                                    let mut updated_vault = local_vault.clone();
+                                    updated_vault.records = merged_records;
+                                    store.import_vault(&passphrase, &updated_vault).await?;
+                                }
+                            }
+                            SyncCycleResult::Conflicts(conflicts) => {
+                                println!("Sync conflicts detected ({}):", conflicts.len());
+                                for c in conflicts {
+                                    println!(
+                                        "  Conflict on {} ({}): local v{} vs remote v{}",
+                                        c.object_id,
+                                        c.entity_type,
+                                        c.local_version,
+                                        c.remote_version
+                                    );
+                                }
+                            }
+                            SyncCycleResult::Error(msg) => {
+                                return Err(invalid(&format!("Sync error: {msg}")).into());
+                            }
+                        }
+                    } else if let Some(remote_path) = extract_flag(extra, "--remote") {
+                        let passphrase = extract_flag(extra, "--passphrase").ok_or_else(|| {
+                            invalid("Missing required flag --passphrase <passphrase>.")
+                        })?;
+                        let device_id = extract_flag(extra, "--device-id")
+                            .unwrap_or_else(|| "shellumi-cli".to_string());
+                        let remote_content = fs::read_to_string(&remote_path)?;
+                        let remote_vault = SyncVault::from_json(&remote_content)?;
+                        let local_vault = store
+                            .export_vault_with_iterations(
+                                &passphrase,
+                                &device_id,
+                                DEFAULT_KDF_ITERATIONS,
+                            )
+                            .await?;
+                        let res = execute_sync_cycle(
+                            &local_vault.records,
+                            &remote_vault.records,
+                            &passphrase,
+                            None,
+                        );
+                        match res {
+                            SyncCycleResult::AlreadySynchronized => {
+                                println!("Local vault and remote file are already in sync.");
+                            }
+                            SyncCycleResult::Success {
+                                report,
+                                merged_records,
+                            } => {
+                                println!("{}", report.message);
+                                if report.local_updated > 0 {
+                                    let mut updated = local_vault.clone();
+                                    updated.records = merged_records.clone();
+                                    store.import_vault(&passphrase, &updated).await?;
+                                }
+                                if report.remote_updated > 0 {
+                                    let mut updated_remote = remote_vault.clone();
+                                    updated_remote.records = merged_records;
+                                    fs::write(&remote_path, updated_remote.to_json()?)?;
+                                }
+                            }
+                            SyncCycleResult::Conflicts(conflicts) => {
+                                println!("File sync conflicts ({}):", conflicts.len());
+                                for c in conflicts {
+                                    println!(
+                                        "  Conflict on {} ({}): local v{} vs remote v{}",
+                                        c.object_id,
+                                        c.entity_type,
+                                        c.local_version,
+                                        c.remote_version
+                                    );
+                                }
+                            }
+                            SyncCycleResult::Error(msg) => {
+                                return Err(invalid(&format!("Sync error: {msg}")).into());
+                            }
+                        }
+                    } else {
+                        return Err(invalid(
+                            "Vault sync without a remote connection is not implemented; provide --token <oauth_token> for Google Drive or --remote <path> for file sync.",
+                        )
+                        .into());
+                    }
                 }
                 _ => unreachable!(),
             }

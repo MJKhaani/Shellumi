@@ -926,7 +926,7 @@ impl Shellumi {
                 content=content.child(row("SSH host-key verification","Unknown servers require an explicit decision. Changed keys are rejected by OpenSSH.".into(),muted("Required").into_any_element())).child(row("Agent forwarding","SSH sessions do not forward your authentication agent.".into(),muted("Disabled").into_any_element())).child(row("Authentication","System OpenSSH uses your local SSH config, agent and interactive authentication prompts.".into(),muted("OpenSSH").into_any_element()));
             }
             "Synchronization" => {
-                content=content.child(heading("Local-first workspace")).child(muted("Google Drive transport and account authorization are not implemented. Your saved hosts and preferences remain local."));
+                content=content.child(heading("Encrypted Google Drive Synchronization")).child(muted("End-to-end encrypted synchronization over HTTPS using system curl transport to your private Google Drive appDataFolder. Passphrases never leave your machine and Google cannot inspect payload ciphertext."));
             }
             "Keyboard Shortcuts" => {
                 for (name, key) in [
@@ -1540,6 +1540,9 @@ impl Shellumi {
         };
         self.desktop.public_records.clear();
         self.desktop.public_selected = 0;
+        if keys {
+            self.load_identities(cx);
+        }
         let task = cx
             .background_executor()
             .spawn(async move { shellumi_storage::desktop::public_ssh_records(&home, keys) });
@@ -1558,6 +1561,152 @@ impl Shellumi {
     fn public_inventory_page(&self, page: &'static str, cx: &mut Context<Self>) -> gpui::Div {
         let keys = page == "Keychain";
         let mut table = panel().flex_1().min_w_0().flex().flex_col().gap_2();
+        if keys {
+            let daemon = shellumi_core::probe_keychain_daemon();
+            let status_badge_color = if daemon.is_available {
+                rgb(0x10b981)
+            } else {
+                rgb(0xf59e0b)
+            };
+            let status_badge_bg = if daemon.is_available {
+                rgb(0x064e3b)
+            } else {
+                rgb(0x78350f)
+            };
+            let daemon_card = div()
+                .p_3()
+                .rounded_lg()
+                .bg(rgb(0x0f172a))
+                .border_1()
+                .border_color(rgb(0x334155))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child(format!(
+                                            "🔐 OS Keychain Daemon: {}",
+                                            daemon.backend_name
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .p_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .bg(status_badge_bg)
+                                        .text_color(status_badge_color)
+                                        .child(if daemon.is_available {
+                                            "ACTIVE"
+                                        } else {
+                                            "FALLBACK"
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child(format!("Daemon: {}", daemon.daemon_identifier)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x64748b))
+                        .child(daemon.details),
+                );
+
+            table = table.child(daemon_card).child(div().h(px(4.0)));
+            table = table.child(heading("Saved Reusable Identities"));
+            if self.identities.is_empty() {
+                table = table.child(muted("No reusable identities saved. Add identities via `shellumi identity add <name> --username <user> --key-path <path>`."));
+            } else {
+                for id in &self.identities {
+                    let cert_info = if let Some(ref cert) = id.certificate_path {
+                        format!(" (Cert: {cert})")
+                    } else {
+                        String::new()
+                    };
+                    let method_badge = format!("{} • {}{}", id.username, id.auth_method, cert_info);
+                    let has_keychain_ref =
+                        id.password_secret_ref.is_some() || id.passphrase_secret_ref.is_some();
+                    table = table.child(
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(0x1e293b))
+                            .border_1()
+                            .border_color(rgb(0x334155))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(rgb(0xf3f4f6))
+                                                    .child(id.name.clone()),
+                                            )
+                                            .children(if has_keychain_ref {
+                                                Some(
+                                                    div()
+                                                        .p_1()
+                                                        .rounded_sm()
+                                                        .bg(rgb(0x1e3a8a))
+                                                        .text_color(rgb(0x93c5fd))
+                                                        .text_xs()
+                                                        .child("🔐 Keychain"),
+                                                )
+                                            } else {
+                                                None
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x9ca3af))
+                                            .child(method_badge),
+                                    ),
+                            )
+                            .child(if let Some(ref kp) = id.key_path {
+                                div().text_xs().text_color(rgb(0x60a5fa)).child(kp.clone())
+                            } else {
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x9ca3af))
+                                    .child("Passphrase/Agent".to_string())
+                            }),
+                    );
+                }
+            }
+            table = table
+                .child(div().h(px(8.0)))
+                .child(heading("System SSH Keys (~/.ssh)"));
+        }
         for (index, record) in self.desktop.public_records.iter().enumerate() {
             table = table.child(
                 button(("public-record", index), record.name.clone())
@@ -1830,8 +1979,17 @@ impl Shellumi {
                 })),
             );
         }
-        let remote=panel().flex_1().min_w_0().flex().flex_col().gap_3().child(heading("Remote connections")).child(muted("Select a host to open its live SFTP terminal. Graphical remote browsing is not connected."))
-            .child(self.sessions_page(true,cx));
+        let remote = panel()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(heading("Remote connections"))
+            .child(muted(
+                "Select a host to open its live SFTP terminal and graphical dual-pane browser.",
+            ))
+            .child(self.sessions_page(true, cx));
         div()
             .flex()
             .items_start()
@@ -1843,10 +2001,106 @@ impl Shellumi {
 
 impl Shellumi {
     fn backup_page(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div().flex().flex_col().gap_4().child(empty("Local-first workspace","Google Drive authorization and network synchronization are not implemented. Your data stays local and no account is required."))
-            .child(panel().flex().flex_col().gap_3().child(heading("Encrypted backups")).child(muted("Export your local vault, or restore an existing encrypted backup. Only ciphertext is written to the backup file."))
-                .child(div().flex().gap_2().child(primary("export-vault-backup","Export encrypted backup…").on_click(cx.listener(|app,_,_,cx|app.edit_library_item(EditorKind::ExportBackup,None,cx))))
-                    .child(button("restore-vault-backup","Restore encrypted backup…").on_click(cx.listener(|app,_,_,cx|app.edit_library_item(EditorKind::RestoreBackup,None,cx))))))
+        let sync_badge = match &self.sync_status {
+            AppSyncStatus::LocalOnly => div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x374151))
+                .text_xs()
+                .text_color(rgb(0xe5e7eb))
+                .child("Local only"),
+            AppSyncStatus::UpToDate { .. } => div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x065f46))
+                .text_xs()
+                .text_color(rgb(0xa7f3d0))
+                .child("Up to date"),
+            AppSyncStatus::Syncing => div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x1e40af))
+                .text_xs()
+                .text_color(rgb(0xbfdbfe))
+                .child("Syncing…"),
+            AppSyncStatus::Conflict { message } => div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x92400e))
+                .text_xs()
+                .text_color(rgb(0xfde68a))
+                .child(format!("Conflict: {message}")),
+            AppSyncStatus::Error(e) => div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x991b1b))
+                .text_xs()
+                .text_color(rgb(0xfecaca))
+                .child(format!("Error: {e}")),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                panel()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(heading("Google Drive Cloud Synchronization"))
+                            .child(sync_badge),
+                    )
+                    .child(muted(
+                        "End-to-end encrypted synchronization over HTTPS directly to your private Google Drive appDataFolder via system HTTP transport. All records are encrypted with AES-256-GCM before transport; Google cannot inspect your data.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                primary("trigger-gdrive-sync", "Sync with Google Drive now")
+                                    .on_click(cx.listener(|app, _, _, cx| app.trigger_sync(cx))),
+                            ),
+                    ),
+            )
+            .child(
+                panel()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(heading("Encrypted Backups"))
+                    .child(muted(
+                        "Export your local vault, or restore an existing encrypted backup. Only ciphertext is written to the backup file.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                primary("export-vault-backup", "Export encrypted backup…")
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.edit_library_item(EditorKind::ExportBackup, None, cx)
+                                    })),
+                            )
+                            .child(
+                                button("restore-vault-backup", "Restore encrypted backup…")
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.edit_library_item(EditorKind::RestoreBackup, None, cx)
+                                    })),
+                            ),
+                    ),
+            )
     }
 }
 

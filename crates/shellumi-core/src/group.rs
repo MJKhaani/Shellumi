@@ -12,6 +12,7 @@ pub struct HostGroup {
     pub default_username: Option<String>,
     pub default_port: Option<NonZeroU16>,
     pub tags: Vec<String>,
+    pub identity_id: Option<i64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -87,7 +88,13 @@ impl HostGroup {
             default_username,
             default_port,
             tags: clean_tags,
+            identity_id: None,
         })
+    }
+
+    pub fn with_identity_id(mut self, identity_id: Option<i64>) -> Self {
+        self.identity_id = identity_id;
+        self
     }
 }
 
@@ -99,11 +106,26 @@ pub fn resolve_effective_destination(
     port: Option<u16>,
     group: Option<&HostGroup>,
 ) -> Result<SshDestination, DestinationError> {
-    let effective_user = match username {
-        Some(u) if !u.trim().is_empty() => u.trim(),
-        _ => match group.and_then(|g| g.default_username.as_deref()) {
-            Some(gu) => gu,
-            None => return Err(DestinationError::InvalidUsername),
+    resolve_effective_destination_with_identity(host, username, port, group, None)
+}
+
+/// Resolves effective connection parameters for a host, inheriting missing username
+/// from its assigned identity or parent group.
+pub fn resolve_effective_destination_with_identity(
+    host: &str,
+    username: Option<&str>,
+    port: Option<u16>,
+    group: Option<&HostGroup>,
+    identity: Option<&crate::Identity>,
+) -> Result<SshDestination, DestinationError> {
+    let effective_user = match identity {
+        Some(ident) if !ident.username.trim().is_empty() => ident.username.trim(),
+        _ => match username {
+            Some(u) if !u.trim().is_empty() => u.trim(),
+            _ => match group.and_then(|g| g.default_username.as_deref()) {
+                Some(gu) => gu,
+                None => return Err(DestinationError::InvalidUsername),
+            },
         },
     };
 
