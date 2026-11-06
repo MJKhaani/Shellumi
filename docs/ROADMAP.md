@@ -1,6 +1,6 @@
 # Shellumi roadmap
 
-The current milestone is **v0.0.1-alpha**. Requirements remain in
+The current milestone is **v0.0.2-alpha**. Requirements remain in
 [PROJECT.md](../PROJECT.md); the [feature matrix](FEATURE_MATRIX.md) and
 [GUI status](GUI_STATUS.md) describe implementation evidence and limitations.
 
@@ -36,7 +36,7 @@ The following work is included in the alpha source:
 
 ## Verification recorded for alpha
 
-- 313 automated workspace tests passed on macOS; two real-server tests are
+- 318 automated workspace tests passed on macOS; three real-server tests are
   opt-in. The self-contained SSH/SFTP acceptance test passed separately.
 - Local OpenSSH encrypted-key authentication through the app helper succeeded;
   the same setup refused an untrusted host. Self-contained real-server SFTP
@@ -44,7 +44,7 @@ The following work is included in the alpha source:
   host-key rejection also passed. Password/MFA/native-store and GUI interaction
   acceptance remain pending.
 - Formatting and workspace Clippy with `-D warnings` passed with 0 warnings.
-- An optimized Intel macOS app was built locally.
+- Optimized Intel macOS app and CLI builds passed locally for `0.0.2-alpha`.
 - macOS GUI checks covered saving snippets/workspaces, launching a workspace
   shell, changing a terminal preference, long output, scrolling and split sizing.
 - Linux, Windows and Apple Silicon runtime behavior is not established by these
@@ -63,9 +63,9 @@ The following work is included in the alpha source:
    notarization before broader distribution.
 4. **Credential and transport acceptance:** add stdin/masked CLI secret entry and GUI identity editing;
    verify saved-identity authentication and native keychains on actual Windows/Linux desktops. Exercise
-   SFTP GUI interaction, interruption of stalled reads, permission/timestamp
+   SFTP GUI interaction, abandoned staging recovery, permission/timestamp
    preservation, and Drive against a test account. Staged publication and
-   cooperative GUI cancellation are implemented; visual acceptance remains. Isolated macOS SFTP transport acceptance is recorded
+   GUI cancellation with bounded SSH pipe IO are implemented; visual acceptance remains. Isolated macOS SFTP transport acceptance is recorded
    in [the test guide](development/ssh-integration.md).
    Secure credential fallback is opt-in with a user-supplied passphrase; Drive
    must not sync with a shared/default vault key.
@@ -127,8 +127,33 @@ acceptance remains pending.
   OpenSSH acceptance test to check cancellation and staging cleanup in both
   directions, plus successful replacement with an empty file.
 
-Remaining: cancellation cannot interrupt a stalled SSH read and is refused once
-publication begins. Abrupt shutdown/network loss may leave staging files. File
+The initial implementation used cooperative cancellation. The v0.0.2-alpha
+increment below adds interruption of stalled SSH pipe IO. Cancellation remains
+refused once publication begins. Abrupt shutdown/network loss may leave staging files. File
 permission/timestamp preservation, GUI click/focus acceptance, password/MFA and
-non-macOS validation remain. The next transfer increment is bounded interruption
-of stalled reads and recovery of abandoned staging files.
+non-macOS validation remain. Recovery of abandoned staging files remains the next transfer increment.
+
+## v0.0.2-alpha release and bounded IO (2026-11-06)
+
+- Added bounded-channel SSH pipe workers with one deadline for a complete packet
+  read/write, including SFTP initialization; partial/trickled bytes do not reset
+  the deadline. Cancellation interrupts blocked pipe waits. Poisoned transports
+  are terminated, not resumed after a partial frame.
+- Graphical transfer jobs pass their cancellation token into connection setup,
+  so a server that accepts TCP without answering SSH can be cancelled too.
+- Healthy packet-boundary cancellation still closes/unlinks staging. If a blocked
+  connection must be terminated, failed remote cleanup retains the temporary path.
+- New tests cover blocked reads/writes, trickled input, buffered packet boundaries,
+  invalid timeouts, pre-cancelled setup, and actual OpenSSH nonresponse.
+- Aligned all five crates, lockfile, FFI/diagnostics and native package metadata
+  with `0.0.2-alpha`; the release workflow rejects tag/crate version mismatches.
+- Patched the existing xattr 0.2.3 dependency used through GPUI's archive library
+  to unblock the previous Linux compile failure. Upstream licenses and API remain.
+  macOS upstream tests passed; the Linux-target download failed DNS locally,
+  so full Linux compilation remains a tag-CI verification item.
+
+Local evidence: 318 workspace tests passed, 3 opt-in tests ignored; both tests in
+the self-contained SSH/SFTP acceptance target passed separately. The vendored
+xattr tests passed (4 integration tests and 1 doc test). Optimized macOS app/CLI builds, formatting and strict workspace Clippy passed.
+The `v0.0.2-alpha` tag triggers builds for Linux x86_64, Windows x86_64 and macOS
+arm64/x86_64; CI completion and platform runtime validation remain separate.

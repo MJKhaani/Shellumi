@@ -1,4 +1,4 @@
-# Feature status — v0.0.1-alpha
+# Feature status — v0.0.2-alpha
 
 This matrix describes the current application. [PROJECT.md](../PROJECT.md) is
 the target scope; domain types and packaging prototypes alone do not constitute
@@ -17,7 +17,7 @@ finished user features. See [GUI_STATUS.md](GUI_STATUS.md) for workflow details.
 | Keychain / identities | Initial integration | Reusable Identity model & Turso table (schema v14), OpenSSH certificate validation/principals, host/group binding with credential inheritance, Native OS Keychain daemons (macOS Security Framework, Linux Secret Service via `secret-tool` / D-Bus, Windows Credential Manager `PasswordVault` API) with AES-256-GCM authenticated vault fallback, URI reference binding (`keychain://`), OS Keychain status card and CLI management. Host/group GUI selectors apply identities to SSH, SFTP, workspace restores and tunnels; reference-only OpenSSH askpass supports matching password/key-passphrase prompts on trusted hosts. Identity editing remains CLI-driven; actual Windows/Linux daemon and password/MFA/native-store validation remain. |
 | Known Hosts | Initial integration | Real trust-store inspection and explicit revocation with stale-record checks. Trust acceptance remains an explicit OpenSSH decision. |
 | Tunnels | Initial working integration | Persisted rules, SSH-host selection, editing and real OpenSSH tunnel sessions. Traffic telemetry is not measured. |
-| SFTP | Initial integration | RFC SFTP v3 wire format codec, SftpClient over SSH subsystem (`ssh -s sftp`), graphical dual-pane browser, directory listing, upload/download queue, and RemoteEditorWorkspace with SHA-256 dirty checking. Isolated macOS OpenSSH acceptance passed with a saved group identity, encrypted key, binary/empty transfers, reconnect and strict host-key rejection. Staged publication follows verified CLOSE; GUI queue has live progress, two-worker scheduling and acknowledged cooperative cancellation. Existing files survive pre-publication failure/cancel. Legacy servers may refuse overwrite; stalled-read interruption, metadata preservation, GUI interaction, password/MFA and other-platform acceptance remain. Cleanup errors retain temporary paths; batch SFTP requires pre-established host trust. |
+| SFTP | Initial integration | RFC SFTP v3 wire format codec, SftpClient over SSH subsystem (`ssh -s sftp`), graphical dual-pane browser, directory listing, upload/download queue, and RemoteEditorWorkspace with SHA-256 dirty checking. Isolated macOS OpenSSH acceptance passed with a saved group identity, encrypted key, binary/empty transfers, reconnect and strict host-key rejection. Staged publication follows verified CLOSE; GUI queue has live progress, two-worker scheduling and acknowledged cancellation including blocked SSH pipe waits. Existing files survive pre-publication failure/cancel. Legacy servers may refuse overwrite; abandoned staging recovery, metadata preservation, GUI interaction, password/MFA and other-platform acceptance remain. Cleanup errors retain temporary paths; batch SFTP requires pre-established host trust. |
 | Session logs | Initial integration | Opt-in recordings, library, playback and export tools. Redaction is not a guarantee that recordings contain no sensitive data. |
 | Local storage | Implemented | Async Turso schema v14, transactional migrations, CRUD, reopen/future-version tests, identities support, and local preferences. |
 | Encrypted backups | Implemented locally | GUI export/restore, masked passphrase entry, overwrite refusal, transactional rollback and round-trip tests. |
@@ -29,6 +29,6 @@ finished user features. See [GUI_STATUS.md](GUI_STATUS.md) for workflow details.
 | Mobile | Prototype | Core FFI and native examples only; no released mobile client. |
 | Releases | Tag-driven CI | Four platform/architecture targets, native packaging, checksums and Cargo metadata manifest. The alpha tag is a prerelease; CI success and runtime validation are separate checks. |
 
-The local macOS workspace suite passed 313 automated tests, with two opt-in
+The local macOS workspace suite passed 318 automated tests, with three opt-in
 real-server tests ignored in the normal suite. The self-contained SSH/SFTP
 acceptance test passed separately; see [the test guide](development/ssh-integration.md). See [ROADMAP.md](ROADMAP.md) for next steps.

@@ -56,6 +56,13 @@ jobs:
           xcrun --find metal
       - name: Install Rust target
         run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
+      - name: Verify crate versions match the tag
+        shell: bash
+        run: |
+          for manifest in crates/*/Cargo.toml; do
+            crate_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest")"
+            [[ "$crate_version" == "$SHELLUMI_VERSION" ]] || { echo "Version mismatch in $manifest: $crate_version != $SHELLUMI_VERSION"; exit 1; }
+          done
       - name: Build release binaries
         run: cargo build --locked --release -p shellumi-app -p shellumi-cli --target ${{ matrix.target }}
       - name: Package Linux assets

@@ -5564,7 +5564,7 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shellumi-app"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "gpui",
@@ -5578,7 +5578,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-cli"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "serde_json",
  "shellumi-core",
@@ -5589,7 +5589,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-core"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "base64",
  "ring",
@@ -5602,7 +5602,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-storage"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -5614,7 +5614,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-terminal"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "grid",
  "portable-pty",
@@ -7985,8 +7985,6 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 [[package]]
 name = "xattr"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d1526bbe5aaeb5eb06885f4d987bcdfa5e23187055de9b83fe00156a821fabc"
 dependencies = [
  "libc",
 ]

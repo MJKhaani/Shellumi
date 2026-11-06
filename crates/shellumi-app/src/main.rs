@@ -4386,7 +4386,10 @@ impl Shellumi {
             lifecycle_manager,
             simulated_output: vec![
                 "Last login: user@mobile on ttys002".into(),
-                "Shellumi Mobile Touch Simulator v0.1.0 (iOS/Android Prototype)".into(),
+                format!(
+                    "Shellumi Mobile Touch Simulator v{} (iOS/Android Prototype)",
+                    env!("CARGO_PKG_VERSION")
+                ),
                 "Virtual accessory keys stream VT/ANSI bytes into the mobile session.".into(),
                 "$ ".into(),
             ],

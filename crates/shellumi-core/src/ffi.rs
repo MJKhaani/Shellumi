@@ -44,7 +44,7 @@ fn str_to_c_char(s: &str) -> *mut c_char {
 /// This pointer is statically allocated and must NOT be freed.
 #[no_mangle]
 pub extern "C" fn shellumi_core_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.1.0\0";
+    static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
     VERSION.as_ptr() as *const c_char
 }
 
@@ -395,7 +395,7 @@ mod tests {
         let ptr = shellumi_core_version();
         assert!(!ptr.is_null());
         let str_val = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
-        assert_eq!(str_val, "0.1.0");
+        assert_eq!(str_val, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ set -euo pipefail
 
 ARCH="${1:-$(uname -m)}"
 BIN_PATH="${2:-target/release/shellumi-app}"
-VERSION="${SHELLUMI_VERSION:-0.0.1-alpha}"
+VERSION="${SHELLUMI_VERSION:-0.0.2-alpha}"
 OUTPUT_DIR="dist"
 APP_NAME="Shellumi.app"
 APP_BUNDLE="${OUTPUT_DIR}/${APP_NAME}"

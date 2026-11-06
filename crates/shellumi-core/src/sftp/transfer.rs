@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Cancellation is cooperative at packet boundaries. Once publication begins,
+/// Cancellation also interrupts live SSH pipe waits. Once publication begins,
 /// cancellation is refused so the UI cannot label a committed transfer cancelled.
 #[derive(Clone, Debug, Default)]
 pub struct TransferControl(Arc<AtomicU8>);

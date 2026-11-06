@@ -96,9 +96,26 @@ failure removes only staging, never the old destination. Other tests exercise
 symlink replacement without following the link, cancellation/publication races,
 actual queue outcomes and retained cleanup warnings.
 
-Cancellation is cooperative at packet boundaries and cannot interrupt a stalled
-SSH read; once publication begins cancellation is refused. Network loss or abrupt
+Cancellation interrupts live SSH pipe waits as well as checking packet boundaries;
+once publication begins cancellation is refused. Packet read/write deadlines are
+bounded (30 seconds by default), including initialization. Partial/trickled input
+does not reset the whole-packet deadline. Network loss or abrupt
 shutdown can leave hidden staging files; remote cleanup errors report their path.
 The original destination's permissions/timestamps are not preserved. Non-OpenSSH
 servers without posix-rename can refuse replacement of existing remote files;
 Shellumi never deletes the original as an overwrite fallback.
+
+## Nonresponsive SSH connection acceptance
+
+The same opt-in acceptance target also includes
+`stalled_ssh_connect_is_cancellable_and_bounded`. Its TCP fault fixture accepts a
+real system OpenSSH client but never returns an SSH banner. The test verifies
+both a configured one-second timeout and cancellation during connection setup,
+then closes the fixture and waits for its thread. It does not bypass host trust
+or alter user SSH files. Both acceptance tests run with the command above.
+
+Ordinary unit tests additionally block fake OS-pipe handles to verify independent
+read/write deadlines and cancellation, poisoned-writer refusal, buffered packet
+boundaries and a trickled frame that cannot extend its deadline indefinitely.
+These fault tests complement the real OpenSSH tests; they are not replacement
+SSH protocol implementations.

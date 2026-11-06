@@ -189,7 +189,8 @@ impl Shellumi {
             .detach();
             let task = cx.background_executor().spawn(async move {
                 job.control.check()?;
-                let mut client = SftpClient::connect(&job.destination, &job.options)?;
+                let mut client =
+                    SftpClient::connect_with_control(&job.destination, &job.options, &job.control)?;
                 let callback = |bytes, total| {
                     let _ = progress_tx.try_send((bytes, total));
                 };
@@ -266,7 +267,7 @@ impl Shellumi {
                 } else if queued {
                     "Queued transfer cancelled."
                 } else {
-                    "Cancelling at the next packet boundary…"
+                    "Cancelling transfer…"
                 }
                 .into(),
             );

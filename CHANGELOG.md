@@ -2,12 +2,24 @@
 
 ## Unreleased
 
+## 0.0.2-alpha
+
+- Interrupt blocked SSH pipe reads/writes on cancellation and enforce one bounded
+  deadline per complete packet (30 seconds by default), including SFTP handshake.
+- Terminate the SSH child after pipe failure/interruption; keep cleanup warnings
+  with remote staging paths when a connection cannot be reused safely.
+- Add blocked/trickled-pipe and nonresponsive SSH connection acceptance tests.
+- Align crate, FFI/diagnostic and package versions; require release tags to match crate versions.
+- Patch the existing xattr 0.2.3 Linux errno compatibility failure while retaining
+  upstream licenses and native behavior; native Linux app build remains for CI.
+
+
 - Reject unsafe listing filenames before joining GUI transfer destinations.
 - Align live SFTP reads with the codec’s 16 MiB frame limit before allocation.
 - Stage SFTP downloads/uploads privately and publish only after validated transfer
   completion; preserve existing destinations on pre-publication failure/cancel.
 - Add graphical queued/running Cancel actions, live byte progress, real worker
-  limits and stable tab/listing updates. Cancellation is cooperative; failed
+  limits and stable tab/listing updates. Cancellation interrupts SSH pipe waits; failed
   remote cleanup retains a visible temporary-file path.
 - Prevent byte progress and CLI queue previews from claiming completed transfers.
 - Extend OpenSSH acceptance with destination preservation and cancellation in
@@ -34,8 +46,9 @@
 - Disable SFTP agent forwarding and require previously trusted host keys.
 - Pipe HTTP headers and UTF-8 bodies to curl through stdin rather than argv;
   reject malformed header input and ignore user curl configuration.
-- Regression coverage: 313 workspace tests passed on macOS, two opt-in tests ignored;
-  the self-contained real-server SSH/SFTP acceptance test passed separately.
+- Regression coverage: 318 workspace tests passed on macOS, three opt-in tests ignored;
+  both self-contained SSH/SFTP acceptance tests passed separately. Native xattr
+  verification passed 4 integration tests and 1 doc test.
 
 ## 0.0.1-alpha
 

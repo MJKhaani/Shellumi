@@ -287,3 +287,72 @@ fn saved_identity_sftp_roundtrip_reconnect_and_host_trust() {
     );
     println!("Real OpenSSH: group identity, encrypted key, SFTP listing, binary/empty atomic transfers, cancellation preserving originals, reconnect, changed/unknown host key rejection and wrong-passphrase rejection passed.");
 }
+
+#[test]
+#[ignore = "requires macOS OpenSSH and permission to bind a loopback socket"]
+fn stalled_ssh_connect_is_cancellable_and_bounded() {
+    use std::sync::mpsc;
+    for cancel in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, shutdown) = mpsc::channel::<()>();
+        let (accepted, ready) = mpsc::channel();
+        // Fault fixture: TCP accepts the SSH client, but never sends a banner.
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((_socket, _)) => {
+                        let _ = accepted.send(());
+                        let _ = shutdown.recv_timeout(Duration::from_secs(5));
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if matches!(shutdown.try_recv(), Err(mpsc::TryRecvError::Disconnected))
+                            || Instant::now() >= deadline
+                        {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("Loopback fixture failed: {error}"),
+                }
+            }
+        });
+        let control = TransferControl::default();
+        let other = control.clone();
+        let cancellation = cancel.then(|| {
+            std::thread::spawn(move || {
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(other.cancel());
+            })
+        });
+        let options = SftpConnectOptions {
+            ssh_config_file: Some("/dev/null".into()),
+            timeout_seconds: if cancel { 30 } else { 1 },
+            ..Default::default()
+        };
+        let destination = SshDestination::new("127.0.0.1", "fixture", port).unwrap();
+        let start = Instant::now();
+        let result = SftpClient::connect_with_control(&destination, &options, &control);
+        let elapsed = start.elapsed();
+        drop(release);
+        server.join().unwrap();
+        if let Some(thread) = cancellation {
+            thread.join().unwrap();
+        }
+        assert!(
+            result.is_err(),
+            "A nonresponsive SSH server must not establish SFTP"
+        );
+        if cancel {
+            assert!(matches!(result, Err(SftpError::Cancelled)));
+        }
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "Stalled SSH did not stop in time: {elapsed:?}"
+        );
+    }
+}

@@ -266,7 +266,7 @@ impl DiagnosticsRunner {
 
         DiagnosticsReport {
             timestamp: format!("epoch-{}", now),
-            shellumi_version: "0.1.0".to_string(),
+            shellumi_version: env!("CARGO_PKG_VERSION").to_string(),
             os_platform: std::env::consts::OS.to_string(),
             os_arch: std::env::consts::ARCH.to_string(),
             checks,
@@ -593,7 +593,7 @@ mod tests {
         let runner = DiagnosticsRunner::new();
         let report = runner.run_all();
 
-        assert_eq!(report.shellumi_version, "0.1.0");
+        assert_eq!(report.shellumi_version, env!("CARGO_PKG_VERSION"));
         assert!(!report.checks.is_empty());
 
         let (passed, warnings, failures) = report.counts();

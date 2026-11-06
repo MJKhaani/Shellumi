@@ -1,4 +1,4 @@
-# Desktop GUI implementation — v0.0.1-alpha
+# Desktop GUI implementation — v0.0.2-alpha
 
 The desktop is Rust/GPUI. The supplied UI design pack is a visual reference;
 its sample data and prototype QA are not evidence of working application features.
@@ -72,8 +72,8 @@ implemented application; those controls are not presented as functioning toggles
   validation and tests.
 - `README.md`, `docs/ROADMAP.md`, `docs/GUI_STATUS.md`: implementation status.
 
-Verification commands: `cargo test --locked --offline --workspace` (313 passed,
-2 opt-in tests ignored on macOS), app unit tests (47 passed, 1 ignored),
+Verification commands: `cargo test --locked --offline --workspace` (318 passed,
+3 opt-in tests ignored on macOS), app unit tests (47 passed, 1 ignored),
 `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, and the native macOS release build. Workspace
 integration tests requiring a loopback listener were run with loopback access.
@@ -170,7 +170,23 @@ symlink safety and retained cleanup warnings. The real-server test checks both
 directions of cancellation and staging cleanup. These transport/helper tests do
 not establish visual, keyboard or screen-reader acceptance of the new Cancel UI.
 
-Cancellation is cooperative; stalled SSH reads can delay it indefinitely.
+Cancellation now interrupts live SSH pipe waits, including connection setup;
+packet reads/writes have bounded deadlines. Filesystem IO and final publication
+are separate: a commit already in progress cannot be relabelled cancelled.
 Original permissions/timestamps are not preserved (new files use private modes).
 Abrupt shutdown/network loss can leave staging files; these cases still need
-bounded interruption/recovery work.
+abandoned-staging recovery work.
+
+## v0.0.2-alpha bounded connection cancellation
+
+The transfer worker calls `SftpClient::connect_with_control`, propagating its
+one-shot cancellation token through SFTP initialization and packet IO. GUI Cancel
+and tab close can interrupt a nonresponsive SSH connection rather than waiting
+indefinitely for a pipe read. The UI still acknowledges the worker outcome;
+cleanup warnings remain visible if interruption leaves remote staging behind.
+
+Core pipe IO uses bounded channels and dedicated blocking-handle workers, with
+cancellation checks while waiting and one deadline per packet. Read/write timeout
+or interruption terminates the SSH child, avoiding reuse of a partial frame.
+Normal transfer/cancellation and stalled-connect tests passed against actual
+OpenSSH. No new visual/keyboard acceptance is inferred from these tests.

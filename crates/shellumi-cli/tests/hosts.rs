@@ -1760,7 +1760,10 @@ fn supports_system_diagnostics_doctor_cli() {
         .unwrap();
     assert!(out_json.status.success());
     let str_json = String::from_utf8(out_json.stdout).unwrap();
-    assert!(str_json.contains("\"shellumi_version\": \"0.1.0\""));
+    assert!(str_json.contains(&format!(
+        "\"shellumi_version\": \"{}\"",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(str_json.contains("\"checks\":"));
 
     // 3. Markdown output
@@ -1820,7 +1823,10 @@ async fn supports_mobile_cli_and_virtual_keys() {
     let str_ffi = String::from_utf8(out_ffi.stdout).unwrap();
     assert!(str_ffi.contains("Mobile FFI contracts verified successfully"));
     assert!(str_ffi.contains("\"ok\":true"));
-    assert!(str_ffi.contains("C-ABI Core Version: 0.1.0"));
+    assert!(str_ffi.contains(&format!(
+        "C-ABI Core Version: {}",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(str_ffi.contains("C-ABI Destination Parsing:"));
     assert!(str_ffi.contains("C-ABI Virtual Key Translation:"));
 

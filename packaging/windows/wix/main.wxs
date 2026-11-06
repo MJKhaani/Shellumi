@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="Shellumi"
              Language="1033"
-             Version="0.1.0"
+             Version="0.0.2"
              Manufacturer="Shellumi Contributors"
              UpgradeCode="87A24D4B-3914-4B3B-8C9B-975DE1F00E4A">
 

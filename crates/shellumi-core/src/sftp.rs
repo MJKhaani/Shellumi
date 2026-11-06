@@ -7,10 +7,12 @@
 //! - Local filesystem listing and directory browsing
 
 mod transfer;
+mod transport;
 pub use transfer::TransferControl;
 
 use std::fmt;
 use std::fs;
+use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_SFTP_PACKET_LENGTH: usize = 16 * 1024 * 1024;
@@ -1624,8 +1626,9 @@ impl Default for SftpConnectOptions {
 
 /// High-level client for live SFTP v3 wire streaming and remote filesystem operations.
 pub struct SftpClient {
-    reader: Box<dyn std::io::Read + Send>,
-    writer: Box<dyn std::io::Write + Send>,
+    reader: transport::PacketReader,
+    writer: transport::PacketWriter,
+    active_control: Option<TransferControl>,
     child_process: Option<std::process::Child>,
     next_request_id: u32,
     server_version: u32,
@@ -1638,6 +1641,23 @@ impl SftpClient {
         destination: &crate::SshDestination,
         options: &SftpConnectOptions,
     ) -> Result<Self, SftpError> {
+        Self::connect_with_control(destination, options, &TransferControl::default())
+    }
+    /// Connect with cancellable SSH handshake and bounded packet IO.
+    pub fn connect_with_control(
+        destination: &crate::SshDestination,
+        options: &SftpConnectOptions,
+        control: &TransferControl,
+    ) -> Result<Self, SftpError> {
+        control.check()?;
+        if options.timeout_seconds == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SFTP timeout must be greater than zero",
+            )
+            .into());
+        }
+        let timeout = std::time::Duration::from_secs(options.timeout_seconds.into());
         let mut cmd = std::process::Command::new("ssh");
         if let Some(config) = &options.ssh_config_file {
             cmd.arg("-F").arg(config);
@@ -1694,15 +1714,20 @@ impl SftpClient {
         })?;
 
         let mut client = Self {
-            reader: Box::new(std::io::BufReader::new(stdout)),
-            writer: Box::new(std::io::BufWriter::new(stdin)),
+            reader: transport::PacketReader::Direct(Box::new(std::io::empty())),
+            writer: transport::PacketWriter::Direct(Box::new(std::io::sink())),
+            active_control: Some(control.clone()),
             child_process: Some(child),
             next_request_id: 1,
             server_version: 0,
             server_extensions: Vec::new(),
         };
 
+        client.reader = transport::PacketReader::process(stdout, timeout)?;
+        client.writer = transport::PacketWriter::process(stdin, timeout)?;
         client.init()?;
+        control.check()?;
+        client.active_control = None;
         Ok(client)
     }
 
@@ -1712,8 +1737,9 @@ impl SftpClient {
         writer: Box<dyn std::io::Write + Send>,
     ) -> Result<Self, SftpError> {
         let mut client = Self {
-            reader,
-            writer,
+            reader: transport::PacketReader::Direct(reader),
+            writer: transport::PacketWriter::Direct(writer),
+            active_control: None,
             child_process: None,
             next_request_id: 1,
             server_version: 0,
@@ -1741,14 +1767,23 @@ impl SftpClient {
 
     pub fn send_packet(&mut self, packet: &SftpPacket) -> Result<(), SftpError> {
         let wire = packet.encode();
-        self.writer.write_all(&wire)?;
-        self.writer.flush()?;
+        self.writer.begin(self.active_control.as_ref());
+        if let Err(error) = self
+            .writer
+            .write_all(&wire)
+            .and_then(|_| self.writer.flush())
+        {
+            return Err(self.transport_error(error));
+        }
         Ok(())
     }
 
     pub fn read_packet(&mut self) -> Result<SftpPacket, SftpError> {
+        self.reader.begin(self.active_control.as_ref());
         let mut len_bytes = [0u8; 4];
-        self.reader.read_exact(&mut len_bytes)?;
+        if let Err(error) = self.reader.read_exact(&mut len_bytes) {
+            return Err(self.transport_error(error));
+        }
         let length = u32::from_be_bytes(len_bytes) as usize;
         if length == 0 || length > MAX_SFTP_PACKET_LENGTH {
             return Err(SftpError::Protocol(SftpProtocolError::InvalidPacketLength(
@@ -1757,7 +1792,9 @@ impl SftpClient {
         }
 
         let mut payload = vec![0u8; length];
-        self.reader.read_exact(&mut payload)?;
+        if let Err(error) = self.reader.read_exact(&mut payload) {
+            return Err(self.transport_error(error));
+        }
 
         let mut full_wire = Vec::with_capacity(4 + length);
         full_wire.extend_from_slice(&len_bytes);
@@ -1767,6 +1804,33 @@ impl SftpClient {
             .map_err(SftpError::Protocol)?
             .ok_or(SftpError::Protocol(SftpProtocolError::UnexpectedEof))?;
         Ok(packet)
+    }
+
+    fn transport_error(&mut self, error: std::io::Error) -> SftpError {
+        // A timed-out/cancelled partial frame is not safe to resume or reuse.
+        if let Some(mut child) = self.child_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if self
+            .active_control
+            .as_ref()
+            .is_some_and(TransferControl::is_cancelled)
+        {
+            SftpError::Cancelled
+        } else {
+            SftpError::Io(error)
+        }
+    }
+    fn controlled<T>(
+        &mut self,
+        control: &TransferControl,
+        operation: impl FnOnce(&mut Self) -> Result<T, SftpError>,
+    ) -> Result<T, SftpError> {
+        let previous = self.active_control.replace(control.clone());
+        let result = operation(self);
+        self.active_control = previous;
+        result
     }
 
     fn init(&mut self) -> Result<(), SftpError> {
@@ -1921,6 +1985,20 @@ impl SftpClient {
     where
         F: Fn(u64, u64),
     {
+        self.controlled(control, |client| {
+            client.download_file_controlled(remote_path, local_path, control, callback)
+        })
+    }
+    fn download_file_controlled<F>(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        control: &TransferControl,
+        callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
         control.check()?;
         let size = self.stat(remote_path)?.size;
         let mut staging = transfer::LocalStaging::new(local_path)?;
@@ -1988,6 +2066,7 @@ impl SftpClient {
             }
             Ok(offset)
         })();
+        self.active_control = None;
         let closed = self.close_handle(handle);
         let bytes = transferred?;
         closed?;
@@ -2013,6 +2092,20 @@ impl SftpClient {
         )
     }
     pub fn upload_file_with_control<F>(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        control: &TransferControl,
+        callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
+        self.controlled(control, |client| {
+            client.upload_file_controlled(local_path, remote_path, control, callback)
+        })
+    }
+    fn upload_file_controlled<F>(
         &mut self,
         local_path: &Path,
         remote_path: &str,
@@ -2103,6 +2196,7 @@ impl SftpClient {
             }
             Ok(offset)
         })();
+        self.active_control = None;
         let closed = self.close_handle(handle);
         let result = transferred.and_then(|bytes| {
             closed?;
@@ -3533,5 +3627,22 @@ mod transfer_completion_tests {
         for name in ["normal file.txt", ".hidden", "name;literal", "فارسی.txt"] {
             assert!(PathUtils::is_safe_file_name(name));
         }
+    }
+    #[test]
+    fn zero_timeout_and_precancelled_connect_fail_before_launch() {
+        let destination = crate::SshDestination::new("example.invalid", "user", 22).unwrap();
+        let options = SftpConnectOptions {
+            timeout_seconds: 0,
+            ..Default::default()
+        };
+        assert!(
+            matches!(SftpClient::connect(&destination, &options), Err(SftpError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput)
+        );
+        let token = TransferControl::default();
+        token.cancel();
+        assert!(matches!(
+            SftpClient::connect_with_control(&destination, &SftpConnectOptions::default(), &token),
+            Err(SftpError::Cancelled)
+        ));
     }
 }

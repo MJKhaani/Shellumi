@@ -230,7 +230,11 @@ Legacy workspace destinations and Quick Connect use OpenSSH defaults.
   `shellumi-app::sftp_transfer` dispatches at most two background workers per tab,
   sends bounded progress updates, and acknowledges worker cancellation. Stable tab
   IDs and listing generations reject stale asynchronous updates. Cancellation is
-  cooperative and cannot interrupt a blocked SSH read or undo publication.
+  propagated into live SSH pipe IO and connection setup, and cannot undo publication.
+  `sftp::transport` uses bounded channels and pipe-owner threads; a packet has one
+  read/write deadline (default 30 seconds), even if bytes arrive intermittently.
+  Timeout/interruption terminates the SSH child rather than reusing a partial frame.
+  Cleanup after interruption can fail and reports the remote staging path.
 - **SFTP transfer completion:** Uploads, downloads and directory listings require a
   matching successful final CLOSE response. Close-time server errors, missing
   replies and mismatched request IDs propagate to callers. An optional explicit
@@ -328,3 +332,13 @@ receives authorization headers/body on stdin. SFTP batch connections disable
 agent forwarding and enforce known-host trust. Saved identities and secret
 references have persistence/CLI support, but GUI SSH launch wiring and live
 cross-platform/keychain/cloud acceptance still need work.
+
+## v0.0.2-alpha build compatibility
+
+The release workflow compares each crate's version with the semantic tag before
+building. Crate/FFI/diagnostic and native package versions are aligned. The root
+`[patch.crates-io]` selects a local xattr 0.2.3 compatibility patch for GPUI's
+`zed-async-tar` dependency. The patch maps the missing Linux/Android errno alias
+to ENODATA and preserves native macOS/BSD behavior and upstream licenses; see
+`vendor/xattr/PATCH.md`. It is excluded from the Shellumi workspace and tested
+separately. Full target build results are established by tag-triggered CI.

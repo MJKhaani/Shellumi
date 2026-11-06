@@ -9,7 +9,7 @@ Shellumi is built in Rust with a native GPUI interface and a local Turso databas
 It aims to provide an alternative to Termius without mandatory accounts,
 telemetry, subscriptions, or cloud storage requirements. Licensed under MIT.
 
-**Current milestone: `v0.0.1-alpha`.** This is an early testing release. The
+**Current milestone: `v0.0.2-alpha`.** This is an early testing release. The
 macOS desktop has been exercised locally; Linux and Windows remain target
 platforms requiring runtime validation. Review the limitations below before
 using Shellumi for administration.
@@ -53,7 +53,8 @@ See [GUI implementation status](docs/GUI_STATUS.md) for screen-by-screen details
 Download an asset matching your operating system and CPU from
 [GitHub Releases](https://github.com/MJKhaani/Shellumi/releases). Tag builds run
 through GitHub Actions; an asset is available only after its build succeeds.
-Alpha tags are published as prereleases. The local macOS build is unsigned and
+Alpha tags are published as prereleases. `v0.0.2-alpha` starts a new four-target
+build; inspect its workflow result before treating release assets as available. The locally verified Intel macOS `0.0.2-alpha` build is unsigned and
 not notarized.
 
 On macOS, extract the app archive or open the disk image and launch
@@ -170,10 +171,12 @@ can require an OS unlock/permission dialog.
 
 The graphical transfer queue starts at most two jobs per tab and reports live
 byte progress. **Cancel** removes queued work immediately or requests running
-work to stop at the next packet boundary. Closing a tab also requests cancellation.
+work to stop, including blocked SSH pipe reads/writes. Closing a tab also requests cancellation.
 Cancellation is refused once final publication begins, and the task remains in
-progress until its worker confirms completion or cancellation. A stalled SSH
-read can delay cancellation; forced interruption is not implemented yet.
+progress until its worker confirms completion or cancellation. Live SSH pipe
+waits poll cancellation and enforce a deadline for each complete packet read or
+write (30 seconds by default). A timed-out or interrupted SSH transport is
+terminated rather than reused with a potentially incomplete frame.
 
 Downloads write a private sibling `.shellumi-transfer-*.part` file and rename it
 after size/EOF checks, a successful server CLOSE, and a local file sync. Uploads
@@ -188,9 +191,10 @@ the transfer retains a visible error with the temporary path.
 
 ## Verification and limitations
 
-The local macOS workspace suite passed **313 automated tests**, with two
+The local macOS workspace suite passed **318 automated tests**, with three
 real-server tests opt-in. The self-contained SSH/SFTP acceptance test also passed
-separately; see [the test guide](docs/development/ssh-integration.md). Local macOS
+separately, including nonresponsive-connection cancellation/timeout checks;
+see [the test guide](docs/development/ssh-integration.md). Local macOS
 GUI checks covered snippet creation, workspace saving and shell launch, preference
 changes, long terminal output, scrolling and split sizing.
 
@@ -207,8 +211,8 @@ Remaining limitations include:
 
 - The graphical SFTP transport passed isolated real-server encrypted-key,
   listing, transfer, reconnect and host-key rejection tests. GUI interaction,
-  staged atomic publication and cooperative cancellation also passed. GUI interaction,
-  password/MFA, interruption of stalled SSH reads, metadata preservation and
+  staged publication, cancellation and nonresponsive-connection checks also passed.
+  GUI interaction, password/MFA, abandoned staging recovery, metadata preservation and
   other-platform acceptance remain pending. Network loss or abrupt shutdown can
   leave hidden staging files; cleanup failures report their remote path.
 - Drive still needs real-account acceptance. Authorization requires an externally
@@ -243,3 +247,17 @@ packaging/                Desktop and mobile packaging definitions
 
 [PROJECT.md](PROJECT.md) contains the long-term requirements. Its feature list is
 the target scope, not a claim that every capability is implemented.
+
+## v0.0.2-alpha release notes
+
+This alpha connects saved identities throughout desktop SSH/SFTP/workspace/tunnel
+launches and adds staged transfers, real queue dispatch, cancellation and bounded
+SSH pipe IO. Credential/sync hardening removes shared fallback keys and keeps
+HTTP authorization out of process arguments. The changelog and roadmap record
+acceptance evidence and unfinished work.
+
+The previous alpha's Linux build failed in the existing `xattr` 0.2.3 dependency.
+A local, license-preserving [compatibility patch](vendor/xattr/PATCH.md) fixes the
+removed Linux errno alias without downgrading libc. Native macOS upstream tests
+passed. A local Linux-target check could not run because the Rust target download
+failed DNS resolution; the tag workflow must establish the full Linux build.
