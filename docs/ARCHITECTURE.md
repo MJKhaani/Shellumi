@@ -333,7 +333,7 @@ agent forwarding and enforce known-host trust. Saved identities and secret
 references have persistence/CLI support, but GUI SSH launch wiring and live
 cross-platform/keychain/cloud acceptance still need work.
 
-## v0.0.2-alpha build compatibility
+## v0.0.3-alpha build compatibility
 
 The release workflow compares each crate's version with the semantic tag before
 building. Crate/FFI/diagnostic and native package versions are aligned. The root

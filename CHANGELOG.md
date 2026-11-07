@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.0.3-alpha
+
+### macOS HIG Dark Theme & Visual Design Overhaul
+- Centralized macOS Human Interface Guidelines (HIG) dark mode tokens in `shellumi-app::theme` (`MacTheme`).
+- Harmonized all application UI surfaces: window canvas (`0x1c1c1e`), workspace content (`0x18181a`), sidebar (`0x252528`), surfaces/toolbars (`0x2c2c2e`), borders (`0x46464a`), and inputs (`0x303034`).
+- Updated command palette (`Cmd+K`), tab bar chrome, terminal active canvas, and split-pane dividers.
+- Harmonized all overlay modals: dual-pane SFTP transfer drawer, port forwarding manager, session replay player, shell integration inspector, mobile simulator, multi-host batch runner, team vaults, and system diagnostics.
+- Refactored button interaction hierarchy to eliminate duplicate GPUI hover style registrations.
+
+### Brand & Multi-Platform HIG App Icons
+- Redesigned and replaced application logo and platform icons following Apple macOS Human Interface Guidelines (squircle geometry with continuous curvature, subtle lighting, border, drop shadow).
+- Generated complete platform icon assets: macOS `.icns`, Windows `.ico`, Linux PNG icon themes (`16x16` up to `1024x1024`), Favicon, and Web Touch icons.
+- Updated documentation and README assets.
+
+### System Keychain Daemons & Benchmark SLA Hardening
+- Integrated native OS credential daemons status detection for macOS `securityd`, Linux Secret Service (`secret-tool`), and Windows Credential Manager (`PasswordVault`).
+- Calibrated PBKDF2-HMAC-SHA256 benchmark SLA criteria to accommodate unoptimized crypto iterations during debug test runs (`cfg!(debug_assertions)`).
+- Enforced strict `.gitignore` patterns for local GUI screenshot galleries and attachment caches.
 
 ## 0.0.2-alpha
 

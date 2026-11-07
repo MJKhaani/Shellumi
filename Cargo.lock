@@ -5564,7 +5564,7 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shellumi-app"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "gpui",
@@ -5578,7 +5578,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-cli"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 dependencies = [
  "serde_json",
  "shellumi-core",
@@ -5589,7 +5589,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-core"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 dependencies = [
  "base64",
  "ring",
@@ -5602,7 +5602,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-storage"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -5614,7 +5614,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-terminal"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 dependencies = [
  "grid",
  "portable-pty",

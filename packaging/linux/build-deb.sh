@@ -7,7 +7,7 @@ set -euo pipefail
 ARCH="${1:-amd64}"
 APP_BIN="${2:-target/release/shellumi-app}"
 CLI_BIN="${3:-target/release/shellumi-cli}"
-VERSION="${SHELLUMI_VERSION:-0.0.2-alpha}"
+VERSION="${SHELLUMI_VERSION:-0.0.3-alpha}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Expected a semantic release version" >&2; exit 1; }
 case "$ARCH" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported package architecture" >&2; exit 1 ;; esac
 # Keep the replacement literal; Bash parameter substitution can expand ~ to HOME.
