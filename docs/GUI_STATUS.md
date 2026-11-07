@@ -56,12 +56,13 @@ implemented application; those controls are not presented as functioning toggles
 
 ## Files in this GUI increment
 
+- `crates/shellumi-app/src/theme.rs`: macOS HIG Dark theme tokens (window/content canvas, sidebar, surfaces, borders, text hierarchies, and accent states).
 - `crates/shellumi-app/src/desktop.rs`: navigation pages, library editors,
-  confirmation dialogs, preferences, local files and backup/public-key UI.
+  confirmation dialogs, preferences, local files and backup/public-key UI harmonized with macOS dark tokens.
 - `crates/shellumi-app/src/main.rs`: page routing, host/group/import controls,
   embedded managers, real tunnel sessions, measured terminal sizing/scrolling,
-  workspace restoration, and removal of simulated SFTP output.
-- `crates/shellumi-app/src/text_input.rs`: masked passphrase entry.
+  workspace restoration, modals, and native macOS dark styling.
+- `crates/shellumi-app/src/text_input.rs`: masked passphrase and search input styling with macOS dark tokens.
 - `crates/shellumi-app/src/connection.rs` and `askpass.rs`: identity-aware launch
   coordination and separate credential helper; `tests/askpass.rs` tests helper processes.
 - `crates/shellumi-core/src/connection.rs`: shared launch policy, strict prompt

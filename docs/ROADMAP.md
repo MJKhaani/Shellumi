@@ -8,7 +8,7 @@ The current milestone is **v0.0.2-alpha**. Requirements remain in
 
 The following work is included in the alpha source:
 
-- Native Rust/GPUI desktop with the supplied navy/teal visual direction,
+- Native Rust/GPUI desktop with native macOS Dark visual direction and design tokens,
   navigation, host inventory/inspector, centered editors and local-first startup.
 - Automatic platform data paths, Turso database creation and migration,
   asynchronous storage, and persistent preferences.
