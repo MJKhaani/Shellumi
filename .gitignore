@@ -17,3 +17,6 @@ pinned/
 
 # Interrupted local SFTP staging files
 .shellumi-transfer-*.part
+
+# Codex attachments cache
+/.codex-attachments/

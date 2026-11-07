@@ -37,10 +37,20 @@ if [ -f "${CLI_BIN}" ]; then
     chmod 755 "${PKG_DIR}/usr/bin/shellumi-cli"
 fi
 
-# Desktop entry & Icon
+# Desktop entry & Icons (FreeDesktop Hicolor Theme)
 cp packaging/linux/shellumi.desktop "${PKG_DIR}/usr/share/applications/"
-if [ -f "resources/logo.svg" ]; then
-    cp resources/logo.svg "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps/shellumi.svg"
+for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
+    if [ -f "resources/icons/hicolor/${size}/apps/shellumi.png" ]; then
+        mkdir -p "${PKG_DIR}/usr/share/icons/hicolor/${size}/apps"
+        cp "resources/icons/hicolor/${size}/apps/shellumi.png" "${PKG_DIR}/usr/share/icons/hicolor/${size}/apps/shellumi.png"
+    fi
+done
+if [ -f "resources/icons/hicolor/scalable/apps/shellumi.svg" ]; then
+    mkdir -p "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps"
+    cp "resources/icons/hicolor/scalable/apps/shellumi.svg" "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps/shellumi.svg"
+elif [ -f "resources/logo.svg" ]; then
+    mkdir -p "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps"
+    cp "resources/logo.svg" "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps/shellumi.svg"
 fi
 
 # Documentation & License

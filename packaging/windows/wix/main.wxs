@@ -16,6 +16,9 @@
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <MediaTemplate EmbedCab="yes" />
 
+        <Icon Id="ShellumiIcon" SourceFile="resources\shellumi.ico" />
+        <Property Id="ARPPRODUCTICON" Value="ShellumiIcon" />
+
         <Feature Id="ProductFeature" Title="Shellumi" Level="1">
             <ComponentGroupRef Id="ProductComponents" />
             <ComponentRef Id="ApplicationShortcut" />
@@ -45,7 +48,9 @@
                           Name="Shellumi"
                           Description="Free and Open-Source SSH Client"
                           Target="[INSTALLFOLDER]shellumi-app.exe"
-                          WorkingDirectory="INSTALLFOLDER" />
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="ShellumiIcon"
+                          IconIndex="0" />
                 <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
                 <RegistryValue Root="HKCU" Key="Software\Shellumi" Name="installed" Type="integer" Value="1" KeyPath="yes" />
             </Component>

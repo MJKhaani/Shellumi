@@ -240,7 +240,7 @@ crates/shellumi-core/      UI-independent domain, validation and crypto models
 crates/shellumi-terminal/  Terminal emulator, PTY manager and recording engine
 crates/shellumi-storage/   Async local Turso operations, migrations and preferences
 crates/shellumi-cli/       Command-line management and connection dispatch
-resources/                Logo, screenshots and bundled licenses
+resources/                Brand logo, multi-platform HIG icons, screenshots and bundled licenses
 docs/                     Architecture, progress, roadmap and threat model
 packaging/                Desktop and mobile packaging definitions
 .github/workflows/        CI and tag-triggered release builds

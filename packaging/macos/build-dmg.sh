@@ -20,7 +20,12 @@ cp "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/shellumi-app"
 chmod +x "${APP_BUNDLE}/Contents/MacOS/shellumi-app"
 
 cp packaging/macos/Info.plist "${APP_BUNDLE}/Contents/Info.plist"
-if [ -f "resources/logo.png" ]; then
+if [ -f "resources/AppIcon.icns" ]; then
+    cp resources/AppIcon.icns "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+fi
+if [ -f "resources/AppIcon.png" ]; then
+    cp resources/AppIcon.png "${APP_BUNDLE}/Contents/Resources/AppIcon.png"
+elif [ -f "resources/logo.png" ]; then
     cp resources/logo.png "${APP_BUNDLE}/Contents/Resources/AppIcon.png"
 fi
 
