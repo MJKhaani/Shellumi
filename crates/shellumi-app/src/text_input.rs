@@ -596,9 +596,11 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0x192536))
-            .text_color(rgb(0xe9f0f9))
+            .bg(rgb(0x303034))
+            .text_color(rgb(0xf5f5f7))
             .rounded_md()
+            .border_1()
+            .border_color(rgb(0x46464a))
             .line_height(px(24.))
             .text_size(px(14.))
             .child(
@@ -606,7 +608,7 @@ impl Render for TextInput {
                     .h(px(24. + 4. * 2.))
                     .w_full()
                     .p(px(4.))
-                    .bg(rgb(0x192536))
+                    .bg(rgb(0x303034))
                     .child(TextElement { input: cx.entity() }),
             )
     }

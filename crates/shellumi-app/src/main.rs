@@ -5,6 +5,9 @@ mod desktop;
 mod session;
 mod sftp_transfer;
 mod text_input;
+mod theme;
+
+pub use theme::MacTheme;
 
 use gpui::{
     actions, div, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context, Entity,
@@ -456,7 +459,7 @@ fn render_terminal_spans(spans: Vec<StyledSpan>, line_height: f32) -> gpui::Div 
         return line.child(" ");
     }
     for span in spans {
-        let (r, g, b) = span.fg.to_rgb((0xf3, 0xf4, 0xf6));
+        let (r, g, b) = span.fg.to_rgb((0xf5, 0xf5, 0xf7));
         let color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         let mut el = div().text_color(rgb(color_u32));
         if span.attrs.bold {
@@ -472,7 +475,7 @@ fn render_terminal_spans(spans: Vec<StyledSpan>, line_height: f32) -> gpui::Div 
             el = el.line_through();
         }
         if span.bg != Color::Default {
-            let (br, bg_val, bb) = span.bg.to_rgb((0x09, 0x0f, 0x1c));
+            let (br, bg_val, bb) = span.bg.to_rgb((0x18, 0x18, 0x1a));
             let bg_u32 = ((br as u32) << 16) | ((bg_val as u32) << 8) | (bb as u32);
             el = el.bg(rgb(bg_u32));
         }
@@ -5264,7 +5267,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(0x0a0f1d))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
@@ -5276,10 +5279,10 @@ impl Shellumi {
             .max_h(px(580.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x3b82f6))
-            .rounded_lg()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .rounded_xl()
             .p_5()
             .gap_4();
 
@@ -5289,7 +5292,7 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div()
@@ -5300,13 +5303,13 @@ impl Shellumi {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xfbbf24))
+                            .text_color(rgb(MacTheme::WARNING))
                             .child("⚠️ Sync Conflict Resolution"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("Concurrent modifications detected between local storage and remote vault. Choose which version to retain."),
                     ),
             )
@@ -5316,9 +5319,13 @@ impl Shellumi {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_conflict_modal(cx)))
                     .child("✕ Close"),
             );
@@ -5335,8 +5342,8 @@ impl Shellumi {
                 .copied()
                 .unwrap_or(ConflictResolutionChoice::KeepLocal);
             let pill_color = match choice {
-                ConflictResolutionChoice::KeepLocal => rgb(0x0284c7),
-                ConflictResolutionChoice::AcceptRemote => rgb(0x16a34a),
+                ConflictResolutionChoice::KeepLocal => rgb(MacTheme::ACCENT_BLUE),
+                ConflictResolutionChoice::AcceptRemote => rgb(MacTheme::SUCCESS),
             };
 
             items_col = items_col.child(
@@ -5345,9 +5352,17 @@ impl Shellumi {
                     .p_2()
                     .rounded_md()
                     .cursor_pointer()
-                    .bg(if is_sel { rgb(0x334155) } else { rgb(0x0f172a) })
+                    .bg(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
                     .border_1()
-                    .border_color(if is_sel { rgb(0x60a5fa) } else { rgb(0x1e293b) })
+                    .border_color(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::SEPARATOR)
+                    })
                     .on_click(cx.listener(move |app, _, _, cx| app.select_conflict_item(i, cx)))
                     .child(
                         div()
@@ -5358,7 +5373,11 @@ impl Shellumi {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xf1f5f9))
+                                    .text_color(if is_sel {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(MacTheme::TEXT_PRIMARY)
+                                    })
                                     .child(item.object_id.clone()),
                             )
                             .child(
@@ -5375,7 +5394,11 @@ impl Shellumi {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(if is_sel {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
                             .child(format!("Type: {}", item.entity_type)),
                     ),
             );
@@ -5398,12 +5421,12 @@ impl Shellumi {
                 .gap_2()
                 .p_3()
                 .rounded_md()
-                .bg(rgb(0x0f172a))
+                .bg(rgb(MacTheme::INPUT_BG))
                 .border_2()
                 .border_color(if is_local_chosen {
-                    rgb(0x38bdf8)
+                    rgb(MacTheme::ACCENT_BLUE)
                 } else {
-                    rgb(0x334155)
+                    rgb(MacTheme::SEPARATOR)
                 })
                 .child(
                     div()
@@ -5413,20 +5436,20 @@ impl Shellumi {
                         .child(
                             div()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x38bdf8))
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child("🖥 Local Version"),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child(format!("v{}", item.local_version)),
                         ),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0xcbd5e1))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child(item.local_summary.clone()),
                 )
                 .child(
@@ -5436,14 +5459,31 @@ impl Shellumi {
                         .px_3()
                         .py_1p5()
                         .rounded_md()
+                        .border_1()
+                        .border_color(if is_local_chosen {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(MacTheme::SEPARATOR)
+                        })
                         .cursor_pointer()
                         .bg(if is_local_chosen {
-                            rgb(0x0284c7)
+                            rgb(MacTheme::ACCENT_BLUE)
                         } else {
-                            rgb(0x1e293b)
+                            rgb(0x323236)
                         })
-                        .text_color(rgb(0xffffff))
+                        .text_color(if is_local_chosen {
+                            rgb(0xffffff)
+                        } else {
+                            rgb(MacTheme::TEXT_PRIMARY)
+                        })
                         .text_xs()
+                        .hover(move |s| {
+                            if is_local_chosen {
+                                s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                            } else {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                            }
+                        })
                         .on_click(cx.listener(|app, _, _, cx| {
                             app.set_conflict_choice(ConflictResolutionChoice::KeepLocal, cx);
                         }))
@@ -5464,12 +5504,12 @@ impl Shellumi {
                 .gap_2()
                 .p_3()
                 .rounded_md()
-                .bg(rgb(0x0f172a))
+                .bg(rgb(MacTheme::INPUT_BG))
                 .border_2()
                 .border_color(if is_remote_chosen {
-                    rgb(0x4ade80)
+                    rgb(MacTheme::SUCCESS)
                 } else {
-                    rgb(0x334155)
+                    rgb(MacTheme::SEPARATOR)
                 })
                 .child(
                     div()
@@ -5479,20 +5519,20 @@ impl Shellumi {
                         .child(
                             div()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x4ade80))
+                                .text_color(rgb(MacTheme::SUCCESS))
                                 .child("☁ Remote Vault"),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child(format!("v{}", item.remote_version)),
                         ),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0xcbd5e1))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child(item.remote_summary.clone()),
                 )
                 .child(
@@ -5502,14 +5542,31 @@ impl Shellumi {
                         .px_3()
                         .py_1p5()
                         .rounded_md()
+                        .border_1()
+                        .border_color(if is_remote_chosen {
+                            rgb(MacTheme::SUCCESS)
+                        } else {
+                            rgb(MacTheme::SEPARATOR)
+                        })
                         .cursor_pointer()
                         .bg(if is_remote_chosen {
-                            rgb(0x16a34a)
+                            rgb(MacTheme::SUCCESS)
                         } else {
-                            rgb(0x1e293b)
+                            rgb(0x323236)
                         })
-                        .text_color(rgb(0xffffff))
+                        .text_color(if is_remote_chosen {
+                            rgb(0xffffff)
+                        } else {
+                            rgb(MacTheme::TEXT_PRIMARY)
+                        })
                         .text_xs()
+                        .hover(move |s| {
+                            if is_remote_chosen {
+                                s.bg(rgb(MacTheme::SUCCESS))
+                            } else {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                            }
+                        })
                         .on_click(cx.listener(|app, _, _, cx| {
                             app.set_conflict_choice(ConflictResolutionChoice::AcceptRemote, cx);
                         }))
@@ -5535,16 +5592,20 @@ impl Shellumi {
             .gap_3()
             .pt_3()
             .border_t_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .id("cancel-resolutions-btn")
                     .px_4()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_conflict_modal(cx)))
                     .child("Cancel"),
             )
@@ -5554,11 +5615,14 @@ impl Shellumi {
                     .px_4()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x16a34a))
+                    .border_1()
+                    .border_color(rgb(MacTheme::ACCENT_BLUE))
+                    .bg(rgb(MacTheme::ACCENT_BLUE))
                     .text_color(rgb(0xffffff))
                     .font_weight(FontWeight::BOLD)
                     .text_xs()
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.apply_conflict_resolutions(cx)))
                     .child(format!("Apply All Resolutions ({total})")),
             );
@@ -5578,9 +5642,9 @@ impl Shellumi {
             "Paste Snippet"
         };
         let action_bg = if modal.execute {
-            rgb(0x059669)
+            rgb(MacTheme::SUCCESS)
         } else {
-            rgb(0x2563eb)
+            rgb(MacTheme::ACCENT_BLUE)
         };
 
         let overlay = div()
@@ -5589,7 +5653,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(0x0a0f1d))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
@@ -5601,10 +5665,10 @@ impl Shellumi {
             .max_h(px(520.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x38bdf8))
-            .rounded_lg()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .rounded_xl()
             .p_5()
             .gap_4();
 
@@ -5614,14 +5678,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child(format!("📜 {action_name}: {}", modal.snippet_name)),
                 ),
             )
@@ -5631,10 +5695,13 @@ impl Shellumi {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_snippet_modal(cx)))
                     .child("✕ Close"),
             );
@@ -5644,14 +5711,14 @@ impl Shellumi {
         let template_card = div()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x0f172a))
+            .bg(rgb(MacTheme::CONTENT_BG))
             .border_1()
-            .border_color(rgb(0x1e293b))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_xs()
                     .font_family(MONOSPACE_FONT)
-                    .text_color(rgb(0x38bdf8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .child(format!("Template: {}", modal.command_template)),
             );
         modal_box = modal_box.child(template_card);
@@ -5670,7 +5737,7 @@ impl Shellumi {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .child(var.name.clone()),
             );
             if var.is_secret {
@@ -5679,9 +5746,9 @@ impl Shellumi {
                         .px_2()
                         .py_0p5()
                         .rounded_sm()
-                        .bg(rgb(0x7f1d1d))
+                        .bg(rgb(0x4a1818))
                         .text_xs()
-                        .text_color(rgb(0xfecaca))
+                        .text_color(rgb(MacTheme::DANGER))
                         .child("SECRET"),
                 );
             }
@@ -5691,9 +5758,9 @@ impl Shellumi {
                         .px_2()
                         .py_0p5()
                         .rounded_sm()
-                        .bg(rgb(0x1e3a8a))
+                        .bg(rgb(0x183048))
                         .text_xs()
-                        .text_color(rgb(0xbfdbfe))
+                        .text_color(rgb(MacTheme::ACCENT_BLUE))
                         .child(format!("default: {def}")),
                 );
             }
@@ -5715,11 +5782,11 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x450a0a))
+                    .bg(rgb(0x4a1818))
                     .border_1()
-                    .border_color(rgb(0x991b1b))
+                    .border_color(rgb(MacTheme::DANGER))
                     .text_xs()
-                    .text_color(rgb(0xfecaca))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(format!("⚠ {err}")),
             );
         }
@@ -5731,7 +5798,7 @@ impl Shellumi {
             .justify_end()
             .gap_3()
             .border_t_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pt_3()
             .child(
                 div()
@@ -5739,10 +5806,13 @@ impl Shellumi {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_sm()
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_snippet_modal(cx)))
                     .child("Cancel"),
             )
@@ -5752,10 +5822,13 @@ impl Shellumi {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x7c3aed))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_sm()
-                    .text_color(rgb(0xffffff))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener({
                         let snip_id = modal.snippet_id;
                         move |app, _, _, cx| {
@@ -5771,11 +5844,14 @@ impl Shellumi {
                     .px_4()
                     .py_1()
                     .rounded_md()
+                    .border_1()
+                    .border_color(action_bg)
                     .bg(action_bg)
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(0xffffff))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.apply_snippet_modal(cx)))
                     .child(if modal.execute {
                         "Run (↵)"
@@ -5799,7 +5875,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(0x0a0f1d))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
@@ -5811,10 +5887,10 @@ impl Shellumi {
             .max_h(px(640.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0xa855f7))
-            .rounded_lg()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .rounded_xl()
             .p_5()
             .gap_4();
 
@@ -5824,14 +5900,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child(format!("⚡ Multi-Host Execution: {}", modal.snippet_name)),
                 ),
             )
@@ -5841,10 +5917,13 @@ impl Shellumi {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_batch_modal(cx)))
                     .child("✕ Close"),
             );
@@ -5854,14 +5933,14 @@ impl Shellumi {
         let template_card = div()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x0f172a))
+            .bg(rgb(MacTheme::CONTENT_BG))
             .border_1()
-            .border_color(rgb(0x1e293b))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_xs()
                     .font_family(MONOSPACE_FONT)
-                    .text_color(rgb(0xc084fc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .child(format!("Template: {}", modal.command_template)),
             );
         modal_box = modal_box.child(template_card);
@@ -5880,7 +5959,7 @@ impl Shellumi {
                     div()
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xe2e8f0))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child(var.name.clone()),
                 );
                 let field = div()
@@ -5907,21 +5986,43 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Policy:"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Policy:"),
+                    )
                     .child(
                         div()
                             .id("policy-parallel-btn")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(if is_parallel {
-                                rgb(0x7c3aed)
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if is_parallel {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if is_parallel {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .text_color(if is_parallel {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
                             .cursor_pointer()
+                            .hover(move |s| {
+                                if is_parallel {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.set_batch_policy(BatchExecutionPolicyChoice::Parallel, cx);
                             }))
@@ -5932,15 +6033,32 @@ impl Shellumi {
                             .id("policy-sequential-btn")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(if !is_parallel {
-                                rgb(0x7c3aed)
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if !is_parallel {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if !is_parallel {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .text_color(if !is_parallel {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
                             .cursor_pointer()
+                            .hover(move |s| {
+                                if !is_parallel {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.set_batch_policy(BatchExecutionPolicyChoice::Sequential, cx);
                             }))
@@ -5952,16 +6070,33 @@ impl Shellumi {
                     .id("toggle-dry-run-btn")
                     .px_3()
                     .py_1()
-                    .rounded_sm()
-                    .bg(if is_dry_run {
-                        rgb(0x0284c7)
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if is_dry_run {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x334155)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .bg(if is_dry_run {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xffffff))
+                    .text_color(if is_dry_run {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    })
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if is_dry_run {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
+                    })
                     .on_click(cx.listener(|app, _, _, cx| app.toggle_batch_dry_run(cx)))
                     .child(if is_dry_run {
                         "✔ Dry Run (Preview Only)"
@@ -5985,7 +6120,7 @@ impl Shellumi {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .child(format!(
                         "Target Hosts ({selected_count}/{total_count} selected):"
                     )),
@@ -6000,11 +6135,14 @@ impl Shellumi {
                             .id("batch-select-all-btn")
                             .px_2()
                             .py_0p5()
-                            .rounded_sm()
-                            .bg(rgb(0x334155))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
+                            .bg(rgb(0x323236))
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(
                                 cx.listener(|app, _, _, cx| app.batch_select_all_hosts(true, cx)),
                             )
@@ -6015,11 +6153,14 @@ impl Shellumi {
                             .id("batch-deselect-all-btn")
                             .px_2()
                             .py_0p5()
-                            .rounded_sm()
-                            .bg(rgb(0x334155))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
+                            .bg(rgb(0x323236))
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(
                                 cx.listener(|app, _, _, cx| app.batch_select_all_hosts(false, cx)),
                             )
@@ -6060,7 +6201,7 @@ impl Shellumi {
                 div()
                     .p_3()
                     .text_xs()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("No hosts match the filter criteria."),
             );
         } else {
@@ -6077,15 +6218,15 @@ impl Shellumi {
                     .p_2()
                     .rounded_md()
                     .bg(if is_selected {
-                        rgb(0x1e293b)
+                        rgb(MacTheme::INPUT_BG)
                     } else {
-                        rgb(0x0f172a)
+                        rgb(MacTheme::SURFACE)
                     })
                     .border_1()
                     .border_color(if is_selected {
-                        rgb(0x475569)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x1e293b)
+                        rgb(MacTheme::SEPARATOR)
                     });
 
                 let mut top_line = div().flex().items_center().justify_between().gap_2();
@@ -6100,10 +6241,16 @@ impl Shellumi {
                             .px_2()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if is_selected {
-                                rgb(0x7c3aed)
+                            .border_1()
+                            .border_color(if is_selected {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if is_selected {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
@@ -6118,22 +6265,27 @@ impl Shellumi {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(host.name.clone()),
                     )
-                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
-                        "({}@{}:{})",
-                        host.destination.username(),
-                        host.destination.host(),
-                        host.destination.port()
-                    )));
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child(format!(
+                                "({}@{}:{})",
+                                host.destination.username(),
+                                host.destination.host(),
+                                host.destination.port()
+                            )),
+                    );
 
                 let mut right_side = div().flex().items_center().gap_2();
                 if let Some(dur) = host.duration_ms {
                     right_side = right_side.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(format!("{dur}ms")),
                     );
                 }
@@ -6155,11 +6307,14 @@ impl Shellumi {
                             .id(("toggle-output", hid as usize))
                             .px_2()
                             .py_0p5()
-                            .rounded_sm()
-                            .bg(rgb(0x334155))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
+                            .bg(rgb(0x323236))
                             .text_xs()
-                            .text_color(rgb(0x93c5fd))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.toggle_batch_host_output(hid, cx);
                             }))
@@ -6179,14 +6334,14 @@ impl Shellumi {
                         .mt_2()
                         .p_2()
                         .rounded_sm()
-                        .bg(rgb(0x020617))
+                        .bg(rgb(MacTheme::CONTENT_BG))
                         .border_1()
-                        .border_color(rgb(0x1e293b))
+                        .border_color(rgb(MacTheme::SEPARATOR))
                         .child(
                             div()
                                 .text_xs()
                                 .font_family(MONOSPACE_FONT)
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .child(host.output.clone()),
                         );
                     row = row.child(out_card);
@@ -6199,19 +6354,20 @@ impl Shellumi {
 
         // Summary bar if completed
         if let Some(summary) = &modal.summary {
+            let is_failed = summary.failed > 0;
             let summary_card = div()
                 .p_2()
                 .rounded_md()
-                .bg(if summary.failed > 0 {
-                    rgb(0x450a0a)
+                .bg(if is_failed {
+                    rgb(0x4a1818)
                 } else {
-                    rgb(0x064e3b)
+                    rgb(0x133820)
                 })
                 .border_1()
-                .border_color(if summary.failed > 0 {
-                    rgb(0x991b1b)
+                .border_color(if is_failed {
+                    rgb(MacTheme::DANGER)
                 } else {
-                    rgb(0x047857)
+                    rgb(MacTheme::SUCCESS)
                 })
                 .flex()
                 .items_center()
@@ -6220,7 +6376,7 @@ impl Shellumi {
                     div()
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(0xffffff))
                         .child(format!(
                             "Execution Summary: {}/{} succeeded, {} failed ({}ms total)",
                             summary.succeeded,
@@ -6239,11 +6395,11 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x450a0a))
+                    .bg(rgb(0x4a1818))
                     .border_1()
-                    .border_color(rgb(0x991b1b))
+                    .border_color(rgb(MacTheme::DANGER))
                     .text_xs()
-                    .text_color(rgb(0xfecaca))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(format!("⚠ {err}")),
             );
         }
@@ -6264,7 +6420,7 @@ impl Shellumi {
             .justify_end()
             .gap_3()
             .border_t_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pt_3()
             .child(
                 div()
@@ -6272,10 +6428,13 @@ impl Shellumi {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_sm()
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_batch_modal(cx)))
                     .child("Close"),
             )
@@ -6285,15 +6444,32 @@ impl Shellumi {
                     .px_4()
                     .py_1()
                     .rounded_md()
-                    .bg(if is_running || selected_count == 0 {
-                        rgb(0x475569)
+                    .border_1()
+                    .border_color(if is_running || selected_count == 0 {
+                        rgb(MacTheme::SEPARATOR)
                     } else {
-                        rgb(0x7c3aed)
+                        rgb(MacTheme::ACCENT_BLUE)
+                    })
+                    .bg(if is_running || selected_count == 0 {
+                        rgb(0x38383a)
+                    } else {
+                        rgb(MacTheme::ACCENT_BLUE)
                     })
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xffffff))
+                    .text_color(if is_running || selected_count == 0 {
+                        rgb(MacTheme::TEXT_TERTIARY)
+                    } else {
+                        rgb(0xffffff)
+                    })
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if !is_running && selected_count > 0 {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s
+                        }
+                    })
                     .on_click(cx.listener(|app, _, _, cx| app.execute_batch(cx)))
                     .child(action_btn_text),
             );
@@ -6313,7 +6489,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgba(0x000000d0))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_start()
             .justify_center()
@@ -6326,9 +6502,9 @@ impl Shellumi {
             .id("command-palette-card")
             .w(px(640.0))
             .rounded_xl()
-            .bg(rgb(0x111827))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x374151))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .shadow_2xl()
             .overflow_hidden()
             .flex()
@@ -6342,9 +6518,9 @@ impl Shellumi {
             .gap_3()
             .px_4()
             .py_3()
-            .bg(rgb(0x0f172a))
+            .bg(rgb(MacTheme::SIDEBAR_BG))
             .border_b_1()
-            .border_color(rgb(0x1f2937))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(div().text_lg().child("🔍"))
             .child(div().flex_1().child(palette.input.clone()))
             .child(
@@ -6353,9 +6529,9 @@ impl Shellumi {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x1f2937))
+                    .bg(rgb(MacTheme::SURFACE_HOVER))
                     .text_xs()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_command_palette(cx)))
                     .child("Esc"),
@@ -6375,7 +6551,7 @@ impl Shellumi {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x9ca3af))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("No commands, hosts, or snippets match your query."),
                 );
             modal_box = modal_box.child(empty_view);
@@ -6392,9 +6568,9 @@ impl Shellumi {
             for (idx, mat) in matches.iter().enumerate() {
                 let is_selected = idx == palette.selected_idx;
                 let (bg_color, border_left) = if is_selected {
-                    (rgb(0x1e3a5f), rgb(0x3b82f6))
+                    (rgb(MacTheme::ACCENT_BLUE), rgb(MacTheme::ACCENT_BLUE_HOVER))
                 } else {
-                    (rgb(0x111827), rgb(0x111827))
+                    (rgb(MacTheme::SURFACE), rgb(MacTheme::SURFACE))
                 };
 
                 let cat = mat.command.category;
@@ -6475,12 +6651,12 @@ impl Shellumi {
                             .px_2()
                             .py_0p5()
                             .rounded_md()
-                            .bg(rgb(0x1f2937))
+                            .bg(rgb(0x323236))
                             .border_1()
-                            .border_color(rgb(0x374151))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .text_xs()
                             .font_family(MONOSPACE_FONT)
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(sc.clone()),
                     );
                 }
@@ -6499,18 +6675,18 @@ impl Shellumi {
             .px_4()
             .py_2()
             .border_t_1()
-            .border_color(rgb(0x1f2937))
-            .bg(rgb(0x0a0f1d))
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .bg(rgb(MacTheme::INPUT_BG))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x6b7280))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("↑↓ navigate  •  ↵ execute  •  esc dismiss"),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x4b5563))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child(format!("{} actions available", matches.len())),
             );
         modal_box = modal_box.child(footer);
@@ -6529,7 +6705,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(0x0a0f1d))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
@@ -6541,10 +6717,10 @@ impl Shellumi {
             .max_h(px(680.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x141e2c))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x6366f1))
-            .rounded_lg()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .rounded_xl()
             .p_5()
             .gap_4();
 
@@ -6554,14 +6730,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child("👥 Team Collaboration & Shared Vaults"),
                 ),
             )
@@ -6572,10 +6748,13 @@ impl Shellumi {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x263346))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_team_modal(cx)))
                     .child("✕ Close"),
             );
@@ -6591,10 +6770,16 @@ impl Shellumi {
                 .px_3()
                 .py_1p5()
                 .rounded_md()
-                .bg(if is_vaults {
-                    rgb(0x4338ca)
+                .border_1()
+                .border_color(if is_vaults {
+                    rgb(MacTheme::ACCENT_BLUE)
                 } else {
-                    rgb(0x263346)
+                    rgb(MacTheme::SEPARATOR)
+                })
+                .bg(if is_vaults {
+                    rgb(MacTheme::ACCENT_BLUE)
+                } else {
+                    rgb(0x323236)
                 })
                 .text_sm()
                 .font_weight(if is_vaults {
@@ -6602,8 +6787,19 @@ impl Shellumi {
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(rgb(0xffffff))
+                .text_color(if is_vaults {
+                    rgb(0xffffff)
+                } else {
+                    rgb(MacTheme::TEXT_SECONDARY)
+                })
                 .cursor_pointer()
+                .hover(move |s| {
+                    if is_vaults {
+                        s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                    } else {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                    }
+                })
                 .on_click(cx.listener(|app, _, _, cx| {
                     if let Some(m) = &mut app.team_modal {
                         m.active_tab = TeamModalTab::Vaults;
@@ -6620,10 +6816,16 @@ impl Shellumi {
                 .px_3()
                 .py_1p5()
                 .rounded_md()
-                .bg(if is_members {
-                    rgb(0x4338ca)
+                .border_1()
+                .border_color(if is_members {
+                    rgb(MacTheme::ACCENT_BLUE)
                 } else {
-                    rgb(0x263346)
+                    rgb(MacTheme::SEPARATOR)
+                })
+                .bg(if is_members {
+                    rgb(MacTheme::ACCENT_BLUE)
+                } else {
+                    rgb(0x323236)
                 })
                 .text_sm()
                 .font_weight(if is_members {
@@ -6631,8 +6833,19 @@ impl Shellumi {
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(rgb(0xffffff))
+                .text_color(if is_members {
+                    rgb(0xffffff)
+                } else {
+                    rgb(MacTheme::TEXT_SECONDARY)
+                })
                 .cursor_pointer()
+                .hover(move |s| {
+                    if is_members {
+                        s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                    } else {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                    }
+                })
                 .on_click(cx.listener(|app, _, _, cx| {
                     if let Some(m) = &mut app.team_modal {
                         m.active_tab = TeamModalTab::Members;
@@ -6649,10 +6862,16 @@ impl Shellumi {
                 .px_3()
                 .py_1p5()
                 .rounded_md()
-                .bg(if is_audit {
-                    rgb(0x4338ca)
+                .border_1()
+                .border_color(if is_audit {
+                    rgb(MacTheme::ACCENT_BLUE)
                 } else {
-                    rgb(0x263346)
+                    rgb(MacTheme::SEPARATOR)
+                })
+                .bg(if is_audit {
+                    rgb(MacTheme::ACCENT_BLUE)
+                } else {
+                    rgb(0x323236)
                 })
                 .text_sm()
                 .font_weight(if is_audit {
@@ -6660,8 +6879,19 @@ impl Shellumi {
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(rgb(0xffffff))
+                .text_color(if is_audit {
+                    rgb(0xffffff)
+                } else {
+                    rgb(MacTheme::TEXT_SECONDARY)
+                })
                 .cursor_pointer()
+                .hover(move |s| {
+                    if is_audit {
+                        s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                    } else {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                    }
+                })
                 .on_click(cx.listener(|app, _, _, cx| {
                     if let Some(m) = &mut app.team_modal {
                         m.active_tab = TeamModalTab::AuditLog;
@@ -6680,11 +6910,11 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x064e3b))
+                    .bg(rgb(0x133820))
                     .border_1()
-                    .border_color(rgb(0x059669))
+                    .border_color(rgb(MacTheme::SUCCESS))
                     .text_xs()
-                    .text_color(rgb(0xa7f3d0))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .child(format!("✓ {msg}")),
             );
         }
@@ -6694,11 +6924,11 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x450a0a))
+                    .bg(rgb(0x4a1818))
                     .border_1()
-                    .border_color(rgb(0x991b1b))
+                    .border_color(rgb(MacTheme::DANGER))
                     .text_xs()
-                    .text_color(rgb(0xfecaca))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(format!("⚠ {err}")),
             );
         }
@@ -6719,9 +6949,11 @@ impl Shellumi {
                         div()
                             .p_4()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .text_sm()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("No shared team vaults found. Create one below to collaborate."),
                     );
                 } else {
@@ -6740,15 +6972,15 @@ impl Shellumi {
                             .p_3()
                             .rounded_md()
                             .bg(if is_selected {
-                                rgb(0x1e1b4b)
+                                rgb(MacTheme::INPUT_BG)
                             } else {
-                                rgb(0x0f172a)
+                                rgb(MacTheme::SURFACE)
                             })
                             .border_1()
                             .border_color(if is_selected {
-                                rgb(0x6366f1)
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x141e2c)
+                                rgb(MacTheme::SEPARATOR)
                             });
 
                         let left = div()
@@ -6764,7 +6996,7 @@ impl Shellumi {
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xf1f5f9))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .child(v.name.clone()),
                                     )
                                     .child(
@@ -6772,24 +7004,27 @@ impl Shellumi {
                                             .px_2()
                                             .py_0p5()
                                             .rounded_sm()
-                                            .bg(rgb(0x312e81))
+                                            .bg(rgb(0x183048))
                                             .text_xs()
-                                            .text_color(rgb(0xc7d2fe))
+                                            .text_color(rgb(MacTheme::ACCENT_BLUE))
                                             .child(format!("Epoch {epoch}")),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                             .child(format!("Owner: {}", v.owner_id)),
                                     ),
                             )
                             .child(
-                                div().text_xs().text_color(rgb(0x64748b)).child(
-                                    v.description
-                                        .clone()
-                                        .unwrap_or_else(|| "No description".into()),
-                                ),
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child(
+                                        v.description
+                                            .clone()
+                                            .unwrap_or_else(|| "No description".into()),
+                                    ),
                             );
 
                         let mut right = div().flex().items_center().gap_2();
@@ -6800,11 +7035,14 @@ impl Shellumi {
                                     .id(("select-vault-btn", v_idx))
                                     .px_2()
                                     .py_1()
-                                    .rounded_sm()
-                                    .bg(rgb(0x4338ca))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
                                     .text_xs()
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         if let Some(m) = &mut app.team_modal {
                                             m.selected_vault_id = Some(vid_sel.clone());
@@ -6818,10 +7056,12 @@ impl Shellumi {
                                 div()
                                     .px_2()
                                     .py_1()
-                                    .rounded_sm()
-                                    .bg(rgb(0x065f46))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::SUCCESS))
+                                    .bg(rgb(0x133820))
                                     .text_xs()
-                                    .text_color(rgb(0xa7f3d0))
+                                    .text_color(rgb(MacTheme::SUCCESS))
                                     .child("Active"),
                             );
                         }
@@ -6831,11 +7071,14 @@ impl Shellumi {
                                 .id(("rotate-key-btn", v_idx))
                                 .px_2()
                                 .py_1()
-                                .rounded_sm()
-                                .bg(rgb(0x374151))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(MacTheme::SEPARATOR))
+                                .bg(rgb(0x323236))
                                 .text_xs()
-                                .text_color(rgb(0xe5e7eb))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.rotate_team_vault_key(&vid_rotate, cx);
                                 }))
@@ -6847,11 +7090,14 @@ impl Shellumi {
                                 .id(("delete-vault-btn", v_idx))
                                 .px_2()
                                 .py_1()
-                                .rounded_sm()
-                                .bg(rgb(0x7f1d1d))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(MacTheme::SEPARATOR))
+                                .bg(rgb(0x323236))
                                 .text_xs()
-                                .text_color(rgb(0xfecaca))
+                                .text_color(rgb(MacTheme::DANGER))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0x4a1818)))
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.delete_team_vault(&vid_del, cx);
                                 }))
@@ -6869,9 +7115,9 @@ impl Shellumi {
                     .id("create-vault-box")
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(0x0f172a))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .border_1()
-                    .border_color(rgb(0x141e2c))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -6879,7 +7125,7 @@ impl Shellumi {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("CREATE NEW SHARED VAULT"),
                     )
                     .child(modal.new_vault_name.clone())
@@ -6891,11 +7137,14 @@ impl Shellumi {
                                 .px_4()
                                 .py_1p5()
                                 .rounded_md()
-                                .bg(rgb(0x4338ca))
+                                .border_1()
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xffffff))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.create_team_vault(cx);
                                 }))
@@ -6910,9 +7159,11 @@ impl Shellumi {
                         div()
                             .p_4()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(0x332810))
+                            .border_1()
+                            .border_color(rgb(MacTheme::WARNING))
                             .text_sm()
-                            .text_color(rgb(0xf59e0b))
+                            .text_color(rgb(MacTheme::WARNING))
                             .child(
                                 "⚠️ Please select a shared vault from the 'Shared Vaults' tab first.",
                             ),
@@ -6930,7 +7181,7 @@ impl Shellumi {
                 modal_box = modal_box.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child(format!("Enrolled Collaborators for: {selected_vault_name}")),
                 );
 
@@ -6944,8 +7195,8 @@ impl Shellumi {
 
                 if modal.members.is_empty() {
                     members_list = members_list.child(
-                        div().p_3().rounded_md().bg(rgb(0x0f172a)).text_xs().text_color(
-                            rgb(0x64748b),
+                        div().p_3().rounded_md().bg(rgb(MacTheme::INPUT_BG)).border_1().border_color(rgb(MacTheme::SEPARATOR)).text_xs().text_color(
+                            rgb(MacTheme::TEXT_SECONDARY),
                         ).child(
                             "No additional collaborators enrolled yet. Invite team members below.",
                         ),
@@ -6963,19 +7214,19 @@ impl Shellumi {
                             .justify_between()
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::SURFACE))
                             .border_1()
                             .border_color(if is_revoked {
-                                rgb(0x450a0a)
+                                rgb(MacTheme::DANGER)
                             } else {
-                                rgb(0x141e2c)
+                                rgb(MacTheme::SEPARATOR)
                             });
 
                         let (badge_bg, badge_fg) = match m.role {
-                            TeamRole::Owner => (rgb(0x78350f), rgb(0xfde68a)),
-                            TeamRole::Administrator => (rgb(0x1e3a8a), rgb(0xbfdbfe)),
-                            TeamRole::Editor => (rgb(0x064e3b), rgb(0xa7f3d0)),
-                            TeamRole::Viewer => (rgb(0x374151), rgb(0xd1d5db)),
+                            TeamRole::Owner => (rgb(0x3a2c10), rgb(MacTheme::WARNING)),
+                            TeamRole::Administrator => (rgb(0x183048), rgb(MacTheme::ACCENT_BLUE)),
+                            TeamRole::Editor => (rgb(0x133820), rgb(MacTheme::SUCCESS)),
+                            TeamRole::Viewer => (rgb(0x323236), rgb(MacTheme::TEXT_SECONDARY)),
                         };
 
                         let left = div()
@@ -6992,9 +7243,9 @@ impl Shellumi {
                                             .text_sm()
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(if is_revoked {
-                                                rgb(0x94a3b8)
+                                                rgb(MacTheme::TEXT_SECONDARY)
                                             } else {
-                                                rgb(0xf8fafc)
+                                                rgb(MacTheme::TEXT_PRIMARY)
                                             })
                                             .child(m.display_name.clone()),
                                     )
@@ -7014,26 +7265,31 @@ impl Shellumi {
                                                 .px_2()
                                                 .py_0p5()
                                                 .rounded_sm()
-                                                .bg(rgb(0x7f1d1d))
+                                                .bg(rgb(0x4a1818))
                                                 .text_xs()
-                                                .text_color(rgb(0xfecaca))
+                                                .text_color(rgb(MacTheme::DANGER))
                                                 .child("⛔ Revoked")
                                         } else {
                                             div()
                                                 .px_2()
                                                 .py_0p5()
                                                 .rounded_sm()
-                                                .bg(rgb(0x065f46))
+                                                .bg(rgb(0x133820))
                                                 .text_xs()
-                                                .text_color(rgb(0xa7f3d0))
+                                                .text_color(rgb(MacTheme::SUCCESS))
                                                 .child("Active")
                                         }
                                     }),
                             )
-                            .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
-                                "User: {} • Invited by {}",
-                                m.user_id, m.invited_by
-                            )));
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child(format!(
+                                        "User: {} • Invited by {}",
+                                        m.user_id, m.invited_by
+                                    )),
+                            );
 
                         let mut right = div().flex().items_center().gap_2();
                         if !is_revoked && m.role != TeamRole::Owner {
@@ -7049,11 +7305,14 @@ impl Shellumi {
                                     .id(("toggle-role-btn", m_idx))
                                     .px_2()
                                     .py_1()
-                                    .rounded_sm()
-                                    .bg(rgb(0x374151))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::SEPARATOR))
+                                    .bg(rgb(0x323236))
                                     .text_xs()
-                                    .text_color(rgb(0xe2e8f0))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.update_member_role(&mid_role, next_role, cx);
                                     }))
@@ -7065,11 +7324,14 @@ impl Shellumi {
                                     .id(("revoke-member-btn", m_idx))
                                     .px_2()
                                     .py_1()
-                                    .rounded_sm()
-                                    .bg(rgb(0x7f1d1d))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::SEPARATOR))
+                                    .bg(rgb(0x323236))
                                     .text_xs()
-                                    .text_color(rgb(0xfecaca))
+                                    .text_color(rgb(MacTheme::DANGER))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x4a1818)))
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.revoke_team_member(&mid_revoke, cx);
                                     }))
@@ -7089,9 +7351,9 @@ impl Shellumi {
                     .id("invite-member-box")
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(0x0f172a))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .border_1()
-                    .border_color(rgb(0x141e2c))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -7099,7 +7361,7 @@ impl Shellumi {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("ADD LOCAL MEMBERSHIP RECORD"),
                     )
                     .child(modal.invite_user_id.clone())
@@ -7115,21 +7377,43 @@ impl Shellumi {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Role:"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .child("Role:"),
+                                    )
                                     .child(
                                         div()
                                             .id("invite-role-viewer")
                                             .px_2()
                                             .py_1()
-                                            .rounded_sm()
-                                            .bg(if current_role == TeamRole::Viewer {
-                                                rgb(0x4338ca)
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(if current_role == TeamRole::Viewer {
+                                                rgb(MacTheme::ACCENT_BLUE)
                                             } else {
-                                                rgb(0x374151)
+                                                rgb(MacTheme::SEPARATOR)
+                                            })
+                                            .bg(if current_role == TeamRole::Viewer {
+                                                rgb(MacTheme::ACCENT_BLUE)
+                                            } else {
+                                                rgb(0x323236)
                                             })
                                             .text_xs()
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(if current_role == TeamRole::Viewer {
+                                                rgb(0xffffff)
+                                            } else {
+                                                rgb(MacTheme::TEXT_PRIMARY)
+                                            })
                                             .cursor_pointer()
+                                            .hover(move |s| {
+                                                if current_role == TeamRole::Viewer {
+                                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                                } else {
+                                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                                }
+                                            })
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 if let Some(m) = &mut app.team_modal {
                                                     m.invite_role = TeamRole::Viewer;
@@ -7143,15 +7427,32 @@ impl Shellumi {
                                             .id("invite-role-editor")
                                             .px_2()
                                             .py_1()
-                                            .rounded_sm()
-                                            .bg(if current_role == TeamRole::Editor {
-                                                rgb(0x4338ca)
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(if current_role == TeamRole::Editor {
+                                                rgb(MacTheme::ACCENT_BLUE)
                                             } else {
-                                                rgb(0x374151)
+                                                rgb(MacTheme::SEPARATOR)
+                                            })
+                                            .bg(if current_role == TeamRole::Editor {
+                                                rgb(MacTheme::ACCENT_BLUE)
+                                            } else {
+                                                rgb(0x323236)
                                             })
                                             .text_xs()
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(if current_role == TeamRole::Editor {
+                                                rgb(0xffffff)
+                                            } else {
+                                                rgb(MacTheme::TEXT_PRIMARY)
+                                            })
                                             .cursor_pointer()
+                                            .hover(move |s| {
+                                                if current_role == TeamRole::Editor {
+                                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                                } else {
+                                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                                }
+                                            })
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 if let Some(m) = &mut app.team_modal {
                                                     m.invite_role = TeamRole::Editor;
@@ -7165,15 +7466,36 @@ impl Shellumi {
                                             .id("invite-role-admin")
                                             .px_2()
                                             .py_1()
-                                            .rounded_sm()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(
+                                                if current_role == TeamRole::Administrator {
+                                                    rgb(MacTheme::ACCENT_BLUE)
+                                                } else {
+                                                    rgb(MacTheme::SEPARATOR)
+                                                },
+                                            )
                                             .bg(if current_role == TeamRole::Administrator {
-                                                rgb(0x4338ca)
+                                                rgb(MacTheme::ACCENT_BLUE)
                                             } else {
-                                                rgb(0x374151)
+                                                rgb(0x323236)
                                             })
                                             .text_xs()
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(
+                                                if current_role == TeamRole::Administrator {
+                                                    rgb(0xffffff)
+                                                } else {
+                                                    rgb(MacTheme::TEXT_PRIMARY)
+                                                },
+                                            )
                                             .cursor_pointer()
+                                            .hover(move |s| {
+                                                if current_role == TeamRole::Administrator {
+                                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                                } else {
+                                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                                }
+                                            })
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 if let Some(m) = &mut app.team_modal {
                                                     m.invite_role = TeamRole::Administrator;
@@ -7189,11 +7511,14 @@ impl Shellumi {
                                     .px_4()
                                     .py_1p5()
                                     .rounded_md()
-                                    .bg(rgb(0x4338ca))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.invite_team_member(cx);
                                     }))
@@ -7208,9 +7533,11 @@ impl Shellumi {
                         div()
                             .p_4()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(0x332810))
+                            .border_1()
+                            .border_color(rgb(MacTheme::WARNING))
                             .text_sm()
-                            .text_color(rgb(0xf59e0b))
+                            .text_color(rgb(MacTheme::WARNING))
                             .child(
                                 "⚠️ Please select a shared vault from the 'Shared Vaults' tab first.",
                             ),
@@ -7225,9 +7552,14 @@ impl Shellumi {
                     .map(|v| v.name.as_str())
                     .unwrap_or("Selected Vault");
 
-                modal_box = modal_box.child(div().text_xs().text_color(rgb(0x94a3b8)).child(
-                    format!("Tamper-Evident Audit Trail for: {selected_vault_name}"),
-                ));
+                modal_box = modal_box.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child(format!(
+                            "Tamper-Evident Audit Trail for: {selected_vault_name}"
+                        )),
+                );
 
                 let mut audit_list = div()
                     .id("team-audit-list")
@@ -7242,9 +7574,11 @@ impl Shellumi {
                         div()
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("No audit records logged yet for this vault."),
                     );
                 } else {
@@ -7254,12 +7588,12 @@ impl Shellumi {
                             .px_3()
                             .py_1p5()
                             .rounded_sm()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::CONTENT_BG))
                             .border_1()
-                            .border_color(rgb(0x141e2c))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .text_xs()
                             .font_family(MONOSPACE_FONT)
-                            .text_color(rgb(0xc7d2fe))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(formatted);
                         audit_list = audit_list.child(row);
                     }
@@ -7289,7 +7623,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(0x0a0f1d))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
@@ -7301,10 +7635,10 @@ impl Shellumi {
             .max_h(px(680.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x141e2c))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x0e7490))
-            .rounded_lg()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .rounded_xl()
             .p_5()
             .gap_4();
 
@@ -7314,14 +7648,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child("Infrastructure inventory"),
                 ),
             )
@@ -7334,10 +7668,13 @@ impl Shellumi {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x263346))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.dismiss_infra_modal(cx);
                     }))
@@ -7351,9 +7688,11 @@ impl Shellumi {
                 div()
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x7f1d1d))
+                    .bg(rgb(0x4a1818))
+                    .border_1()
+                    .border_color(rgb(MacTheme::DANGER))
                     .text_xs()
-                    .text_color(rgb(0xfecaca))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(format!("⚠️ {err}")),
             );
         }
@@ -7362,9 +7701,11 @@ impl Shellumi {
                 div()
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x065f46))
+                    .bg(rgb(0x133820))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SUCCESS))
                     .text_xs()
-                    .text_color(rgb(0xa7f3d0))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .child(format!("ℹ️ {status}")),
             );
         }
@@ -7376,7 +7717,7 @@ impl Shellumi {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_2()
             .child(
                 div()
@@ -7384,15 +7725,32 @@ impl Shellumi {
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .bg(if current_tab == InfraModalTab::Providers {
-                        rgb(0x0e7490)
+                    .border_1()
+                    .border_color(if current_tab == InfraModalTab::Providers {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .bg(if current_tab == InfraModalTab::Providers {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xffffff))
+                    .text_color(if current_tab == InfraModalTab::Providers {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if current_tab == InfraModalTab::Providers {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
+                    })
                     .on_click(cx.listener(|app, _, _, cx| {
                         if let Some(m) = &mut app.infra_modal {
                             m.active_tab = InfraModalTab::Providers;
@@ -7407,15 +7765,32 @@ impl Shellumi {
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .bg(if current_tab == InfraModalTab::Discovered {
-                        rgb(0x0e7490)
+                    .border_1()
+                    .border_color(if current_tab == InfraModalTab::Discovered {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .bg(if current_tab == InfraModalTab::Discovered {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xffffff))
+                    .text_color(if current_tab == InfraModalTab::Discovered {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if current_tab == InfraModalTab::Discovered {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
+                    })
                     .on_click(cx.listener(|app, _, _, cx| {
                         if let Some(m) = &mut app.infra_modal {
                             m.active_tab = InfraModalTab::Discovered;
@@ -7430,15 +7805,32 @@ impl Shellumi {
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .bg(if current_tab == InfraModalTab::Ansible {
-                        rgb(0x0e7490)
+                    .border_1()
+                    .border_color(if current_tab == InfraModalTab::Ansible {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .bg(if current_tab == InfraModalTab::Ansible {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xffffff))
+                    .text_color(if current_tab == InfraModalTab::Ansible {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if current_tab == InfraModalTab::Ansible {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
+                    })
                     .on_click(cx.listener(|app, _, _, cx| {
                         if let Some(m) = &mut app.infra_modal {
                             m.active_tab = InfraModalTab::Ansible;
@@ -7462,15 +7854,32 @@ impl Shellumi {
                             .id("kind-aws")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(if current_kind == CloudProviderKind::Aws {
-                                rgb(0x0e7490)
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if current_kind == CloudProviderKind::Aws {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x374151)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if current_kind == CloudProviderKind::Aws {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .text_color(if current_kind == CloudProviderKind::Aws {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
                             .cursor_pointer()
+                            .hover(move |s| {
+                                if current_kind == CloudProviderKind::Aws {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 if let Some(m) = &mut app.infra_modal {
                                     m.new_provider_kind = CloudProviderKind::Aws;
@@ -7484,15 +7893,32 @@ impl Shellumi {
                             .id("kind-azure")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(if current_kind == CloudProviderKind::Azure {
-                                rgb(0x0e7490)
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if current_kind == CloudProviderKind::Azure {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x374151)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if current_kind == CloudProviderKind::Azure {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .text_color(if current_kind == CloudProviderKind::Azure {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
                             .cursor_pointer()
+                            .hover(move |s| {
+                                if current_kind == CloudProviderKind::Azure {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 if let Some(m) = &mut app.infra_modal {
                                     m.new_provider_kind = CloudProviderKind::Azure;
@@ -7506,15 +7932,32 @@ impl Shellumi {
                             .id("kind-do")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(if current_kind == CloudProviderKind::DigitalOcean {
-                                rgb(0x0e7490)
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if current_kind == CloudProviderKind::DigitalOcean {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x374151)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if current_kind == CloudProviderKind::DigitalOcean {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .text_color(if current_kind == CloudProviderKind::DigitalOcean {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
                             .cursor_pointer()
+                            .hover(move |s| {
+                                if current_kind == CloudProviderKind::DigitalOcean {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 if let Some(m) = &mut app.infra_modal {
                                     m.new_provider_kind = CloudProviderKind::DigitalOcean;
@@ -7528,15 +7971,32 @@ impl Shellumi {
                             .id("kind-ansible")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(if current_kind == CloudProviderKind::Ansible {
-                                rgb(0x0e7490)
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if current_kind == CloudProviderKind::Ansible {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x374151)
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if current_kind == CloudProviderKind::Ansible {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x323236)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .text_color(if current_kind == CloudProviderKind::Ansible {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
                             .cursor_pointer()
+                            .hover(move |s| {
+                                if current_kind == CloudProviderKind::Ansible {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 if let Some(m) = &mut app.infra_modal {
                                     m.new_provider_kind = CloudProviderKind::Ansible;
@@ -7551,15 +8011,15 @@ impl Shellumi {
                     .flex_col()
                     .gap_2()
                     .p_3()
-                    .bg(rgb(0x0f172a))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0x263346))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("Connect New Infrastructure Provider:"),
                     )
                     .child(kind_picker)
@@ -7581,11 +8041,14 @@ impl Shellumi {
                                     .px_4()
                                     .py_1p5()
                                     .rounded_md()
-                                    .bg(rgb(0x0e7490))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.create_infra_provider(cx);
                                     }))
@@ -7608,9 +8071,11 @@ impl Shellumi {
                         div()
                             .p_4()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("No infrastructure providers configured yet."),
                     );
                 } else {
@@ -7632,9 +8097,9 @@ impl Shellumi {
                             .justify_between()
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::SURFACE))
                             .border_1()
-                            .border_color(rgb(0x263346))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .child(
                                 div().flex().flex_col().gap_0p5().child(
                                     div()
@@ -7646,7 +8111,7 @@ impl Shellumi {
                                             div()
                                                 .text_sm()
                                                 .font_weight(FontWeight::BOLD)
-                                                .text_color(rgb(0xf8fafc))
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                 .child(p.name.clone()),
                                         )
                                         .child(
@@ -7654,9 +8119,9 @@ impl Shellumi {
                                                 .px_1p5()
                                                 .py_0p5()
                                                 .rounded_sm()
-                                                .bg(rgb(0x141e2c))
+                                                .bg(rgb(0x183048))
                                                 .text_xs()
-                                                .text_color(rgb(0x38bdf8))
+                                                .text_color(rgb(MacTheme::ACCENT_BLUE))
                                                 .child(p.provider_kind.to_uppercase()),
                                         ),
                                 ),
@@ -7671,11 +8136,14 @@ impl Shellumi {
                                             .id(("sync-prov-btn", p_idx))
                                             .px_2()
                                             .py_1()
-                                            .rounded_sm()
-                                            .bg(rgb(0x0369a1))
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(rgb(MacTheme::SEPARATOR))
+                                            .bg(rgb(0x323236))
                                             .text_xs()
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.sync_infra_provider(sync_pid.clone(), cx);
                                             }))
@@ -7686,11 +8154,14 @@ impl Shellumi {
                                             .id(("del-prov-btn", p_idx))
                                             .px_2()
                                             .py_1()
-                                            .rounded_sm()
-                                            .bg(rgb(0x7f1d1d))
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(rgb(MacTheme::SEPARATOR))
+                                            .bg(rgb(0x323236))
                                             .text_xs()
-                                            .text_color(rgb(0xfecaca))
+                                            .text_color(rgb(MacTheme::DANGER))
                                             .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(0x4a1818)))
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.delete_infra_provider(pid.clone(), cx);
                                             }))
@@ -7716,9 +8187,11 @@ impl Shellumi {
                         div()
                             .p_4()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("No hosts discovered yet. Connect a provider and trigger Sync, or import an inventory file."),
                     );
                 } else {
@@ -7739,9 +8212,9 @@ impl Shellumi {
                             .justify_between()
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::SURFACE))
                             .border_1()
-                            .border_color(rgb(0x263346))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .child(
                                 div()
                                     .flex()
@@ -7756,7 +8229,7 @@ impl Shellumi {
                                                 div()
                                                     .text_sm()
                                                     .font_weight(FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                     .child(h.name.clone()),
                                             )
                                             .child(
@@ -7764,16 +8237,16 @@ impl Shellumi {
                                                     .px_1p5()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x141e2c))
+                                                    .bg(rgb(MacTheme::INPUT_BG))
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                                     .child(state_badge),
                                             )
                                             .child({
                                                 let reg = h.region.as_deref().unwrap_or("-");
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x64748b))
+                                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                                     .child(format!("[{reg}]"))
                                             }),
                                     )
@@ -7781,7 +8254,7 @@ impl Shellumi {
                                         div()
                                             .text_xs()
                                             .font_family(MONOSPACE_FONT)
-                                            .text_color(rgb(0x38bdf8))
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                             .child(format!(
                                                 "{}@{}:{}",
                                                 h.username.as_deref().unwrap_or("user"),
@@ -7796,10 +8269,12 @@ impl Shellumi {
                                         .id(("imported-badge", h_idx))
                                         .px_2p5()
                                         .py_1()
-                                        .rounded_sm()
-                                        .bg(rgb(0x065f46))
+                                        .rounded_md()
+                                        .bg(rgb(0x133820))
+                                        .border_1()
+                                        .border_color(rgb(MacTheme::SUCCESS))
                                         .text_xs()
-                                        .text_color(rgb(0xa7f3d0))
+                                        .text_color(rgb(MacTheme::SUCCESS))
                                         .child(format!(
                                             "✅ Imported (ID: {})",
                                             h.imported_host_id.unwrap_or(0)
@@ -7809,12 +8284,15 @@ impl Shellumi {
                                         .id(("import-host-btn", h_idx))
                                         .px_3()
                                         .py_1()
-                                        .rounded_sm()
-                                        .bg(rgb(0x0e7490))
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                        .bg(rgb(MacTheme::ACCENT_BLUE))
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
                                         .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                         .on_click(cx.listener(move |app, _, _, cx| {
                                             app.import_discovered_host_into_inventory(h_idx, cx);
                                         }))
@@ -7833,20 +8311,20 @@ impl Shellumi {
                     .gap_4()
                     .p_4()
                     .rounded_md()
-                    .bg(rgb(0x0f172a))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .border_1()
-                    .border_color(rgb(0x263346))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("Export Shellumi Inventory to Ansible"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("Generate fully compliant Ansible static and dynamic inventory formats from your current Shellumi hosts, groups, and tags."),
                     )
                     .child(
@@ -7859,11 +8337,14 @@ impl Shellumi {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(rgb(0x0e7490))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.export_ansible_inventory_file(false, cx);
                                     }))
@@ -7875,11 +8356,14 @@ impl Shellumi {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(rgb(0x4338ca))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::SEPARATOR))
+                                    .bg(rgb(0x323236))
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.export_ansible_inventory_file(true, cx);
                                     }))
@@ -7909,7 +8393,7 @@ impl Shellumi {
             .id("diagnostics-modal-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000cc))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center();
@@ -7920,9 +8404,9 @@ impl Shellumi {
             .max_h(px(580.0))
             .p_6()
             .rounded_xl()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -7934,14 +8418,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child("🩺 System Diagnostics & Production Health Check"),
                 ),
             )
@@ -7951,22 +8435,27 @@ impl Shellumi {
                     .px_2p5()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_diagnostics_modal(cx)))
                     .child("✕ Close"),
             );
         modal_box = modal_box.child(header);
 
         // Sub-Navigation Tabs
+        let is_health = modal.active_tab == DiagnosticsModalTab::HealthChecks;
+        let is_bench = modal.active_tab == DiagnosticsModalTab::Benchmarks;
         let tabs = div()
             .flex()
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_2()
             .child(
                 div()
@@ -7974,18 +8463,31 @@ impl Shellumi {
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .cursor_pointer()
-                    .bg(if modal.active_tab == DiagnosticsModalTab::HealthChecks {
-                        rgb(0x0f766e)
+                    .border_1()
+                    .border_color(if is_health {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x334155)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .cursor_pointer()
+                    .bg(if is_health {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(if modal.active_tab == DiagnosticsModalTab::HealthChecks {
+                    .text_color(if is_health {
                         rgb(0xffffff)
                     } else {
-                        rgb(0x94a3b8)
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
+                    .hover(move |s| {
+                        if is_health {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
                     })
                     .on_click(cx.listener(|app, _, _, cx| {
                         if let Some(ref mut m) = app.diagnostics_modal {
@@ -8004,18 +8506,31 @@ impl Shellumi {
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .cursor_pointer()
-                    .bg(if modal.active_tab == DiagnosticsModalTab::Benchmarks {
-                        rgb(0x2563eb)
+                    .border_1()
+                    .border_color(if is_bench {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x334155)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .cursor_pointer()
+                    .bg(if is_bench {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(if modal.active_tab == DiagnosticsModalTab::Benchmarks {
+                    .text_color(if is_bench {
                         rgb(0xffffff)
                     } else {
-                        rgb(0x94a3b8)
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
+                    .hover(move |s| {
+                        if is_bench {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
                     })
                     .on_click(cx.listener(|app, _, _, cx| {
                         if let Some(ref mut m) = app.diagnostics_modal {
@@ -8043,13 +8558,13 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_lg()
-                                .text_color(rgb(0x38bdf8))
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child("⏳ Running system diagnostic checks..."),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child("Testing OpenSSH binary, CSPRNG, AEAD ciphers, network loopback, and storage integrity..."),
                         );
                     modal_box = modal_box.child(loading);
@@ -8059,20 +8574,20 @@ impl Shellumi {
                     // Status Banner
                     let (banner_bg, banner_fg, banner_text) = if failures > 0 {
                         (
-                            rgb(0x7f1d1d),
-                            rgb(0xfecaca),
+                            rgb(0x4a1818),
+                            rgb(MacTheme::DANGER),
                             format!("❌ Action Required: {failures} critical check(s) failed."),
                         )
                     } else if warnings > 0 {
                         (
-                            rgb(0x78350f),
-                            rgb(0xfde68a),
+                            rgb(0x3a2c10),
+                            rgb(MacTheme::WARNING),
                             format!("⚠️ Degraded: All critical tests passed, but {warnings} warning(s) detected."),
                         )
                     } else {
                         (
-                            rgb(0x065f46),
-                            rgb(0xa7f3d0),
+                            rgb(0x133820),
+                            rgb(MacTheme::SUCCESS),
                             "✅ All Systems Ready: All production environment prerequisites passed."
                                 .to_string(),
                         )
@@ -8083,6 +8598,8 @@ impl Shellumi {
                         .py_2p5()
                         .rounded_md()
                         .bg(banner_bg)
+                        .border_1()
+                        .border_color(banner_fg)
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
                         .text_color(banner_fg)
@@ -8106,18 +8623,18 @@ impl Shellumi {
 
                     for (c_idx, check) in report.checks.iter().enumerate() {
                         let (badge_bg, badge_fg) = match check.status {
-                            DiagnosticStatus::Passed => (rgb(0x065f46), rgb(0xa7f3d0)),
-                            DiagnosticStatus::Warning => (rgb(0x78350f), rgb(0xfde68a)),
-                            DiagnosticStatus::Failed => (rgb(0x7f1d1d), rgb(0xfecaca)),
+                            DiagnosticStatus::Passed => (rgb(0x133820), rgb(MacTheme::SUCCESS)),
+                            DiagnosticStatus::Warning => (rgb(0x3a2c10), rgb(MacTheme::WARNING)),
+                            DiagnosticStatus::Failed => (rgb(0x4a1818), rgb(MacTheme::DANGER)),
                         };
 
                         let mut row = div()
                             .id(("diag-check-row", c_idx))
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .border_1()
-                            .border_color(rgb(0x334155))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .flex()
                             .flex_col()
                             .gap_1p5();
@@ -8136,7 +8653,7 @@ impl Shellumi {
                                         div()
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .child(check.name.clone()),
                                     ),
                             )
@@ -8148,7 +8665,7 @@ impl Shellumi {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x64748b))
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                             .child(format!("{}ms", check.duration_ms)),
                                     )
                                     .child(
@@ -8167,7 +8684,7 @@ impl Shellumi {
 
                         let row_msg = div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(check.message.clone());
                         row = row.child(row_msg);
 
@@ -8176,9 +8693,11 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(MacTheme::CONTENT_BG))
+                                .border_1()
+                                .border_color(rgb(MacTheme::SEPARATOR))
                                 .text_xs()
-                                .text_color(rgb(0x38bdf8))
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child(format!("↳ Remediation: {rem}"));
                             row = row.child(row_rem);
                         }
@@ -8194,22 +8713,30 @@ impl Shellumi {
                         .justify_between()
                         .pt_2()
                         .border_t_1()
-                        .border_color(rgb(0x334155))
-                        .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
-                            "Platform: {} [{}]",
-                            report.os_platform, report.os_arch
-                        )))
+                        .border_color(rgb(MacTheme::SEPARATOR))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .child(format!(
+                                    "Platform: {} [{}]",
+                                    report.os_platform, report.os_arch
+                                )),
+                        )
                         .child(
                             div()
                                 .id("rerun-diagnostics-btn")
                                 .px_3()
                                 .py_1p5()
                                 .rounded_md()
-                                .bg(rgb(0x0f766e))
+                                .border_1()
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xffffff))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.run_diagnostics_checks(cx);
                                 }))
@@ -8230,21 +8757,21 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_lg()
-                                .text_color(rgb(0x38bdf8))
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child("⏳ Running deterministic micro-benchmarks..."),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child("Evaluating AES-256-GCM AEAD, PBKDF2 stretching, autocomplete, template engine, and sync diffing..."),
                         );
                     modal_box = modal_box.child(loading);
                 } else if let Some(ref b_report) = modal.benchmark_report {
                     let (b_bg, b_fg, b_title) = if b_report.failed_count > 0 {
                         (
-                            rgb(0x7f1d1d),
-                            rgb(0xfecaca),
+                            rgb(0x4a1818),
+                            rgb(MacTheme::DANGER),
                             format!(
                                 "❌ SLA Breach: {} benchmark(s) failed strict SLAs.",
                                 b_report.failed_count
@@ -8252,8 +8779,8 @@ impl Shellumi {
                         )
                     } else if b_report.warning_count > 0 {
                         (
-                            rgb(0x78350f),
-                            rgb(0xfde68a),
+                            rgb(0x3a2c10),
+                            rgb(MacTheme::WARNING),
                             format!(
                                 "⚠️ SLA Warning: {} benchmark(s) close to SLA threshold.",
                                 b_report.warning_count
@@ -8261,8 +8788,8 @@ impl Shellumi {
                         )
                     } else {
                         (
-                            rgb(0x065f46),
-                            rgb(0xa7f3d0),
+                            rgb(0x133820),
+                            rgb(MacTheme::SUCCESS),
                             "✅ All Performance Benchmarks Passed: Subsystem throughput and latency exceed strict SLA targets."
                                 .to_string(),
                         )
@@ -8273,6 +8800,8 @@ impl Shellumi {
                         .py_2p5()
                         .rounded_md()
                         .bg(b_bg)
+                        .border_1()
+                        .border_color(b_fg)
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
                         .text_color(b_fg)
@@ -8299,9 +8828,9 @@ impl Shellumi {
 
                     for (b_idx, metric) in b_report.metrics.iter().enumerate() {
                         let (badge_bg, badge_fg) = match metric.status {
-                            BenchmarkStatus::Passed => (rgb(0x065f46), rgb(0xa7f3d0)),
-                            BenchmarkStatus::Warning => (rgb(0x78350f), rgb(0xfde68a)),
-                            BenchmarkStatus::Failed => (rgb(0x7f1d1d), rgb(0xfecaca)),
+                            BenchmarkStatus::Passed => (rgb(0x133820), rgb(MacTheme::SUCCESS)),
+                            BenchmarkStatus::Warning => (rgb(0x3a2c10), rgb(MacTheme::WARNING)),
+                            BenchmarkStatus::Failed => (rgb(0x4a1818), rgb(MacTheme::DANGER)),
                         };
 
                         let latency_str = if metric.latency_us_per_op >= 1000.0 {
@@ -8322,9 +8851,9 @@ impl Shellumi {
                             .id(("diag-bench-row", b_idx))
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .border_1()
-                            .border_color(rgb(0x334155))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .flex()
                             .flex_col()
                             .gap_1p5();
@@ -8343,13 +8872,13 @@ impl Shellumi {
                                         div()
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .child(metric.name.clone()),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x64748b))
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                             .child(format!("({} iters)", metric.iterations)),
                                     ),
                             )
@@ -8362,13 +8891,13 @@ impl Shellumi {
                                         div()
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0x38bdf8))
+                                            .text_color(rgb(MacTheme::ACCENT_BLUE))
                                             .child(throughput_str),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                             .child(latency_str),
                                     )
                                     .child(
@@ -8392,13 +8921,13 @@ impl Shellumi {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                     .child(metric.description.clone()),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0xca8a04))
+                                    .text_color(rgb(MacTheme::WARNING))
                                     .child(format!("SLA: {}", metric.target_sla)),
                             );
                         row = row.child(row_desc);
@@ -8408,9 +8937,11 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(MacTheme::CONTENT_BG))
+                                .border_1()
+                                .border_color(rgb(MacTheme::SEPARATOR))
                                 .text_xs()
-                                .text_color(rgb(0x64748b))
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                 .child(format!("↳ {}", metric.note));
                             row = row.child(row_note);
                         }
@@ -8425,11 +8956,11 @@ impl Shellumi {
                         .justify_between()
                         .pt_2()
                         .border_t_1()
-                        .border_color(rgb(0x334155))
+                        .border_color(rgb(MacTheme::SEPARATOR))
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x64748b))
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                 .child("Local Deterministic Micro-Benchmarks (All Offline)"),
                         )
                         .child(
@@ -8438,11 +8969,14 @@ impl Shellumi {
                                 .px_3()
                                 .py_1p5()
                                 .rounded_md()
-                                .bg(rgb(0x2563eb))
+                                .border_1()
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xffffff))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.run_benchmarks(cx);
                                 }))
@@ -8465,7 +8999,7 @@ impl Shellumi {
             .id("mobile-modal-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000cc))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center();
@@ -8476,9 +9010,9 @@ impl Shellumi {
             .max_h(px(620.0))
             .p_6()
             .rounded_xl()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -8490,14 +9024,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child("📱 Mobile Touch & Virtual Key Simulator (Phase 11)"),
                 ),
             )
@@ -8507,10 +9041,13 @@ impl Shellumi {
                     .px_2p5()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_mobile_modal(cx)))
                     .child("✕ Close"),
             );
@@ -8518,15 +9055,21 @@ impl Shellumi {
 
         // Viewport selector & Lifecycle status banner
         let (status_bg, status_fg, status_icon) = match modal.lifecycle_manager.state {
-            MobileSessionState::Connected => (rgb(0x065f46), rgb(0xa7f3d0), "🟢"),
+            MobileSessionState::Connected => (rgb(0x133820), rgb(MacTheme::SUCCESS), "🟢"),
             MobileSessionState::BackgroundGracePeriod { .. } => {
-                (rgb(0x78350f), rgb(0xfde68a), "🟡")
+                (rgb(0x3a2c10), rgb(MacTheme::WARNING), "🟡")
             }
-            MobileSessionState::Suspended { .. } => (rgb(0x831843), rgb(0xfce7f3), "🟠"),
-            MobileSessionState::Reconnecting { .. } => (rgb(0x1e3a8a), rgb(0xbfdbfe), "🔄"),
-            MobileSessionState::Connecting => (rgb(0x374151), rgb(0xf3f4f6), "⏳"),
-            MobileSessionState::Disconnected { .. } => (rgb(0x7f1d1d), rgb(0xfecaca), "🔴"),
+            MobileSessionState::Suspended { .. } => (rgb(0x3a1a28), rgb(0xf472b6), "🟠"),
+            MobileSessionState::Reconnecting { .. } => {
+                (rgb(0x183048), rgb(MacTheme::ACCENT_BLUE), "🔄")
+            }
+            MobileSessionState::Connecting => (rgb(0x323236), rgb(MacTheme::TEXT_SECONDARY), "⏳"),
+            MobileSessionState::Disconnected { .. } => (rgb(0x4a1818), rgb(MacTheme::DANGER), "🔴"),
         };
+
+        let is_iphone = modal.preset == MobileViewportPreset::IPhone15Pro;
+        let is_pixel = modal.preset == MobileViewportPreset::AndroidPixel8;
+        let is_ipad = modal.preset == MobileViewportPreset::IPadPro11;
 
         let top_row = div()
             .flex()
@@ -8544,15 +9087,32 @@ impl Shellumi {
                             .px_2p5()
                             .py_1()
                             .rounded_md()
+                            .border_1()
+                            .border_color(if is_iphone {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SEPARATOR)
+                            })
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .cursor_pointer()
-                            .bg(if modal.preset == MobileViewportPreset::IPhone15Pro {
-                                rgb(0x2563eb)
+                            .bg(if is_iphone {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(0x323236)
                             })
-                            .text_color(rgb(0xffffff))
+                            .text_color(if is_iphone {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
+                            .hover(move |s| {
+                                if is_iphone {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.switch_mobile_preset(MobileViewportPreset::IPhone15Pro, cx);
                             }))
@@ -8564,15 +9124,32 @@ impl Shellumi {
                             .px_2p5()
                             .py_1()
                             .rounded_md()
+                            .border_1()
+                            .border_color(if is_pixel {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SEPARATOR)
+                            })
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .cursor_pointer()
-                            .bg(if modal.preset == MobileViewportPreset::AndroidPixel8 {
-                                rgb(0x2563eb)
+                            .bg(if is_pixel {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(0x323236)
                             })
-                            .text_color(rgb(0xffffff))
+                            .text_color(if is_pixel {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
+                            .hover(move |s| {
+                                if is_pixel {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.switch_mobile_preset(MobileViewportPreset::AndroidPixel8, cx);
                             }))
@@ -8584,15 +9161,32 @@ impl Shellumi {
                             .px_2p5()
                             .py_1()
                             .rounded_md()
+                            .border_1()
+                            .border_color(if is_ipad {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SEPARATOR)
+                            })
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .cursor_pointer()
-                            .bg(if modal.preset == MobileViewportPreset::IPadPro11 {
-                                rgb(0x2563eb)
+                            .bg(if is_ipad {
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(0x323236)
                             })
-                            .text_color(rgb(0xffffff))
+                            .text_color(if is_ipad {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
+                            .hover(move |s| {
+                                if is_ipad {
+                                    s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                } else {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                }
+                            })
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.switch_mobile_preset(MobileViewportPreset::IPadPro11, cx);
                             }))
@@ -8607,6 +9201,8 @@ impl Shellumi {
                     .px_3()
                     .py_1()
                     .rounded_md()
+                    .border_1()
+                    .border_color(status_fg)
                     .bg(status_bg)
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
@@ -8623,14 +9219,14 @@ impl Shellumi {
             .gap_2()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x0f172a))
+            .bg(rgb(MacTheme::INPUT_BG))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("OS Lifecycle:"),
             )
             .child(
@@ -8638,11 +9234,14 @@ impl Shellumi {
                     .id("life-bg-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x334155))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.trigger_mobile_lifecycle(
                             MobileLifecycleEvent::AppBackgrounded { grace_seconds: 30 },
@@ -8656,11 +9255,14 @@ impl Shellumi {
                     .id("life-tick-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x334155))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.trigger_mobile_lifecycle(
                             MobileLifecycleEvent::BackgroundTimerTick {
@@ -8676,11 +9278,14 @@ impl Shellumi {
                     .id("life-expire-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x334155))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.trigger_mobile_lifecycle(MobileLifecycleEvent::BackgroundExpired, cx);
                     }))
@@ -8691,11 +9296,14 @@ impl Shellumi {
                     .id("life-netdrop-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x334155))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.trigger_mobile_lifecycle(MobileLifecycleEvent::NetworkLost, cx);
                     }))
@@ -8706,11 +9314,14 @@ impl Shellumi {
                     .id("life-reconnect-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x334155))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.trigger_mobile_lifecycle(MobileLifecycleEvent::NetworkRestored, cx);
                     }))
@@ -8721,11 +9332,14 @@ impl Shellumi {
                     .id("life-foreground-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x065f46))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SUCCESS))
+                    .bg(rgb(0x133820))
                     .text_xs()
-                    .text_color(rgb(0xa7f3d0))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x1c4a2c)))
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.trigger_mobile_lifecycle(MobileLifecycleEvent::AppForegrounded, cx);
                     }))
@@ -8739,9 +9353,9 @@ impl Shellumi {
             .id("simulated-mobile-screen")
             .p_4()
             .rounded_lg()
-            .bg(rgb(0x020617))
+            .bg(rgb(MacTheme::CONTENT_BG))
             .border_1()
-            .border_color(rgb(0x1e293b))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .flex()
             .flex_col()
             .gap_1()
@@ -8754,11 +9368,17 @@ impl Shellumi {
                 .w(px(100.0))
                 .h(px(12.0))
                 .rounded_full()
-                .bg(rgb(0x1e293b))
+                .bg(rgb(0x323236))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(rgb(0x334155))),
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded_full()
+                        .bg(rgb(MacTheme::SEPARATOR)),
+                ),
         );
         screen_area = screen_area.child(notch);
 
@@ -8767,7 +9387,7 @@ impl Shellumi {
                 div()
                     .text_xs()
                     .font_family(".AppleSystemUIFontMonospaced")
-                    .text_color(rgb(0x22c55e))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .child(line.clone()),
             );
         }
@@ -8778,9 +9398,9 @@ impl Shellumi {
             .id("virtual-accessory-strip")
             .p_2()
             .rounded_md()
-            .bg(rgb(0x0f172a))
+            .bg(rgb(MacTheme::INPUT_BG))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .flex()
             .items_center()
             .gap_1p5()
@@ -8796,19 +9416,32 @@ impl Shellumi {
                     .id("mod-ctrl-btn")
                     .px_2p5()
                     .py_1()
-                    .rounded_sm()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if ctrl_active {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::SEPARATOR)
+                    })
                     .cursor_pointer()
                     .bg(if ctrl_active {
-                        rgb(0xd97706)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(if ctrl_active {
                         rgb(0xffffff)
                     } else {
-                        rgb(0x94a3b8)
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
+                    .hover(move |s| {
+                        if ctrl_active {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
                     })
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.toggle_mobile_modifier(VirtualKeyModifier::Ctrl, cx);
@@ -8820,19 +9453,32 @@ impl Shellumi {
                     .id("mod-alt-btn")
                     .px_2p5()
                     .py_1()
-                    .rounded_sm()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if alt_active {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::SEPARATOR)
+                    })
                     .cursor_pointer()
                     .bg(if alt_active {
-                        rgb(0xd97706)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x334155)
+                        rgb(0x323236)
                     })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(if alt_active {
                         rgb(0xffffff)
                     } else {
-                        rgb(0x94a3b8)
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
+                    .hover(move |s| {
+                        if alt_active {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
                     })
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.toggle_mobile_modifier(VirtualKeyModifier::Alt, cx);
@@ -8849,14 +9495,15 @@ impl Shellumi {
                     .id(("vkey-btn", k_idx))
                     .px_2p5()
                     .py_1()
-                    .rounded_sm()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .cursor_pointer()
-                    .bg(rgb(0x1e293b))
+                    .bg(rgb(0x323236))
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x38bdf8))
-                    .border_1()
-                    .border_color(rgb(0x334155))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.press_mobile_virtual_key(key_clone.clone(), cx);
                     }))
@@ -8870,9 +9517,9 @@ impl Shellumi {
             .id("mobile-telemetry-log")
             .p_2p5()
             .rounded_md()
-            .bg(rgb(0x090d16))
+            .bg(rgb(MacTheme::CONTENT_BG))
             .border_1()
-            .border_color(rgb(0x1e293b))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .flex()
             .flex_col()
             .gap_1()
@@ -8883,7 +9530,7 @@ impl Shellumi {
             telemetry = telemetry.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Tap virtual keys above to stream ANSI escape codes..."),
             );
         } else {
@@ -8892,7 +9539,7 @@ impl Shellumi {
                     div()
                         .text_xs()
                         .font_family(".AppleSystemUIFontMonospaced")
-                        .text_color(rgb(0x38bdf8))
+                        .text_color(rgb(MacTheme::ACCENT_BLUE))
                         .child(entry.clone()),
                 );
             }
@@ -8906,17 +9553,22 @@ impl Shellumi {
             .justify_between()
             .pt_2()
             .border_t_1()
-            .border_color(rgb(0x334155))
-            .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
-                "Viewport: {} ({} × {} cols/rows)",
-                modal.preset.label(),
-                cols,
-                rows
-            )))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .child(format!(
+                        "Viewport: {} ({} × {} cols/rows)",
+                        modal.preset.label(),
+                        cols,
+                        rows
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Portable Core FFI Bridge: Ready for Swift/Kotlin integration"),
             );
         modal_box = modal_box.child(footer);
@@ -8933,7 +9585,7 @@ impl Shellumi {
             .id("shell-integration-modal-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000cc))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center();
@@ -8944,9 +9596,9 @@ impl Shellumi {
             .max_h(px(640.0))
             .p_6()
             .rounded_xl()
-            .bg(rgb(0x1e293b))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -8958,7 +9610,7 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div()
@@ -8969,13 +9621,13 @@ impl Shellumi {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("⚡ Shell Integration & Autocomplete (Phase 13)"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("Semantic OSC 133 prompts, CWD tracking, password prompt classification, and offline autocomplete"),
                     ),
             )
@@ -8985,9 +9637,9 @@ impl Shellumi {
                     .px_2p5()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x334155))
+                    .bg(rgb(MacTheme::SURFACE_HOVER))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_shell_integration_modal(cx)))
                     .child("✕ Close"),
@@ -9022,14 +9674,14 @@ impl Shellumi {
                         FontWeight::NORMAL
                     })
                     .bg(if is_active {
-                        rgb(0x2563eb)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x0f172a)
+                        rgb(MacTheme::INPUT_BG)
                     })
                     .text_color(if is_active {
                         rgb(0xffffff)
                     } else {
-                        rgb(0x94a3b8)
+                        rgb(MacTheme::TEXT_SECONDARY)
                     })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.set_shell_integration_tab(tab, cx);
@@ -9049,7 +9701,7 @@ impl Shellumi {
                 shell_pills = shell_pills.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("Target Shell:"),
                 );
                 for (idx, shell) in ["zsh", "bash", "fish"].into_iter().enumerate() {
@@ -9062,8 +9714,16 @@ impl Shellumi {
                             .rounded_sm()
                             .cursor_pointer()
                             .text_xs()
-                            .bg(if is_sel { rgb(0x0284c7) } else { rgb(0x334155) })
-                            .text_color(if is_sel { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                            .bg(if is_sel {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::INPUT_BG)
+                            })
+                            .text_color(if is_sel {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.set_shell_integration_shell(shell, cx);
                             }))
@@ -9083,16 +9743,16 @@ impl Shellumi {
                     .id("hook-script-box")
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(0x020617))
+                    .bg(rgb(MacTheme::CONTENT_BG))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .max_h(px(220.0))
                     .overflow_y_scroll()
                     .child(
                         div()
                             .text_xs()
                             .font_family(".AppleSystemUIFontMonospaced")
-                            .text_color(rgb(0xa5f3fc))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(hook_code),
                     );
                 hooks_body = hooks_body.child(script_box);
@@ -9103,11 +9763,11 @@ impl Shellumi {
                 let instructions = div()
                     .p_2p5()
                     .rounded_md()
-                    .bg(rgb(0x0f172a))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .text_xs()
-                    .text_color(rgb(0xcbd5e1))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -9116,18 +9776,22 @@ impl Shellumi {
                             .font_weight(FontWeight::BOLD)
                             .child("Installation Instructions:"),
                     )
-                    .child(div().text_color(rgb(0x94a3b8)).child(format!(
-                        "Add the following to your ~/.{}rc or config file:",
-                        modal.selected_shell
-                    )))
+                    .child(
+                        div()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child(format!(
+                                "Add the following to your ~/.{}rc or config file:",
+                                modal.selected_shell
+                            )),
+                    )
                     .child(
                         div()
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(rgb(0x1e293b))
+                            .bg(rgb(MacTheme::CONTENT_BG))
                             .font_family(".AppleSystemUIFontMonospaced")
-                            .text_color(rgb(0x38bdf8))
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
                             .child(install_cmd),
                     );
                 hooks_body = hooks_body.child(instructions);
@@ -9141,9 +9805,9 @@ impl Shellumi {
                 let explanation = div()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(0x0f172a))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .flex()
                     .flex_col()
                     .gap_1p5()
@@ -9151,31 +9815,31 @@ impl Shellumi {
                         div()
                             .font_weight(FontWeight::BOLD)
                             .text_xs()
-                            .text_color(rgb(0xf1f5f9))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("Semantic Prompt Escape Sequences (OSC 133 & OSC 7):"),
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                        div().text_xs().text_color(rgb(MacTheme::TEXT_SECONDARY)).child(
                             "• OSC 133 ; A ST — Prompt Start: Signals the terminal that the interactive shell prompt has begun rendering.",
                         ),
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                        div().text_xs().text_color(rgb(MacTheme::TEXT_SECONDARY)).child(
                             "• OSC 133 ; B ST — Command Start: Signals the user has begun typing command input.",
                         ),
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                        div().text_xs().text_color(rgb(MacTheme::TEXT_SECONDARY)).child(
                             "• OSC 133 ; C ST — Command Executed: User pressed Enter; command process is now running.",
                         ),
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                        div().text_xs().text_color(rgb(MacTheme::TEXT_SECONDARY)).child(
                             "• OSC 133 ; D [; exitcode] ST — Command Finished: Command exited with status code (e.g. 0 for success).",
                         ),
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x94a3b8)).child(
+                        div().text_xs().text_color(rgb(MacTheme::TEXT_SECONDARY)).child(
                             "• OSC 7 file://hostname/path ST — CWD Notification: Updates the active working directory badge.",
                         ),
                     );
@@ -9214,9 +9878,9 @@ impl Shellumi {
                 let inspector = div()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(0x020617))
+                    .bg(rgb(MacTheme::CONTENT_BG))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -9224,14 +9888,14 @@ impl Shellumi {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x38bdf8))
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
                             .child("🔍 Live Session State Inspector:"),
                     )
                     .child(
                         div()
                             .text_xs()
                             .font_family(".AppleSystemUIFontMonospaced")
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(active_tab_info),
                     );
                 markers_body = markers_body.child(inspector);
@@ -9245,9 +9909,9 @@ impl Shellumi {
                 let sec_banner = div()
                     .p_2p5()
                     .rounded_md()
-                    .bg(rgb(0x451a03))
+                    .bg(rgb(0x3a2817))
                     .border_1()
-                    .border_color(rgb(0x78350f))
+                    .border_color(rgb(MacTheme::WARNING))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -9255,7 +9919,7 @@ impl Shellumi {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0xfde68a))
+                            .text_color(rgb(MacTheme::WARNING))
                             .child("Security Guarantee: Password prompt detection is strictly passive. Shellumi NEVER auto-injects credentials into arbitrary terminal streams without explicit user confirmation."),
                     );
                 pw_body = pw_body.child(sec_banner);
@@ -9265,7 +9929,7 @@ impl Shellumi {
                 sample_buttons = sample_buttons.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("Click a sample prompt line to test classification:"),
                 );
 
@@ -9288,10 +9952,11 @@ impl Shellumi {
                             .px_2p5()
                             .py_1()
                             .rounded_sm()
-                            .bg(rgb(0x334155))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .text_xs()
                             .cursor_pointer()
-                            .text_color(rgb(0xe2e8f0))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.update_test_prompt_input(prompt_sample, cx);
                             }))
@@ -9324,23 +9989,23 @@ impl Shellumi {
                 let output_box = div()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(0x020617))
+                    .bg(rgb(MacTheme::CONTENT_BG))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .flex()
                     .flex_col()
                     .gap_1p5()
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                             .child("Current Prompt Line:"),
                     )
                     .child(
                         div()
                             .text_xs()
                             .font_family(".AppleSystemUIFontMonospaced")
-                            .text_color(rgb(0xffffff))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(modal.test_prompt_input.clone()),
                     )
                     .child(
@@ -9352,14 +10017,14 @@ impl Shellumi {
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .bg(if modal.detected_prompt_kind.is_some() {
-                                rgb(0x78350f)
+                                rgb(0x3a2817)
                             } else {
-                                rgb(0x1e293b)
+                                rgb(MacTheme::INPUT_BG)
                             })
                             .text_color(if modal.detected_prompt_kind.is_some() {
-                                rgb(0xfde68a)
+                                rgb(MacTheme::WARNING)
                             } else {
-                                rgb(0x94a3b8)
+                                rgb(MacTheme::TEXT_SECONDARY)
                             })
                             .child(detected_label),
                     );
@@ -9375,7 +10040,7 @@ impl Shellumi {
                 sample_queries = sample_queries.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("Sample Queries:"),
                 );
                 for (idx, query) in ["git ", "docker ", "cargo ", "ssh ", "systemctl "]
@@ -9392,11 +10057,15 @@ impl Shellumi {
                             .cursor_pointer()
                             .text_xs()
                             .bg(if is_active {
-                                rgb(0x2563eb)
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x334155)
+                                rgb(MacTheme::INPUT_BG)
                             })
-                            .text_color(rgb(0xffffff))
+                            .text_color(if is_active {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.update_test_autocomplete_query(query, cx);
                             }))
@@ -9410,9 +10079,9 @@ impl Shellumi {
                     .id("autocomplete-results-box")
                     .p_2p5()
                     .rounded_md()
-                    .bg(rgb(0x020617))
+                    .bg(rgb(MacTheme::CONTENT_BG))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .max_h(px(250.0))
                     .overflow_y_scroll()
                     .flex()
@@ -9423,26 +10092,26 @@ impl Shellumi {
                     list_box = list_box.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                             .child("No autocomplete suggestions found for query."),
                     );
                 } else {
                     for item in &modal.autocomplete_results {
                         let kind_color = match item.kind {
-                            CompletionKind::Command => rgb(0x38bdf8),
-                            CompletionKind::Subcommand => rgb(0x4ade80),
-                            CompletionKind::Flag => rgb(0xfacc15),
-                            CompletionKind::FilePath => rgb(0xa78bfa),
-                            CompletionKind::Host => rgb(0xf472b6),
-                            CompletionKind::Snippet => rgb(0xfb923c),
-                            CompletionKind::History => rgb(0x94a3b8),
+                            CompletionKind::Command => rgb(MacTheme::ACCENT_BLUE),
+                            CompletionKind::Subcommand => rgb(MacTheme::SUCCESS),
+                            CompletionKind::Flag => rgb(MacTheme::WARNING),
+                            CompletionKind::FilePath => rgb(0xbf5af2),
+                            CompletionKind::Host => rgb(0xff375f),
+                            CompletionKind::Snippet => rgb(0xff9f0a),
+                            CompletionKind::History => rgb(MacTheme::TEXT_SECONDARY),
                         };
 
                         let row = div()
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::SURFACE))
                             .flex()
                             .items_center()
                             .justify_between()
@@ -9456,7 +10125,7 @@ impl Shellumi {
                                             .px_1p5()
                                             .py_0p5()
                                             .rounded_sm()
-                                            .bg(rgb(0x1e293b))
+                                            .bg(rgb(MacTheme::INPUT_BG))
                                             .text_xs()
                                             .text_color(kind_color)
                                             .child(format!("{:?}", item.kind)),
@@ -9465,14 +10134,14 @@ impl Shellumi {
                                         div()
                                             .text_xs()
                                             .font_family(".AppleSystemUIFontMonospaced")
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .child(item.display_label.clone()),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x64748b))
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                     .child(item.description.clone().unwrap_or_default()),
                             );
                         list_box = list_box.child(row);
@@ -9491,17 +10160,17 @@ impl Shellumi {
             .justify_between()
             .pt_2()
             .border_t_1()
-            .border_color(rgb(0x334155))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Local-First & Offline Engine: No telemetry or remote dependency"),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("CLI: shellumi shell-hook / complete / prompt-detect"),
             );
         modal_box = modal_box.child(footer);
@@ -9518,7 +10187,7 @@ impl Shellumi {
             .id("session-replay-modal-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000cc))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center();
@@ -9529,9 +10198,9 @@ impl Shellumi {
             .max_h(px(660.0))
             .p_6()
             .rounded_xl()
-            .bg(rgb(0x141e2c))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -9551,13 +10220,13 @@ impl Shellumi {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("Session logs"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(
                                 "Asciicast v2 audit logging, automated secret redaction, and timestamped terminal playback.",
                             ),
@@ -9569,9 +10238,9 @@ impl Shellumi {
                     .px_3()
                     .py_1p5()
                     .rounded_md()
-                    .bg(rgb(0x263346))
+                    .bg(rgb(MacTheme::SURFACE_HOVER))
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_session_replay_modal(cx)))
                     .child("✕ Close"),
@@ -9584,11 +10253,11 @@ impl Shellumi {
                 div()
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x064e3b))
+                    .bg(rgb(0x133820))
                     .border_1()
-                    .border_color(rgb(0x059669))
+                    .border_color(rgb(MacTheme::SUCCESS))
                     .text_xs()
-                    .text_color(rgb(0x6ee7b7))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .child(note.clone()),
             );
         }
@@ -9622,14 +10291,14 @@ impl Shellumi {
                         FontWeight::NORMAL
                     })
                     .bg(if is_active {
-                        rgb(0x2563eb)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x0f172a)
+                        rgb(MacTheme::INPUT_BG)
                     })
                     .text_color(if is_active {
                         rgb(0xffffff)
                     } else {
-                        rgb(0x94a3b8)
+                        rgb(MacTheme::TEXT_SECONDARY)
                     })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.set_session_replay_tab(tab, cx);
@@ -9650,9 +10319,9 @@ impl Shellumi {
                             .id("recordings-empty-state")
                             .p_6()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .border_1()
-                            .border_color(rgb(0x141e2c))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .flex()
                             .flex_col()
                             .items_center()
@@ -9661,13 +10330,13 @@ impl Shellumi {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xe2e8f0))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .child("No session recordings found"),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x64748b))
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                     .child(
                                         "Click [⏺ Record] in any active terminal pane header to record your session.",
                                     ),
@@ -9693,15 +10362,15 @@ impl Shellumi {
                             .p_3()
                             .rounded_lg()
                             .bg(if is_selected {
-                                rgb(0x1e3a8a)
+                                rgb(MacTheme::SURFACE_HOVER)
                             } else {
-                                rgb(0x0f172a)
+                                rgb(MacTheme::INPUT_BG)
                             })
                             .border_1()
                             .border_color(if is_selected {
-                                rgb(0x3b82f6)
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x141e2c)
+                                rgb(MacTheme::SEPARATOR)
                             })
                             .flex()
                             .items_center()
@@ -9720,7 +10389,7 @@ impl Shellumi {
                                                 div()
                                                     .text_sm()
                                                     .font_weight(FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                     .child(rec.title.clone()),
                                             )
                                             .child(
@@ -9728,9 +10397,9 @@ impl Shellumi {
                                                     .px_1p5()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x263346))
+                                                    .bg(rgb(MacTheme::SURFACE))
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                                     .child(format!(
                                                         "⏱ {}",
                                                         rec.formatted_duration()
@@ -9741,18 +10410,21 @@ impl Shellumi {
                                                     .px_1p5()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x141e2c))
+                                                    .bg(rgb(MacTheme::SURFACE))
                                                     .text_xs()
-                                                    .text_color(rgb(0x64748b))
+                                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                                     .child(rec.formatted_size()),
                                             ),
                                     )
-                                    .child(div().text_xs().text_color(rgb(0x64748b)).child(
-                                        format!(
-                                            "ID: {} • {} events • Recorded at {}",
-                                            rec.id, rec.event_count, rec.recorded_at
-                                        ),
-                                    )),
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                            .child(format!(
+                                                "ID: {} • {} events • Recorded at {}",
+                                                rec.id, rec.event_count, rec.recorded_at
+                                            )),
+                                    ),
                             )
                             .child(
                                 div()
@@ -9765,7 +10437,7 @@ impl Shellumi {
                                             .px_2p5()
                                             .py_1()
                                             .rounded_sm()
-                                            .bg(rgb(0x2563eb))
+                                            .bg(rgb(MacTheme::ACCENT_BLUE))
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(rgb(0xffffff))
@@ -9784,9 +10456,9 @@ impl Shellumi {
                                             .px_2p5()
                                             .py_1()
                                             .rounded_sm()
-                                            .bg(rgb(0x263346))
+                                            .bg(rgb(MacTheme::SURFACE_HOVER))
                                             .text_xs()
-                                            .text_color(rgb(0xd1d5db))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.export_session_recording_ui(
@@ -9802,9 +10474,9 @@ impl Shellumi {
                                             .px_2p5()
                                             .py_1()
                                             .rounded_sm()
-                                            .bg(rgb(0x7f1d1d))
+                                            .bg(rgb(MacTheme::DANGER))
                                             .text_xs()
-                                            .text_color(rgb(0xfca5a5))
+                                            .text_color(rgb(0xffffff))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.delete_session_recording_ui(
@@ -9831,26 +10503,26 @@ impl Shellumi {
                     let status_badge = if let Some(e) = engine_opt {
                         match e.status() {
                             PlaybackStatus::Playing => div()
-                                .bg(rgb(0x15803d))
+                                .bg(rgb(MacTheme::SUCCESS))
                                 .text_color(rgb(0xffffff))
                                 .child("▶ PLAYING"),
                             PlaybackStatus::Paused => div()
-                                .bg(rgb(0xb45309))
-                                .text_color(rgb(0xffffff))
+                                .bg(rgb(MacTheme::WARNING))
+                                .text_color(rgb(0x000000))
                                 .child("⏸ PAUSED"),
                             PlaybackStatus::Completed => div()
-                                .bg(rgb(0x4338ca))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
                                 .text_color(rgb(0xffffff))
                                 .child("✓ COMPLETED"),
                             PlaybackStatus::Stopped => div()
-                                .bg(rgb(0x475569))
-                                .text_color(rgb(0xffffff))
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child("⏹ STOPPED"),
                         }
                     } else {
                         div()
-                            .bg(rgb(0x475569))
-                            .text_color(rgb(0xffffff))
+                            .bg(rgb(MacTheme::SURFACE_HOVER))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("⏹ STOPPED")
                     };
 
@@ -9867,15 +10539,20 @@ impl Shellumi {
                                     div()
                                         .text_sm()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                         .child(cur.title.clone()),
                                 )
-                                .child(div().text_xs().text_color(rgb(0x64748b)).child(format!(
-                                    "Duration: {} • {} events • Recorded at {}",
-                                    format_duration_hms(cur.duration_secs),
-                                    cur.event_count,
-                                    cur.recorded_at
-                                ))),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                        .child(format!(
+                                            "Duration: {} • {} events • Recorded at {}",
+                                            format_duration_hms(cur.duration_secs),
+                                            cur.event_count,
+                                            cur.recorded_at
+                                        )),
+                                ),
                         )
                         .child(
                             div()
@@ -9902,9 +10579,9 @@ impl Shellumi {
                     let mut controls_bar = div()
                         .p_3()
                         .rounded_lg()
-                        .bg(rgb(0x0f172a))
+                        .bg(rgb(MacTheme::INPUT_BG))
                         .border_1()
-                        .border_color(rgb(0x141e2c))
+                        .border_color(rgb(MacTheme::SEPARATOR))
                         .flex()
                         .items_center()
                         .justify_between();
@@ -9920,13 +10597,17 @@ impl Shellumi {
                                 .py_1p5()
                                 .rounded_sm()
                                 .bg(if is_playing {
-                                    rgb(0xb45309)
+                                    rgb(MacTheme::WARNING)
                                 } else {
-                                    rgb(0x16a34a)
+                                    rgb(MacTheme::SUCCESS)
                                 })
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xffffff))
+                                .text_color(if is_playing {
+                                    rgb(0x000000)
+                                } else {
+                                    rgb(0xffffff)
+                                })
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.toggle_modal_playback(cx);
@@ -9939,9 +10620,9 @@ impl Shellumi {
                                 .px_2p5()
                                 .py_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x263346))
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
                                 .text_xs()
-                                .text_color(rgb(0xd1d5db))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.step_modal_playback(-5.0, cx);
@@ -9954,9 +10635,9 @@ impl Shellumi {
                                 .px_2p5()
                                 .py_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x263346))
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
                                 .text_xs()
-                                .text_color(rgb(0xd1d5db))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.step_modal_playback(5.0, cx);
@@ -9974,9 +10655,9 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x141e2c))
+                                .bg(rgb(MacTheme::SURFACE))
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.seek_modal_playback(0.0, cx);
@@ -9989,9 +10670,9 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x141e2c))
+                                .bg(rgb(MacTheme::SURFACE))
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.seek_modal_playback(0.25, cx);
@@ -10004,9 +10685,9 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x141e2c))
+                                .bg(rgb(MacTheme::SURFACE))
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.seek_modal_playback(0.5, cx);
@@ -10019,9 +10700,9 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x141e2c))
+                                .bg(rgb(MacTheme::SURFACE))
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.seek_modal_playback(0.75, cx);
@@ -10034,9 +10715,9 @@ impl Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x141e2c))
+                                .bg(rgb(MacTheme::SURFACE))
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.seek_modal_playback(1.0, cx);
@@ -10054,7 +10735,7 @@ impl Shellumi {
                                 .px_2p5()
                                 .py_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x0284c7))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xffffff))
@@ -10068,7 +10749,7 @@ impl Shellumi {
                             div()
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xe2e8f0))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .child(time_label),
                         );
 
@@ -10083,9 +10764,9 @@ impl Shellumi {
                         .id("player-screen-box")
                         .p_3()
                         .rounded_lg()
-                        .bg(rgb(0x020617))
+                        .bg(rgb(MacTheme::CONTENT_BG))
                         .border_1()
-                        .border_color(rgb(0x141e2c))
+                        .border_color(rgb(MacTheme::SEPARATOR))
                         .min_h(px(240.0))
                         .max_h(px(320.0))
                         .overflow_y_scroll()
@@ -10097,7 +10778,7 @@ impl Shellumi {
                         screen_div = screen_div.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x64748b))
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                 .child("[Ready to play. Click ▶ Play or seek to a timestamp.]"),
                         );
                     } else {
@@ -10107,7 +10788,7 @@ impl Shellumi {
                                     .id(("screen-line", l_idx))
                                     .text_xs()
                                     .font_family(".AppleSystemUIFontMonospaced")
-                                    .text_color(rgb(0xa5f3fc))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .child(if line.is_empty() { " " } else { line }.to_string()),
                             );
                         }
@@ -10119,9 +10800,9 @@ impl Shellumi {
                             .id("player-empty-prompt")
                             .p_6()
                             .rounded_md()
-                            .bg(rgb(0x0f172a))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .border_1()
-                            .border_color(rgb(0x141e2c))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .flex()
                             .flex_col()
                             .items_center()
@@ -10130,13 +10811,13 @@ impl Shellumi {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xe2e8f0))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .child("No recording selected for playback"),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x64748b))
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                     .child(
                                         "Select a session from the [Recordings List] tab to start frame-by-frame replay.",
                                     ),
@@ -10155,17 +10836,17 @@ impl Shellumi {
             .justify_between()
             .pt_3()
             .border_t_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Compatible with Asciicast v2 (.cast) • Automated redaction enabled"),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("CLI: shellumi session list / play / export"),
             );
         modal_box = modal_box.child(footer);
@@ -10191,7 +10872,7 @@ impl Shellumi {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(0x0a0f1d))
+            .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
@@ -10203,10 +10884,10 @@ impl Shellumi {
             .max_h(px(720.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x141e2c))
+            .bg(rgb(MacTheme::SURFACE))
             .border_1()
-            .border_color(rgb(0x0284c7))
-            .rounded_lg()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .rounded_xl()
             .p_5()
             .gap_4();
 
@@ -10216,14 +10897,14 @@ impl Shellumi {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
                 div().flex().items_center().gap_2().child(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child("Port forwarding"),
                 ),
             )
@@ -10236,9 +10917,9 @@ impl Shellumi {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x263346))
+                    .bg(rgb(MacTheme::SURFACE_HOVER))
                     .text_xs()
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| app.dismiss_tunnel_modal(cx)))
                     .child("✕ Close"),
@@ -10253,9 +10934,9 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x7f1d1d))
+                    .bg(rgb(0x4a1818))
                     .text_xs()
-                    .text_color(rgb(0xfecaca))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(format!("⚠ {err}")),
             );
         }
@@ -10266,9 +10947,9 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x064e3b))
+                    .bg(rgb(0x133820))
                     .text_xs()
-                    .text_color(rgb(0xa7f3d0))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .child(format!("✓ {msg}")),
             );
         }
@@ -10283,14 +10964,14 @@ impl Shellumi {
             .w(px(380.0))
             .gap_2()
             .border_r_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .pr_4();
 
         list_col = list_col.child(
             div()
                 .text_sm()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0x94a3b8))
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                 .child(format!("CONFIGURED TUNNELS ({})", modal.tunnels.len())),
         );
 
@@ -10298,14 +10979,14 @@ impl Shellumi {
             list_col = list_col.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Loading tunnels…"),
             );
         } else if modal.tunnels.is_empty() {
             list_col = list_col.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("No port forwards configured yet. Create one on the right."),
             );
         } else {
@@ -10360,9 +11041,9 @@ impl Shellumi {
                 };
 
                 let item_bg = if is_selected {
-                    rgb(0x1e3a8a)
+                    rgb(MacTheme::SURFACE_HOVER)
                 } else {
-                    rgb(0x0f172a)
+                    rgb(MacTheme::INPUT_BG)
                 };
 
                 let mut card = div()
@@ -10375,9 +11056,9 @@ impl Shellumi {
                     .bg(item_bg)
                     .border_1()
                     .border_color(if is_selected {
-                        rgb(0x3b82f6)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SEPARATOR)
                     })
                     .cursor_pointer()
                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -10393,7 +11074,7 @@ impl Shellumi {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(tunnel.name.clone()),
                     )
                     .child(
@@ -10402,15 +11083,15 @@ impl Shellumi {
                             .py_0p5()
                             .rounded_md()
                             .bg(if is_active {
-                                rgb(0x065f46)
+                                rgb(0x133820)
                             } else {
-                                rgb(0x263346)
+                                rgb(MacTheme::SURFACE)
                             })
                             .text_xs()
                             .text_color(if is_active {
-                                rgb(0x34d399)
+                                rgb(MacTheme::SUCCESS)
                             } else {
-                                rgb(0x94a3b8)
+                                rgb(MacTheme::TEXT_TERTIARY)
                             })
                             .child(status_pill.0),
                     );
@@ -10423,9 +11104,13 @@ impl Shellumi {
                         .items_center()
                         .gap_2()
                         .text_xs()
-                        .text_color(rgb(0x38bdf8))
+                        .text_color(rgb(MacTheme::ACCENT_BLUE))
                         .child(flag_str)
-                        .child(div().text_color(rgb(0x94a3b8)).child(rule_summary)),
+                        .child(
+                            div()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child(rule_summary),
+                        ),
                 );
 
                 // Actions row: Start/Stop button + Delete button
@@ -10441,12 +11126,17 @@ impl Shellumi {
                             .py_1()
                             .rounded_md()
                             .bg(if is_active {
-                                rgb(0xb45309)
+                                rgb(MacTheme::WARNING)
                             } else {
-                                rgb(0x0284c7)
+                                rgb(MacTheme::SUCCESS)
                             })
                             .text_xs()
-                            .text_color(rgb(0xffffff))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if is_active {
+                                rgb(0x000000)
+                            } else {
+                                rgb(0xffffff)
+                            })
                             .cursor_pointer()
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.toggle_tunnel_state(tid, window, cx);
@@ -10459,9 +11149,9 @@ impl Shellumi {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(0x7f1d1d))
+                            .bg(rgb(MacTheme::DANGER))
                             .text_xs()
-                            .text_color(rgb(0xfca5a5))
+                            .text_color(rgb(0xffffff))
                             .cursor_pointer()
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.delete_tunnel_modal(tid, cx);
@@ -10475,7 +11165,7 @@ impl Shellumi {
                         .py_1()
                         .text_sm()
                         .cursor_pointer()
-                        .text_color(rgb(0x91a0b7))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .on_click(cx.listener(move |app, _, _, cx| app.edit_saved_tunnel(tid, cx)))
                         .child("Edit rule"),
                 );
@@ -10531,17 +11221,17 @@ impl Shellumi {
                 .gap_2()
                 .p_3()
                 .rounded_md()
-                .bg(rgb(0x0f172a))
+                .bg(rgb(MacTheme::INPUT_BG))
                 .border_1()
-                .border_color(rgb(0x263346))
+                .border_color(rgb(MacTheme::SEPARATOR))
                 .child(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0x38bdf8))
+                        .text_color(rgb(MacTheme::ACCENT_BLUE))
                         .child(format!("Saved rule: {}", selected_tunnel.name)),
                 )
-                .child(div().text_xs().text_color(rgb(0x91a0b7)).child("Open the tunnel terminal to inspect authentication and forwarding errors. Traffic counters are not measured."))
+                .child(div().text_xs().text_color(rgb(MacTheme::TEXT_SECONDARY)).child("Open the tunnel terminal to inspect authentication and forwarding errors. Traffic counters are not measured."))
                 .child(
                     div()
                         .flex()
@@ -10550,16 +11240,16 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x64748b))
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                 .child("SSH Command Preview:"),
                         )
                         .child(
                             div()
                                 .p_2()
                                 .rounded_md()
-                                .bg(rgb(0x020617))
+                                .bg(rgb(MacTheme::CONTENT_BG))
                                 .text_xs()
-                                .text_color(rgb(0x34d399))
+                                .text_color(rgb(MacTheme::SUCCESS))
                                 .child(preview_str),
                         ),
                 );
@@ -10573,14 +11263,14 @@ impl Shellumi {
             .gap_3()
             .p_4()
             .rounded_md()
-            .bg(rgb(0x0f172a))
+            .bg(rgb(MacTheme::INPUT_BG))
             .border_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xf8fafc))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .child("➕ Configure New Tunnel"),
             );
 
@@ -10596,9 +11286,14 @@ impl Shellumi {
                         .rounded_md()
                         .text_sm()
                         .bg(if modal.selected_host_id == Some(id) {
-                            rgb(0x1c373d)
+                            rgb(MacTheme::ACCENT_BLUE)
                         } else {
-                            rgb(0x192536)
+                            rgb(MacTheme::SURFACE)
+                        })
+                        .text_color(if modal.selected_host_id == Some(id) {
+                            rgb(0xffffff)
+                        } else {
+                            rgb(MacTheme::TEXT_SECONDARY)
                         })
                         .cursor_pointer()
                         .on_click(cx.listener(move |app, _, _, cx| {
@@ -10612,7 +11307,12 @@ impl Shellumi {
             }
         }
         form_box = form_box
-            .child(div().text_xs().text_color(rgb(0x91a0b7)).child("SSH host"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .child("SSH host"),
+            )
             .child(host_picker);
         // Forwarding Type Buttons
         let ftype_row = div()
@@ -10626,12 +11326,16 @@ impl Shellumi {
                     .py_1()
                     .rounded_md()
                     .bg(if modal.forwarding_type == ForwardingType::Local {
-                        rgb(0x0284c7)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SURFACE)
                     })
                     .text_xs()
-                    .text_color(rgb(0xffffff))
+                    .text_color(if modal.forwarding_type == ForwardingType::Local {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.set_tunnel_forwarding_type(ForwardingType::Local, cx)
@@ -10645,12 +11349,16 @@ impl Shellumi {
                     .py_1()
                     .rounded_md()
                     .bg(if modal.forwarding_type == ForwardingType::Remote {
-                        rgb(0x0284c7)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SURFACE)
                     })
                     .text_xs()
-                    .text_color(rgb(0xffffff))
+                    .text_color(if modal.forwarding_type == ForwardingType::Remote {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.set_tunnel_forwarding_type(ForwardingType::Remote, cx)
@@ -10664,12 +11372,16 @@ impl Shellumi {
                     .py_1()
                     .rounded_md()
                     .bg(if modal.forwarding_type == ForwardingType::Dynamic {
-                        rgb(0x0284c7)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x263346)
+                        rgb(MacTheme::SURFACE)
                     })
                     .text_xs()
-                    .text_color(rgb(0xffffff))
+                    .text_color(if modal.forwarding_type == ForwardingType::Dynamic {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.set_tunnel_forwarding_type(ForwardingType::Dynamic, cx)
@@ -10687,7 +11399,7 @@ impl Shellumi {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("Tunnel Name:"),
                 )
                 .child(modal.name_input.clone()),
@@ -10702,7 +11414,7 @@ impl Shellumi {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("Bind Port:"),
                 )
                 .child(modal.bind_port_input.clone()),
@@ -10719,7 +11431,7 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child("Target Host:"),
                         )
                         .child(modal.target_host_input.clone()),
@@ -10733,7 +11445,7 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child("Target Port:"),
                         )
                         .child(modal.target_port_input.clone()),
@@ -10748,7 +11460,7 @@ impl Shellumi {
                 .px_4()
                 .py_2()
                 .rounded_md()
-                .bg(rgb(0x0284c7))
+                .bg(rgb(MacTheme::ACCENT_BLUE))
                 .text_sm()
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(0xffffff))
@@ -10789,20 +11501,24 @@ impl Shellumi {
             container = container.child(
                 div()
                     .p_2()
-                    .bg(rgb(0x7f1d1d))
+                    .bg(rgb(0x4a1818))
+                    .border_1()
+                    .border_color(rgb(MacTheme::DANGER))
                     .rounded_md()
                     .text_sm()
-                    .text_color(rgb(0xfecaca))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(format!("Error: {err}")),
             );
         } else if let Some(msg) = &state.status_message {
             container = container.child(
                 div()
                     .p_2()
-                    .bg(rgb(0x064e3b))
+                    .bg(rgb(0x133820))
+                    .border_1()
+                    .border_color(rgb(MacTheme::SUCCESS))
                     .rounded_md()
                     .text_sm()
-                    .text_color(rgb(0xa7f3d0))
+                    .text_color(rgb(MacTheme::SUCCESS))
                     .child(msg.clone()),
             );
         }
@@ -10818,7 +11534,7 @@ impl Shellumi {
             .items_center()
             .gap_1()
             .text_xs()
-            .text_color(rgb(0x9ca3af))
+            .text_color(rgb(MacTheme::TEXT_SECONDARY))
             .flex_wrap();
         local_crumbs_div = local_crumbs_div.child("💻 Local: ");
         for (i, (name, path)) in local_crumbs.into_iter().enumerate() {
@@ -10827,7 +11543,7 @@ impl Shellumi {
                 div()
                     .id(("local-crumb", i))
                     .cursor_pointer()
-                    .text_color(rgb(0x60a5fa))
+                    .text_color(rgb(MacTheme::ACCENT_BLUE))
                     .hover(|s| s.underline())
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.sftp_navigate_local(tab_idx, p_clone.clone(), cx);
@@ -10849,7 +11565,7 @@ impl Shellumi {
                 div()
                     .p_4()
                     .text_sm()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Empty directory"),
             );
         } else {
@@ -10874,20 +11590,20 @@ impl Shellumi {
                     .text_xs()
                     .cursor_pointer()
                     .bg(if is_selected {
-                        rgb(0x1e3a8a)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x111827)
+                        rgb(MacTheme::SURFACE)
                     })
                     .text_color(if is_selected {
                         rgb(0xffffff)
                     } else {
-                        rgb(0xd1d5db)
+                        rgb(MacTheme::TEXT_PRIMARY)
                     })
                     .hover(|s| {
                         s.bg(if is_selected {
-                            rgb(0x1e3a8a)
+                            rgb(MacTheme::ACCENT_BLUE)
                         } else {
-                            rgb(0x1f2937)
+                            rgb(MacTheme::SURFACE_HOVER)
                         })
                     });
 
@@ -10918,14 +11634,14 @@ impl Shellumi {
                         div()
                             .w(px(70.0))
                             .text_right()
-                            .text_color(rgb(0x9ca3af))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(entry.formatted_size()),
                     )
                     .child(
                         div()
                             .w(px(80.0))
                             .text_center()
-                            .text_color(rgb(0x6b7280))
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                             .child(entry.formatted_permissions()),
                     );
 
@@ -10937,10 +11653,10 @@ impl Shellumi {
             .flex_1()
             .flex()
             .flex_col()
-            .bg(rgb(0x1f2937))
+            .bg(rgb(MacTheme::SURFACE))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x374151))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .p_3()
             .gap_2()
             .min_w_0()
@@ -10955,10 +11671,14 @@ impl Shellumi {
                             .id("sftp-local-up")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(rgb(0x374151))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
+                            .bg(rgb(0x323236))
                             .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.sftp_navigate_local_up(tab_idx, cx);
                             }))
@@ -10973,7 +11693,7 @@ impl Shellumi {
                     .justify_between()
                     .px_1()
                     .text_xs()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .font_weight(FontWeight::BOLD)
                     .child(div().flex_1().child("Name"))
                     .child(div().w(px(70.0)).text_right().child("Size"))
@@ -10998,13 +11718,31 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(if has_local_sel {
-                        rgb(0x059669)
+                    .border_1()
+                    .border_color(if has_local_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x374151)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .bg(if has_local_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
+                    })
+                    .text_color(if has_local_sel {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_TERTIARY)
                     })
                     .text_sm()
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if has_local_sel {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
+                    })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.sftp_upload_selected(tab_idx, cx);
                     }))
@@ -11016,13 +11754,31 @@ impl Shellumi {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(if has_remote_sel {
-                        rgb(0x0284c7)
+                    .border_1()
+                    .border_color(if has_remote_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x374151)
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .bg(if has_remote_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
+                    })
+                    .text_color(if has_remote_sel {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_TERTIARY)
                     })
                     .text_sm()
                     .cursor_pointer()
+                    .hover(move |s| {
+                        if has_remote_sel {
+                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                        } else {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        }
+                    })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.sftp_download_selected(tab_idx, cx);
                     }))
@@ -11037,7 +11793,7 @@ impl Shellumi {
             .items_center()
             .gap_1()
             .text_xs()
-            .text_color(rgb(0x9ca3af))
+            .text_color(rgb(MacTheme::TEXT_SECONDARY))
             .flex_wrap();
         remote_crumbs_div = remote_crumbs_div.child(format!("🌐 Remote ({}): ", state.host_name));
         for (i, (name, path)) in remote_crumbs.into_iter().enumerate() {
@@ -11046,7 +11802,7 @@ impl Shellumi {
                 div()
                     .id(("remote-crumb", i))
                     .cursor_pointer()
-                    .text_color(rgb(0x34d399))
+                    .text_color(rgb(MacTheme::ACCENT_BLUE))
                     .hover(|s| s.underline())
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.sftp_navigate_remote(tab_idx, p_clone.clone(), cx);
@@ -11068,7 +11824,7 @@ impl Shellumi {
                 div()
                     .p_4()
                     .text_sm()
-                    .text_color(rgb(0x93c5fd))
+                    .text_color(rgb(MacTheme::ACCENT_BLUE))
                     .child("Loading remote directory…"),
             );
         } else if state.remote_entries.is_empty() {
@@ -11076,7 +11832,7 @@ impl Shellumi {
                 div()
                     .p_4()
                     .text_sm()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Empty directory"),
             );
         } else {
@@ -11101,20 +11857,20 @@ impl Shellumi {
                     .text_xs()
                     .cursor_pointer()
                     .bg(if is_selected {
-                        rgb(0x064e3b)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x111827)
+                        rgb(MacTheme::SURFACE)
                     })
                     .text_color(if is_selected {
                         rgb(0xffffff)
                     } else {
-                        rgb(0xd1d5db)
+                        rgb(MacTheme::TEXT_PRIMARY)
                     })
                     .hover(|s| {
                         s.bg(if is_selected {
-                            rgb(0x064e3b)
+                            rgb(MacTheme::ACCENT_BLUE)
                         } else {
-                            rgb(0x1f2937)
+                            rgb(MacTheme::SURFACE_HOVER)
                         })
                     });
 
@@ -11145,14 +11901,14 @@ impl Shellumi {
                         div()
                             .w(px(70.0))
                             .text_right()
-                            .text_color(rgb(0x9ca3af))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(entry.formatted_size()),
                     )
                     .child(
                         div()
                             .w(px(80.0))
                             .text_center()
-                            .text_color(rgb(0x6b7280))
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                             .child(entry.formatted_permissions()),
                     );
 
@@ -11164,10 +11920,10 @@ impl Shellumi {
             .flex_1()
             .flex()
             .flex_col()
-            .bg(rgb(0x1f2937))
+            .bg(rgb(MacTheme::SURFACE))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x374151))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .p_3()
             .gap_2()
             .min_w_0()
@@ -11182,10 +11938,14 @@ impl Shellumi {
                             .id("sftp-remote-up")
                             .px_2()
                             .py_1()
-                            .rounded_sm()
-                            .bg(rgb(0x374151))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
+                            .bg(rgb(0x323236))
                             .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.sftp_navigate_remote_up(tab_idx, cx);
                             }))
@@ -11200,7 +11960,7 @@ impl Shellumi {
                     .justify_between()
                     .px_1()
                     .text_xs()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .font_weight(FontWeight::BOLD)
                     .child(div().flex_1().child("Name"))
                     .child(div().w(px(70.0)).text_right().child("Size"))
@@ -11220,10 +11980,10 @@ impl Shellumi {
         let mut queue_drawer = div()
             .flex()
             .flex_col()
-            .bg(rgb(0x111827))
+            .bg(rgb(MacTheme::SURFACE))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x374151))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .p_3()
             .gap_2();
 
@@ -11235,7 +11995,7 @@ impl Shellumi {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xd1d5db))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .child(format!(
                         "Transfers & Queue: {} completed / {} total ({:.1}%)",
                         q_summary.completed_tasks,
@@ -11248,10 +12008,14 @@ impl Shellumi {
                     .id("sftp-clear-completed-btn")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgb(0x374151))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(0x323236))
                     .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.sftp_clear_completed(tab_idx, cx);
                     }))
@@ -11263,13 +12027,13 @@ impl Shellumi {
         let progress_bar = div()
             .w_full()
             .h(px(6.0))
-            .bg(rgb(0x374151))
+            .bg(rgb(MacTheme::INPUT_BG))
             .rounded_full()
             .overflow_hidden()
             .child(
                 div()
                     .h_full()
-                    .bg(rgb(0x10b981))
+                    .bg(rgb(MacTheme::ACCENT_BLUE))
                     .w(gpui::relative(pct / 100.0)),
             );
 
@@ -11286,17 +12050,21 @@ impl Shellumi {
 
             for task in state.queue.tasks() {
                 let status_badge = match &task.status {
-                    TransferStatus::Completed => {
-                        div().text_color(rgb(0x10b981)).child("✓ Completed")
-                    }
-                    TransferStatus::InProgress => {
-                        div().text_color(rgb(0x38bdf8)).child("⟳ In Progress")
-                    }
+                    TransferStatus::Completed => div()
+                        .text_color(rgb(MacTheme::SUCCESS))
+                        .child("✓ Completed"),
+                    TransferStatus::InProgress => div()
+                        .text_color(rgb(MacTheme::ACCENT_BLUE))
+                        .child("⟳ In Progress"),
                     TransferStatus::Failed(err) => div()
-                        .text_color(rgb(0xef4444))
+                        .text_color(rgb(MacTheme::DANGER))
                         .child(format!("✗ Failed: {err}")),
-                    TransferStatus::Queued => div().text_color(rgb(0x9ca3af)).child("⏳ Queued"),
-                    TransferStatus::Cancelled => div().text_color(rgb(0x6b7280)).child("Cancelled"),
+                    TransferStatus::Queued => div()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("⏳ Queued"),
+                    TransferStatus::Cancelled => div()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("Cancelled"),
                 };
 
                 let mut task_row = div()
@@ -11304,7 +12072,7 @@ impl Shellumi {
                     .items_center()
                     .justify_between()
                     .text_xs()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child(div().flex_1().min_w_0().truncate().child(format!(
                         "#{} {} · {} → {}",
                         task.id, task.direction, task.local_path, task.remote_path
@@ -11341,7 +12109,13 @@ impl Shellumi {
                                 .id(("cancel-transfer", task_id))
                                 .px_2()
                                 .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(MacTheme::SEPARATOR))
+                                .bg(rgb(0x323236))
+                                .text_color(rgb(MacTheme::DANGER))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                 .child("Cancel")
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.sftp_cancel_transfer(tab_id, task_id, cx)
@@ -11428,10 +12202,11 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
                 .pb_2()
                 .text_xs()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0x697c94))
+                .text_color(rgb(MacTheme::TEXT_TERTIARY))
                 .child(group),
         );
         for page in pages {
+            let is_sel = page == active;
             links = links.child(
                 div()
                     .id(gpui::SharedString::from(format!("nav-{page}")))
@@ -11440,17 +12215,22 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
                     .rounded_md()
                     .text_sm()
                     .cursor_pointer()
-                    .bg(if page == active {
-                        rgb(0x1c373d)
+                    .bg(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x101824)
+                        rgb(MacTheme::SIDEBAR_BG)
                     })
-                    .text_color(if page == active {
-                        rgb(0x59ddc1)
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
                     } else {
-                        rgb(0x91a0b7)
+                        rgb(MacTheme::TEXT_SECONDARY)
                     })
-                    .hover(|style| style.bg(rgb(0x192536)))
+                    .font_weight(if is_sel {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(
                         cx.listener(move |app, _, window, cx| app.navigate_page(page, window, cx)),
                     )
@@ -11459,7 +12239,7 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
         }
     }
     div()
-        .w(px(210.0))
+        .w(px(MacTheme::SIDEBAR_WIDTH))
         .h_full()
         .flex_shrink_0()
         .min_h_0()
@@ -11467,15 +12247,16 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
         .flex_col()
         .gap_2()
         .p_3()
-        .bg(rgb(0x101824))
+        .bg(rgb(MacTheme::SIDEBAR_BG))
         .border_r_1()
-        .border_color(rgb(0x263346))
+        .border_color(rgb(MacTheme::SEPARATOR))
         .child(
             div()
                 .px_2()
                 .py_2()
                 .text_lg()
                 .font_weight(FontWeight::BOLD)
+                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                 .child("▸  shellumi"),
         )
         .child(links)
@@ -11487,7 +12268,8 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
                 .rounded_md()
                 .text_sm()
                 .cursor_pointer()
-                .text_color(rgb(0x91a0b7))
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
                 .on_click(
                     cx.listener(|app, _, window, cx| app.navigate_page("Settings", window, cx)),
                 )
@@ -11496,19 +12278,21 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
         .child(
             div()
                 .border_1()
-                .border_color(rgb(0x263346))
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .bg(rgb(MacTheme::SURFACE))
                 .rounded_md()
                 .p_3()
                 .child(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child("Personal workspace"),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x697c94))
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
                         .child("Local only"),
                 ),
         )
@@ -11522,8 +12306,8 @@ impl Render for Shellumi {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(rgb(0x0b111c))
-            .text_color(rgb(0xe9f0f9))
+            .bg(rgb(MacTheme::CONTENT_BG))
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
             .text_size(px(self.desktop.preferences.ui_font_size as f32));
 
         if let Some(page) = self.page {
@@ -11547,7 +12331,9 @@ impl Render for Shellumi {
                 .gap_1()
                 .px_6()
                 .pt_3()
-                .bg(rgb(0x0f172a));
+                .bg(rgb(MacTheme::TOOLBAR_BG))
+                .border_b_1()
+                .border_color(rgb(MacTheme::SEPARATOR));
 
             let is_hosts_active = self.active_tab_idx.is_none();
             tab_bar = tab_bar.child(
@@ -11558,14 +12344,14 @@ impl Render for Shellumi {
                     .rounded_t_md()
                     .cursor_pointer()
                     .bg(if is_hosts_active {
-                        rgb(0x1f2937)
+                        rgb(MacTheme::CONTENT_BG)
                     } else {
-                        rgb(0x0f172a)
+                        rgb(MacTheme::TOOLBAR_BG)
                     })
                     .text_color(if is_hosts_active {
-                        rgb(0xf9fafb)
+                        rgb(MacTheme::TEXT_PRIMARY)
                     } else {
-                        rgb(0x9ca3af)
+                        rgb(MacTheme::TEXT_SECONDARY)
                     })
                     .font_weight(if is_hosts_active {
                         FontWeight::BOLD
@@ -11602,14 +12388,14 @@ impl Render for Shellumi {
                         .rounded_t_md()
                         .cursor_pointer()
                         .bg(if is_active {
-                            rgb(0x1f2937)
+                            rgb(MacTheme::CONTENT_BG)
                         } else {
-                            rgb(0x0f172a)
+                            rgb(MacTheme::TOOLBAR_BG)
                         })
                         .text_color(if is_active {
-                            rgb(0xf9fafb)
+                            rgb(MacTheme::TEXT_PRIMARY)
                         } else {
-                            rgb(0x9ca3af)
+                            rgb(MacTheme::TEXT_SECONDARY)
                         })
                         .font_weight(if is_active {
                             FontWeight::BOLD
@@ -11626,7 +12412,7 @@ impl Render for Shellumi {
                                 .px_1()
                                 .rounded_sm()
                                 .cursor_pointer()
-                                .text_color(rgb(0x6b7280))
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.close_tab(tab_id, window, cx);
                                     cx.stop_propagation();
@@ -11643,7 +12429,8 @@ impl Render for Shellumi {
                     .py_1()
                     .rounded_md()
                     .cursor_pointer()
-                    .text_color(rgb(0x9ca3af))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
                     .on_click(cx.listener(|app, _, window, cx| app.open_local_terminal(window, cx)))
                     .child("+"),
             );
@@ -11718,7 +12505,11 @@ impl Render for Shellumi {
                                     .flex_col()
                                     .gap_1()
                                     .child(div().text_2xl().child(header_title))
-                                    .child(div().text_color(rgb(0x9ca3af)).child(header_subtitle)),
+                                    .child(
+                                        div()
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .child(header_subtitle),
+                                    ),
                             )
                             .child({
                                 let mut actions_bar = div().flex().items_center().gap_2();
@@ -11730,8 +12521,8 @@ impl Render for Shellumi {
                                             .px_3()
                                             .py_1p5()
                                             .rounded_md()
-                                            .bg(rgb(0x7f1d1d))
-                                            .text_color(rgb(0xfecaca))
+                                            .bg(rgb(0x4a1818))
+                                            .text_color(rgb(MacTheme::DANGER))
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
                                             .child("⚠️ UNENCRYPTED TELNET"),
@@ -11750,8 +12541,9 @@ impl Render for Shellumi {
                                             .px_3()
                                             .py_2()
                                             .rounded_md()
-                                            .bg(rgb(0x2563eb))
+                                            .bg(rgb(MacTheme::ACCENT_BLUE))
                                             .text_sm()
+                                            .text_color(rgb(0xffffff))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.sftp_toggle_mode(active_idx, cx);
@@ -11777,11 +12569,12 @@ impl Render for Shellumi {
                                                 .py_2()
                                                 .rounded_md()
                                                 .bg(if show_hidden {
-                                                    rgb(0x4b5563)
+                                                    rgb(MacTheme::SURFACE_HOVER)
                                                 } else {
-                                                    rgb(0x374151)
+                                                    rgb(MacTheme::INPUT_BG)
                                                 })
                                                 .text_sm()
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |app, _, _, cx| {
                                                     app.sftp_toggle_hidden(active_idx, cx);
@@ -11794,8 +12587,9 @@ impl Render for Shellumi {
                                                 .px_3()
                                                 .py_2()
                                                 .rounded_md()
-                                                .bg(rgb(0x374151))
+                                                .bg(rgb(MacTheme::INPUT_BG))
                                                 .text_sm()
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |app, _, _, cx| {
                                                     app.sftp_refresh(active_idx, cx);
@@ -11813,8 +12607,9 @@ impl Render for Shellumi {
                                                 .px_3()
                                                 .py_2()
                                                 .rounded_md()
-                                                .bg(rgb(0x374151))
+                                                .bg(rgb(MacTheme::INPUT_BG))
                                                 .text_sm()
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|app, _, window, cx| {
                                                     app.split_pane(
@@ -11831,8 +12626,9 @@ impl Render for Shellumi {
                                                 .px_3()
                                                 .py_2()
                                                 .rounded_md()
-                                                .bg(rgb(0x374151))
+                                                .bg(rgb(MacTheme::INPUT_BG))
                                                 .text_sm()
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|app, _, window, cx| {
                                                     app.split_pane(
@@ -11849,11 +12645,16 @@ impl Render for Shellumi {
                                                 .p_2()
                                                 .rounded_md()
                                                 .bg(if self.snippets_panel_open {
-                                                    rgb(0x2563eb)
+                                                    rgb(MacTheme::ACCENT_BLUE)
                                                 } else {
-                                                    rgb(0x374151)
+                                                    rgb(MacTheme::INPUT_BG)
                                                 })
                                                 .text_sm()
+                                                .text_color(if self.snippets_panel_open {
+                                                    rgb(0xffffff)
+                                                } else {
+                                                    rgb(MacTheme::TEXT_PRIMARY)
+                                                })
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|app, _, _, cx| {
                                                     app.snippets_panel_open =
@@ -11884,9 +12685,17 @@ impl Render for Shellumi {
                                             .px_3()
                                             .py_2()
                                             .rounded_md()
-                                            .bg(if is_on { rgb(0xb91c1c) } else { rgb(0x374151) })
+                                            .bg(if is_on {
+                                                rgb(MacTheme::DANGER)
+                                            } else {
+                                                rgb(MacTheme::INPUT_BG)
+                                            })
                                             .text_sm()
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(if is_on {
+                                                rgb(0xffffff)
+                                            } else {
+                                                rgb(MacTheme::TEXT_PRIMARY)
+                                            })
                                             .cursor_pointer()
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 let total = app
@@ -11928,16 +12737,16 @@ impl Render for Shellumi {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(0x1e1b4b))
+                        .bg(rgb(MacTheme::SURFACE))
                         .border_1()
-                        .border_color(rgb(0x6366f1));
+                        .border_color(rgb(MacTheme::SEPARATOR));
 
                     let mut info_left = div().flex().items_center().gap_3();
                     info_left = info_left.child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xa5b4fc))
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
                             .child(format!("👥 Session: {}", multiplayer.session_id)),
                     );
                     info_left = info_left.child(
@@ -11945,9 +12754,9 @@ impl Render for Shellumi {
                             .px_2()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(rgb(0x312e81))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .text_xs()
-                            .text_color(rgb(0xe0e7ff))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(format!("Host: @{owner}")),
                     );
                     info_left = info_left.child(
@@ -11956,19 +12765,23 @@ impl Render for Shellumi {
                             .py_0p5()
                             .rounded_sm()
                             .bg(if controller == "local_user" {
-                                rgb(0x065f46)
+                                rgb(MacTheme::SUCCESS)
                             } else {
-                                rgb(0x854d0e)
+                                rgb(MacTheme::WARNING)
                             })
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xffffff))
+                            .text_color(if controller == "local_user" {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(0x000000)
+                            })
                             .child(format!("✍️ Active Writer: @{controller}")),
                     );
                     info_left = info_left.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(format!("{participants_count} participant(s)")),
                     );
 
@@ -11991,7 +12804,7 @@ impl Render for Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0x4338ca))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
                                 .text_xs()
                                 .text_color(rgb(0xffffff))
                                 .cursor_pointer()
@@ -12009,9 +12822,9 @@ impl Render for Shellumi {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(rgb(0xb45309))
+                                .bg(rgb(MacTheme::WARNING))
                                 .text_xs()
-                                .text_color(rgb(0xffffff))
+                                .text_color(rgb(0x000000))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.revoke_multiplayer_control(cx);
@@ -12026,9 +12839,9 @@ impl Render for Shellumi {
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(rgb(0x374151))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .text_xs()
-                            .text_color(rgb(0xd1d5db))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.add_multiplayer_demo_participant(cx);
@@ -12042,9 +12855,9 @@ impl Render for Shellumi {
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(rgb(0x7f1d1d))
+                            .bg(rgb(MacTheme::DANGER))
                             .text_xs()
-                            .text_color(rgb(0xfecaca))
+                            .text_color(rgb(0xffffff))
                             .cursor_pointer()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.toggle_multiplayer_on_active_tab(cx);
@@ -12064,16 +12877,20 @@ impl Render for Shellumi {
                         .items_center()
                         .gap_2()
                         .p_3()
-                        .bg(rgb(0x1f2937))
+                        .bg(rgb(MacTheme::SURFACE))
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(0x374151));
+                        .border_color(rgb(MacTheme::SEPARATOR));
 
                     if self.snippets.is_empty() {
-                        snippets_bar =
-                            snippets_bar.child(div().text_xs().text_color(rgb(0x9ca3af)).child(
+                        snippets_bar = snippets_bar.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .child(
                                 "No saved snippets found. Add snippets via `shellumi snippet add`.",
-                            ));
+                            ),
+                        );
                     } else {
                         for snippet in &self.snippets {
                             let snip_id = snippet.id;
@@ -12086,21 +12903,21 @@ impl Render for Shellumi {
                                 .gap_2()
                                 .px_2()
                                 .py_1()
-                                .bg(rgb(0x111827))
+                                .bg(rgb(MacTheme::INPUT_BG))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(rgb(0x374151))
+                                .border_color(rgb(MacTheme::SEPARATOR))
                                 .child(
                                     div()
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                         .child(snip_name),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x9ca3af))
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                         .font_family(MONOSPACE_FONT)
                                         .child(if snip_cmd.len() > 30 {
                                             format!("{}…", &snip_cmd[..30])
@@ -12113,7 +12930,8 @@ impl Render for Shellumi {
                                         .id(("snippet-paste", snip_id as usize))
                                         .px_2()
                                         .py_0p5()
-                                        .bg(rgb(0x374151))
+                                        .bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                         .rounded_sm()
                                         .text_xs()
                                         .cursor_pointer()
@@ -12128,7 +12946,7 @@ impl Render for Shellumi {
                                         .id(("snippet-run", snip_id as usize))
                                         .px_2()
                                         .py_0p5()
-                                        .bg(rgb(0x059669))
+                                        .bg(rgb(MacTheme::SUCCESS))
                                         .text_color(rgb(0xffffff))
                                         .rounded_sm()
                                         .text_xs()
@@ -12144,7 +12962,7 @@ impl Render for Shellumi {
                                         .id(("snippet-batch", snip_id as usize))
                                         .px_2()
                                         .py_0p5()
-                                        .bg(rgb(0x7c3aed))
+                                        .bg(rgb(MacTheme::ACCENT_BLUE))
                                         .text_color(rgb(0xffffff))
                                         .rounded_sm()
                                         .text_xs()
@@ -12172,10 +12990,10 @@ impl Render for Shellumi {
                             .px_4()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(0x7f1d1d))
+                            .bg(rgb(0x4a1818))
                             .border_1()
-                            .border_color(rgb(0xef4444))
-                            .text_color(rgb(0xfecaca))
+                            .border_color(rgb(MacTheme::DANGER))
+                            .text_color(rgb(MacTheme::DANGER))
                             .text_sm()
                             .child(format!("⚠️ {warning_msg}"))
                             .child(
@@ -12184,7 +13002,8 @@ impl Render for Shellumi {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(rgb(0x991b1b))
+                                    .bg(rgb(MacTheme::DANGER))
+                                    .text_color(rgb(0xffffff))
                                     .cursor_pointer()
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.broadcast_warning = None;
@@ -12229,12 +13048,12 @@ impl Render for Shellumi {
                         .gap_2()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0x141e2c))
+                        .bg(rgb(MacTheme::CONTENT_BG))
                         .border_1()
                         .border_color(if is_active_pane {
-                            rgb(0x3c746f)
+                            rgb(MacTheme::ACCENT_BLUE)
                         } else {
-                            rgb(0x263346)
+                            rgb(MacTheme::SEPARATOR)
                         })
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if let Some(active_idx) = app.active_tab_idx {
@@ -12252,7 +13071,7 @@ impl Render for Shellumi {
                         .justify_between()
                         .px_2()
                         .py_1()
-                        .bg(rgb(0x111827))
+                        .bg(rgb(MacTheme::SURFACE))
                         .rounded_sm();
 
                     let mut pane_info_group = div().flex().items_center().gap_2();
@@ -12269,9 +13088,9 @@ impl Render for Shellumi {
                         div()
                             .text_xs()
                             .text_color(if is_active_pane {
-                                rgb(0x93c5fd)
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x9ca3af)
+                                rgb(MacTheme::TEXT_SECONDARY)
                             })
                             .child(pane_info),
                     );
@@ -12288,8 +13107,8 @@ impl Render for Shellumi {
                                 .px_1p5()
                                 .py_0p5()
                                 .rounded_sm()
-                                .bg(rgb(0x1e293b))
-                                .text_color(rgb(0x38bdf8))
+                                .bg(rgb(MacTheme::INPUT_BG))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .text_xs()
                                 .child(format!("📂 {}", display_cwd)),
                         );
@@ -12298,9 +13117,9 @@ impl Render for Shellumi {
                     // Exit code badge
                     if let Some(code) = pane.terminal.last_exit_code() {
                         let (bg_color, fg_color, text) = if code == 0 {
-                            (rgb(0x064e3b), rgb(0x6ee7b7), "✓ 0".to_string())
+                            (rgb(0x133820), rgb(MacTheme::SUCCESS), "✓ 0".to_string())
                         } else {
-                            (rgb(0x7f1d1d), rgb(0xfca5a5), format!("✗ {}", code))
+                            (rgb(0x4a1818), rgb(MacTheme::DANGER), format!("✗ {}", code))
                         };
                         pane_info_group = pane_info_group.child(
                             div()
@@ -12323,8 +13142,8 @@ impl Render for Shellumi {
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(rgb(0x78350f))
-                                    .text_color(rgb(0xfde68a))
+                                    .bg(rgb(0x3a2817))
+                                    .text_color(rgb(MacTheme::WARNING))
                                     .text_xs()
                                     .child(format!("🔑 Prompt: {:?}", prompt_match.kind)),
                             );
@@ -12351,9 +13170,9 @@ impl Render for Shellumi {
                             .text_xs()
                             .cursor_pointer()
                             .bg(if is_recording {
-                                rgb(0xdc2626)
+                                rgb(MacTheme::DANGER)
                             } else {
-                                rgb(0x374151)
+                                rgb(MacTheme::INPUT_BG)
                             })
                             .text_color(rgb(0xffffff))
                             .on_click(cx.listener(move |app, _, _, cx| {
@@ -12372,9 +13191,9 @@ impl Render for Shellumi {
                             .text_xs()
                             .cursor_pointer()
                             .bg(if pane.search_open {
-                                rgb(0x2563eb)
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x374151)
+                                rgb(MacTheme::INPUT_BG)
                             })
                             .text_color(rgb(0xffffff))
                             .on_click(cx.listener(move |app, _, _, cx| {
@@ -12395,9 +13214,9 @@ impl Render for Shellumi {
                                 .text_xs()
                                 .cursor_pointer()
                                 .bg(if is_excluded {
-                                    rgb(0x4b5563)
+                                    rgb(MacTheme::SURFACE_HOVER)
                                 } else {
-                                    rgb(0x059669)
+                                    rgb(MacTheme::SUCCESS)
                                 })
                                 .text_color(rgb(0xffffff))
                                 .on_click(cx.listener(move |app, _, _, cx| {
@@ -12422,8 +13241,8 @@ impl Render for Shellumi {
                                 .rounded_sm()
                                 .text_xs()
                                 .cursor_pointer()
-                                .bg(rgb(0x7f1d1d))
-                                .text_color(rgb(0xfecaca))
+                                .bg(rgb(MacTheme::DANGER))
+                                .text_color(rgb(0xffffff))
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.close_pane(pane_id, window, cx);
                                     cx.stop_propagation();
@@ -12447,8 +13266,10 @@ impl Render for Shellumi {
                             .items_center()
                             .gap_2()
                             .p_2()
-                            .bg(rgb(0x1f2937))
+                            .bg(rgb(MacTheme::SURFACE))
                             .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .child(div().flex_1().child(pane.search_input.clone()))
                             .child(
                                 div()
@@ -12456,7 +13277,7 @@ impl Render for Shellumi {
                                     .px_2()
                                     .py_1()
                                     .rounded_sm()
-                                    .bg(rgb(0x2563eb))
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
                                     .text_xs()
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
@@ -12472,8 +13293,9 @@ impl Render for Shellumi {
                                     .px_2()
                                     .py_1()
                                     .rounded_sm()
-                                    .bg(rgb(0x374151))
+                                    .bg(rgb(MacTheme::INPUT_BG))
                                     .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.search_prev(pane_id, cx);
@@ -12487,8 +13309,9 @@ impl Render for Shellumi {
                                     .px_2()
                                     .py_1()
                                     .rounded_sm()
-                                    .bg(rgb(0x374151))
+                                    .bg(rgb(MacTheme::INPUT_BG))
                                     .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.search_next(pane_id, cx);
@@ -12496,7 +13319,12 @@ impl Render for Shellumi {
                                     }))
                                     .child("↓"),
                             )
-                            .child(div().text_xs().text_color(rgb(0x9ca3af)).child(match_label));
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child(match_label),
+                            );
                         pane_el = pane_el.child(search_bar);
                     }
 
@@ -12506,7 +13334,7 @@ impl Render for Shellumi {
                                 .px_2()
                                 .py_1()
                                 .text_sm()
-                                .text_color(rgb(0xfca5a5))
+                                .text_color(rgb(MacTheme::DANGER))
                                 .child(message.clone()),
                         );
                     }
@@ -12524,7 +13352,7 @@ impl Render for Shellumi {
                         .flex_1()
                         .overflow_y_scroll()
                         .font_family(MONOSPACE_FONT)
-                        .bg(rgb(0x090f1c))
+                        .bg(rgb(MacTheme::CONTENT_BG))
                         .p_3()
                         .flex()
                         .flex_col();
@@ -12636,7 +13464,7 @@ impl Render for Shellumi {
                                 );
                                 window.paint_quad(gpui::fill(
                                     gpui::Bounds::new(origin, size(px(4.0), px(thumb_height))),
-                                    rgb(0x52647a),
+                                    rgb(MacTheme::SURFACE_HOVER),
                                 ));
                             }
                         },
@@ -12761,14 +13589,18 @@ impl Render for Shellumi {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(0x263346))
-                    .bg(if active { rgb(0x1c373d) } else { rgb(0x141e2c) })
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(if active {
+                        rgb(MacTheme::SURFACE_HOVER)
+                    } else {
+                        rgb(MacTheme::SURFACE)
+                    })
                     .cursor_pointer()
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.selected_host_id = Some(id);
                         cx.notify();
                     }))
-                    .child(div().text_color(rgb(0x91a0b7)).child("▤"))
+                    .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("▤"))
                     .child(
                         div()
                             .flex_1()
@@ -12779,28 +13611,32 @@ impl Render for Shellumi {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .child(host.name.clone()),
                             )
-                            .child(div().text_xs().text_color(rgb(0x697c94)).child(
-                                format_endpoint(
-                                    host.destination.username(),
-                                    host.destination.host(),
-                                    host.destination.port().get(),
-                                ),
-                            )),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child(format_endpoint(
+                                        host.destination.username(),
+                                        host.destination.host(),
+                                        host.destination.port().get(),
+                                    )),
+                            ),
                     )
                     .child(
                         div()
                             .w(px(120.0))
                             .text_xs()
-                            .text_color(rgb(0x91a0b7))
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                             .child(host.group_name.clone().unwrap_or_else(|| "—".into())),
                     )
                     .child(
                         div()
                             .w(px(75.0))
                             .text_xs()
-                            .text_color(rgb(0x91a0b7))
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
                             .child(host.protocol().display_name()),
                     ),
             );
@@ -12819,7 +13655,7 @@ impl Render for Shellumi {
                 div()
                     .p_6()
                     .text_sm()
-                    .text_color(rgb(0x91a0b7))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child(message),
             );
         }
@@ -12828,16 +13664,16 @@ impl Render for Shellumi {
             .min_w_0()
             .flex()
             .flex_col()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
-            .border_color(rgb(0x263346))
-            .bg(rgb(0x141e2c))
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .bg(rgb(MacTheme::SURFACE))
             .overflow_hidden()
             .child(
                 div()
                     .p_3()
                     .border_b_1()
-                    .border_color(rgb(0x263346))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .child(self.search_input.clone()),
             )
             .child(
@@ -12846,9 +13682,9 @@ impl Render for Shellumi {
                     .gap_3()
                     .px_4()
                     .py_2()
-                    .bg(rgb(0x192536))
+                    .bg(rgb(MacTheme::TOOLBAR_BG))
                     .text_xs()
-                    .text_color(rgb(0x697c94))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child(div().w(px(15.0)))
                     .child(div().flex_1().child("NAME"))
                     .child(div().w(px(120.0)).child("GROUP"))
@@ -12857,12 +13693,12 @@ impl Render for Shellumi {
             .child(div().id("host-list").overflow_y_scroll().child(rows));
 
         let mut collections = div()
-            .w(px(165.0))
+            .w(px(180.0))
             .flex_shrink_0()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
-            .border_color(rgb(0x263346))
-            .bg(rgb(0x141e2c))
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .bg(rgb(MacTheme::SIDEBAR_BG))
             .p_4()
             .flex()
             .flex_col()
@@ -12871,7 +13707,7 @@ impl Render for Shellumi {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x697c94))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("COLLECTIONS"),
             )
             .child(
@@ -12881,15 +13717,15 @@ impl Render for Shellumi {
                     .py_2()
                     .rounded_md()
                     .bg(if self.selected_group.is_none() {
-                        rgb(0x1c373d)
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x141e2c)
+                        rgb(MacTheme::SIDEBAR_BG)
                     })
                     .text_sm()
                     .text_color(if self.selected_group.is_none() {
-                        rgb(0x59ddc1)
+                        rgb(0xffffff)
                     } else {
-                        rgb(0x91a0b7)
+                        rgb(MacTheme::TEXT_PRIMARY)
                     })
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| {
@@ -12915,8 +13751,16 @@ impl Render for Shellumi {
                     .py_1()
                     .rounded_md()
                     .text_sm()
-                    .bg(if active { rgb(0x1c373d) } else { rgb(0x141e2c) })
-                    .text_color(if active { rgb(0x59ddc1) } else { rgb(0x91a0b7) })
+                    .bg(if active {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::SIDEBAR_BG)
+                    })
+                    .text_color(if active {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    })
                     .cursor_pointer()
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.selected_group = Some(group_name.clone());
@@ -12931,26 +13775,26 @@ impl Render for Shellumi {
                     .mt_2()
                     .pt_3()
                     .border_t_1()
-                    .border_color(rgb(0x263346))
+                    .border_color(rgb(MacTheme::SEPARATOR))
                     .text_xs()
-                    .text_color(rgb(0x697c94))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("LOCAL STORAGE"),
             )
             .child(
                 div()
                     .px_2()
                     .text_sm()
-                    .text_color(rgb(0x91a0b7))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("Personal workspace"),
             );
 
         let mut inspector = div()
-            .w(px(235.0))
+            .w(px(240.0))
             .flex_shrink_0()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
-            .border_color(rgb(0x263346))
-            .bg(rgb(0x141e2c))
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .bg(rgb(MacTheme::SURFACE))
             .p_4()
             .flex()
             .flex_col()
@@ -12965,15 +13809,16 @@ impl Render for Shellumi {
                     div()
                         .text_base()
                         .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .child(host.name.clone()),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x697c94))
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child(host.destination.host().to_owned()),
                 )
-                .child(div().h(px(1.0)).bg(rgb(0x263346)))
+                .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
                 .child(host_detail(
                     "Protocol",
                     host.protocol().display_name().to_string(),
@@ -12995,7 +13840,7 @@ impl Render for Shellumi {
                         host.tags.join(", ")
                     },
                 ))
-                .child(div().h(px(1.0)).bg(rgb(0x263346)))
+                .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
                 .child(
                     div()
                         .flex()
@@ -13007,9 +13852,10 @@ impl Render for Shellumi {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(0x59ddc1))
-                                .text_color(rgb(0x0b2928))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
+                                .text_color(rgb(0xffffff))
                                 .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.connect(&connect_host, window, cx)
@@ -13023,7 +13869,8 @@ impl Render for Shellumi {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(0x192536))
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .text_sm()
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |app, _, _, cx| {
@@ -13039,7 +13886,8 @@ impl Render for Shellumi {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(0x192536))
+                        .bg(rgb(MacTheme::SURFACE_HOVER))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .text_sm()
                         .cursor_pointer()
                         .on_click(cx.listener(move |app, _, window, cx| {
@@ -13054,7 +13902,7 @@ impl Render for Shellumi {
                     .px_3()
                     .py_2()
                     .text_sm()
-                    .text_color(rgb(0xff858c))
+                    .text_color(rgb(MacTheme::DANGER))
                     .cursor_pointer()
                     .on_click(cx.listener(move |app, _, _, cx| app.delete_host(id, cx)))
                     .child("Delete host"),
@@ -13063,7 +13911,7 @@ impl Render for Shellumi {
             inspector = inspector.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x91a0b7))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                     .child("Select a host to view its details."),
             );
         }
@@ -13075,17 +13923,23 @@ impl Render for Shellumi {
             .px_6()
             .py_4()
             .border_b_1()
-            .border_color(rgb(0x263346))
+            .border_color(rgb(MacTheme::SEPARATOR))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("Hosts"))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Hosts"),
+                    )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x91a0b7))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("Infrastructure inventory"),
                     ),
             )
@@ -13096,9 +13950,10 @@ impl Render for Shellumi {
                     .py_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0x34465c))
-                    .bg(rgb(0x192536))
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .text_sm()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .cursor_pointer()
                     .on_click(
                         cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)),
@@ -13117,12 +13972,13 @@ impl Render for Shellumi {
                     .child(
                         div()
                             .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child("Infrastructure inventory"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x91a0b7))
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child("Your saved connections, organized locally"),
                     ),
             )
@@ -13138,8 +13994,10 @@ impl Render for Shellumi {
                             .py_2()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(0x34465c))
+                            .border_color(rgb(MacTheme::SEPARATOR))
+                            .bg(rgb(MacTheme::INPUT_BG))
                             .text_sm()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .cursor_pointer()
                             .on_click(cx.listener(|app, _, _, cx| app.load_hosts(cx)))
                             .child("Refresh"),
@@ -13150,8 +14008,8 @@ impl Render for Shellumi {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(0x59ddc1))
-                            .text_color(rgb(0x0b2928))
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .cursor_pointer()
@@ -13167,7 +14025,7 @@ impl Render for Shellumi {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x91a0b7))
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("Quick connect"),
             )
             .child(div().flex_1().child(self.quick_connect_input.clone()))
@@ -13178,8 +14036,10 @@ impl Render for Shellumi {
                     .py_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0x34465c))
+                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .bg(rgb(MacTheme::INPUT_BG))
                     .text_sm()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, window, cx| app.quick_connect(window, cx)))
                     .child("Connect"),
@@ -13188,7 +14048,7 @@ impl Render for Shellumi {
             quick = quick.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0xff858c))
+                    .text_color(rgb(MacTheme::DANGER))
                     .child(error.clone()),
             );
         }
@@ -13205,7 +14065,7 @@ impl Render for Shellumi {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x0b111c))
+            .bg(rgb(MacTheme::CONTENT_BG))
             .child(header)
             .child(
                 div()
@@ -13231,73 +14091,89 @@ impl Render for Shellumi {
             );
         let mut result = root.child(div().flex().flex_1().min_h_0().child(sidebar).child(body));
         if let Some(form) = &self.form {
-            let mut editor =
-                div()
-                    .id("host-editor")
-                    .overflow_y_scroll()
-                    .w(px(720.0))
-                    .max_w_full()
-                    .max_h(px(650.0))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(0x34465c))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_6()
-                    .bg(rgb(0x141e2c))
-                    .child(div().text_lg().font_weight(FontWeight::BOLD).child(
-                        if form.id.is_some() {
+            let mut editor = div()
+                .id("host-editor")
+                .overflow_y_scroll()
+                .w(px(720.0))
+                .max_w_full()
+                .max_h(px(650.0))
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_6()
+                .bg(rgb(MacTheme::SURFACE))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .child(if form.id.is_some() {
                             "Edit host"
                         } else {
                             "New host"
-                        },
-                    ))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x91a0b7))
-                            .child("Connection details are stored locally on this device."),
-                    )
-                    .child(div().text_sm().text_color(rgb(0x91a0b7)).child("Protocol"))
-                    .child({
-                        let mut proto_row = div().flex().flex_row().gap_2().mb_1();
-                        let protocols = [
-                            (ConnectionProtocol::Ssh, "SSH"),
-                            (ConnectionProtocol::Mosh, "Mosh"),
-                            (ConnectionProtocol::Telnet, "Telnet"),
-                            (ConnectionProtocol::Serial, "Serial"),
-                        ];
-                        for (idx, (p, label)) in protocols.into_iter().enumerate() {
-                            let is_sel = form.protocol == p;
-                            let btn_bg = if is_sel { rgb(0x1d383c) } else { rgb(0x192536) };
-                            let btn_fg = if is_sel { rgb(0x59ddc1) } else { rgb(0x91a0b7) };
-                            proto_row = proto_row.child(
-                                div()
-                                    .id(("proto-select", idx))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(btn_bg)
-                                    .text_color(btn_fg)
-                                    .text_xs()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.set_form_protocol(p, cx);
-                                    }))
-                                    .child(label),
-                            );
-                        }
-                        proto_row
-                    });
+                        }),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("Connection details are stored locally on this device."),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("Protocol"),
+                )
+                .child({
+                    let mut proto_row = div().flex().flex_row().gap_2().mb_1();
+                    let protocols = [
+                        (ConnectionProtocol::Ssh, "SSH"),
+                        (ConnectionProtocol::Mosh, "Mosh"),
+                        (ConnectionProtocol::Telnet, "Telnet"),
+                        (ConnectionProtocol::Serial, "Serial"),
+                    ];
+                    for (idx, (p, label)) in protocols.into_iter().enumerate() {
+                        let is_sel = form.protocol == p;
+                        let btn_bg = if is_sel {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(MacTheme::INPUT_BG)
+                        };
+                        let btn_fg = if is_sel {
+                            rgb(0xffffff)
+                        } else {
+                            rgb(MacTheme::TEXT_SECONDARY)
+                        };
+                        proto_row = proto_row.child(
+                            div()
+                                .id(("proto-select", idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(btn_bg)
+                                .text_color(btn_fg)
+                                .text_xs()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.set_form_protocol(p, cx);
+                                }))
+                                .child(label),
+                        );
+                    }
+                    proto_row
+                });
 
             if form.protocol == ConnectionProtocol::Telnet {
                 editor = editor.child(
                     div()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0x7f1d1d))
-                        .text_color(rgb(0xfecaca))
+                        .bg(rgb(0x4a1818))
+                        .text_color(rgb(MacTheme::DANGER))
                         .text_xs()
                         .child("⚠️ UNENCRYPTED PROTOCOL: Telnet transmits all credentials, keystrokes, and session data in cleartext over the network without encryption."),
                 );
@@ -13306,8 +14182,8 @@ impl Render for Shellumi {
                     div()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0x14532d))
-                        .text_color(rgb(0xbbf7d0))
+                        .bg(rgb(0x133820))
+                        .text_color(rgb(MacTheme::SUCCESS))
                         .text_xs()
                         .child("🔌 Direct serial line connection. Specify serial device path in Hostname (e.g. /dev/ttyUSB0 or COM1) and baud rate in Port (e.g. 115200)."),
                 );
@@ -13362,7 +14238,7 @@ impl Render for Shellumi {
                 editor = editor.child(self.identity_picker(form.identity_id, false, cx));
             }
             if let Some(error) = &self.form_error {
-                editor = editor.child(div().text_color(rgb(0xfca5a5)).child(error.clone()));
+                editor = editor.child(div().text_color(rgb(MacTheme::DANGER)).child(error.clone()));
             }
             if self.saving {
                 editor = editor.child("Saving…");
@@ -13376,8 +14252,8 @@ impl Render for Shellumi {
                                 .id("save-host")
                                 .p_2()
                                 .rounded_md()
-                                .bg(rgb(0x59ddc1))
-                                .text_color(rgb(0x0b2928))
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
+                                .text_color(rgb(0xffffff))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| app.save_host(cx)))
                                 .child("Save"),
@@ -13387,7 +14263,8 @@ impl Render for Shellumi {
                                 .id("cancel-host")
                                 .p_2()
                                 .rounded_md()
-                                .bg(rgb(0x374151))
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.form = None;
@@ -13405,7 +14282,7 @@ impl Render for Shellumi {
                     .top_0()
                     .left_0()
                     .size_full()
-                    .bg(rgba(0x030913dd))
+                    .bg(rgba(0x000000bb))
                     .flex()
                     .items_center()
                     .justify_center()

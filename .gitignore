@@ -20,3 +20,6 @@ pinned/
 
 # Codex attachments cache
 /.codex-attachments/
+
+# Visual design gallery
+/gpui_macos_dark_gallery/

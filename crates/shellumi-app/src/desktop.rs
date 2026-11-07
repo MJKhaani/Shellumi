@@ -72,40 +72,71 @@ impl DesktopUi {
 }
 fn panel() -> gpui::Div {
     div()
-        .rounded_lg()
+        .rounded(px(MacTheme::PANEL_RADIUS))
         .border_1()
-        .border_color(rgb(0x263346))
-        .bg(rgb(0x141e2c))
+        .border_color(rgb(MacTheme::SEPARATOR))
+        .bg(rgb(MacTheme::SURFACE))
         .p_4()
 }
 fn muted(text: impl Into<gpui::SharedString>) -> gpui::Div {
-    div().text_sm().text_color(rgb(0x91a0b7)).child(text.into())
+    div()
+        .text_sm()
+        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+        .child(text.into())
 }
 fn heading(text: impl Into<gpui::SharedString>) -> gpui::Div {
-    div().font_weight(FontWeight::SEMIBOLD).child(text.into())
+    div()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+        .child(text.into())
 }
-fn button(
+fn button_base(
     id: impl Into<gpui::ElementId>,
     text: impl Into<gpui::SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .px_3()
-        .py_2()
-        .rounded_md()
+        .py_1p5()
+        .rounded(px(MacTheme::CONTROL_RADIUS))
         .border_1()
-        .border_color(rgb(0x34465c))
-        .bg(rgb(0x192536))
         .text_sm()
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(0x223043)))
         .child(text.into())
+}
+fn button(
+    id: impl Into<gpui::ElementId>,
+    text: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    button_base(id, text)
+        .border_color(rgb(MacTheme::SEPARATOR))
+        .bg(rgb(0x323236))
+        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+        .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
 }
 fn primary(
     id: impl Into<gpui::ElementId>,
     text: impl Into<gpui::SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    button(id, text).bg(rgb(0x59ddc1)).text_color(rgb(0x0b2928))
+    button_base(id, text)
+        .border_color(rgb(MacTheme::ACCENT_BLUE))
+        .bg(rgb(MacTheme::ACCENT_BLUE))
+        .text_color(rgb(0xffffff))
+        .hover(|style| {
+            style
+                .bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                .border_color(rgb(MacTheme::ACCENT_BLUE_HOVER))
+        })
+}
+fn danger(
+    id: impl Into<gpui::ElementId>,
+    text: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    button_base(id, text)
+        .border_color(rgb(MacTheme::DANGER))
+        .bg(rgb(MacTheme::DANGER))
+        .text_color(rgb(0xffffff))
+        .hover(|style| style.bg(rgb(0xff6961)).border_color(rgb(0xff6961)))
 }
 fn empty(title: &str, text: &str) -> gpui::Div {
     panel()
@@ -496,13 +527,19 @@ impl Shellumi {
                 .px_6()
                 .py_4()
                 .border_b_1()
-                .border_color(rgb(0x263346))
+                .border_color(rgb(MacTheme::SEPARATOR))
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_xl().font_weight(FontWeight::BOLD).child(page))
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child(page),
+                        )
                         .child(muted(subtitle)),
                 )
                 .child(button("page-search", "Search anything").on_click(
@@ -544,7 +581,7 @@ impl Shellumi {
                     .px_6()
                     .py_2()
                     .text_sm()
-                    .text_color(rgb(0xf3be72))
+                    .text_color(rgb(MacTheme::WARNING))
                     .child(message.clone()),
             );
         }
@@ -625,12 +662,18 @@ impl Shellumi {
             .child(self.desktop.search.clone());
         for snippet in snippets {
             let id = snippet.id;
+            let is_sel = selected.is_some_and(|s| s.id == id);
             list = list.child(
                 button(("snippet", id as u64), snippet.name.clone())
-                    .bg(if selected.is_some_and(|s| s.id == id) {
-                        rgb(0x1c373d)
+                    .bg(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x141e2c)
+                        rgb(MacTheme::SURFACE)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
                     })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.desktop.selected_snippet = Some(id);
@@ -671,9 +714,12 @@ impl Shellumi {
                         .min_h(px(260.0))
                         .p_4()
                         .rounded_md()
-                        .bg(rgb(0x0b1521))
+                        .bg(rgb(MacTheme::CONTENT_BG))
+                        .border_1()
+                        .border_color(rgb(MacTheme::SEPARATOR))
                         .font_family(MONOSPACE_FONT)
                         .text_sm()
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         .children(
                             snippet
                                 .command
@@ -733,7 +779,8 @@ impl Shellumi {
                         )))
                         .child(
                             button("delete-snippet", "Delete")
-                                .text_color(rgb(0xff858c))
+                                .border_color(rgb(MacTheme::DANGER))
+                                .text_color(rgb(MacTheme::DANGER))
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.desktop.confirm = Some((
                                         format!("Delete snippet '{name}'?"),
@@ -784,15 +831,21 @@ impl Shellumi {
             "Keyboard Shortcuts",
             "Advanced",
         ] {
+            let is_active = self.desktop.settings_section == section;
             categories = categories.child(
                 button(
                     gpui::SharedString::from(format!("setting-section-{section}")),
                     section,
                 )
-                .bg(if self.desktop.settings_section == section {
-                    rgb(0x1c373d)
+                .bg(if is_active {
+                    rgb(MacTheme::ACCENT_BLUE)
                 } else {
-                    rgb(0x141e2c)
+                    rgb(MacTheme::SURFACE)
+                })
+                .text_color(if is_active {
+                    rgb(0xffffff)
+                } else {
+                    rgb(MacTheme::TEXT_PRIMARY)
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.desktop.settings_section = section;
@@ -827,7 +880,7 @@ impl Shellumi {
                 .gap_4()
                 .py_3()
                 .border_b_1()
-                .border_color(rgb(0x263346))
+                .border_color(rgb(MacTheme::SEPARATOR))
                 .child(
                     div()
                         .flex_1()
@@ -987,7 +1040,9 @@ impl Shellumi {
                 .gap_1()
                 .p_3()
                 .rounded_md()
-                .bg(rgb(0x0b1521));
+                .border_1()
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .bg(rgb(MacTheme::CONTENT_BG));
             for session in &workspace.sessions {
                 preview = preview.child(
                     div()
@@ -995,9 +1050,10 @@ impl Shellumi {
                         .p_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(0x34465c))
+                        .border_color(rgb(MacTheme::SEPARATOR))
+                        .bg(rgb(MacTheme::SURFACE))
                         .text_xs()
-                        .text_color(rgb(0x59ddc1))
+                        .text_color(rgb(MacTheme::ACCENT_BLUE))
                         .child(session.name.clone()),
                 );
             }
@@ -1303,9 +1359,14 @@ impl Shellumi {
                     layouts = layouts.child(
                         button(gpui::SharedString::from(format!("layout-{layout}")), layout)
                             .bg(if editor.layout == layout {
-                                rgb(0x1c373d)
+                                rgb(MacTheme::ACCENT_BLUE)
                             } else {
-                                rgb(0x192536)
+                                rgb(0x323236)
+                            })
+                            .text_color(if editor.layout == layout {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
                             })
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 if let Some(editor) = &mut app.desktop.editor {
@@ -1411,7 +1472,7 @@ impl Shellumi {
                                 div()
                                     .w(px(24.0))
                                     .text_xs()
-                                    .text_color(rgb(0x697c94))
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                     .child((index + 1).to_string()),
                             )
                             .child(div().flex_1().child(line.clone()))
@@ -1446,7 +1507,13 @@ impl Shellumi {
                 .flex_col()
                 .gap_4()
                 .p_6()
-                .child(div().text_lg().font_weight(FontWeight::BOLD).child(title))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .child(title),
+                )
                 .child(body);
             if let Some(error) = &self.desktop.message {
                 modal = modal.child(muted(error.clone()));
@@ -1480,7 +1547,7 @@ impl Shellumi {
                 div()
                     .absolute()
                     .inset_0()
-                    .bg(rgba(0x030913dd))
+                    .bg(rgba(0x030305dd))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1490,7 +1557,47 @@ impl Shellumi {
         }
         if let Some((message, command)) = &self.desktop.confirm {
             let command = command.clone();
-            root=root.child(div().absolute().inset_0().bg(rgba(0x030913dd)).flex().items_center().justify_center().child(panel().w(px(440.0)).flex().flex_col().gap_4().child(heading(message.clone())).child(muted("Confirm this change to the local record. Existing terminal sessions are not affected.")).child(div().flex().justify_end().gap_2().child(button("cancel-library-delete","Cancel").on_click(cx.listener(|app,_,_,cx|{app.desktop.confirm=None;cx.notify();}))).child(primary("confirm-library-delete","Delete").on_click(cx.listener(move|app,_,_,cx|app.desktop_command(command.clone(),cx)))))));
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(0x030305dd))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        panel()
+                            .w(px(440.0))
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(heading(message.clone()))
+                            .child(muted(
+                                "Confirm this change to the local record. Existing terminal sessions are not affected.",
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        button("cancel-library-delete", "Cancel").on_click(
+                                            cx.listener(|app, _, _, cx| {
+                                                app.desktop.confirm = None;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        danger("confirm-library-delete", "Delete").on_click(
+                                            cx.listener(move |app, _, _, cx| {
+                                                app.desktop_command(command.clone(), cx)
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    ),
+            );
         }
         if let Some(modal) = &self.snippet_modal {
             root = root.child(self.render_snippet_modal(modal, cx));
@@ -1568,21 +1675,21 @@ impl Shellumi {
         if keys {
             let daemon = shellumi_core::probe_keychain_daemon();
             let status_badge_color = if daemon.is_available {
-                rgb(0x10b981)
+                rgb(MacTheme::SUCCESS)
             } else {
-                rgb(0xf59e0b)
+                rgb(MacTheme::WARNING)
             };
             let status_badge_bg = if daemon.is_available {
-                rgb(0x064e3b)
+                rgba(0x30d15826)
             } else {
-                rgb(0x78350f)
+                rgba(0xffd60a26)
             };
             let daemon_card = div()
                 .p_3()
                 .rounded_lg()
-                .bg(rgb(0x0f172a))
+                .bg(rgb(MacTheme::SURFACE))
                 .border_1()
-                .border_color(rgb(0x334155))
+                .border_color(rgb(MacTheme::SEPARATOR))
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -1600,7 +1707,7 @@ impl Shellumi {
                                     div()
                                         .text_sm()
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                         .child(format!(
                                             "🔐 OS Keychain Daemon: {}",
                                             daemon.backend_name
@@ -1623,14 +1730,14 @@ impl Shellumi {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .child(format!("Daemon: {}", daemon.daemon_identifier)),
                         ),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x64748b))
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
                         .child(daemon.details),
                 );
 
@@ -1652,9 +1759,9 @@ impl Shellumi {
                         div()
                             .p_2()
                             .rounded_md()
-                            .bg(rgb(0x1e293b))
+                            .bg(rgb(MacTheme::SURFACE))
                             .border_1()
-                            .border_color(rgb(0x334155))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .flex()
                             .items_center()
                             .justify_between()
@@ -1672,7 +1779,7 @@ impl Shellumi {
                                                 div()
                                                     .text_sm()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf3f4f6))
+                                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                                     .child(id.name.clone()),
                                             )
                                             .children(if has_keychain_ref {
@@ -1680,8 +1787,8 @@ impl Shellumi {
                                                     div()
                                                         .p_1()
                                                         .rounded_sm()
-                                                        .bg(rgb(0x1e3a8a))
-                                                        .text_color(rgb(0x93c5fd))
+                                                        .bg(rgba(0x0a84ff26))
+                                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
                                                         .text_xs()
                                                         .child("🔐 Keychain"),
                                                 )
@@ -1692,16 +1799,19 @@ impl Shellumi {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x9ca3af))
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                             .child(method_badge),
                                     ),
                             )
                             .child(if let Some(ref kp) = id.key_path {
-                                div().text_xs().text_color(rgb(0x60a5fa)).child(kp.clone())
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .child(kp.clone())
                             } else {
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x9ca3af))
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                     .child("Passphrase/Agent".to_string())
                             }),
                     );
@@ -1712,12 +1822,18 @@ impl Shellumi {
                 .child(heading("System SSH Keys (~/.ssh)"));
         }
         for (index, record) in self.desktop.public_records.iter().enumerate() {
+            let is_sel = index == self.desktop.public_selected;
             table = table.child(
                 button(("public-record", index), record.name.clone())
-                    .bg(if index == self.desktop.public_selected {
-                        rgb(0x1c373d)
+                    .bg(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
                     } else {
-                        rgb(0x141e2c)
+                        rgb(MacTheme::SURFACE)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
                     })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.desktop.public_selected = index;
@@ -1754,7 +1870,7 @@ impl Shellumi {
                             path: record.path.clone(),
                             expected: raw.clone(),
                         };
-                        inspector=inspector.child(button("revoke-known-host","Revoke trust…").text_color(rgb(0xff858c)).on_click(cx.listener(move|app,_,_,cx|{app.desktop.confirm=Some(("Revoke this server key? Future connections with this key will be rejected.".into(),command.clone()));cx.notify();})));
+                        inspector=inspector.child(button("revoke-known-host","Revoke trust…").text_color(rgb(MacTheme::DANGER)).on_click(cx.listener(move|app,_,_,cx|{app.desktop.confirm=Some(("Revoke this server key? Future connections with this key will be rejected.".into(),command.clone()));cx.notify();})));
                     }
                 }
             }
@@ -2011,41 +2127,41 @@ impl Shellumi {
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x374151))
+                .bg(rgb(0x38383a))
                 .text_xs()
-                .text_color(rgb(0xe5e7eb))
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
                 .child("Local only"),
             AppSyncStatus::UpToDate { .. } => div()
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x065f46))
+                .bg(rgba(0x30d15826))
                 .text_xs()
-                .text_color(rgb(0xa7f3d0))
+                .text_color(rgb(MacTheme::SUCCESS))
                 .child("Up to date"),
             AppSyncStatus::Syncing => div()
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x1e40af))
+                .bg(rgba(0x0a84ff26))
                 .text_xs()
-                .text_color(rgb(0xbfdbfe))
+                .text_color(rgb(MacTheme::ACCENT_BLUE))
                 .child("Syncing…"),
             AppSyncStatus::Conflict { message } => div()
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x92400e))
+                .bg(rgba(0xffd60a26))
                 .text_xs()
-                .text_color(rgb(0xfde68a))
+                .text_color(rgb(MacTheme::WARNING))
                 .child(format!("Conflict: {message}")),
             AppSyncStatus::Error(e) => div()
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x991b1b))
+                .bg(rgba(0xff453a26))
                 .text_xs()
-                .text_color(rgb(0xfecaca))
+                .text_color(rgb(MacTheme::DANGER))
                 .child(format!("Error: {e}")),
         };
 

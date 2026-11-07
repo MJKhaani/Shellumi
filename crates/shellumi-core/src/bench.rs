@@ -378,10 +378,16 @@ impl BenchmarkRunner {
         let ops_per_sec = iterations as f64 / elapsed_secs.max(0.000_001);
         let latency_us = (duration_ms * 1000.0) / iterations as f64;
 
-        // PBKDF2 100k rounds should take at least 5ms (adequate resistance) but under 1000ms in unoptimized debug builds
-        let status = if (5_000.0..=1_000_000.0).contains(&latency_us) {
+        // PBKDF2 100k rounds should take at least 5ms (adequate resistance).
+        // In unoptimized debug test builds, allow up to 5000ms. In release builds, SLA is 1000ms.
+        let max_latency_us = if cfg!(debug_assertions) {
+            5_000_000.0
+        } else {
+            1_000_000.0
+        };
+        let status = if (5_000.0..=max_latency_us).contains(&latency_us) {
             BenchmarkStatus::Passed
-        } else if latency_us > 1_000_000.0 && latency_us < 2_000_000.0 {
+        } else if latency_us > max_latency_us && latency_us < max_latency_us * 1.5 {
             BenchmarkStatus::Warning
         } else {
             BenchmarkStatus::Failed
