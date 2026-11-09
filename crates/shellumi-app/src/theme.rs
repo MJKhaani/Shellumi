@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use gpui::{rgb, Rgba};
+use gpui::{div, px, rgb, Div, FontWeight, IntoElement, ParentElement, Rgba, SharedString, Styled};
 
 /// Native macOS Dark visual design tokens adhering to Apple Human Interface Guidelines
 /// and the neutral graphite + system blue color scheme from the visual design specification.
@@ -20,6 +20,12 @@ impl MacTheme {
     pub const INPUT_BG: u32 = 0x303034;
     pub const SEPARATOR: u32 = 0x46464a;
     pub const SEPARATOR_SUBTLE: u32 = 0x3a3a3f;
+    pub const BORDER: u32 = 0x46464a;
+
+    // Badge and specialized code backgrounds from gallery
+    pub const BADGE_NAVY: u32 = 0x174a76;
+    pub const BADGE_DEEP_BLUE: u32 = 0x15385b;
+    pub const CODE_BG: u32 = 0x101317;
 
     // Typography hierarchy
     pub const TEXT_PRIMARY: u32 = 0xf5f5f7;
@@ -34,8 +40,8 @@ impl MacTheme {
     pub const WARNING: u32 = 0xffd60a;
     pub const DANGER: u32 = 0xff453a;
 
-    // Terminal canvas
-    pub const TERMINAL_BG: u32 = 0x18181a;
+    // Terminal canvas (deep black background from gallery showcase)
+    pub const TERMINAL_BG: u32 = 0x0c0f13;
     pub const TERMINAL_FG: u32 = 0xf5f5f7;
 
     // Geometry
@@ -126,4 +132,91 @@ pub fn warning() -> Rgba {
 #[inline]
 pub fn danger() -> Rgba {
     rgb(MacTheme::DANGER)
+}
+
+// Reusable macOS dark UI primitives matching gpui_macos_dark_gallery
+pub fn heading(name: impl Into<SharedString>, detail: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                .child(name.into()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                .child(detail.into()),
+        )
+}
+
+pub fn subheader(text: impl Into<SharedString>) -> Div {
+    div()
+        .mt_3()
+        .mb_2()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_sm()
+        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+        .child(text.into())
+}
+
+pub fn card(child: impl IntoElement) -> Div {
+    div()
+        .w_full()
+        .bg(rgb(MacTheme::SURFACE))
+        .border_1()
+        .border_color(rgb(MacTheme::BORDER))
+        .rounded(px(MacTheme::PANEL_RADIUS))
+        .p_3()
+        .child(child)
+}
+
+pub fn caption(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_sm()
+        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+        .child(text.into())
+}
+
+pub fn pill(text: impl Into<SharedString>) -> Div {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(MacTheme::INPUT_BG))
+        .text_xs()
+        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+        .child(text.into())
+}
+
+pub fn item(title: impl Into<SharedString>, meta: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                .font_weight(FontWeight::MEDIUM)
+                .child(title.into()),
+        )
+        .child(caption(meta))
+}
+
+pub fn glyph_badge(glyph: impl Into<SharedString>, bg: u32, fg: u32) -> Div {
+    div()
+        .w(px(32.0))
+        .h(px(32.0))
+        .rounded_md()
+        .bg(rgb(bg))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(fg))
+        .child(glyph.into())
 }

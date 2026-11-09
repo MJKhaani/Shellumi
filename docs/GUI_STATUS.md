@@ -1,4 +1,4 @@
-# Desktop GUI implementation — v0.0.3-alpha
+# Desktop GUI implementation — v0.0.4-alpha
 
 The desktop is Rust/GPUI. The supplied UI design pack is a visual reference;
 its sample data and prototype QA are not evidence of working application features.

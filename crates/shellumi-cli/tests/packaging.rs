@@ -37,15 +37,15 @@ fn package(version: &str, arch: &str, binaries: bool) -> (tempfile::TempDir, Out
 }
 #[test]
 fn prerelease_debian_version_is_literal_and_both_binaries_are_packaged() {
-    let (dir, output) = package("0.0.3-alpha", "x86_64", true);
+    let (dir, output) = package("0.0.4-alpha", "x86_64", true);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let folder = dir.path().join("dist/shellumi_0.0.3-alpha_amd64");
+    let folder = dir.path().join("dist/shellumi_0.0.4-alpha_amd64");
     let control = std::fs::read_to_string(folder.join("DEBIAN/control")).unwrap();
-    assert!(control.lines().any(|line| line == "Version: 0.0.3~alpha"));
+    assert!(control.lines().any(|line| line == "Version: 0.0.4~alpha"));
     assert!(control.lines().any(|line| line == "Architecture: amd64"));
     assert!(!control.contains(&dir.path().display().to_string()));
     assert_eq!(
@@ -61,8 +61,8 @@ fn prerelease_debian_version_is_literal_and_both_binaries_are_packaged() {
 fn invalid_packaging_inputs_fail_before_any_output_cleanup() {
     for (version, arch, binaries) in [
         ("../../escape", "amd64", true),
-        ("0.0.3-alpha", "../escape", true),
-        ("0.0.3-alpha", "amd64", false),
+        ("0.0.4-alpha", "../escape", true),
+        ("0.0.4-alpha", "amd64", false),
     ] {
         let (dir, output) = package(version, arch, binaries);
         assert!(!output.status.success());

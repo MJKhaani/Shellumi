@@ -609,30 +609,59 @@ impl Shellumi {
                     ),
             );
         let mut packages = panel()
-            .w(px(160.0))
+            .w(px(170.0))
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(muted("PACKAGES"))
-            .child(button("all-snippets", "All snippets").on_click(cx.listener(
-                |app, _, _, cx| {
-                    app.desktop.snippet_tag = None;
-                    cx.notify();
-                },
-            )));
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .child("PACKAGES"),
+            )
+            .child(
+                button("all-snippets", "▣  All snippets")
+                    .bg(if self.desktop.snippet_tag.is_none() {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
+                    })
+                    .text_color(if self.desktop.snippet_tag.is_none() {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    })
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.desktop.snippet_tag = None;
+                        cx.notify();
+                    })),
+            );
         let mut tags: Vec<_> = self.snippets.iter().flat_map(|s| s.tags.iter()).collect();
         tags.sort();
         tags.dedup();
         for (index, tag) in tags.iter().enumerate() {
             let tag = (*tag).clone();
             let selected_tag = tag.clone();
-            packages = packages.child(button(("snippet-tag", index), tag).on_click(cx.listener(
-                move |app, _, _, cx| {
-                    app.desktop.snippet_tag = Some(selected_tag.clone());
-                    cx.notify();
-                },
-            )));
+            let is_sel = self.desktop.snippet_tag.as_deref() == Some(&tag);
+            packages = packages.child(
+                button(("snippet-tag", index), format!("▣  {tag}"))
+                    .bg(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(0x323236)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    })
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.desktop.snippet_tag = Some(selected_tag.clone());
+                        cx.notify();
+                    })),
+            );
         }
         let query = self.desktop.search.read(cx).value().trim().to_lowercase();
         let snippets: Vec<_> = self
@@ -713,19 +742,33 @@ impl Shellumi {
                     div()
                         .min_h(px(260.0))
                         .p_4()
-                        .rounded_md()
-                        .bg(rgb(MacTheme::CONTENT_BG))
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::CODE_BG))
                         .border_1()
-                        .border_color(rgb(MacTheme::SEPARATOR))
+                        .border_color(rgb(MacTheme::BORDER))
                         .font_family(MONOSPACE_FONT)
                         .text_sm()
                         .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .children(
-                            snippet
-                                .command
-                                .lines()
-                                .map(|line| div().child(line.to_owned())),
-                        ),
+                        .children(snippet.command.lines().enumerate().map(|(i, line)| {
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .w(px(28.0))
+                                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                        .child(format!("{}", i + 1)),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(if i == 0 && line.starts_with('#') {
+                                            rgb(MacTheme::SUCCESS)
+                                        } else {
+                                            rgb(MacTheme::TEXT_PRIMARY)
+                                        })
+                                        .child(line.to_owned()),
+                                )
+                        })),
                 )
                 .child(muted(format!(
                     "{} template parameters · execution always requires your action",
@@ -1030,10 +1073,16 @@ impl Shellumi {
     }
     fn workspaces_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut grid = div().flex().flex_wrap().gap_3();
-        for workspace in &self.workspaces {
+        for (index, workspace) in self.workspaces.iter().enumerate() {
             let id = workspace.id;
             let name = workspace.name.clone();
             let duplicate = format!("{} copy", workspace.name);
+            let glyph = match index % 4 {
+                0 => "◉",
+                1 => "⌘",
+                2 => "▣",
+                _ => "▧",
+            };
             let mut preview = div()
                 .flex()
                 .flex_wrap()
@@ -1041,7 +1090,7 @@ impl Shellumi {
                 .p_3()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
+                .border_color(rgb(MacTheme::BORDER))
                 .bg(rgb(MacTheme::CONTENT_BG));
             for session in &workspace.sessions {
                 preview = preview.child(
@@ -1050,7 +1099,7 @@ impl Shellumi {
                         .p_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(MacTheme::SEPARATOR))
+                        .border_color(rgb(MacTheme::BORDER))
                         .bg(rgb(MacTheme::SURFACE))
                         .text_xs()
                         .text_color(rgb(MacTheme::ACCENT_BLUE))
@@ -1059,12 +1108,46 @@ impl Shellumi {
             }
             grid = grid.child(
                 panel()
-                    .w(px(300.0))
+                    .w(px(320.0))
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(heading(workspace.name.clone()))
-                    .child(muted(workspace.description.clone().unwrap_or_default()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(35.0))
+                                    .h(px(35.0))
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::BADGE_DEEP_BLUE))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(glyph),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(heading(workspace.name.clone()))
+                                    .child(muted(workspace.description.clone().unwrap_or_else(
+                                        || {
+                                            format!(
+                                                "{} sessions · {}",
+                                                workspace.sessions.len(),
+                                                workspace.layout
+                                            )
+                                        },
+                                    ))),
+                            ),
+                    )
                     .child(preview)
                     .child(muted(format!(
                         "{} sessions · {}",
@@ -1142,20 +1225,60 @@ impl Shellumi {
             .flat_map(|tab| &tab.panes)
             .filter(|p| p.session.is_some())
             .count();
-        let mut metrics = div().flex().gap_3();
-        for (label, value) in [
-            ("Saved hosts", hosts.len()),
-            ("Open sessions", active),
-            ("Saved workspaces", self.workspaces.len()),
-            ("Command snippets", self.snippets.len()),
-        ] {
+        let metric_defs = [
+            (
+                "Saved hosts",
+                hosts.len(),
+                "⌘",
+                MacTheme::BADGE_NAVY,
+                MacTheme::ACCENT_BLUE,
+            ),
+            ("Open sessions", active, "●", 0x1a3a2a, MacTheme::SUCCESS),
+            (
+                "Saved workspaces",
+                self.workspaces.len(),
+                "▣",
+                MacTheme::BADGE_DEEP_BLUE,
+                MacTheme::ACCENT_BLUE,
+            ),
+            (
+                "Command snippets",
+                self.snippets.len(),
+                "⚡",
+                0x3d3010,
+                MacTheme::WARNING,
+            ),
+        ];
+        let mut metrics = div().flex().flex_wrap().gap_3();
+        for (label, value, glyph, bg, fg) in metric_defs {
             metrics = metrics.child(
-                panel().flex_1().child(muted(label)).child(
+                panel().flex_1().min_w(px(140.0)).child(
                     div()
-                        .mt_2()
-                        .text_2xl()
-                        .font_weight(FontWeight::BOLD)
-                        .child(value.to_string()),
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .h(px(36.0))
+                                .rounded_md()
+                                .bg(rgb(bg))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(fg))
+                                .font_weight(FontWeight::BOLD)
+                                .child(glyph),
+                        )
+                        .child(
+                            div().flex().flex_col().child(muted(label)).child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child(value.to_string()),
+                            ),
+                        ),
                 ),
             );
         }
@@ -1168,9 +1291,11 @@ impl Shellumi {
         for host in hosts.iter().take(6) {
             let host = host.clone();
             host_list = host_list.child(
-                button(("overview-host", host.id as u64), host.name.clone()).on_click(
-                    cx.listener(move |app, _, window, cx| app.connect(&host, window, cx)),
-                ),
+                button(
+                    ("overview-host", host.id as u64),
+                    format!("⌘  {}", host.name),
+                )
+                .on_click(cx.listener(move |app, _, window, cx| app.connect(&host, window, cx))),
             );
         }
         if hosts.is_empty() {
@@ -1823,8 +1948,9 @@ impl Shellumi {
         }
         for (index, record) in self.desktop.public_records.iter().enumerate() {
             let is_sel = index == self.desktop.public_selected;
+            let icon = if keys { "⚿" } else { "🛡" };
             table = table.child(
-                button(("public-record", index), record.name.clone())
+                button(("public-record", index), format!("{icon}  {}", record.name))
                     .bg(if is_sel {
                         rgb(MacTheme::ACCENT_BLUE)
                     } else {
@@ -2075,10 +2201,10 @@ impl Shellumi {
                     ("local-file", index),
                     format!(
                         "{} {}     {}",
-                        if directory { "▸" } else { "·" },
+                        if directory { "📁" } else { "◧" },
                         entry.name,
                         if directory {
-                            String::new()
+                            "—".to_string()
                         } else {
                             format!("{} B", entry.size)
                         }

@@ -1,6 +1,6 @@
 # Shellumi roadmap
 
-The current milestone is **v0.0.3-alpha**. Requirements remain in
+The current milestone is **v0.0.4-alpha**. Requirements remain in
 [PROJECT.md](../PROJECT.md); the [feature matrix](FEATURE_MATRIX.md) and
 [GUI status](GUI_STATUS.md) describe implementation evidence and limitations.
 

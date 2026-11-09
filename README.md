@@ -9,7 +9,7 @@ Shellumi is built in Rust with a native GPUI interface and a local Turso databas
 It aims to provide an alternative to Termius without mandatory accounts,
 telemetry, subscriptions, or cloud storage requirements. Licensed under MIT.
 
-**Current milestone: `v0.0.3-alpha`.** This is an early testing release. The
+**Current milestone: `v0.0.4-alpha`.** This is an early testing release. The
 macOS desktop has been exercised locally; Linux and Windows remain target
 platforms requiring runtime validation. Review the limitations below before
 using Shellumi for administration.
@@ -248,6 +248,13 @@ packaging/                Desktop and mobile packaging definitions
 
 [PROJECT.md](PROJECT.md) contains the long-term requirements. Its feature list is
 the target scope, not a claim that every capability is implemented.
+
+## v0.0.4-alpha release notes
+
+This release delivers a complete macOS Dark gallery visual design overhaul across
+all application views, modals, cards, badges, and controls; full multi-platform
+keyboard shortcuts implementation with 37 GPUI actions, dual-layer keystroke
+interception, focus tracking, and comprehensive shortcuts documentation (`docs/SHORTCUTS.md`).
 
 ## v0.0.3-alpha release notes
 

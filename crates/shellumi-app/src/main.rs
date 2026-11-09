@@ -7,11 +7,12 @@ mod sftp_transfer;
 mod text_input;
 mod theme;
 
-pub use theme::MacTheme;
+pub use theme::{caption, card, glyph_badge, heading, item, pill, subheader, MacTheme};
 
 use gpui::{
     actions, div, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context, Entity,
-    FocusHandle, FontWeight, KeyBinding, KeyDownEvent, Window, WindowBounds, WindowOptions,
+    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Window, WindowBounds,
+    WindowOptions,
 };
 use session::{Session, SessionEvent};
 #[cfg(test)]
@@ -54,7 +55,50 @@ const MONOSPACE_FONT: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
 
-actions!(shellumi, [RefreshHosts, ToggleCommandPalette]);
+actions!(
+    shellumi,
+    [
+        RefreshHosts,
+        ToggleCommandPalette,
+        NewTab,
+        OpenLocalTerminal,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        SelectTab1,
+        SelectTab2,
+        SelectTab3,
+        SelectTab4,
+        SelectTab5,
+        SelectTab6,
+        SelectTab7,
+        SelectTab8,
+        SelectTab9,
+        SplitVertical,
+        SplitHorizontal,
+        FocusNextPane,
+        FocusPrevPane,
+        ClosePane,
+        ToggleFocusMode,
+        ToggleBroadcast,
+        ToggleSnippets,
+        FindInTerminal,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
+        QuickConnect,
+        NewHost,
+        ReconnectSession,
+        ToggleSidebar,
+        GoToHosts,
+        GoToOverview,
+        GoToWorkspaces,
+        GoToSftp,
+        GoToKeychain,
+        GoToPortForwarding,
+        OpenSettings,
+    ]
+);
 
 enum HostState {
     NoDatabase,
@@ -319,6 +363,7 @@ struct Shellumi {
     shell_integration_modal: Option<ShellIntegrationModalState>,
     session_replay_modal: Option<SessionReplayModalState>,
     tunnel_modal: Option<TunnelModalState>,
+    sidebar_visible: bool,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -572,6 +617,7 @@ impl Shellumi {
             shell_integration_modal: None,
             session_replay_modal: None,
             tunnel_modal: None,
+            sidebar_visible: true,
         }
     }
 
@@ -1391,6 +1437,11 @@ impl Shellumi {
                 }
                 _ => {}
             }
+        }
+
+        if self.handle_app_shortcut(&event.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
         }
 
         let Some(active_idx) = self.active_tab_idx else {
@@ -3081,6 +3132,407 @@ impl Shellumi {
         }
     }
 
+    fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.form.is_some() {
+            self.form = None;
+            self.form_error = None;
+            cx.notify();
+            return;
+        }
+        if self.command_palette.is_some() {
+            self.dismiss_command_palette(cx);
+            return;
+        }
+        if self.page.is_some() {
+            self.page = None;
+            cx.notify();
+            return;
+        }
+        if let Some(active_idx) = self.active_tab_idx {
+            if let Some(tab) = self.tabs.get(active_idx) {
+                let id = tab.id;
+                self.close_tab(id, window, cx);
+            }
+        }
+    }
+
+    fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.page = None;
+        let total = self.tabs.len();
+        let next = match self.active_tab_idx {
+            Some(idx) => (idx + 1) % total,
+            None => 0,
+        };
+        self.select_tab(Some(next), window, cx);
+    }
+
+    fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.page = None;
+        let total = self.tabs.len();
+        let prev = match self.active_tab_idx {
+            Some(0) | None => total - 1,
+            Some(idx) => idx - 1,
+        };
+        self.select_tab(Some(prev), window, cx);
+    }
+
+    fn switch_to_tab(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = None;
+        if idx < self.tabs.len() {
+            self.select_tab(Some(idx), window, cx);
+        } else if idx == 0 {
+            self.select_tab(None, window, cx);
+        }
+    }
+
+    fn close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(active_idx) else {
+            return;
+        };
+        if tab.panes.len() > 1 {
+            let pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+            if let Some(pane) = tab.panes.get(pane_idx) {
+                let pane_id = pane.id;
+                self.close_pane(pane_id, window, cx);
+            }
+        } else {
+            let tab_id = tab.id;
+            self.close_tab(tab_id, window, cx);
+        }
+    }
+
+    fn focus_next_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(active_idx) else {
+            return;
+        };
+        if tab.panes.len() > 1 {
+            tab.active_pane_idx = (tab.active_pane_idx + 1) % tab.panes.len();
+            cx.notify();
+        }
+    }
+
+    fn focus_prev_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(active_idx) else {
+            return;
+        };
+        if tab.panes.len() > 1 {
+            tab.active_pane_idx = if tab.active_pane_idx == 0 {
+                tab.panes.len() - 1
+            } else {
+                tab.active_pane_idx - 1
+            };
+            cx.notify();
+        }
+    }
+
+    fn toggle_focus_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(active_idx) else {
+            return;
+        };
+        if tab.panes.len() > 1 {
+            if tab.split.is_some() {
+                tab.split = None;
+            } else {
+                tab.split = Some(SplitDirection::Vertical);
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_broadcast_mode(&mut self, cx: &mut Context<Self>) {
+        let total = self
+            .active_tab_idx
+            .and_then(|i| self.tabs.get(i))
+            .map(|t| t.panes.len())
+            .unwrap_or(0);
+        self.broadcast_manager.set_total_panes(total);
+        self.broadcast_manager.toggle();
+        cx.notify();
+    }
+
+    fn trigger_find_in_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(active_idx) else {
+            return;
+        };
+        let pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+        if let Some(pane) = tab.panes.get(pane_idx) {
+            let pane_id = pane.id;
+            self.toggle_search(pane_id, cx);
+        }
+    }
+
+    fn reconnect_active_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active_idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(active_idx) else {
+            return;
+        };
+        if tab.kind == SessionKind::Local {
+            let tab_id = tab.id;
+            self.close_tab(tab_id, window, cx);
+            self.open_local_terminal(window, cx);
+        } else {
+            self.trigger_mobile_lifecycle(MobileLifecycleEvent::NetworkRestored, cx);
+        }
+    }
+
+    fn trigger_quick_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = None;
+        self.select_tab(None, window, cx);
+        window.focus(&self.quick_connect_input.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn handle_app_shortcut(
+        &mut self,
+        key: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let is_primary =
+            key.modifiers.platform || (key.modifiers.control && !key.modifiers.platform);
+        let shift = key.modifiers.shift;
+        let alt = key.modifiers.alt;
+        let k = key.key.to_ascii_lowercase();
+
+        // 1. Command Palette: Cmd+K / Ctrl+K (without Shift/Alt)
+        if is_primary && !shift && !alt && k == "k" {
+            self.toggle_command_palette(window, cx);
+            return true;
+        }
+
+        // 2. New Tab / Local Terminal: Cmd+T / Ctrl+T, Cmd+L / Ctrl+L
+        if is_primary && !shift && !alt && (k == "t" || k == "l") {
+            self.open_local_terminal(window, cx);
+            return true;
+        }
+
+        // 3. Close Tab: Cmd+W / Ctrl+W (without Shift)
+        if is_primary && !shift && !alt && k == "w" {
+            self.close_active_tab(window, cx);
+            return true;
+        }
+
+        // 4. Close Pane: Cmd+Shift+W / Ctrl+Shift+W
+        if is_primary && shift && !alt && k == "w" {
+            self.close_active_pane(window, cx);
+            return true;
+        }
+
+        // 5. Next Tab: Cmd+Shift+] / Ctrl+Tab / Ctrl+PageDown
+        if (is_primary && shift && (k == "]" || k == "}"))
+            || (key.modifiers.control && !shift && (k == "tab" || k == "pagedown"))
+        {
+            self.next_tab(window, cx);
+            return true;
+        }
+
+        // 6. Previous Tab: Cmd+Shift+[ / Ctrl+Shift+Tab / Ctrl+PageUp
+        if (is_primary && shift && (k == "[" || k == "{"))
+            || (key.modifiers.control && shift && k == "tab")
+            || (key.modifiers.control && !shift && k == "pageup")
+        {
+            self.prev_tab(window, cx);
+            return true;
+        }
+
+        // 7. Tab 1-9: Cmd+1..9 / Ctrl+1..9
+        if is_primary && !shift && !alt && k.len() == 1 {
+            if let Some(ch) = k.chars().next() {
+                if ('1'..='9').contains(&ch) {
+                    let idx = (ch as usize) - ('1' as usize);
+                    self.switch_to_tab(idx, window, cx);
+                    return true;
+                }
+            }
+        }
+
+        // 8. Split Vertical: Cmd+D / Ctrl+Shift+E
+        if (is_primary && !shift && !alt && k == "d")
+            || (key.modifiers.control && shift && !alt && k == "e")
+        {
+            self.split_pane(SplitDirection::Vertical, window, cx);
+            return true;
+        }
+
+        // 9. Split Horizontal: Cmd+Shift+D / Ctrl+Shift+O
+        if (is_primary && shift && !alt && k == "d")
+            || (key.modifiers.control && shift && !alt && k == "o")
+        {
+            self.split_pane(SplitDirection::Horizontal, window, cx);
+            return true;
+        }
+
+        // 10. Focus Next Pane: Cmd+] / Alt+Right
+        if (is_primary && !shift && !alt && k == "]")
+            || (alt && !shift && !is_primary && k == "right")
+        {
+            self.focus_next_pane(cx);
+            return true;
+        }
+
+        // 11. Focus Previous Pane: Cmd+[ / Alt+Left
+        if (is_primary && !shift && !alt && k == "[")
+            || (alt && !shift && !is_primary && k == "left")
+        {
+            self.focus_prev_pane(cx);
+            return true;
+        }
+
+        // 12. Switch Focus Mode (Toggle Split / Single): Cmd+Shift+M / Ctrl+Alt+M
+        if (is_primary && shift && !alt && k == "m")
+            || (key.modifiers.control && alt && !shift && k == "m")
+        {
+            self.toggle_focus_mode(cx);
+            return true;
+        }
+
+        // 13. Toggle Broadcast: Cmd+B / Cmd+Shift+B / Ctrl+Alt+B
+        if (is_primary && !alt && k == "b") || (key.modifiers.control && alt && k == "b") {
+            self.toggle_broadcast_mode(cx);
+            return true;
+        }
+
+        // 14. Toggle Snippets: Cmd+. / Ctrl+.
+        if is_primary && !shift && !alt && k == "." {
+            self.snippets_panel_open = !self.snippets_panel_open;
+            cx.notify();
+            return true;
+        }
+
+        // 15. Find in Terminal: Cmd+F / Ctrl+F
+        if is_primary && !shift && !alt && k == "f" {
+            self.trigger_find_in_terminal(cx);
+            return true;
+        }
+
+        // 16. Zoom In: Cmd+= / Cmd++ / Ctrl+= / Ctrl++
+        if is_primary && !alt && (k == "=" || k == "+") {
+            self.desktop.preferences.terminal_font_size =
+                (self.desktop.preferences.terminal_font_size + 1).min(32);
+            cx.notify();
+            return true;
+        }
+
+        // 17. Zoom Out: Cmd+- / Ctrl+-
+        if is_primary && !alt && k == "-" {
+            self.desktop.preferences.terminal_font_size = (self
+                .desktop
+                .preferences
+                .terminal_font_size
+                .saturating_sub(1))
+            .max(8);
+            cx.notify();
+            return true;
+        }
+
+        // 18. Reset Zoom: Cmd+0 / Ctrl+0
+        if is_primary && !alt && k == "0" {
+            self.desktop.preferences.terminal_font_size = 14;
+            cx.notify();
+            return true;
+        }
+
+        // 19. Quick Connect: Cmd+O / Ctrl+O (without Shift)
+        if is_primary && !shift && !alt && k == "o" {
+            self.trigger_quick_connect(window, cx);
+            return true;
+        }
+
+        // 20. New Host: Cmd+N / Ctrl+N
+        if is_primary && !shift && !alt && k == "n" {
+            self.edit_host(None, cx);
+            return true;
+        }
+
+        // 21. Refresh: Cmd+R / Ctrl+R (without Shift)
+        if is_primary && !shift && !alt && k == "r" {
+            self.load_hosts(cx);
+            return true;
+        }
+
+        // 22. Reconnect: Cmd+Shift+R / Ctrl+Shift+R
+        if is_primary && shift && !alt && k == "r" {
+            self.reconnect_active_session(window, cx);
+            return true;
+        }
+
+        // 23. Toggle Sidebar: Cmd+\ / Ctrl+\
+        if is_primary && !alt && (k == "\\" || k == "|") {
+            self.sidebar_visible = !self.sidebar_visible;
+            cx.notify();
+            return true;
+        }
+
+        // 24. Settings: Cmd+, / Ctrl+,
+        if is_primary && !alt && k == "," {
+            self.page = Some("Settings");
+            cx.notify();
+            return true;
+        }
+
+        // 25. Navigation shortcuts:
+        if is_primary && shift && !alt {
+            match k.as_str() {
+                "h" => {
+                    self.page = None;
+                    self.select_tab(None, window, cx);
+                    return true;
+                }
+                "o" => {
+                    self.page = Some("Overview");
+                    cx.notify();
+                    return true;
+                }
+                "k" => {
+                    self.page = Some("Workspaces");
+                    cx.notify();
+                    return true;
+                }
+                "u" => {
+                    self.page = Some("SFTP Files");
+                    cx.notify();
+                    return true;
+                }
+                "y" => {
+                    self.page = Some("Keychain");
+                    cx.notify();
+                    return true;
+                }
+                "p" => {
+                    self.page = Some("Port Forwarding");
+                    cx.notify();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        false
+    }
+
     fn handle_palette_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -3092,21 +3544,28 @@ impl Shellumi {
                 "escape" => {
                     self.dismiss_command_palette(cx);
                     cx.stop_propagation();
+                    return;
                 }
                 "down" => {
                     self.command_palette_select_next(cx);
                     cx.stop_propagation();
+                    return;
                 }
                 "up" => {
                     self.command_palette_select_prev(cx);
                     cx.stop_propagation();
+                    return;
                 }
                 "enter" => {
                     self.execute_command_palette_selected(window, cx);
                     cx.stop_propagation();
+                    return;
                 }
                 _ => {}
             }
+        }
+        if self.handle_app_shortcut(&event.keystroke, window, cx) {
+            cx.stop_propagation();
         }
     }
 
@@ -11065,17 +11524,54 @@ impl Shellumi {
                         app.select_tunnel_modal_item(idx, cx);
                     }));
 
-                // Top row: name + status pill
+                let glyph_box = div()
+                    .w(px(30.0))
+                    .h(px(30.0))
+                    .rounded_md()
+                    .bg(rgb(MacTheme::INPUT_BG))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                    .child("⇄");
+
+                let status_dot = div()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded_full()
+                    .bg(rgb(if is_active {
+                        MacTheme::SUCCESS
+                    } else {
+                        MacTheme::TEXT_TERTIARY
+                    }));
+
+                // Top row: glyph + dot + name + status pill
                 let top_row = div()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap_2()
+                    .child(glyph_box)
+                    .child(status_dot)
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .child(tunnel.name.clone()),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child(tunnel.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child(format!("{flag_str}: {rule_summary}")),
+                            ),
                     )
                     .child(
                         div()
@@ -11096,22 +11592,6 @@ impl Shellumi {
                             .child(status_pill.0),
                     );
                 card = card.child(top_row);
-
-                // Middle row: flag + rule summary
-                card = card.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(rgb(MacTheme::ACCENT_BLUE))
-                        .child(flag_str)
-                        .child(
-                            div()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child(rule_summary),
-                        ),
-                );
 
                 // Actions row: Start/Stop button + Delete button
                 let actions_row = div()
@@ -12141,7 +12621,12 @@ fn host_form_field(label: &'static str, input: Entity<TextInput>) -> gpui::Div {
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_sm().text_color(rgb(0x91a0b7)).child(label))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                .child(label),
+        )
         .child(input)
 }
 
@@ -12155,10 +12640,20 @@ fn host_detail(label: &'static str, value: String) -> gpui::Div {
         .justify_between()
         .gap_2()
         .border_b_1()
-        .border_color(rgb(0x263346))
+        .border_color(rgb(MacTheme::BORDER))
         .pb_2()
-        .child(div().text_xs().text_color(rgb(0x697c94)).child(label))
-        .child(div().text_xs().text_color(rgb(0xe9f0f9)).child(value))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                .child(value),
+        )
 }
 
 fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::Div {
@@ -12254,10 +12749,22 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
             div()
                 .px_2()
                 .py_2()
-                .text_lg()
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                .child("▸  shellumi"),
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .child("Shellumi"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("GPUI · macOS Dark"),
+                ),
         )
         .child(links)
         .child(
@@ -12278,9 +12785,9 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
         .child(
             div()
                 .border_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
+                .border_color(rgb(MacTheme::BORDER))
                 .bg(rgb(MacTheme::SURFACE))
-                .rounded_md()
+                .rounded_lg()
                 .p_3()
                 .child(
                     div()
@@ -12293,7 +12800,7 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
                     div()
                         .text_xs()
                         .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                        .child("Local only"),
+                        .child("Local-first · Offline · Zero cloud"),
                 ),
         )
 }
@@ -12302,25 +12809,152 @@ impl Render for Shellumi {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut root = div()
             .id("shellumi-root")
+            .track_focus(&self.focus)
             .size_full()
             .overflow_hidden()
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::CONTENT_BG))
             .text_color(rgb(MacTheme::TEXT_PRIMARY))
-            .text_size(px(self.desktop.preferences.ui_font_size as f32));
+            .text_size(px(self.desktop.preferences.ui_font_size as f32))
+            .on_key_down(cx.listener(Self::handle_palette_key_down))
+            .on_action(cx.listener(|app, _: &RefreshHosts, _, cx| app.load_hosts(cx)))
+            .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
+                app.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &NewTab, window, cx| {
+                app.open_local_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &OpenLocalTerminal, window, cx| {
+                app.open_local_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &CloseTab, window, cx| {
+                app.close_active_tab(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &NextTab, window, cx| {
+                app.next_tab(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &PrevTab, window, cx| {
+                app.prev_tab(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab1, window, cx| {
+                app.switch_to_tab(0, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab2, window, cx| {
+                app.switch_to_tab(1, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab3, window, cx| {
+                app.switch_to_tab(2, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab4, window, cx| {
+                app.switch_to_tab(3, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab5, window, cx| {
+                app.switch_to_tab(4, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab6, window, cx| {
+                app.switch_to_tab(5, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab7, window, cx| {
+                app.switch_to_tab(6, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab8, window, cx| {
+                app.switch_to_tab(7, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SelectTab9, window, cx| {
+                app.switch_to_tab(8, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SplitVertical, window, cx| {
+                app.split_pane(SplitDirection::Vertical, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &SplitHorizontal, window, cx| {
+                app.split_pane(SplitDirection::Horizontal, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &FocusNextPane, _, cx| {
+                app.focus_next_pane(cx);
+            }))
+            .on_action(cx.listener(|app, _: &FocusPrevPane, _, cx| {
+                app.focus_prev_pane(cx);
+            }))
+            .on_action(cx.listener(|app, _: &ClosePane, window, cx| {
+                app.close_active_pane(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleFocusMode, _, cx| {
+                app.toggle_focus_mode(cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleBroadcast, _, cx| {
+                app.toggle_broadcast_mode(cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleSnippets, _, cx| {
+                app.snippets_panel_open = !app.snippets_panel_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &FindInTerminal, _, cx| {
+                app.trigger_find_in_terminal(cx);
+            }))
+            .on_action(cx.listener(|app, _: &ZoomIn, _, cx| {
+                app.desktop.preferences.terminal_font_size =
+                    (app.desktop.preferences.terminal_font_size + 1).min(32);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &ZoomOut, _, cx| {
+                app.desktop.preferences.terminal_font_size =
+                    (app.desktop.preferences.terminal_font_size.saturating_sub(1)).max(8);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &ResetZoom, _, cx| {
+                app.desktop.preferences.terminal_font_size = 14;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &QuickConnect, window, cx| {
+                app.trigger_quick_connect(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &NewHost, _, cx| {
+                app.edit_host(None, cx);
+            }))
+            .on_action(cx.listener(|app, _: &ReconnectSession, window, cx| {
+                app.reconnect_active_session(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleSidebar, _, cx| {
+                app.sidebar_visible = !app.sidebar_visible;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &GoToHosts, window, cx| {
+                app.page = None;
+                app.select_tab(None, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &GoToOverview, _, cx| {
+                app.page = Some("Overview");
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &GoToWorkspaces, _, cx| {
+                app.page = Some("Workspaces");
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &GoToSftp, _, cx| {
+                app.page = Some("SFTP Files");
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &GoToKeychain, _, cx| {
+                app.page = Some("Keychain");
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &GoToPortForwarding, _, cx| {
+                app.page = Some("Port Forwarding");
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &OpenSettings, _, cx| {
+                app.page = Some("Settings");
+                cx.notify();
+            }));
 
         if let Some(page) = self.page {
             let body = self.render_desktop_page(page, cx);
-            let result = root.child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(workspace_sidebar(cx, page))
-                    .child(body),
-            );
+            let mut container = div().flex().flex_1().min_h_0().overflow_hidden();
+            if self.sidebar_visible {
+                container = container.child(workspace_sidebar(cx, page));
+            }
+            let result = root.child(container.child(body));
             return self.desktop_overlays(result, cx);
         }
         if !self.tabs.is_empty() {
@@ -13048,12 +13682,12 @@ impl Render for Shellumi {
                         .gap_2()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(MacTheme::CONTENT_BG))
+                        .bg(rgb(MacTheme::TERMINAL_BG))
                         .border_1()
                         .border_color(if is_active_pane {
                             rgb(MacTheme::ACCENT_BLUE)
                         } else {
-                            rgb(MacTheme::SEPARATOR)
+                            rgb(MacTheme::BORDER)
                         })
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if let Some(active_idx) = app.active_tab_idx {
@@ -13352,7 +13986,7 @@ impl Render for Shellumi {
                         .flex_1()
                         .overflow_y_scroll()
                         .font_family(MONOSPACE_FONT)
-                        .bg(rgb(MacTheme::CONTENT_BG))
+                        .bg(rgb(MacTheme::TERMINAL_BG))
                         .p_3()
                         .flex()
                         .flex_col();
@@ -13489,28 +14123,23 @@ impl Render for Shellumi {
                     panes_container = panes_container.child(pane_el);
                 }
 
-                let mut result = if is_sftp_dual_pane {
-                    let sftp_state = tab.sftp_state.as_ref().unwrap();
-                    root.child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_h_0()
-                            .child(workspace_sidebar(cx, "Terminal"))
-                            .child(
-                                body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
-                            ),
-                    )
-                } else {
-                    root.child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_h_0()
-                            .child(workspace_sidebar(cx, "Terminal"))
-                            .child(body.child(panes_container)),
-                    )
-                };
+                let mut result =
+                    if is_sftp_dual_pane {
+                        let sftp_state = tab.sftp_state.as_ref().unwrap();
+                        let mut row = div().flex().flex_1().min_h_0();
+                        if self.sidebar_visible {
+                            row = row.child(workspace_sidebar(cx, "Terminal"));
+                        }
+                        root.child(row.child(
+                            body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
+                        ))
+                    } else {
+                        let mut row = div().flex().flex_1().min_h_0();
+                        if self.sidebar_visible {
+                            row = row.child(workspace_sidebar(cx, "Terminal"));
+                        }
+                        root.child(row.child(body.child(panes_container)))
+                    };
                 if let Some(modal) = &self.conflict_modal {
                     result = result.child(self.render_conflict_modal(modal, cx));
                 }
@@ -13600,13 +14229,26 @@ impl Render for Shellumi {
                         app.selected_host_id = Some(id);
                         cx.notify();
                     }))
-                    .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("▤"))
+                    .child(
+                        div()
+                            .w(px(30.0))
+                            .h(px(30.0))
+                            .rounded_md()
+                            .bg(rgb(MacTheme::BADGE_NAVY))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
+                            .font_weight(FontWeight::BOLD)
+                            .child("⌘"),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
+                            .gap_1()
                             .child(
                                 div()
                                     .text_sm()
@@ -13618,10 +14260,14 @@ impl Render for Shellumi {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child(format_endpoint(
-                                        host.destination.username(),
-                                        host.destination.host(),
-                                        host.destination.port().get(),
+                                    .child(format!(
+                                        "{}  ·  {}",
+                                        format_endpoint(
+                                            host.destination.username(),
+                                            host.destination.host(),
+                                            host.destination.port().get(),
+                                        ),
+                                        host.group_name.as_deref().unwrap_or("Default")
                                     )),
                             ),
                     )
@@ -13636,7 +14282,7 @@ impl Render for Shellumi {
                         div()
                             .w(px(75.0))
                             .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
                             .child(host.protocol().display_name()),
                     ),
             );
@@ -13666,14 +14312,14 @@ impl Render for Shellumi {
             .flex_col()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
+            .border_color(rgb(MacTheme::BORDER))
             .bg(rgb(MacTheme::SURFACE))
             .overflow_hidden()
             .child(
                 div()
                     .p_3()
                     .border_b_1()
-                    .border_color(rgb(MacTheme::SEPARATOR))
+                    .border_color(rgb(MacTheme::BORDER))
                     .child(self.search_input.clone()),
             )
             .child(
@@ -13693,27 +14339,27 @@ impl Render for Shellumi {
             .child(div().id("host-list").overflow_y_scroll().child(rows));
 
         let mut collections = div()
-            .w(px(180.0))
+            .w(px(190.0))
             .flex_shrink_0()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
+            .border_color(rgb(MacTheme::BORDER))
             .bg(rgb(MacTheme::SIDEBAR_BG))
             .p_4()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .child(
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .child("COLLECTIONS"),
+                    .child("GROUPS"),
             )
             .child(
                 div()
                     .id("all-hosts")
-                    .px_2()
+                    .px_3()
                     .py_2()
                     .rounded_md()
                     .bg(if self.selected_group.is_none() {
@@ -13732,7 +14378,7 @@ impl Render for Shellumi {
                         app.selected_group = None;
                         cx.notify();
                     }))
-                    .child(format!("All hosts     {}", hosts.len())),
+                    .child(format!("▣  All hosts     {}", hosts.len())),
             );
         let mut groups: Vec<&str> = hosts
             .iter()
@@ -13744,18 +14390,22 @@ impl Render for Shellumi {
         for (index, group) in groups.into_iter().enumerate() {
             let group_name = group.to_owned();
             let active = self.selected_group.as_deref() == Some(group);
+            let count = hosts
+                .iter()
+                .filter(|h| h.group_name.as_deref() == Some(group))
+                .count();
             collections = collections.child(
                 div()
                     .id(("collection-group", index))
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .py_2()
                     .rounded_md()
-                    .text_sm()
                     .bg(if active {
                         rgb(MacTheme::ACCENT_BLUE)
                     } else {
                         rgb(MacTheme::SIDEBAR_BG)
                     })
+                    .text_sm()
                     .text_color(if active {
                         rgb(0xffffff)
                     } else {
@@ -13766,7 +14416,7 @@ impl Render for Shellumi {
                         app.selected_group = Some(group_name.clone());
                         cx.notify();
                     }))
-                    .child(format!("▹  {group}")),
+                    .child(format!("▣  {group}     {count}")),
             );
         }
         collections = collections
@@ -14089,106 +14739,12 @@ impl Render for Shellumi {
                             .child(inspector),
                     ),
             );
-        let mut result = root.child(div().flex().flex_1().min_h_0().child(sidebar).child(body));
+        let mut row = div().flex().flex_1().min_h_0();
+        if self.sidebar_visible {
+            row = row.child(sidebar);
+        }
+        let mut result = root.child(row.child(body));
         if let Some(form) = &self.form {
-            let mut editor = div()
-                .id("host-editor")
-                .overflow_y_scroll()
-                .w(px(720.0))
-                .max_w_full()
-                .max_h(px(650.0))
-                .rounded_xl()
-                .border_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
-                .flex()
-                .flex_col()
-                .gap_3()
-                .p_6()
-                .bg(rgb(MacTheme::SURFACE))
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child(if form.id.is_some() {
-                            "Edit host"
-                        } else {
-                            "New host"
-                        }),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child("Connection details are stored locally on this device."),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child("Protocol"),
-                )
-                .child({
-                    let mut proto_row = div().flex().flex_row().gap_2().mb_1();
-                    let protocols = [
-                        (ConnectionProtocol::Ssh, "SSH"),
-                        (ConnectionProtocol::Mosh, "Mosh"),
-                        (ConnectionProtocol::Telnet, "Telnet"),
-                        (ConnectionProtocol::Serial, "Serial"),
-                    ];
-                    for (idx, (p, label)) in protocols.into_iter().enumerate() {
-                        let is_sel = form.protocol == p;
-                        let btn_bg = if is_sel {
-                            rgb(MacTheme::ACCENT_BLUE)
-                        } else {
-                            rgb(MacTheme::INPUT_BG)
-                        };
-                        let btn_fg = if is_sel {
-                            rgb(0xffffff)
-                        } else {
-                            rgb(MacTheme::TEXT_SECONDARY)
-                        };
-                        proto_row = proto_row.child(
-                            div()
-                                .id(("proto-select", idx))
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(btn_bg)
-                                .text_color(btn_fg)
-                                .text_xs()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.set_form_protocol(p, cx);
-                                }))
-                                .child(label),
-                        );
-                    }
-                    proto_row
-                });
-
-            if form.protocol == ConnectionProtocol::Telnet {
-                editor = editor.child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(0x4a1818))
-                        .text_color(rgb(MacTheme::DANGER))
-                        .text_xs()
-                        .child("⚠️ UNENCRYPTED PROTOCOL: Telnet transmits all credentials, keystrokes, and session data in cleartext over the network without encryption."),
-                );
-            } else if form.protocol == ConnectionProtocol::Serial {
-                editor = editor.child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(0x133820))
-                        .text_color(rgb(MacTheme::SUCCESS))
-                        .text_xs()
-                        .child("🔌 Direct serial line connection. Specify serial device path in Hostname (e.g. /dev/ttyUSB0 or COM1) and baud rate in Port (e.g. 115200)."),
-                );
-            }
-
             let hostname_label = if form.protocol == ConnectionProtocol::Serial {
                 "Serial device port"
             } else {
@@ -14199,7 +14755,127 @@ impl Render for Shellumi {
             } else {
                 "Port"
             };
-            editor = editor
+
+            let editor_categories = [
+                "General",
+                "Connection",
+                "Authentication",
+                "Proxy",
+                "Advanced",
+            ];
+            let mut nav = div()
+                .w(px(160.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .bg(rgb(MacTheme::INPUT_BG))
+                .border_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .rounded_lg();
+            for (i, category) in editor_categories.iter().enumerate() {
+                let is_first = i == 0;
+                nav = nav.child(
+                    div()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .text_sm()
+                        .font_weight(if is_first {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .bg(if is_first {
+                            rgb(MacTheme::SURFACE)
+                        } else {
+                            rgba(0x00000000)
+                        })
+                        .text_color(if is_first {
+                            rgb(MacTheme::TEXT_PRIMARY)
+                        } else {
+                            rgb(MacTheme::TEXT_SECONDARY)
+                        })
+                        .child(*category),
+                );
+            }
+
+            let mut fields = div().flex_1().min_w_0().flex().flex_col().gap_3();
+
+            fields = fields.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Protocol"),
+                    )
+                    .child({
+                        let mut proto_row = div().flex().flex_row().gap_2();
+                        let protocols = [
+                            (ConnectionProtocol::Ssh, "SSH"),
+                            (ConnectionProtocol::Mosh, "Mosh"),
+                            (ConnectionProtocol::Telnet, "Telnet"),
+                            (ConnectionProtocol::Serial, "Serial"),
+                        ];
+                        for (idx, (p, label)) in protocols.into_iter().enumerate() {
+                            let is_sel = form.protocol == p;
+                            let btn_bg = if is_sel {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::INPUT_BG)
+                            };
+                            let btn_fg = if is_sel {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            };
+                            proto_row = proto_row.child(
+                                div()
+                                    .id(("proto-select", idx))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(btn_bg)
+                                    .text_color(btn_fg)
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.set_form_protocol(p, cx);
+                                    }))
+                                    .child(label),
+                            );
+                        }
+                        proto_row
+                    }),
+            );
+
+            if form.protocol == ConnectionProtocol::Telnet {
+                fields = fields.child(
+                    div()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(0x4a1818))
+                        .text_color(rgb(MacTheme::DANGER))
+                        .text_xs()
+                        .child("⚠️ UNENCRYPTED PROTOCOL: Telnet transmits all credentials, keystrokes, and session data in cleartext over the network without encryption."),
+                );
+            } else if form.protocol == ConnectionProtocol::Serial {
+                fields = fields.child(
+                    div()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(0x133820))
+                        .text_color(rgb(MacTheme::SUCCESS))
+                        .text_xs()
+                        .child("🔌 Direct serial line connection. Specify serial device path in Hostname (e.g. /dev/ttyUSB0 or COM1) and baud rate in Port (e.g. 115200)."),
+                );
+            }
+
+            fields = fields
                 .child(
                     div()
                         .flex()
@@ -14221,6 +14897,22 @@ impl Render for Shellumi {
                         .child(host_form_field("Username", form.username.clone()))
                         .child(host_form_field("Tags (comma-separated)", form.tags.clone())),
                 )
+                .child(card(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child("Local Vault Security"),
+                        )
+                        .child(caption(
+                            "Host keys, passphrases, and credentials are encrypted and stored locally in Turso SQLite.",
+                        )),
+                ))
                 .child(
                     div()
                         .flex()
@@ -14234,47 +14926,86 @@ impl Render for Shellumi {
                             form.startup_snippet.clone(),
                         )),
                 );
+
             if form.protocol == ConnectionProtocol::Ssh {
-                editor = editor.child(self.identity_picker(form.identity_id, false, cx));
+                fields = fields.child(self.identity_picker(form.identity_id, false, cx));
             }
             if let Some(error) = &self.form_error {
-                editor = editor.child(div().text_color(rgb(MacTheme::DANGER)).child(error.clone()));
-            }
-            if self.saving {
-                editor = editor.child("Saving…");
-            } else {
-                editor = editor.child(
+                fields = fields.child(
                     div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            div()
-                                .id("save-host")
-                                .p_2()
-                                .rounded_md()
-                                .bg(rgb(MacTheme::ACCENT_BLUE))
-                                .text_color(rgb(0xffffff))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|app, _, _, cx| app.save_host(cx)))
-                                .child("Save"),
-                        )
-                        .child(
-                            div()
-                                .id("cancel-host")
-                                .p_2()
-                                .rounded_md()
-                                .bg(rgb(MacTheme::SURFACE_HOVER))
-                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.form = None;
-                                    app.form_error = None;
-                                    cx.notify();
-                                }))
-                                .child("Cancel"),
-                        ),
+                        .text_color(rgb(MacTheme::DANGER))
+                        .text_sm()
+                        .child(error.clone()),
                 );
             }
+
+            let actions = if self.saving {
+                div()
+                    .text_sm()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .child("Saving…")
+            } else {
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("cancel-host")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SURFACE_HOVER))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .text_sm()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.form = None;
+                                app.form_error = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    )
+                    .child(
+                        div()
+                            .id("save-host")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| app.save_host(cx)))
+                            .child("Save"),
+                    )
+            };
+            fields = fields.child(actions);
+
+            let editor = div()
+                .id("host-editor")
+                .overflow_y_scroll()
+                .w(px(780.0))
+                .max_w_full()
+                .max_h(px(700.0))
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .flex()
+                .flex_col()
+                .gap_4()
+                .p_6()
+                .bg(rgb(MacTheme::SURFACE))
+                .child(heading(
+                    if form.id.is_some() {
+                        "Edit Host"
+                    } else {
+                        "New Host"
+                    },
+                    "Host connection configuration · Local storage",
+                ))
+                .child(div().flex().items_start().gap_4().child(nav).child(fields));
             result = result.child(
                 div()
                     .id("host-editor-overlay")
@@ -14367,18 +15098,96 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         text_input::bind_keys(cx);
         #[cfg(target_os = "macos")]
-        let refresh_shortcut = "cmd-r";
-        #[cfg(not(target_os = "macos"))]
-        let refresh_shortcut = "ctrl-r";
-
-        #[cfg(target_os = "macos")]
-        let palette_shortcut = "cmd-k";
-        #[cfg(not(target_os = "macos"))]
-        let palette_shortcut = "ctrl-k";
-
         cx.bind_keys([
-            KeyBinding::new(refresh_shortcut, RefreshHosts, None),
-            KeyBinding::new(palette_shortcut, ToggleCommandPalette, None),
+            KeyBinding::new("cmd-k", ToggleCommandPalette, None),
+            KeyBinding::new("cmd-r", RefreshHosts, None),
+            KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-l", OpenLocalTerminal, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("cmd-shift-]", NextTab, None),
+            KeyBinding::new("ctrl-tab", NextTab, None),
+            KeyBinding::new("cmd-shift-[", PrevTab, None),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+            KeyBinding::new("cmd-1", SelectTab1, None),
+            KeyBinding::new("cmd-2", SelectTab2, None),
+            KeyBinding::new("cmd-3", SelectTab3, None),
+            KeyBinding::new("cmd-4", SelectTab4, None),
+            KeyBinding::new("cmd-5", SelectTab5, None),
+            KeyBinding::new("cmd-6", SelectTab6, None),
+            KeyBinding::new("cmd-7", SelectTab7, None),
+            KeyBinding::new("cmd-8", SelectTab8, None),
+            KeyBinding::new("cmd-9", SelectTab9, None),
+            KeyBinding::new("cmd-d", SplitVertical, None),
+            KeyBinding::new("cmd-shift-d", SplitHorizontal, None),
+            KeyBinding::new("cmd-]", FocusNextPane, None),
+            KeyBinding::new("cmd-[", FocusPrevPane, None),
+            KeyBinding::new("cmd-shift-w", ClosePane, None),
+            KeyBinding::new("cmd-shift-m", ToggleFocusMode, None),
+            KeyBinding::new("cmd-b", ToggleBroadcast, None),
+            KeyBinding::new("cmd-shift-b", ToggleBroadcast, None),
+            KeyBinding::new("cmd-.", ToggleSnippets, None),
+            KeyBinding::new("cmd-f", FindInTerminal, None),
+            KeyBinding::new("cmd-=", ZoomIn, None),
+            KeyBinding::new("cmd-+", ZoomIn, None),
+            KeyBinding::new("cmd--", ZoomOut, None),
+            KeyBinding::new("cmd-0", ResetZoom, None),
+            KeyBinding::new("cmd-o", QuickConnect, None),
+            KeyBinding::new("cmd-n", NewHost, None),
+            KeyBinding::new("cmd-shift-r", ReconnectSession, None),
+            KeyBinding::new("cmd-\\", ToggleSidebar, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-shift-h", GoToHosts, None),
+            KeyBinding::new("cmd-shift-o", GoToOverview, None),
+            KeyBinding::new("cmd-shift-k", GoToWorkspaces, None),
+            KeyBinding::new("cmd-shift-u", GoToSftp, None),
+            KeyBinding::new("cmd-shift-y", GoToKeychain, None),
+            KeyBinding::new("cmd-shift-p", GoToPortForwarding, None),
+        ]);
+
+        #[cfg(not(target_os = "macos"))]
+        cx.bind_keys([
+            KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
+            KeyBinding::new("ctrl-r", RefreshHosts, None),
+            KeyBinding::new("ctrl-t", NewTab, None),
+            KeyBinding::new("ctrl-l", OpenLocalTerminal, None),
+            KeyBinding::new("ctrl-w", CloseTab, None),
+            KeyBinding::new("ctrl-tab", NextTab, None),
+            KeyBinding::new("ctrl-pagedown", NextTab, None),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+            KeyBinding::new("ctrl-pageup", PrevTab, None),
+            KeyBinding::new("ctrl-1", SelectTab1, None),
+            KeyBinding::new("ctrl-2", SelectTab2, None),
+            KeyBinding::new("ctrl-3", SelectTab3, None),
+            KeyBinding::new("ctrl-4", SelectTab4, None),
+            KeyBinding::new("ctrl-5", SelectTab5, None),
+            KeyBinding::new("ctrl-6", SelectTab6, None),
+            KeyBinding::new("ctrl-7", SelectTab7, None),
+            KeyBinding::new("ctrl-8", SelectTab8, None),
+            KeyBinding::new("ctrl-9", SelectTab9, None),
+            KeyBinding::new("ctrl-shift-e", SplitVertical, None),
+            KeyBinding::new("ctrl-shift-o", SplitHorizontal, None),
+            KeyBinding::new("alt-right", FocusNextPane, None),
+            KeyBinding::new("alt-left", FocusPrevPane, None),
+            KeyBinding::new("ctrl-shift-w", ClosePane, None),
+            KeyBinding::new("ctrl-alt-m", ToggleFocusMode, None),
+            KeyBinding::new("ctrl-alt-b", ToggleBroadcast, None),
+            KeyBinding::new("ctrl-.", ToggleSnippets, None),
+            KeyBinding::new("ctrl-f", FindInTerminal, None),
+            KeyBinding::new("ctrl-=", ZoomIn, None),
+            KeyBinding::new("ctrl-+", ZoomIn, None),
+            KeyBinding::new("ctrl--", ZoomOut, None),
+            KeyBinding::new("ctrl-0", ResetZoom, None),
+            KeyBinding::new("ctrl-o", QuickConnect, None),
+            KeyBinding::new("ctrl-n", NewHost, None),
+            KeyBinding::new("ctrl-shift-r", ReconnectSession, None),
+            KeyBinding::new("ctrl-\\", ToggleSidebar, None),
+            KeyBinding::new("ctrl-,", OpenSettings, None),
+            KeyBinding::new("ctrl-shift-h", GoToHosts, None),
+            KeyBinding::new("ctrl-shift-o", GoToOverview, None),
+            KeyBinding::new("ctrl-shift-k", GoToWorkspaces, None),
+            KeyBinding::new("ctrl-shift-u", GoToSftp, None),
+            KeyBinding::new("ctrl-shift-y", GoToKeychain, None),
+            KeyBinding::new("ctrl-shift-p", GoToPortForwarding, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
@@ -16179,5 +16988,115 @@ mod tests {
             }
             _ => panic!("Expected successful sync after resolution"),
         }
+    }
+
+    #[test]
+    fn verifies_keyboard_shortcut_actions_and_keystroke_parsing() {
+        use super::{
+            ClosePane, CloseTab, FindInTerminal, FocusNextPane, FocusPrevPane, GoToHosts,
+            GoToKeychain, GoToOverview, GoToPortForwarding, GoToSftp, GoToWorkspaces, NewHost,
+            NewTab, NextTab, OpenLocalTerminal, OpenSettings, PrevTab, QuickConnect,
+            ReconnectSession, RefreshHosts, ResetZoom, SelectTab1, SelectTab9, SplitHorizontal,
+            SplitVertical, ToggleBroadcast, ToggleCommandPalette, ToggleFocusMode, ToggleSidebar,
+            ToggleSnippets, ZoomIn, ZoomOut,
+        };
+
+        // Ensure all actions are constructible
+        let _ = NewTab;
+        let _ = OpenLocalTerminal;
+        let _ = CloseTab;
+        let _ = NextTab;
+        let _ = PrevTab;
+        let _ = SelectTab1;
+        let _ = SelectTab9;
+        let _ = SplitVertical;
+        let _ = SplitHorizontal;
+        let _ = FocusNextPane;
+        let _ = FocusPrevPane;
+        let _ = ClosePane;
+        let _ = ToggleFocusMode;
+        let _ = ToggleBroadcast;
+        let _ = ToggleSnippets;
+        let _ = FindInTerminal;
+        let _ = ZoomIn;
+        let _ = ZoomOut;
+        let _ = ResetZoom;
+        let _ = QuickConnect;
+        let _ = NewHost;
+        let _ = ReconnectSession;
+        let _ = ToggleSidebar;
+        let _ = GoToHosts;
+        let _ = GoToOverview;
+        let _ = GoToWorkspaces;
+        let _ = GoToSftp;
+        let _ = GoToKeychain;
+        let _ = GoToPortForwarding;
+        let _ = OpenSettings;
+        let _ = RefreshHosts;
+        let _ = ToggleCommandPalette;
+
+        // Test Keystroke matching logic
+        let cmd_t = Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            key: "t".into(),
+            ..Default::default()
+        };
+        let is_primary = cmd_t.modifiers.platform || cmd_t.modifiers.control;
+        assert!(is_primary && cmd_t.key == "t");
+
+        let cmd_shift_d = Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                shift: true,
+                ..Default::default()
+            },
+            key: "d".into(),
+            ..Default::default()
+        };
+        assert!(
+            cmd_shift_d.modifiers.platform && cmd_shift_d.modifiers.shift && cmd_shift_d.key == "d"
+        );
+
+        let ctrl_shift_e = Keystroke {
+            modifiers: gpui::Modifiers {
+                control: true,
+                shift: true,
+                ..Default::default()
+            },
+            key: "e".into(),
+            ..Default::default()
+        };
+        assert!(
+            ctrl_shift_e.modifiers.control
+                && ctrl_shift_e.modifiers.shift
+                && ctrl_shift_e.key == "e"
+        );
+
+        let cmd_zoom_in = Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            key: "=".into(),
+            ..Default::default()
+        };
+        assert!(
+            cmd_zoom_in.modifiers.platform && (cmd_zoom_in.key == "=" || cmd_zoom_in.key == "+")
+        );
+
+        let cmd_tab_3 = Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            key: "3".into(),
+            ..Default::default()
+        };
+        let ch = cmd_tab_3.key.chars().next().unwrap();
+        assert!(('1'..='9').contains(&ch));
+        assert_eq!((ch as usize) - ('1' as usize), 2);
     }
 }

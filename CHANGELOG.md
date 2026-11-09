@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.4-alpha
+
+### macOS Dark Gallery UI Overhaul
+- Updated the entire desktop GUI design across all screens, modals, cards, badges, and controls to match the native macOS Dark theme and tokens from `gpui_macos_dark_gallery`.
+- Replaced host list item chrome with rounded 30x30 navy glyph badges (`⌘`), secondary caption typography, and interactive hover states.
+- Restructured host editor modal into a two-column layout with left category navigation rail (`General`, `Connection`, `Authentication`, `Proxy`, `Advanced`), local vault security card, and right-aligned actions.
+- Styled terminal canvas with deep black contrast background (`0x0c0f13`), 1px subtle split divider borders (`0x46464a`), and protocol-specific tab glyphs (`⌘`, `⚡`, `⚠`, `🔌`, `📁`).
+- Redesigned cards across Port Forwarding (status dots & `⇄` badge), Keychain (`⚿` blue badge), Snippets (line-numbered code block with comment highlights), Workspaces (deep blue badges), and Overview metrics.
+
+### Keyboard Shortcuts Implementation & Action Architecture
+- Created comprehensive keyboard shortcuts reference in `docs/SHORTCUTS.md` covering application, tab, pane, terminal, and navigation shortcuts across macOS, Linux, and Windows.
+- Declared 37 discrete GPUI action structs with corresponding platform keybindings (`cmd-...` on macOS, `ctrl-...` on Linux/Windows).
+- Mounted top-level focus tracking (`.track_focus(&self.focus)`) and centralized `.on_action(...)` handlers on `shellumi-root` to ensure shortcuts function consistently across all desktop pages, tabs, and modals.
+- Implemented dual-layer keyboard shortcut interceptor (`handle_app_shortcut`) in `terminal_input` to prevent active PTY streams from swallowing application hotkeys.
+- Added sidebar visibility toggle (`Cmd+\` / `Ctrl+\`) across all workspace view modes.
+- Added automated test suite `verifies_keyboard_shortcut_actions_and_keystroke_parsing`.
+
 ## 0.0.3-alpha
 
 ### macOS HIG Dark Theme & Visual Design Overhaul
