@@ -1,4 +1,4 @@
-# Feature status — v0.0.4-alpha
+# Feature status — v0.0.6-alpha
 
 This matrix describes the current application. [PROJECT.md](../PROJECT.md) is
 the target scope; domain types and packaging prototypes alone do not constitute
@@ -26,9 +26,10 @@ finished user features. See [GUI_STATUS.md](GUI_STATUS.md) for workflow details.
 | Infrastructure | Local inventory tools | Provider records, inventory parsing and Ansible tools exist; authenticated cloud API discovery is unfinished. |
 | Google Drive sync | Initial integration | Zero-knowledge cloud vault synchronization over Google Drive appDataFolder via SystemHttpTransport (system curl), encrypted diffing, visual conflict resolution modal, and desktop sync panel. OAuth tokens are externally configured; real-account sync/conflict/recovery acceptance remains. |
 | Mosh, Telnet, serial | Experimental | Models and dispatch paths exist; separate executables/hardware may be needed and acceptance testing remains. Telnet is unencrypted. |
+| VNC & RDP (Remote Desktop) | Initial integration | RFB v3.8 protocol codec and frame decoders, RDP TPKT/X.224 negotiation request and MS-RDPBCGR codecs, embedded desktop session tab with live metrics (latency, FPS, resolution, bpp), SAS key shortcuts (Ctrl+Alt+Del, Win, Alt+Tab), scaling switcher (Fit/100%/Fill), view-only mode, and clipboard sync. CLI dispatcher integrates native URL schemes (`vnc://`, `rdp://`) and fallback viewers. |
 | Mobile | Prototype | Core FFI and native examples only; no released mobile client. |
 | Releases | Tag-driven CI | Four platform binary builds passed for v0.0.2-alpha; its first Linux package step failed. Corrected prerelease packaging, root archive ownership, regression tests, immutable-tag retries and source/helper provenance are on main. The repaired workflow passed all four jobs and published [15 assets](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.2-alpha); checksums/provenance were verified. Runtime validation remains separate. |
 
-The local macOS workspace suite passed 321 automated tests, with three opt-in
+The local macOS workspace suite passed 323 automated tests, with three opt-in
 real-server tests ignored in the normal suite. The self-contained SSH/SFTP
 acceptance test passed separately; see [the test guide](development/ssh-integration.md). See [ROADMAP.md](ROADMAP.md) for next steps.

@@ -190,6 +190,59 @@ impl SavedHost {
     pub fn is_serial(&self) -> bool {
         self.protocol() == shellumi_core::ConnectionProtocol::Serial
     }
+
+    pub fn is_vnc(&self) -> bool {
+        self.protocol() == shellumi_core::ConnectionProtocol::Vnc
+    }
+
+    pub fn is_rdp(&self) -> bool {
+        self.protocol() == shellumi_core::ConnectionProtocol::Rdp
+    }
+
+    pub fn is_graphical(&self) -> bool {
+        matches!(
+            self.protocol(),
+            shellumi_core::ConnectionProtocol::Vnc | shellumi_core::ConnectionProtocol::Rdp
+        )
+    }
+
+    pub fn vnc_config(&self) -> Option<shellumi_core::VncConfig> {
+        if self.is_vnc() {
+            self.protocol_config
+                .as_deref()
+                .and_then(|c| serde_json::from_str(c).ok())
+                .or_else(|| {
+                    shellumi_core::VncConfig::new(
+                        self.destination.host(),
+                        self.destination.port().get(),
+                    )
+                    .ok()
+                })
+        } else {
+            None
+        }
+    }
+
+    pub fn rdp_config(&self) -> Option<shellumi_core::RdpConfig> {
+        if self.is_rdp() {
+            self.protocol_config
+                .as_deref()
+                .and_then(|c| serde_json::from_str(c).ok())
+                .or_else(|| {
+                    let mut cfg = shellumi_core::RdpConfig::new(
+                        self.destination.host(),
+                        self.destination.port().get(),
+                    )
+                    .ok()?;
+                    if !self.destination.username().is_empty() {
+                        cfg.username = Some(self.destination.username().to_string());
+                    }
+                    Some(cfg)
+                })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5656,7 +5709,49 @@ mod tests {
             Some(r#"{"baud_rate":115200,"data_bits":8,"parity":"none","stop_bits":1}"#)
         );
 
-        // 4. Update host protocol
+        // 4. Add VNC host
+        let vnc_dest = SshDestination::new("desktop.corp", "user", 5900).unwrap();
+        let vnc_id = store
+            .add_with_protocol(
+                "Linux Workstation VNC",
+                &vnc_dest,
+                None,
+                &["desktop".into()],
+                None,
+                None,
+                "vnc",
+                Some(r#"{"host":"desktop.corp","port":5900,"color_depth":24,"view_only":false,"shared":true,"quality":8,"enable_clipboard":true}"#),
+            )
+            .await
+            .unwrap();
+        let host4 = store.get_host(vnc_id).await.unwrap().unwrap();
+        assert_eq!(host4.protocol, "vnc");
+        assert!(host4.is_vnc());
+        assert!(host4.is_graphical());
+        assert_eq!(host4.vnc_config().unwrap().color_depth, 24);
+
+        // 5. Add RDP host
+        let rdp_dest = SshDestination::new("win-vm.corp", "Administrator", 3389).unwrap();
+        let rdp_id = store
+            .add_with_protocol(
+                "Windows Server RDP",
+                &rdp_dest,
+                None,
+                &["windows".into()],
+                None,
+                None,
+                "rdp",
+                Some(r#"{"host":"win-vm.corp","port":3389,"username":"Administrator","screen_width":1920,"screen_height":1080,"color_depth":32,"enable_audio":false,"enable_clipboard":true,"enable_font_smoothing":true}"#),
+            )
+            .await
+            .unwrap();
+        let host5 = store.get_host(rdp_id).await.unwrap().unwrap();
+        assert_eq!(host5.protocol, "rdp");
+        assert!(host5.is_rdp());
+        assert!(host5.is_graphical());
+        assert_eq!(host5.rdp_config().unwrap().screen_width, 1920);
+
+        // 6. Update host protocol
         let updated_dest = SshDestination::new("switch.corp", "admin", 22).unwrap();
         assert!(store
             .update_with_protocol(

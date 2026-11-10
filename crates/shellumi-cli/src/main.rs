@@ -1438,6 +1438,68 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         );
                     }
                 }
+                ConnectionProtocol::Vnc => {
+                    let vnc_cfg = host.vnc_config().unwrap_or_else(|| {
+                        shellumi_core::VncConfig::new(
+                            effective_dest.host(),
+                            effective_dest.port().get(),
+                        )
+                        .unwrap_or_default()
+                    });
+                    println!(
+                        "Launching graphical VNC session for {}:{}",
+                        vnc_cfg.host, vnc_cfg.port
+                    );
+                    #[cfg(target_os = "macos")]
+                    let mut cmd = Command::new("open");
+                    #[cfg(target_os = "macos")]
+                    cmd.arg(format!("vnc://{}:{}", vnc_cfg.host, vnc_cfg.port));
+
+                    #[cfg(not(target_os = "macos"))]
+                    let mut cmd = Command::new("vncviewer");
+                    #[cfg(not(target_os = "macos"))]
+                    cmd.arg(format!("{}:{}", vnc_cfg.host, vnc_cfg.port));
+
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(
+                            io::Error::other(format!("VNC client exited with {status}")).into()
+                        );
+                    }
+                }
+                ConnectionProtocol::Rdp => {
+                    let rdp_cfg = host.rdp_config().unwrap_or_else(|| {
+                        shellumi_core::RdpConfig::new(
+                            effective_dest.host(),
+                            effective_dest.port().get(),
+                        )
+                        .unwrap_or_default()
+                    });
+                    println!(
+                        "Launching graphical RDP session for {}:{}",
+                        rdp_cfg.host, rdp_cfg.port
+                    );
+                    #[cfg(target_os = "macos")]
+                    let mut cmd = Command::new("open");
+                    #[cfg(target_os = "macos")]
+                    cmd.arg(format!(
+                        "rdp://{}@{}",
+                        rdp_cfg.username.as_deref().unwrap_or(""),
+                        rdp_cfg.host
+                    ));
+
+                    #[cfg(not(target_os = "macos"))]
+                    let mut cmd = Command::new("xfreerdp");
+                    #[cfg(not(target_os = "macos"))]
+                    cmd.args(rdp_cfg.build_arguments());
+
+                    let status = cmd.status()?;
+                    if !status.success() {
+                        return Err(
+                            io::Error::other(format!("RDP client exited with {status}")).into()
+                        );
+                    }
+                }
             }
         }
         "mosh" => {

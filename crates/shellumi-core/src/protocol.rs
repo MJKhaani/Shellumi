@@ -11,6 +11,8 @@ pub enum ConnectionProtocol {
     Telnet,
     Serial,
     Local,
+    Vnc,
+    Rdp,
 }
 
 impl ConnectionProtocol {
@@ -21,6 +23,8 @@ impl ConnectionProtocol {
             Self::Telnet => "telnet",
             Self::Serial => "serial",
             Self::Local => "local",
+            Self::Vnc => "vnc",
+            Self::Rdp => "rdp",
         }
     }
 
@@ -31,6 +35,8 @@ impl ConnectionProtocol {
             "telnet" => Some(Self::Telnet),
             "serial" => Some(Self::Serial),
             "local" => Some(Self::Local),
+            "vnc" | "rfb" => Some(Self::Vnc),
+            "rdp" => Some(Self::Rdp),
             _ => None,
         }
     }
@@ -42,6 +48,8 @@ impl ConnectionProtocol {
             Self::Telnet => "Telnet",
             Self::Serial => "Serial",
             Self::Local => "Local Terminal",
+            Self::Vnc => "VNC",
+            Self::Rdp => "RDP",
         }
     }
 
@@ -52,15 +60,27 @@ impl ConnectionProtocol {
             Self::Telnet => "⚠️",
             Self::Serial => "🔌",
             Self::Local => "💻",
+            Self::Vnc => "🖥️",
+            Self::Rdp => "🪟",
         }
     }
 
     /// Whether data transmitted over this protocol is cryptographically encrypted.
     pub fn is_encrypted(&self) -> bool {
         match self {
-            Self::Ssh | Self::Mosh | Self::Local => true,
-            Self::Telnet | Self::Serial => false,
+            Self::Ssh | Self::Mosh | Self::Local | Self::Rdp => true,
+            Self::Telnet | Self::Serial | Self::Vnc => false,
         }
+    }
+
+    /// Whether this protocol represents a graphical remote desktop session (VNC/RDP).
+    pub fn is_graphical(&self) -> bool {
+        matches!(self, Self::Vnc | Self::Rdp)
+    }
+
+    /// Whether this protocol supports remote desktop viewports.
+    pub fn supports_remote_desktop(&self) -> bool {
+        self.is_graphical()
     }
 
     /// Whether this protocol supports SFTP file transfer sessions.
@@ -88,13 +108,18 @@ impl ConnectionProtocol {
         match self {
             Self::Ssh => Some(22),
             Self::Telnet => Some(23),
+            Self::Vnc => Some(5900),
+            Self::Rdp => Some(3389),
             Self::Mosh | Self::Serial | Self::Local => None,
         }
     }
 
     /// Whether this protocol requires an IP address or hostname destination.
     pub fn requires_network_destination(&self) -> bool {
-        matches!(self, Self::Ssh | Self::Mosh | Self::Telnet)
+        matches!(
+            self,
+            Self::Ssh | Self::Mosh | Self::Telnet | Self::Vnc | Self::Rdp
+        )
     }
 }
 
@@ -694,6 +719,584 @@ impl SerialConfig {
     }
 }
 
+/// Configuration parameters for VNC (Virtual Network Computing / RFB) connections.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VncConfig {
+    pub host: String,
+    pub port: u16,
+    pub password_secret_ref: Option<String>,
+    pub view_only: bool,
+    pub shared: bool,
+    pub color_depth: u8,
+    pub quality: u8,
+    pub enable_clipboard: bool,
+}
+
+impl Default for VncConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 5900,
+            password_secret_ref: None,
+            view_only: false,
+            shared: true,
+            color_depth: 24,
+            quality: 8,
+            enable_clipboard: true,
+        }
+    }
+}
+
+impl VncConfig {
+    pub fn new(host: impl Into<String>, port: u16) -> Result<Self, ProtocolError> {
+        let host_str = host.into();
+        let trimmed = host_str.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ProtocolError::EmptyHostname);
+        }
+        if port == 0 {
+            return Err(ProtocolError::InvalidPort(0));
+        }
+        Ok(Self {
+            host: trimmed,
+            port,
+            password_secret_ref: None,
+            view_only: false,
+            shared: true,
+            color_depth: 24,
+            quality: 8,
+            enable_clipboard: true,
+        })
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "{}:{} (VNC · {}bpp{})",
+            self.host,
+            self.port,
+            self.color_depth,
+            if self.view_only { " · view-only" } else { "" }
+        )
+    }
+}
+
+/// Configuration parameters for RDP (Remote Desktop Protocol) connections.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RdpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub domain: Option<String>,
+    pub password_secret_ref: Option<String>,
+    pub screen_width: u16,
+    pub screen_height: u16,
+    pub color_depth: u8,
+    pub enable_audio: bool,
+    pub enable_clipboard: bool,
+    pub enable_font_smoothing: bool,
+}
+
+impl Default for RdpConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 3389,
+            username: None,
+            domain: None,
+            password_secret_ref: None,
+            screen_width: 1920,
+            screen_height: 1080,
+            color_depth: 32,
+            enable_audio: false,
+            enable_clipboard: true,
+            enable_font_smoothing: true,
+        }
+    }
+}
+
+impl RdpConfig {
+    pub fn new(host: impl Into<String>, port: u16) -> Result<Self, ProtocolError> {
+        let host_str = host.into();
+        let trimmed = host_str.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ProtocolError::EmptyHostname);
+        }
+        if port == 0 {
+            return Err(ProtocolError::InvalidPort(0));
+        }
+        Ok(Self {
+            host: trimmed,
+            port,
+            username: None,
+            domain: None,
+            password_secret_ref: None,
+            screen_width: 1920,
+            screen_height: 1080,
+            color_depth: 32,
+            enable_audio: false,
+            enable_clipboard: true,
+            enable_font_smoothing: true,
+        })
+    }
+
+    pub fn summary(&self) -> String {
+        let user_part = self.username.as_deref().unwrap_or("default");
+        format!(
+            "{}:{} (RDP · {}x{} · user: {})",
+            self.host, self.port, self.screen_width, self.screen_height, user_part
+        )
+    }
+
+    /// Builds command-line arguments compatible with standard xfreerdp / wlfreerdp.
+    pub fn build_arguments(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        args.push(format!("/v:{}:{}", self.host, self.port));
+        if let Some(user) = &self.username {
+            let trimmed = user.trim();
+            if !trimmed.is_empty() {
+                args.push(format!("/u:{trimmed}"));
+            }
+        }
+        if let Some(domain) = &self.domain {
+            let trimmed = domain.trim();
+            if !trimmed.is_empty() {
+                args.push(format!("/d:{trimmed}"));
+            }
+        }
+        args.push(format!(
+            "/size:{}x{}",
+            self.screen_width, self.screen_height
+        ));
+        args.push(format!("/bpp:{}", self.color_depth));
+        if self.enable_clipboard {
+            args.push("+clipboard".to_string());
+        }
+        if self.enable_font_smoothing {
+            args.push("/fonts".to_string());
+        }
+        if self.enable_audio {
+            args.push("/sound".to_string());
+        }
+        args
+    }
+}
+
+/// RFC 6143 The Remote Framebuffer Protocol (RFB / VNC) constants and framing codecs.
+pub mod rfb_constants {
+    pub const RFB_VERSION_3_8: &[u8; 12] = b"RFB 003.008\n";
+    pub const RFB_VERSION_3_7: &[u8; 12] = b"RFB 003.007\n";
+    pub const RFB_VERSION_3_3: &[u8; 12] = b"RFB 003.003\n";
+
+    // Security Types
+    pub const SEC_INVALID: u8 = 0;
+    pub const SEC_NONE: u8 = 1;
+    pub const SEC_VNC_AUTH: u8 = 2;
+    pub const SEC_RA2: u8 = 5;
+    pub const SEC_RA2NE: u8 = 6;
+    pub const SEC_TIGHT: u8 = 16;
+    pub const SEC_TLS: u8 = 18;
+    pub const SEC_VENCRYPT: u8 = 19;
+
+    // Client to Server Message Types
+    pub const MSG_SET_PIXEL_FORMAT: u8 = 0;
+    pub const MSG_SET_ENCODINGS: u8 = 2;
+    pub const MSG_FRAMEBUFFER_UPDATE_REQ: u8 = 3;
+    pub const MSG_KEY_EVENT: u8 = 4;
+    pub const MSG_POINTER_EVENT: u8 = 5;
+    pub const MSG_CLIENT_CUT_TEXT: u8 = 6;
+
+    // Server to Client Message Types
+    pub const MSG_FRAMEBUFFER_UPDATE: u8 = 0;
+    pub const MSG_SET_COLOUR_MAP_ENTRIES: u8 = 1;
+    pub const MSG_BELL: u8 = 2;
+    pub const MSG_SERVER_CUT_TEXT: u8 = 3;
+
+    // Encodings
+    pub const ENCODING_RAW: i32 = 0;
+    pub const ENCODING_COPYRECT: i32 = 1;
+    pub const ENCODING_RRE: i32 = 2;
+    pub const ENCODING_HEXTILE: i32 = 5;
+    pub const ENCODING_ZRLE: i32 = 16;
+    pub const ENCODING_DESKTOP_SIZE: i32 = -223;
+    pub const ENCODING_LAST_RECT: i32 = -224;
+    pub const ENCODING_CURSOR: i32 = -239;
+
+    // Pointer Event Button Masks
+    pub const BUTTON_LEFT: u8 = 0b00000001;
+    pub const BUTTON_MIDDLE: u8 = 0b00000010;
+    pub const BUTTON_RIGHT: u8 = 0b00000100;
+    pub const BUTTON_WHEEL_UP: u8 = 0b00001000;
+    pub const BUTTON_WHEEL_DOWN: u8 = 0b00010000;
+
+    // Standard Keysyms for RFB KeyEvent
+    pub const KEYSYM_BACKSPACE: u32 = 0xFF08;
+    pub const KEYSYM_TAB: u32 = 0xFF09;
+    pub const KEYSYM_RETURN: u32 = 0xFF0D;
+    pub const KEYSYM_ESCAPE: u32 = 0xFF1B;
+    pub const KEYSYM_DELETE: u32 = 0xFFFF;
+    pub const KEYSYM_HOME: u32 = 0xFF50;
+    pub const KEYSYM_LEFT: u32 = 0xFF51;
+    pub const KEYSYM_UP: u32 = 0xFF52;
+    pub const KEYSYM_RIGHT: u32 = 0xFF53;
+    pub const KEYSYM_DOWN: u32 = 0xFF54;
+    pub const KEYSYM_PAGE_UP: u32 = 0xFF55;
+    pub const KEYSYM_PAGE_DOWN: u32 = 0xFF56;
+    pub const KEYSYM_END: u32 = 0xFF57;
+    pub const KEYSYM_CONTROL_L: u32 = 0xFFE3;
+    pub const KEYSYM_CONTROL_R: u32 = 0xFFE4;
+    pub const KEYSYM_ALT_L: u32 = 0xFFE9;
+    pub const KEYSYM_ALT_R: u32 = 0xFFEA;
+    pub const KEYSYM_SUPER_L: u32 = 0xFFEB;
+    pub const KEYSYM_SUPER_R: u32 = 0xFFEC;
+}
+
+/// RFB Pixel Format specification (RFC 6143 Section 7.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfbPixelFormat {
+    pub bits_per_pixel: u8,
+    pub depth: u8,
+    pub big_endian_flag: u8,
+    pub true_colour_flag: u8,
+    pub red_max: u16,
+    pub green_max: u16,
+    pub blue_max: u16,
+    pub red_shift: u8,
+    pub green_shift: u8,
+    pub blue_shift: u8,
+}
+
+impl Default for RfbPixelFormat {
+    fn default() -> Self {
+        Self::default_32bpp_rgba()
+    }
+}
+
+impl RfbPixelFormat {
+    pub fn default_32bpp_rgba() -> Self {
+        Self {
+            bits_per_pixel: 32,
+            depth: 24,
+            big_endian_flag: 0,
+            true_colour_flag: 1,
+            red_max: 255,
+            green_max: 255,
+            blue_max: 255,
+            red_shift: 0,
+            green_shift: 8,
+            blue_shift: 16,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut buf = [0u8; 16];
+        buf[0] = self.bits_per_pixel;
+        buf[1] = self.depth;
+        buf[2] = self.big_endian_flag;
+        buf[3] = self.true_colour_flag;
+        buf[4..6].copy_from_slice(&self.red_max.to_be_bytes());
+        buf[6..8].copy_from_slice(&self.green_max.to_be_bytes());
+        buf[8..10].copy_from_slice(&self.blue_max.to_be_bytes());
+        buf[10] = self.red_shift;
+        buf[11] = self.green_shift;
+        buf[12] = self.blue_shift;
+        buf
+    }
+
+    pub fn from_bytes(buf: &[u8; 16]) -> Self {
+        Self {
+            bits_per_pixel: buf[0],
+            depth: buf[1],
+            big_endian_flag: buf[2],
+            true_colour_flag: buf[3],
+            red_max: u16::from_be_bytes([buf[4], buf[5]]),
+            green_max: u16::from_be_bytes([buf[6], buf[7]]),
+            blue_max: u16::from_be_bytes([buf[8], buf[9]]),
+            red_shift: buf[10],
+            green_shift: buf[11],
+            blue_shift: buf[12],
+        }
+    }
+}
+
+/// RFB ServerInit message payload (RFC 6143 Section 7.3.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RfbServerInit {
+    pub framebuffer_width: u16,
+    pub framebuffer_height: u16,
+    pub pixel_format: RfbPixelFormat,
+    pub name: String,
+}
+
+/// RFB Rectangle header in FramebufferUpdate message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RfbRectangleHeader {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub encoding_type: i32,
+}
+
+/// Parses the server protocol version string (e.g. "RFB 003.008\n").
+pub fn parse_rfb_version(buf: &[u8]) -> Result<(u32, u32), ProtocolError> {
+    if buf.len() < 12 {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    if !buf.starts_with(b"RFB ") || buf[11] != b'\n' || buf[7] != b'.' {
+        let preview = String::from_utf8_lossy(&buf[..buf.len().min(12)]).to_string();
+        return Err(ProtocolError::InvalidRfbVersion(preview));
+    }
+    let major_str = std::str::from_utf8(&buf[4..7])
+        .map_err(|_| ProtocolError::InvalidRfbVersion("bad utf8".into()))?;
+    let minor_str = std::str::from_utf8(&buf[8..11])
+        .map_err(|_| ProtocolError::InvalidRfbVersion("bad utf8".into()))?;
+    let major = major_str
+        .parse::<u32>()
+        .map_err(|_| ProtocolError::InvalidRfbVersion(major_str.into()))?;
+    let minor = minor_str
+        .parse::<u32>()
+        .map_err(|_| ProtocolError::InvalidRfbVersion(minor_str.into()))?;
+    Ok((major, minor))
+}
+
+/// Builds client protocol version handshake (RFB 003.008).
+pub fn build_rfb_version() -> Vec<u8> {
+    rfb_constants::RFB_VERSION_3_8.to_vec()
+}
+
+/// Builds ClientInit message (RFC 6143 Section 7.3.1).
+pub fn build_rfb_client_init(shared: bool) -> [u8; 1] {
+    [if shared { 1 } else { 0 }]
+}
+
+/// Parses ServerInit message from raw bytes (RFC 6143 Section 7.3.2).
+pub fn parse_rfb_server_init(buf: &[u8]) -> Result<(RfbServerInit, usize), ProtocolError> {
+    if buf.len() < 24 {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    let width = u16::from_be_bytes([buf[0], buf[1]]);
+    let height = u16::from_be_bytes([buf[2], buf[3]]);
+    let mut pf_bytes = [0u8; 16];
+    pf_bytes.copy_from_slice(&buf[4..20]);
+    let pixel_format = RfbPixelFormat::from_bytes(&pf_bytes);
+    let name_len = u32::from_be_bytes([buf[20], buf[21], buf[22], buf[23]]) as usize;
+    if buf.len() < 24 + name_len {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    let name = String::from_utf8_lossy(&buf[24..24 + name_len]).into_owned();
+    Ok((
+        RfbServerInit {
+            framebuffer_width: width,
+            framebuffer_height: height,
+            pixel_format,
+            name,
+        },
+        24 + name_len,
+    ))
+}
+
+/// Builds SetPixelFormat client-to-server message (RFC 6143 Section 7.5.1).
+pub fn build_rfb_set_pixel_format(format: &RfbPixelFormat) -> [u8; 20] {
+    let mut msg = [0u8; 20];
+    msg[0] = rfb_constants::MSG_SET_PIXEL_FORMAT;
+    msg[4..20].copy_from_slice(&format.to_bytes());
+    msg
+}
+
+/// Builds SetEncodings client-to-server message (RFC 6143 Section 7.5.2).
+pub fn build_rfb_set_encodings(encodings: &[i32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(4 + encodings.len() * 4);
+    msg.push(rfb_constants::MSG_SET_ENCODINGS);
+    msg.push(0);
+    msg.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
+    for enc in encodings {
+        msg.extend_from_slice(&enc.to_be_bytes());
+    }
+    msg
+}
+
+/// Builds FramebufferUpdateRequest client-to-server message (RFC 6143 Section 7.5.3).
+pub fn build_rfb_framebuffer_update_request(
+    incremental: bool,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+) -> [u8; 10] {
+    let mut msg = [0u8; 10];
+    msg[0] = rfb_constants::MSG_FRAMEBUFFER_UPDATE_REQ;
+    msg[1] = if incremental { 1 } else { 0 };
+    msg[2..4].copy_from_slice(&x.to_be_bytes());
+    msg[4..6].copy_from_slice(&y.to_be_bytes());
+    msg[6..8].copy_from_slice(&width.to_be_bytes());
+    msg[8..10].copy_from_slice(&height.to_be_bytes());
+    msg
+}
+
+/// Builds KeyEvent client-to-server message (RFC 6143 Section 7.5.4).
+pub fn build_rfb_key_event(down: bool, key: u32) -> [u8; 8] {
+    let mut msg = [0u8; 8];
+    msg[0] = rfb_constants::MSG_KEY_EVENT;
+    msg[1] = if down { 1 } else { 0 };
+    msg[4..8].copy_from_slice(&key.to_be_bytes());
+    msg
+}
+
+/// Builds PointerEvent client-to-server message (RFC 6143 Section 7.5.5).
+pub fn build_rfb_pointer_event(button_mask: u8, x: u16, y: u16) -> [u8; 6] {
+    let mut msg = [0u8; 6];
+    msg[0] = rfb_constants::MSG_POINTER_EVENT;
+    msg[1] = button_mask;
+    msg[2..4].copy_from_slice(&x.to_be_bytes());
+    msg[4..6].copy_from_slice(&y.to_be_bytes());
+    msg
+}
+
+/// Builds ClientCutText client-to-server message (RFC 6143 Section 7.5.6).
+pub fn build_rfb_client_cut_text(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut msg = Vec::with_capacity(8 + bytes.len());
+    msg.push(rfb_constants::MSG_CLIENT_CUT_TEXT);
+    msg.extend_from_slice(&[0, 0, 0]);
+    msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    msg.extend_from_slice(bytes);
+    msg
+}
+
+/// Parses ServerCutText message (RFC 6143 Section 7.6.4).
+pub fn parse_rfb_server_cut_text(buf: &[u8]) -> Result<(String, usize), ProtocolError> {
+    if buf.len() < 8 {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    if buf[0] != rfb_constants::MSG_SERVER_CUT_TEXT {
+        return Err(ProtocolError::InvalidRfbData(format!(
+            "Expected ServerCutText(3), got {}",
+            buf[0]
+        )));
+    }
+    let len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+    if buf.len() < 8 + len {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    let text = String::from_utf8_lossy(&buf[8..8 + len]).into_owned();
+    Ok((text, 8 + len))
+}
+
+/// Parses FramebufferUpdate message header (RFC 6143 Section 7.6.1).
+pub fn parse_rfb_framebuffer_update_header(buf: &[u8]) -> Result<(u16, usize), ProtocolError> {
+    if buf.len() < 4 {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    if buf[0] != rfb_constants::MSG_FRAMEBUFFER_UPDATE {
+        return Err(ProtocolError::InvalidRfbData(format!(
+            "Expected FramebufferUpdate(0), got {}",
+            buf[0]
+        )));
+    }
+    let rect_count = u16::from_be_bytes([buf[2], buf[3]]);
+    Ok((rect_count, 4))
+}
+
+/// Parses a single rectangle header in a FramebufferUpdate message.
+pub fn parse_rfb_rectangle_header(
+    buf: &[u8],
+) -> Result<(RfbRectangleHeader, usize), ProtocolError> {
+    if buf.len() < 12 {
+        return Err(ProtocolError::IncompleteRfbMessage);
+    }
+    let x = u16::from_be_bytes([buf[0], buf[1]]);
+    let y = u16::from_be_bytes([buf[2], buf[3]]);
+    let width = u16::from_be_bytes([buf[4], buf[5]]);
+    let height = u16::from_be_bytes([buf[6], buf[7]]);
+    let encoding_type = i32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+    Ok((
+        RfbRectangleHeader {
+            x,
+            y,
+            width,
+            height,
+            encoding_type,
+        },
+        12,
+    ))
+}
+
+/// Builds an RFC 1006 TPKT packet wrapping payload.
+pub fn build_tpkt_packet(payload: &[u8]) -> Vec<u8> {
+    let total_len = (payload.len() + 4) as u16;
+    let mut packet = Vec::with_capacity(total_len as usize);
+    packet.push(3); // TPKT version 3
+    packet.push(0); // Reserved
+    packet.extend_from_slice(&total_len.to_be_bytes());
+    packet.extend_from_slice(payload);
+    packet
+}
+
+/// Parses a TPKT packet. Returns Some((payload, consumed_bytes)) or None if incomplete.
+pub fn parse_tpkt_packet(buf: &[u8]) -> Result<Option<(&[u8], usize)>, ProtocolError> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+    if buf[0] != 3 {
+        return Err(ProtocolError::InvalidTpktPacket);
+    }
+    let total_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    if total_len < 4 {
+        return Err(ProtocolError::InvalidTpktPacket);
+    }
+    if buf.len() < total_len {
+        return Ok(None);
+    }
+    Ok(Some((&buf[4..total_len], total_len)))
+}
+
+/// Builds an RDP X.224 Connection Request (CR) wrapped in TPKT (MS-RDPBCGR Section 2.2.1.1).
+pub fn build_rdp_connection_request(routing_token_user: &str, requested_protocols: u32) -> Vec<u8> {
+    let mut x224 = Vec::new();
+    x224.push(0); // Length indicator placeholder
+    x224.push(0xE0); // PDU type: Connection Request
+    x224.extend_from_slice(&[0x00, 0x00]); // DST-REF
+    x224.extend_from_slice(&[0x12, 0x34]); // SRC-REF
+    x224.push(0x00); // Class 0
+
+    if !routing_token_user.is_empty() {
+        let cookie = format!("Cookie: mstshash={routing_token_user}\r\n");
+        x224.extend_from_slice(cookie.as_bytes());
+    }
+
+    // RDP Negotiation Request (RDP_NEG_REQ)
+    x224.push(0x01); // TYPE_RDP_NEG_REQ
+    x224.push(0x00); // flags
+    x224.extend_from_slice(&8u16.to_le_bytes()); // length: 8 bytes
+    x224.extend_from_slice(&requested_protocols.to_le_bytes());
+
+    let len_indicator = (x224.len() - 1) as u8;
+    x224[0] = len_indicator;
+
+    build_tpkt_packet(&x224)
+}
+
+/// Parses an RDP Negotiation Response (RDP_NEG_RSP). Returns the selected protocol flag.
+pub fn parse_rdp_negotiation_response(payload: &[u8]) -> Result<u32, ProtocolError> {
+    for i in 0..payload.len().saturating_sub(7) {
+        if payload[i] == 0x02 {
+            let len = u16::from_le_bytes([payload[i + 2], payload[i + 3]]);
+            if len == 8 && i + 8 <= payload.len() {
+                let selected = u32::from_le_bytes([
+                    payload[i + 4],
+                    payload[i + 5],
+                    payload[i + 6],
+                    payload[i + 7],
+                ]);
+                return Ok(selected);
+            }
+        }
+    }
+    Err(ProtocolError::InvalidRfbData(
+        "No valid RDP negotiation response found".into(),
+    ))
+}
+
 /// Unified endpoint representing any protocol connection target.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtocolEndpoint {
@@ -705,6 +1308,8 @@ pub enum ProtocolEndpoint {
     Telnet(TelnetConfig),
     Serial(SerialConfig),
     Local,
+    Vnc(VncConfig),
+    Rdp(RdpConfig),
 }
 
 impl ProtocolEndpoint {
@@ -715,6 +1320,8 @@ impl ProtocolEndpoint {
             Self::Telnet(_) => ConnectionProtocol::Telnet,
             Self::Serial(_) => ConnectionProtocol::Serial,
             Self::Local => ConnectionProtocol::Local,
+            Self::Vnc(_) => ConnectionProtocol::Vnc,
+            Self::Rdp(_) => ConnectionProtocol::Rdp,
         }
     }
 
@@ -727,6 +1334,13 @@ impl ProtocolEndpoint {
             Self::Telnet(t) => format!("telnet://{}:{}", t.host, t.port),
             Self::Serial(s) => format!("serial://{}", s.summary()),
             Self::Local => "local://shell".to_string(),
+            Self::Vnc(v) => format!("vnc://{}:{}", v.host, v.port),
+            Self::Rdp(r) => format!(
+                "rdp://{}@{}:{}",
+                r.username.as_deref().unwrap_or(""),
+                r.host,
+                r.port
+            ),
         }
     }
 
@@ -735,6 +1349,9 @@ impl ProtocolEndpoint {
             Self::Telnet(_) => Some(TelnetConfig::security_warning()),
             Self::Serial(_) => Some(
                 "ℹ️ Serial connection: Physical line communication without network encryption.",
+            ),
+            Self::Vnc(_) => Some(
+                "ℹ️ Standard VNC transmits raw unencrypted framebuffer data unless tunneled over SSH.",
             ),
             _ => None,
         }
@@ -747,6 +1364,10 @@ impl ProtocolEndpoint {
     pub fn supports_tunnels(&self) -> bool {
         self.protocol().supports_tunnels()
     }
+
+    pub fn is_graphical(&self) -> bool {
+        self.protocol().is_graphical()
+    }
 }
 
 /// Errors related to protocol specification, configuration, or codecs.
@@ -758,6 +1379,10 @@ pub enum ProtocolError {
     EmptyPortPath,
     EmptyHostname,
     InvalidPort(u16),
+    InvalidRfbVersion(String),
+    IncompleteRfbMessage,
+    InvalidRfbData(String),
+    InvalidTpktPacket,
     UnsupportedFeature {
         protocol: ConnectionProtocol,
         feature: &'static str,
@@ -773,6 +1398,10 @@ impl std::fmt::Display for ProtocolError {
             Self::EmptyPortPath => write!(f, "Serial device port path cannot be empty"),
             Self::EmptyHostname => write!(f, "Hostname cannot be empty"),
             Self::InvalidPort(p) => write!(f, "Invalid port number: {p}"),
+            Self::InvalidRfbVersion(v) => write!(f, "Invalid RFB protocol version string: '{v}'"),
+            Self::IncompleteRfbMessage => write!(f, "Incomplete RFB message buffer"),
+            Self::InvalidRfbData(msg) => write!(f, "Invalid RFB data: {msg}"),
+            Self::InvalidTpktPacket => write!(f, "Invalid TPKT packet header or length"),
             Self::UnsupportedFeature { protocol, feature } => {
                 write!(f, "{protocol} does not support {feature}")
             }
@@ -981,5 +1610,191 @@ mod tests {
         let ep_serial = ProtocolEndpoint::Serial(serial_cfg);
         assert_eq!(ep_serial.protocol(), ConnectionProtocol::Serial);
         assert!(ep_serial.security_warning().is_some());
+
+        let vnc_cfg = VncConfig::new("desktop.local", 5901).unwrap();
+        let ep_vnc = ProtocolEndpoint::Vnc(vnc_cfg);
+        assert_eq!(ep_vnc.protocol(), ConnectionProtocol::Vnc);
+        assert_eq!(ep_vnc.format_target(), "vnc://desktop.local:5901");
+        assert!(ep_vnc.is_graphical());
+        assert!(ep_vnc.security_warning().is_some());
+
+        let rdp_cfg = RdpConfig::new("windows-vm.corp", 3389).unwrap();
+        let ep_rdp = ProtocolEndpoint::Rdp(rdp_cfg);
+        assert_eq!(ep_rdp.protocol(), ConnectionProtocol::Rdp);
+        assert!(ep_rdp.format_target().contains("windows-vm.corp:3389"));
+        assert!(ep_rdp.is_graphical());
+    }
+
+    #[test]
+    fn verifies_vnc_and_rdp_configurations() {
+        // VNC
+        let vnc = VncConfig::new("192.168.1.100", 5900).unwrap();
+        assert_eq!(vnc.host, "192.168.1.100");
+        assert_eq!(vnc.port, 5900);
+        assert_eq!(vnc.color_depth, 24);
+        assert!(!vnc.view_only);
+        assert!(vnc.summary().contains("VNC · 24bpp"));
+
+        assert_eq!(VncConfig::new("", 5900), Err(ProtocolError::EmptyHostname));
+        assert_eq!(
+            VncConfig::new("host", 0),
+            Err(ProtocolError::InvalidPort(0))
+        );
+
+        // RDP
+        let mut rdp = RdpConfig::new("win-server.ad", 3389).unwrap();
+        rdp.username = Some("Administrator".into());
+        rdp.domain = Some("CORP".into());
+        assert_eq!(rdp.host, "win-server.ad");
+        assert_eq!(rdp.port, 3389);
+        assert_eq!(rdp.screen_width, 1920);
+        assert_eq!(rdp.screen_height, 1080);
+        assert!(rdp.summary().contains("1920x1080 · user: Administrator"));
+
+        let args = rdp.build_arguments();
+        assert!(args.contains(&"/v:win-server.ad:3389".to_string()));
+        assert!(args.contains(&"/u:Administrator".to_string()));
+        assert!(args.contains(&"/d:CORP".to_string()));
+        assert!(args.contains(&"/size:1920x1080".to_string()));
+        assert!(args.contains(&"+clipboard".to_string()));
+    }
+
+    #[test]
+    fn verifies_rfb_handshake_and_codecs() {
+        use rfb_constants::*;
+
+        // Version handshake
+        let version_bytes = build_rfb_version();
+        assert_eq!(version_bytes, b"RFB 003.008\n");
+        let (major, minor) = parse_rfb_version(&version_bytes).unwrap();
+        assert_eq!(major, 3);
+        assert_eq!(minor, 8);
+
+        // ClientInit
+        let client_init_shared = build_rfb_client_init(true);
+        assert_eq!(client_init_shared, [1]);
+        let client_init_exclusive = build_rfb_client_init(false);
+        assert_eq!(client_init_exclusive, [0]);
+
+        // ServerInit parsing
+        let pf = RfbPixelFormat::default_32bpp_rgba();
+        let pf_bytes = pf.to_bytes();
+        assert_eq!(RfbPixelFormat::from_bytes(&pf_bytes), pf);
+
+        let mut server_init_buf = Vec::new();
+        server_init_buf.extend_from_slice(&1920u16.to_be_bytes()); // width
+        server_init_buf.extend_from_slice(&1080u16.to_be_bytes()); // height
+        server_init_buf.extend_from_slice(&pf_bytes); // 16 bytes pixel format
+        let name = "Ubuntu Desktop 24.04";
+        server_init_buf.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        server_init_buf.extend_from_slice(name.as_bytes());
+
+        let (server_init, consumed) = parse_rfb_server_init(&server_init_buf).unwrap();
+        assert_eq!(server_init.framebuffer_width, 1920);
+        assert_eq!(server_init.framebuffer_height, 1080);
+        assert_eq!(server_init.name, "Ubuntu Desktop 24.04");
+        assert_eq!(consumed, server_init_buf.len());
+
+        // SetPixelFormat message
+        let set_pf = build_rfb_set_pixel_format(&pf);
+        assert_eq!(set_pf[0], MSG_SET_PIXEL_FORMAT);
+        assert_eq!(&set_pf[4..20], &pf_bytes[..]);
+
+        // SetEncodings message
+        let encodings = vec![
+            ENCODING_RAW,
+            ENCODING_COPYRECT,
+            ENCODING_ZRLE,
+            ENCODING_DESKTOP_SIZE,
+        ];
+        let set_enc = build_rfb_set_encodings(&encodings);
+        assert_eq!(set_enc[0], MSG_SET_ENCODINGS);
+        assert_eq!(set_enc[1], 0); // padding
+        let num_enc = u16::from_be_bytes([set_enc[2], set_enc[3]]);
+        assert_eq!(num_enc, 4);
+
+        // FramebufferUpdateRequest message
+        let fb_req = build_rfb_framebuffer_update_request(true, 0, 0, 1920, 1080);
+        assert_eq!(fb_req[0], MSG_FRAMEBUFFER_UPDATE_REQ);
+        assert_eq!(fb_req[1], 1); // incremental
+        let req_w = u16::from_be_bytes([fb_req[6], fb_req[7]]);
+        let req_h = u16::from_be_bytes([fb_req[8], fb_req[9]]);
+        assert_eq!(req_w, 1920);
+        assert_eq!(req_h, 1080);
+
+        // KeyEvent message
+        let key_down = build_rfb_key_event(true, KEYSYM_RETURN);
+        assert_eq!(key_down[0], MSG_KEY_EVENT);
+        assert_eq!(key_down[1], 1); // down
+        let sym = u32::from_be_bytes([key_down[4], key_down[5], key_down[6], key_down[7]]);
+        assert_eq!(sym, KEYSYM_RETURN);
+
+        // PointerEvent message
+        let pointer = build_rfb_pointer_event(BUTTON_LEFT, 640, 480);
+        assert_eq!(pointer[0], MSG_POINTER_EVENT);
+        assert_eq!(pointer[1], BUTTON_LEFT);
+        let px = u16::from_be_bytes([pointer[2], pointer[3]]);
+        let py = u16::from_be_bytes([pointer[4], pointer[5]]);
+        assert_eq!(px, 640);
+        assert_eq!(py, 480);
+
+        // ClientCutText & ServerCutText
+        let cut_msg = build_rfb_client_cut_text("Clipboard content");
+        assert_eq!(cut_msg[0], MSG_CLIENT_CUT_TEXT);
+
+        let mut server_cut_buf = vec![MSG_SERVER_CUT_TEXT, 0, 0, 0];
+        let text = "Remote text copied";
+        server_cut_buf.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        server_cut_buf.extend_from_slice(text.as_bytes());
+        let (parsed_text, len) = parse_rfb_server_cut_text(&server_cut_buf).unwrap();
+        assert_eq!(parsed_text, "Remote text copied");
+        assert_eq!(len, server_cut_buf.len());
+
+        // FramebufferUpdate header & rectangle header
+        let fb_upd_buf = vec![MSG_FRAMEBUFFER_UPDATE, 0, 0, 2]; // 2 rectangles
+        let (rect_count, h_len) = parse_rfb_framebuffer_update_header(&fb_upd_buf).unwrap();
+        assert_eq!(rect_count, 2);
+        assert_eq!(h_len, 4);
+
+        let mut rect_hdr_buf = Vec::new();
+        rect_hdr_buf.extend_from_slice(&100u16.to_be_bytes()); // x
+        rect_hdr_buf.extend_from_slice(&200u16.to_be_bytes()); // y
+        rect_hdr_buf.extend_from_slice(&320u16.to_be_bytes()); // w
+        rect_hdr_buf.extend_from_slice(&240u16.to_be_bytes()); // h
+        rect_hdr_buf.extend_from_slice(&ENCODING_RAW.to_be_bytes()); // enc
+        let (rect_hdr, r_len) = parse_rfb_rectangle_header(&rect_hdr_buf).unwrap();
+        assert_eq!(rect_hdr.x, 100);
+        assert_eq!(rect_hdr.y, 200);
+        assert_eq!(rect_hdr.width, 320);
+        assert_eq!(rect_hdr.height, 240);
+        assert_eq!(rect_hdr.encoding_type, ENCODING_RAW);
+        assert_eq!(r_len, 12);
+    }
+
+    #[test]
+    fn verifies_rdp_tpkt_and_negotiation() {
+        let payload = b"Hello RDP";
+        let tpkt = build_tpkt_packet(payload);
+        assert_eq!(tpkt[0], 3); // version 3
+        assert_eq!(tpkt[1], 0); // reserved
+        let total_len = u16::from_be_bytes([tpkt[2], tpkt[3]]);
+        assert_eq!(total_len as usize, payload.len() + 4);
+
+        let parsed = parse_tpkt_packet(&tpkt).unwrap().unwrap();
+        assert_eq!(parsed.0, payload);
+        assert_eq!(parsed.1, tpkt.len());
+
+        // RDP Connection Request
+        let cr = build_rdp_connection_request("Administrator", 1); // 1 = SSL/TLS
+        let (cr_payload, _) = parse_tpkt_packet(&cr).unwrap().unwrap();
+        assert_eq!(cr_payload[1], 0xE0); // X.224 CR
+        assert!(String::from_utf8_lossy(cr_payload).contains("Cookie: mstshash=Administrator"));
+
+        // RDP Negotiation Response
+        let mut rsp = vec![0x02, 0x00]; // TYPE_RDP_NEG_RSP
+        rsp.extend_from_slice(&8u16.to_le_bytes()); // len 8
+        rsp.extend_from_slice(&1u32.to_le_bytes()); // selected: SSL
+        let selected_proto = parse_rdp_negotiation_response(&rsp).unwrap();
+        assert_eq!(selected_proto, 1);
     }
 }

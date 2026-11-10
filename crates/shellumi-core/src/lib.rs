@@ -86,10 +86,16 @@ pub use mobile::{
 };
 pub use palette::{PaletteAction, PaletteCategory, PaletteCommand, PaletteMatch, PaletteRegistry};
 pub use protocol::{
-    build_telnet_command, build_telnet_naws, build_telnet_terminal_type_response,
-    parse_telnet_stream, telnet_constants, ConnectionProtocol, MoshConfig, MoshPredictMode,
-    ProtocolEndpoint, ProtocolError, SerialConfig, SerialDataBits, SerialFlowControl, SerialParity,
-    SerialStopBits, TelnetCommandFrame, TelnetConfig,
+    build_rdp_connection_request, build_rfb_client_cut_text, build_rfb_client_init,
+    build_rfb_framebuffer_update_request, build_rfb_key_event, build_rfb_pointer_event,
+    build_rfb_set_encodings, build_rfb_set_pixel_format, build_rfb_version, build_telnet_command,
+    build_telnet_naws, build_telnet_terminal_type_response, build_tpkt_packet,
+    parse_rdp_negotiation_response, parse_rfb_framebuffer_update_header,
+    parse_rfb_rectangle_header, parse_rfb_server_cut_text, parse_rfb_server_init,
+    parse_rfb_version, parse_telnet_stream, parse_tpkt_packet, rfb_constants, telnet_constants,
+    ConnectionProtocol, MoshConfig, MoshPredictMode, ProtocolEndpoint, ProtocolError, RdpConfig,
+    RfbPixelFormat, RfbRectangleHeader, RfbServerInit, SerialConfig, SerialDataBits,
+    SerialFlowControl, SerialParity, SerialStopBits, TelnetCommandFrame, TelnetConfig, VncConfig,
 };
 
 /// Discovers candidate serial device ports on the local machine.

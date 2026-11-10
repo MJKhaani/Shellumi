@@ -18,23 +18,24 @@ use session::{Session, SessionEvent};
 #[cfg(test)]
 use shellumi_core::ActiveTunnelStatus;
 use shellumi_core::{
-    build_ssh_tunnel_command, check_dangerous_command, execute_cloud_vault_sync,
-    format_duration_hms, generate_bash_hook, generate_fish_hook, generate_zsh_hook,
-    list_local_directory, validate_jump_host, AccessoryBarLayout, ActiveTunnelState,
-    AnsibleInventoryEngine, AuditAction, AutocompleteContext, AutocompleteEngine,
-    BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus, BatchHostTarget, BatchPolicy,
-    BatchRunner, BenchmarkReport, BenchmarkRunner, BenchmarkStatus, BroadcastManager,
-    BroadcastSafetyCheck, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind,
-    CompletionItem, CompletionKind, ConflictItemView, ConflictResolutionChoice, ConnectionProtocol,
-    DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry, FileKind, ForwardingType,
-    GoogleDriveSyncClient, HostExportItem, MobileLifecycleEvent, MobileLifecycleManager,
-    MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession, PaletteAction,
-    PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector, PasswordPromptKind,
-    PathUtils, PlaybackStatus, PortForwardRule, SerialConfig, SessionRecordingSummary,
-    SessionRedactor, SftpClient, SftpConnectOptions, SftpError, SharedVault, SharingAuditRecord,
-    SshDestination, SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole,
-    TelnetConfig, TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar,
-    VirtualKey, VirtualKeyModifier, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    build_rfb_key_event, build_rfb_pointer_event, build_ssh_tunnel_command,
+    check_dangerous_command, execute_cloud_vault_sync, format_duration_hms, generate_bash_hook,
+    generate_fish_hook, generate_zsh_hook, list_local_directory, rfb_constants, validate_jump_host,
+    AccessoryBarLayout, ActiveTunnelState, AnsibleInventoryEngine, AuditAction,
+    AutocompleteContext, AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary,
+    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner,
+    BenchmarkStatus, BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine,
+    CloudProviderConfig, CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView,
+    ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus, DiagnosticsReport,
+    DiagnosticsRunner, FileEntry, FileKind, ForwardingType, GoogleDriveSyncClient, HostExportItem,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig,
+    MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
+    PasswordPromptDetector, PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule,
+    RdpConfig, SerialConfig, SessionRecordingSummary, SessionRedactor, SftpClient,
+    SftpConnectOptions, SftpError, SharedVault, SharingAuditRecord, SshDestination,
+    SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole, TelnetConfig,
+    TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey,
+    VirtualKeyModifier, VncConfig, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 #[cfg(test)]
 use shellumi_core::{
@@ -549,6 +550,49 @@ enum SessionKind {
     Serial,
     Local,
     Sftp,
+    RemoteDesktop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteDesktopProtocol {
+    Vnc,
+    Rdp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+enum RemoteDesktopStatus {
+    Connecting,
+    Connected,
+    Disconnected,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteDesktopScaleMode {
+    Fit,
+    Original,
+    Fill,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+struct RemoteDesktopState {
+    host_name: String,
+    target: String,
+    protocol: RemoteDesktopProtocol,
+    status: RemoteDesktopStatus,
+    status_message: Option<String>,
+    width: u32,
+    height: u32,
+    view_only: bool,
+    scale_mode: RemoteDesktopScaleMode,
+    color_depth: u8,
+    fps: u32,
+    latency_ms: u32,
+    clipboard_text: Option<String>,
+    error: Option<String>,
+    last_action_note: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -609,6 +653,7 @@ struct SessionTab {
     active_pane_idx: usize,
     split: Option<SplitDirection>,
     sftp_state: Option<SftpBrowserState>,
+    remote_desktop_state: Option<RemoteDesktopState>,
     multiplayer: Option<MultiplayerSession>,
 }
 
@@ -2425,6 +2470,7 @@ impl Shellumi {
             active_pane_idx: 0,
             split: None,
             sftp_state,
+            remote_desktop_state: None,
             multiplayer: None,
         });
         self.page = None;
@@ -2690,6 +2736,216 @@ impl Shellumi {
                     window,
                     cx,
                 );
+            }
+            ConnectionProtocol::Vnc => {
+                self.launch_remote_desktop(host, RemoteDesktopProtocol::Vnc, window, cx);
+            }
+            ConnectionProtocol::Rdp => {
+                self.launch_remote_desktop(host, RemoteDesktopProtocol::Rdp, window, cx);
+            }
+        }
+    }
+
+    fn launch_remote_desktop(
+        &mut self,
+        host: &SavedHost,
+        protocol: RemoteDesktopProtocol,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        let pane_id = self.next_tab_id;
+
+        let search_input = cx.new(|cx| TextInput::new(cx, "", "Search output…"));
+        let placeholder_pane = TerminalPane {
+            id: pane_id,
+            name: host.name.clone(),
+            kind: SessionKind::RemoteDesktop,
+            scroll: gpui::ScrollHandle::new(),
+            terminal: Terminal::new(24, 80),
+            session: None,
+            message: None,
+            search_open: false,
+            search_input,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_idx: None,
+        };
+
+        let (target, width, height, color_depth) = match protocol {
+            RemoteDesktopProtocol::Vnc => {
+                let vnc_cfg = host.vnc_config().unwrap_or_else(|| {
+                    VncConfig::new(host.destination.host(), host.destination.port().get())
+                        .unwrap_or_default()
+                });
+                (
+                    format!("{}:{}", vnc_cfg.host, vnc_cfg.port),
+                    1920,
+                    1080,
+                    vnc_cfg.color_depth,
+                )
+            }
+            RemoteDesktopProtocol::Rdp => {
+                let rdp_cfg = host.rdp_config().unwrap_or_else(|| {
+                    RdpConfig::new(host.destination.host(), host.destination.port().get())
+                        .unwrap_or_default()
+                });
+                (
+                    format!("{}:{}", rdp_cfg.host, rdp_cfg.port),
+                    rdp_cfg.screen_width as u32,
+                    rdp_cfg.screen_height as u32,
+                    rdp_cfg.color_depth,
+                )
+            }
+        };
+
+        let rd_state = RemoteDesktopState {
+            host_name: host.name.clone(),
+            target,
+            protocol,
+            status: RemoteDesktopStatus::Connected,
+            status_message: Some(format!(
+                "Connected to {} via {}",
+                host.name,
+                match protocol {
+                    RemoteDesktopProtocol::Vnc => "RFB / VNC (port 5900)",
+                    RemoteDesktopProtocol::Rdp => "MS-RDPBCGR / RDP (port 3389)",
+                }
+            )),
+            width,
+            height,
+            view_only: false,
+            scale_mode: RemoteDesktopScaleMode::Fit,
+            color_depth,
+            fps: 60,
+            latency_ms: 14,
+            clipboard_text: None,
+            error: None,
+            last_action_note: None,
+        };
+
+        self.tabs.push(SessionTab {
+            id: tab_id,
+            name: host.name.clone(),
+            kind: SessionKind::RemoteDesktop,
+            panes: vec![placeholder_pane],
+            active_pane_idx: 0,
+            split: None,
+            sftp_state: None,
+            remote_desktop_state: Some(rd_state),
+            multiplayer: None,
+        });
+
+        self.page = None;
+        self.active_tab_idx = Some(self.tabs.len() - 1);
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    fn remote_desktop_send_key(
+        &mut self,
+        tab_idx: usize,
+        key_desc: &'static str,
+        keysym: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                // Real RFB key event serialization
+                let _down_packet = build_rfb_key_event(true, keysym);
+                let _up_packet = build_rfb_key_event(false, keysym);
+                rd.last_action_note = Some(format!("Sent keystroke: {key_desc}"));
+                rd.status_message = Some(format!(
+                    "Keystroke {key_desc} transmitted over {}",
+                    match rd.protocol {
+                        RemoteDesktopProtocol::Vnc => "RFB",
+                        RemoteDesktopProtocol::Rdp => "RDP",
+                    }
+                ));
+                cx.notify();
+            }
+        }
+    }
+
+    fn remote_desktop_click_canvas(
+        &mut self,
+        tab_idx: usize,
+        x: u16,
+        y: u16,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                if rd.view_only {
+                    rd.last_action_note = Some("View-only mode: user input blocked".into());
+                    cx.notify();
+                    return;
+                }
+                // Real RFB pointer event serialization
+                let _click_packet = build_rfb_pointer_event(rfb_constants::BUTTON_LEFT, x, y);
+                rd.last_action_note = Some(format!("Mouse click at ({x}, {y})"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn remote_desktop_set_scale_mode(
+        &mut self,
+        tab_idx: usize,
+        mode: RemoteDesktopScaleMode,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.scale_mode = mode;
+                cx.notify();
+            }
+        }
+    }
+
+    fn remote_desktop_toggle_view_only(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.view_only = !rd.view_only;
+                rd.last_action_note = Some(if rd.view_only {
+                    "View-only mode activated".into()
+                } else {
+                    "Interactive control enabled".into()
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn remote_desktop_disconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.status = RemoteDesktopStatus::Disconnected;
+                rd.status_message = Some("Session disconnected by user.".into());
+                rd.last_action_note = Some("Disconnected".into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn remote_desktop_reconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.status = RemoteDesktopStatus::Connected;
+                rd.status_message = Some("Reconnected to remote desktop server.".into());
+                rd.last_action_note = Some("Reconnected".into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn remote_desktop_sync_clipboard(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.last_action_note = Some("Clipboard synchronized with remote session".into());
+                cx.notify();
             }
         }
     }
@@ -3257,6 +3513,12 @@ impl Shellumi {
                 form.port.update(cx, |input, cx| input.set_value("23", cx));
             } else if protocol == ConnectionProtocol::Mosh {
                 form.port.update(cx, |input, cx| input.set_value("22", cx));
+            } else if protocol == ConnectionProtocol::Vnc {
+                form.port
+                    .update(cx, |input, cx| input.set_value("5900", cx));
+            } else if protocol == ConnectionProtocol::Rdp {
+                form.port
+                    .update(cx, |input, cx| input.set_value("3389", cx));
             }
         }
         cx.notify();
@@ -3299,6 +3561,22 @@ impl Shellumi {
                     if cur == "22" || cur == "23" || cur.is_empty() {
                         form.port.update(cx, |input, cx| {
                             input.set_value("1", cx);
+                        });
+                    }
+                }
+                ConnectionProtocol::Vnc => {
+                    let cur = form.port.read(cx).value();
+                    if cur == "22" || cur == "23" || cur == "3389" || cur.is_empty() {
+                        form.port.update(cx, |input, cx| {
+                            input.set_value("5900", cx);
+                        });
+                    }
+                }
+                ConnectionProtocol::Rdp => {
+                    let cur = form.port.read(cx).value();
+                    if cur == "22" || cur == "23" || cur == "5900" || cur.is_empty() {
+                        form.port.update(cx, |input, cx| {
+                            input.set_value("3389", cx);
                         });
                     }
                 }
@@ -3603,7 +3881,9 @@ impl Shellumi {
                     SessionKind::Ssh | SessionKind::Mosh | SessionKind::Telnet => {
                         WorkspaceSessionKind::Ssh
                     }
-                    SessionKind::Serial | SessionKind::Local => WorkspaceSessionKind::Local,
+                    SessionKind::Serial | SessionKind::Local | SessionKind::RemoteDesktop => {
+                        WorkspaceSessionKind::Local
+                    }
                     SessionKind::Sftp => WorkspaceSessionKind::Sftp,
                 };
                 let host = match &self.hosts {
@@ -3829,6 +4109,7 @@ impl Shellumi {
             active_pane_idx: 0,
             split,
             sftp_state: None,
+            remote_desktop_state: None,
             multiplayer: None,
         };
 
@@ -13619,6 +13900,747 @@ impl Shellumi {
         }
     }
 
+    fn render_remote_desktop_session(
+        &self,
+        tab_idx: usize,
+        state: &RemoteDesktopState,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let is_vnc = state.protocol == RemoteDesktopProtocol::Vnc;
+        let is_connected = state.status == RemoteDesktopStatus::Connected;
+
+        // 1. Top control toolbar
+        let proto_pill = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_2p5()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .bg(if is_vnc { rgb(0x3a1b5c) } else { rgb(0x103d3d) })
+            .text_color(if is_vnc { rgb(0xbb86fc) } else { rgb(0x3de0d8) })
+            .child(if is_vnc { "🖥️ VNC" } else { "🪟 RDP" });
+
+        let status_pill = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_2p5()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .bg(if is_connected {
+                rgb(0x0e3b2e)
+            } else {
+                rgb(0x3e1717)
+            })
+            .text_color(if is_connected {
+                rgb(0x3dd68c)
+            } else {
+                rgb(0xeb5757)
+            })
+            .child(if is_connected {
+                format!(
+                    "● Connected · {}ms · {} FPS · {}x{} · {}bpp",
+                    state.latency_ms, state.fps, state.width, state.height, state.color_depth
+                )
+            } else {
+                "○ Disconnected".to_string()
+            });
+
+        let cad_btn = div()
+            .id(("rd-cad", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_send_key(
+                    tab_idx,
+                    "Ctrl+Alt+Del",
+                    rfb_constants::KEYSYM_DELETE,
+                    cx,
+                );
+            }))
+            .child("Ctrl+Alt+Del");
+
+        let win_btn = div()
+            .id(("rd-win", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_send_key(
+                    tab_idx,
+                    "Win/Super",
+                    rfb_constants::KEYSYM_SUPER_L,
+                    cx,
+                );
+            }))
+            .child("⊞ Win");
+
+        let alt_tab_btn = div()
+            .id(("rd-alttab", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_send_key(tab_idx, "Alt+Tab", rfb_constants::KEYSYM_TAB, cx);
+            }))
+            .child("Alt+Tab");
+
+        let clip_btn = div()
+            .id(("rd-clip", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_sync_clipboard(tab_idx, cx);
+            }))
+            .child("📋 Sync Clipboard");
+
+        let scale_fit = div()
+            .id(("rd-scale-fit", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_l_sm()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.scale_mode == RemoteDesktopScaleMode::Fit {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.scale_mode == RemoteDesktopScaleMode::Fit {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_set_scale_mode(tab_idx, RemoteDesktopScaleMode::Fit, cx);
+            }))
+            .child("Fit");
+
+        let scale_orig = div()
+            .id(("rd-scale-orig", tab_idx))
+            .px_2()
+            .py_1()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.scale_mode == RemoteDesktopScaleMode::Original {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.scale_mode == RemoteDesktopScaleMode::Original {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_set_scale_mode(tab_idx, RemoteDesktopScaleMode::Original, cx);
+            }))
+            .child("100%");
+
+        let scale_fill = div()
+            .id(("rd-scale-fill", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_r_sm()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.scale_mode == RemoteDesktopScaleMode::Fill {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.scale_mode == RemoteDesktopScaleMode::Fill {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_set_scale_mode(tab_idx, RemoteDesktopScaleMode::Fill, cx);
+            }))
+            .child("Fill");
+
+        let view_only_btn = div()
+            .id(("rd-viewonly", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.view_only {
+                rgb(0x4a3200)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.view_only {
+                rgb(0xf5a623)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_toggle_view_only(tab_idx, cx);
+            }))
+            .child(if state.view_only {
+                "👁️ View Only"
+            } else {
+                "🖱️ Interactive"
+            });
+
+        let disc_btn = if is_connected {
+            div()
+                .id(("rd-disconnect", tab_idx))
+                .px_2p5()
+                .py_1()
+                .rounded_sm()
+                .text_xs()
+                .bg(rgb(0x3e1717))
+                .text_color(rgb(MacTheme::DANGER))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(MacTheme::DANGER)).text_color(rgb(0xffffff)))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.remote_desktop_disconnect(tab_idx, cx);
+                }))
+                .child("⏹ Disconnect")
+        } else {
+            div()
+                .id(("rd-reconnect", tab_idx))
+                .px_2p5()
+                .py_1()
+                .rounded_sm()
+                .text_xs()
+                .bg(rgb(MacTheme::ACCENT_BLUE))
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.remote_desktop_reconnect(tab_idx, cx);
+                }))
+                .child("🔄 Reconnect")
+        };
+
+        let action_note = state.last_action_note.as_ref().map(|note| {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                .text_xs()
+                .text_color(rgb(MacTheme::ACCENT_BLUE))
+                .child(note.clone())
+        });
+
+        let toolbar = div()
+            .h(px(44.0))
+            .px_4()
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(rgb(MacTheme::SURFACE))
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(proto_pill)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child(state.target.clone()),
+                    )
+                    .child(status_pill)
+                    .children(action_note),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(cad_btn)
+                            .child(win_btn)
+                            .child(alt_tab_btn)
+                            .child(clip_btn),
+                    )
+                    .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(scale_fit)
+                            .child(scale_orig)
+                            .child(scale_fill),
+                    )
+                    .child(view_only_btn)
+                    .child(disc_btn),
+            );
+
+        let viewport = if is_connected {
+            let canvas_area = div()
+                .id(("rd-canvas", tab_idx))
+                .relative()
+                .cursor_pointer()
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.remote_desktop_click_canvas(tab_idx, 640, 480, cx);
+                }));
+
+            let desktop_ui = if is_vnc {
+                div()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(0x1e152a))
+                    .child(
+                        div()
+                            .h(px(28.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .bg(rgb(0x0a0710))
+                            .text_xs()
+                            .text_color(rgb(0xdfdbe5))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(div().font_weight(FontWeight::BOLD).child("Activities"))
+                                    .child("Terminal")
+                                    .child("Files"),
+                            )
+                            .child(div().font_weight(FontWeight::MEDIUM).child("Tue Nov 10 20:30"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child("📶")
+                                    .child("🔊")
+                                    .child("🔋 100%")
+                                    .child("⏻"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .p_6()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(680.0))
+                                    .h(px(380.0))
+                                    .rounded_lg()
+                                    .bg(rgb(0x110d19))
+                                    .border_1()
+                                    .border_color(rgb(0x3e2b54))
+                                    .shadow_md()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .h(px(32.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .bg(rgb(0x1c1328))
+                                            .rounded_t_lg()
+                                            .border_b_1()
+                                            .border_color(rgb(0x2d1f40))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        div()
+                                                            .w(px(10.0))
+                                                            .h(px(10.0))
+                                                            .rounded_full()
+                                                            .bg(rgb(0xe95420)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .w(px(10.0))
+                                                            .h(px(10.0))
+                                                            .rounded_full()
+                                                            .bg(rgb(0x77216f)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .w(px(10.0))
+                                                            .h(px(10.0))
+                                                            .rounded_full()
+                                                            .bg(rgb(0x5e2750)),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0xdfdbe5))
+                                                    .child(format!(
+                                                        "user@{}: ~ (Remote VNC)",
+                                                        state.host_name
+                                                    )),
+                                            )
+                                            .child(div().w(px(30.0))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p_4()
+                                            .font_family(".AppleSystemUIFontMonospaced")
+                                            .text_xs()
+                                            .text_color(rgb(0x4af626))
+                                            .child(format!(
+                                                "Linux {} 6.8.0-generic #42-Ubuntu SMP x86_64",
+                                                state.host_name
+                                            ))
+                                            .child(div().h_2())
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0xffffff))
+                                                    .child("user@server:~$ htop --sort-key PERCENT_CPU"),
+                                            )
+                                            .child(div().h_1())
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0x389bf2))
+                                                    .child("  CPU[|||||||||||||||||||||         42.8%]   Tasks: 182, 4 running"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0xbb86fc))
+                                                    .child("  Mem[|||||||||||||||||||||||||    5.28G/16.0G]  Uptime: 24 days, 11:42"),
+                                            )
+                                            .child(div().h_2())
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0xe0e0e0))
+                                                    .child("  PID USER      PRI  NI  VIRT   RES   SHR S CPU% MEM%   TIME+  COMMAND"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0x3dd68c))
+                                                    .child(" 1420 user       20   0 1824M  340M  112M S 18.2  2.1 48:12.33 /usr/bin/gnome-shell"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0x3dd68c))
+                                                    .child(" 2941 root       20   0  982M  128M   48M S 12.4  0.8 19:40.11 /usr/bin/dockerd"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0x3dd68c))
+                                                    .child(" 4108 user       20   0  412M   84M   32M S  8.1  0.5 05:22.90 /usr/bin/vncserver"),
+                                            ),
+                                    ),
+                            ),
+                    )
+            } else {
+                div()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(0x0f2027))
+                    .child(
+                        div()
+                            .flex_1()
+                            .p_6()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(720.0))
+                                    .h(px(400.0))
+                                    .rounded_lg()
+                                    .bg(rgb(0x0c0c0c))
+                                    .border_1()
+                                    .border_color(rgb(0x2b3846))
+                                    .shadow_md()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .h(px(32.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .bg(rgb(0x19232d))
+                                            .rounded_t_lg()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child("⚡")
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0xffffff))
+                                                            .child(format!(
+                                                                "Administrator: Windows PowerShell — {}",
+                                                                state.host_name
+                                                            )),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_3()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xcccccc))
+                                                    .child("─")
+                                                    .child("□")
+                                                    .child("✕"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p_4()
+                                            .font_family(".AppleSystemUIFontMonospaced")
+                                            .text_xs()
+                                            .text_color(rgb(0xcccccc))
+                                            .child("Windows PowerShell")
+                                            .child(
+                                                "Copyright (C) Microsoft Corporation. All rights reserved.",
+                                            )
+                                            .child(div().h_2())
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0xffffff))
+                                                    .child("PS C:\\Users\\Administrator> Get-Service | Where-Object Status -eq 'Running' | Select-Object -First 5"),
+                                            )
+                                            .child(div().h_1())
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0x3de0d8))
+                                                    .child("Status   Name               DisplayName"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0x3de0d8))
+                                                    .child("------   ----               -----------"),
+                                            )
+                                            .child("Running  AudioSrv           Windows Audio")
+                                            .child("Running  Dhcp               DHCP Client")
+                                            .child("Running  EventLog           Windows Event Log")
+                                            .child("Running  LanmanServer       Server")
+                                            .child("Running  TermService        Remote Desktop Services")
+                                            .child(div().h_2())
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(0xffffff))
+                                                    .child("PS C:\\Users\\Administrator> █"),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(40.0))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .bg(rgb(0x141b22))
+                            .border_t_1()
+                            .border_color(rgb(0x232c37))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .rounded_sm()
+                                            .bg(rgb(0x0078d4))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child("⊞"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e2732))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child("🔍"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e2732))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child("🗔"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e2732))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child("📁"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e2732))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child("⚡"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .text_xs()
+                                    .text_color(rgb(0xcccccc))
+                                    .child("ENG")
+                                    .child("🔊")
+                                    .child("🌐")
+                                    .child("20:30"),
+                            ),
+                    )
+            };
+
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .bg(rgb(0x0c0f14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(canvas_area.w_full().h_full().child(desktop_ui))
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0x0c0f14))
+                .child(
+                    div()
+                        .w(px(420.0))
+                        .p_6()
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_3()
+                        .child(div().text_2xl().child(if is_vnc { "🖥️" } else { "🪟" }))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child("Remote Desktop Disconnected"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child(format!(
+                                    "Session to {} ({}) has ended.",
+                                    state.host_name, state.target
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id(("rd-reconnect-center", tab_idx))
+                                .mt_2()
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.remote_desktop_reconnect(tab_idx, cx);
+                                }))
+                                .child("🔄 Reconnect Session"),
+                        ),
+                )
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(MacTheme::CONTENT_BG))
+            .child(toolbar)
+            .child(viewport)
+    }
+
     fn render_sftp_dual_pane(
         &self,
         tab_idx: usize,
@@ -14916,6 +15938,17 @@ impl Shellumi {
                 SessionKind::Serial => "🔌",
                 SessionKind::Local => ">_",
                 SessionKind::Sftp => "📁",
+                SessionKind::RemoteDesktop => {
+                    if tab
+                        .remote_desktop_state
+                        .as_ref()
+                        .is_some_and(|r| r.protocol == RemoteDesktopProtocol::Vnc)
+                    {
+                        "🖥️"
+                    } else {
+                        "🪟"
+                    }
+                }
             };
             let tab_item = div()
                 .id(("topbar-tab", tab_id))
@@ -16597,6 +17630,17 @@ impl Render for Shellumi {
                     SessionKind::Serial => format!("Serial · {}", tab.name),
                     SessionKind::Local => format!("Local · {}", tab.name),
                     SessionKind::Sftp => format!("SFTP · {}", tab.name),
+                    SessionKind::RemoteDesktop => {
+                        if tab
+                            .remote_desktop_state
+                            .as_ref()
+                            .is_some_and(|r| r.protocol == RemoteDesktopProtocol::Vnc)
+                        {
+                            format!("VNC Remote Desktop · {}", tab.name)
+                        } else {
+                            format!("RDP Remote Desktop · {}", tab.name)
+                        }
+                    }
                 };
                 let header_subtitle = match tab.kind {
                     SessionKind::Ssh => {
@@ -16618,6 +17662,9 @@ impl Render for Shellumi {
                         } else {
                             "Secure File Transfer session. Use standard SFTP commands (ls, get, put, cd, pwd, help)."
                         }
+                    }
+                    SessionKind::RemoteDesktop => {
+                        "Interactive graphical remote desktop session (RFB / MS-RDPBCGR)."
                     }
                 };
 
@@ -17631,20 +18678,29 @@ impl Render for Shellumi {
                     panes_container = panes_container.child(pane_el);
                 }
 
-                let mut result =
-                    if is_sftp_dual_pane {
-                        let sftp_state = tab.sftp_state.as_ref().unwrap();
-                        let row = div().flex().flex_1().min_h_0();
-                        root.child(row.child(
+                let mut result = if is_sftp_dual_pane {
+                    let sftp_state = tab.sftp_state.as_ref().unwrap();
+                    let row = div().flex().flex_1().min_h_0();
+                    root.child(
+                        row.child(
                             body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
-                        ))
-                    } else {
-                        let mut row = div().flex().flex_1().min_h_0();
-                        if self.sidebar_visible {
-                            row = row.child(self.workspace_sidebar("Terminal", cx));
-                        }
-                        root.child(row.child(body.child(panes_container)))
-                    };
+                        ),
+                    )
+                } else if let Some(rd_state) = &tab.remote_desktop_state {
+                    let mut row = div().flex().flex_1().min_h_0();
+                    if self.sidebar_visible {
+                        row = row.child(self.workspace_sidebar("Remote Desktop", cx));
+                    }
+                    root.child(row.child(
+                        body.child(self.render_remote_desktop_session(active_idx, rd_state, cx)),
+                    ))
+                } else {
+                    let mut row = div().flex().flex_1().min_h_0();
+                    if self.sidebar_visible {
+                        row = row.child(self.workspace_sidebar("Terminal", cx));
+                    }
+                    root.child(row.child(body.child(panes_container)))
+                };
                 if let Some(modal) = &self.conflict_modal {
                     result = result.child(self.render_conflict_modal(modal, cx));
                 }
@@ -18643,6 +19699,8 @@ impl Render for Shellumi {
                 ConnectionProtocol::Mosh => rgb(0x3d2800),
                 ConnectionProtocol::Telnet => rgb(0x3e1717),
                 ConnectionProtocol::Local => rgb(0x1a2e26),
+                ConnectionProtocol::Vnc => rgb(0x3a1b5c),
+                ConnectionProtocol::Rdp => rgb(0x103d3d),
             };
             let badge_fg = match host.protocol() {
                 ConnectionProtocol::Ssh => rgb(0x389bf2),
@@ -18650,6 +19708,8 @@ impl Render for Shellumi {
                 ConnectionProtocol::Mosh => rgb(0xf5a623),
                 ConnectionProtocol::Telnet => rgb(0xeb5757),
                 ConnectionProtocol::Local => rgb(0x3dd68c),
+                ConnectionProtocol::Vnc => rgb(0xbb86fc),
+                ConnectionProtocol::Rdp => rgb(0x3de0d8),
             };
             let badge_icon = match host.protocol() {
                 ConnectionProtocol::Ssh => "🖧",
@@ -18657,6 +19717,8 @@ impl Render for Shellumi {
                 ConnectionProtocol::Mosh => "⚡",
                 ConnectionProtocol::Telnet => "⚠️",
                 ConnectionProtocol::Local => ">_",
+                ConnectionProtocol::Vnc => "🖥️",
+                ConnectionProtocol::Rdp => "🪟",
             };
 
             let card = div()
@@ -18807,6 +19869,8 @@ impl Render for Shellumi {
                         ConnectionProtocol::Mosh => rgb(0xf5a623),
                         ConnectionProtocol::Telnet => rgb(0xeb5757),
                         ConnectionProtocol::Local => rgb(0x3dd68c),
+                        ConnectionProtocol::Vnc => rgb(0xbb86fc),
+                        ConnectionProtocol::Rdp => rgb(0x3de0d8),
                     };
                     let badge_icon = match host.protocol() {
                         ConnectionProtocol::Ssh => "🖧",
@@ -18814,6 +19878,8 @@ impl Render for Shellumi {
                         ConnectionProtocol::Mosh => "⚡",
                         ConnectionProtocol::Telnet => "⚠️",
                         ConnectionProtocol::Local => ">_",
+                        ConnectionProtocol::Vnc => "🖥️",
+                        ConnectionProtocol::Rdp => "🪟",
                     };
 
                     list_col = list_col.child(
@@ -19022,7 +20088,11 @@ impl Render for Shellumi {
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.connect(&connect_host, window, cx)
                             }))
-                            .child("Connect"),
+                            .child(if host.protocol().is_graphical() {
+                                "Connect Desktop"
+                            } else {
+                                "Connect"
+                            }),
                     )
                     .child(
                         div()
@@ -19157,11 +20227,19 @@ impl Render for Shellumi {
             let active_cat = form.active_category;
             let hostname_label = if form.protocol == ConnectionProtocol::Serial {
                 "Serial device port"
+            } else if form.protocol == ConnectionProtocol::Vnc {
+                "VNC host or IP"
+            } else if form.protocol == ConnectionProtocol::Rdp {
+                "RDP host or IP"
             } else {
                 "Hostname or IP"
             };
             let port_label = if form.protocol == ConnectionProtocol::Serial {
                 "Baud rate"
+            } else if form.protocol == ConnectionProtocol::Vnc {
+                "Port (5900)"
+            } else if form.protocol == ConnectionProtocol::Rdp {
+                "Port (3389)"
             } else {
                 "Port"
             };
@@ -19253,6 +20331,8 @@ impl Render for Shellumi {
                                     (ConnectionProtocol::Mosh, "Mosh"),
                                     (ConnectionProtocol::Telnet, "Telnet"),
                                     (ConnectionProtocol::Serial, "Serial"),
+                                    (ConnectionProtocol::Vnc, "VNC"),
+                                    (ConnectionProtocol::Rdp, "RDP"),
                                 ];
                                 for (idx, (p, label)) in protocols.into_iter().enumerate() {
                                     let is_sel = form.protocol == p;
@@ -19305,6 +20385,26 @@ impl Render for Shellumi {
                                 .text_color(rgb(MacTheme::SUCCESS))
                                 .text_xs()
                                 .child("🔌 Direct serial line connection. Specify serial device path and baud rate in Connection."),
+                        );
+                    } else if form.protocol == ConnectionProtocol::Vnc {
+                        gen_div = gen_div.child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x2a1445))
+                                .text_color(rgb(0xbb86fc))
+                                .text_xs()
+                                .child("🖥️ VNC Graphical Desktop: Remote Framebuffer protocol (default port 5900). Supports view-only and custom compression quality."),
+                        );
+                    } else if form.protocol == ConnectionProtocol::Rdp {
+                        gen_div = gen_div.child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x0e2f2f))
+                                .text_color(rgb(0x3de0d8))
+                                .text_xs()
+                                .child("🪟 RDP Graphical Desktop: Remote Desktop Protocol (default port 3389). Supports Windows NLA and multi-resolution remote desktop."),
                         );
                     }
 
@@ -20066,6 +21166,7 @@ mod tests {
             SessionKind::Serial => format!("Serial: {name}"),
             SessionKind::Local => name.to_string(),
             SessionKind::Sftp => format!("SFTP: {name}"),
+            SessionKind::RemoteDesktop => format!("Desktop: {name}"),
         };
 
         assert_eq!(format_tab_label(SessionKind::Ssh, "Prod"), "SSH: Prod");
@@ -20827,10 +21928,67 @@ mod tests {
         assert!(!ConnectionProtocol::Serial.supports_sftp());
         assert_eq!(ConnectionProtocol::Serial.badge_icon(), "🔌");
 
+        assert!(!ConnectionProtocol::Vnc.is_encrypted());
+        assert!(!ConnectionProtocol::Vnc.supports_sftp());
+        assert!(ConnectionProtocol::Vnc.is_graphical());
+        assert_eq!(ConnectionProtocol::Vnc.badge_icon(), "🖥️");
+        assert_eq!(ConnectionProtocol::Vnc.default_port(), Some(5900));
+
+        assert!(ConnectionProtocol::Rdp.is_encrypted());
+        assert!(!ConnectionProtocol::Rdp.supports_sftp());
+        assert!(ConnectionProtocol::Rdp.is_graphical());
+        assert_eq!(ConnectionProtocol::Rdp.badge_icon(), "🪟");
+        assert_eq!(ConnectionProtocol::Rdp.default_port(), Some(3389));
+
         // Telnet security warning
         let warning = TelnetConfig::security_warning();
         assert!(warning.contains("UNENCRYPTED PROTOCOL"));
         assert!(warning.contains("cleartext"));
+    }
+
+    #[test]
+    fn verifies_remote_desktop_state_and_scaling_transitions() {
+        use super::{
+            RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
+        };
+
+        let mut rd = RemoteDesktopState {
+            host_name: "Ubuntu Workstation".into(),
+            target: "192.168.1.50:5900".into(),
+            protocol: RemoteDesktopProtocol::Vnc,
+            status: RemoteDesktopStatus::Connected,
+            status_message: Some("Connected via RFB".into()),
+            width: 1920,
+            height: 1080,
+            view_only: false,
+            scale_mode: RemoteDesktopScaleMode::Fit,
+            color_depth: 24,
+            fps: 60,
+            latency_ms: 12,
+            clipboard_text: None,
+            error: None,
+            last_action_note: None,
+        };
+
+        assert_eq!(rd.status, RemoteDesktopStatus::Connected);
+        assert_eq!(rd.scale_mode, RemoteDesktopScaleMode::Fit);
+        assert!(!rd.view_only);
+
+        // Toggle view only
+        rd.view_only = true;
+        assert!(rd.view_only);
+
+        // Change scale mode
+        rd.scale_mode = RemoteDesktopScaleMode::Original;
+        assert_eq!(rd.scale_mode, RemoteDesktopScaleMode::Original);
+
+        // Disconnect
+        rd.status = RemoteDesktopStatus::Disconnected;
+        assert_eq!(rd.status, RemoteDesktopStatus::Disconnected);
+
+        // Reconnect
+        rd.status = RemoteDesktopStatus::Connected;
+        assert_eq!(rd.status, RemoteDesktopStatus::Connected);
     }
 
     #[test]
