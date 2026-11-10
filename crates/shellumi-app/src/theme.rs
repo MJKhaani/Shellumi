@@ -7,7 +7,7 @@ use gpui::{div, px, rgb, Div, FontWeight, IntoElement, ParentElement, Rgba, Shar
 pub struct MacTheme;
 
 impl MacTheme {
-    // Window & layout canvases
+    // Window & layout canvases (gpui_macos_dark_gallery neutral graphite palette)
     pub const WINDOW_BG: u32 = 0x1c1c1e;
     pub const CONTENT_BG: u32 = 0x18181a;
     pub const SIDEBAR_BG: u32 = 0x252528;

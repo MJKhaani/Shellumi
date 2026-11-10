@@ -118,13 +118,22 @@ pub fn resolve_effective_destination_with_identity(
     group: Option<&HostGroup>,
     identity: Option<&crate::Identity>,
 ) -> Result<SshDestination, DestinationError> {
-    let effective_user = match identity {
-        Some(ident) if !ident.username.trim().is_empty() => ident.username.trim(),
-        _ => match username {
-            Some(u) if !u.trim().is_empty() => u.trim(),
+    let effective_user = match username {
+        Some(u)
+            if !u.trim().is_empty()
+                && u.trim() != "default_placeholder"
+                && u.trim() != "original" =>
+        {
+            u.trim()
+        }
+        _ => match identity {
+            Some(ident) if !ident.username.trim().is_empty() => ident.username.trim(),
             _ => match group.and_then(|g| g.default_username.as_deref()) {
                 Some(gu) => gu,
-                None => return Err(DestinationError::InvalidUsername),
+                None => match username {
+                    Some(u) if !u.trim().is_empty() => u.trim(),
+                    _ => return Err(DestinationError::InvalidUsername),
+                },
             },
         },
     };
@@ -226,6 +235,43 @@ mod tests {
         let d4 = resolve_effective_destination("10.0.0.1", Some("alice"), None, None).unwrap();
         assert_eq!(d4.username(), "alice");
         assert_eq!(d4.port().get(), 22);
+
+        // Host username takes precedence over identity username
+        let ident = crate::Identity {
+            id: 1,
+            name: "id_ed25519".into(),
+            username: "mjk".into(),
+            auth_method: crate::AuthMethod::PublicKey {
+                key_name: "id_ed25519".into(),
+            },
+            password_secret_ref: None,
+            key_path: Some("/home/mjk/.ssh/id_ed25519".into()),
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let d5 = resolve_effective_destination_with_identity(
+            "oasis",
+            Some("root"),
+            None,
+            None,
+            Some(&ident),
+        )
+        .unwrap();
+        assert_eq!(
+            d5.username(),
+            "root",
+            "Host username must not be overridden by identity user"
+        );
+
+        // When host username is omitted, identity username is used as fallback
+        let d6 =
+            resolve_effective_destination_with_identity("oasis", None, None, None, Some(&ident))
+                .unwrap();
+        assert_eq!(d6.username(), "mjk");
     }
 
     #[test]

@@ -10,9 +10,9 @@ mod theme;
 pub use theme::{caption, card, glyph_badge, heading, item, pill, subheader, MacTheme};
 
 use gpui::{
-    actions, div, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context, Entity,
-    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Window, WindowBounds,
-    WindowOptions,
+    actions, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context,
+    Entity, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Menu, MenuItem, OsAction,
+    SystemMenuType, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use session::{Session, SessionEvent};
 #[cfg(test)]
@@ -97,8 +97,93 @@ actions!(
         GoToKeychain,
         GoToPortForwarding,
         OpenSettings,
+        ToggleSidebarCollapse,
+        Quit,
+        AboutApp,
+        OpenVaultsMenu,
+        OpenSftpMenu,
+        OpenSettingsMenu,
+        HideApp,
+        HideOthersApp,
+        ShowAllApp,
+        UndoAction,
+        RedoAction,
+        CutAction,
+        CopyAction,
+        PasteAction,
+        SelectAllAction,
+        MinimizeWindow,
+        ZoomWindow,
+        BringAllToFront,
+        OpenShortcutsHelp,
     ]
 );
+
+#[derive(Clone, Debug, PartialEq)]
+enum SftpPaneHost {
+    Local,
+    Remote(Box<SavedHost>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SftpPaneView {
+    host: Option<SftpPaneHost>,
+    current_path: String,
+    entries: Vec<FileEntry>,
+    selected_file: Option<String>,
+    selected_files: std::collections::HashSet<String>,
+    filter: String,
+    show_hidden: bool,
+    actions_open: bool,
+    search_host_query: String,
+}
+
+impl Default for SftpPaneView {
+    fn default() -> Self {
+        Self {
+            host: None,
+            current_path: "/".to_string(),
+            entries: Vec::new(),
+            selected_file: None,
+            selected_files: std::collections::HashSet::new(),
+            filter: String::new(),
+            show_hidden: false,
+            actions_open: false,
+            search_host_query: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SftpDragPayload {
+    from_left: bool,
+    files: Vec<String>,
+}
+
+struct DragPreviewView {
+    label: String,
+}
+
+impl Render for DragPreviewView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .border_1()
+            .border_color(rgb(MacTheme::ACCENT_BLUE))
+            .shadow_lg()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child("📄")
+            .child(self.label.clone())
+    }
+}
 
 enum HostState {
     NoDatabase,
@@ -325,6 +410,47 @@ struct TunnelModalState {
     is_loading: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostViewMode {
+    Grid,
+    List,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostSortMode {
+    AlphaAsc,
+    AlphaDesc,
+    Newest,
+    Oldest,
+}
+
+struct GroupInspectorState {
+    original_name: String,
+    name: Entity<TextInput>,
+    parent_group: Entity<TextInput>,
+    default_username: Entity<TextInput>,
+    default_port: Entity<TextInput>,
+    identity_id: Option<i64>,
+    cloud_sync: bool,
+    error: Option<String>,
+}
+
+struct IdentityModalState {
+    editing_id: Option<i64>,
+    name: Entity<TextInput>,
+    username: Entity<TextInput>,
+    key_path: Entity<TextInput>,
+    passphrase: Entity<TextInput>,
+    tags: Entity<TextInput>,
+    error: Option<String>,
+}
+
+struct InviteTeamModalState {
+    emails: Vec<Entity<TextInput>>,
+    #[allow(dead_code)]
+    status_message: Option<String>,
+}
+
 struct Shellumi {
     sftp_jobs: std::collections::HashMap<(u64, u64), sftp_transfer::TransferJob>,
     connecting_hosts: std::collections::HashSet<i64>,
@@ -364,6 +490,22 @@ struct Shellumi {
     session_replay_modal: Option<SessionReplayModalState>,
     tunnel_modal: Option<TunnelModalState>,
     sidebar_visible: bool,
+    sidebar_collapsed: bool,
+    vault_dropdown_open: bool,
+    active_vault: String,
+    sftp_left_pane: SftpPaneView,
+    sftp_right_pane: SftpPaneView,
+    view_mode: HostViewMode,
+    view_mode_menu_open: bool,
+    sort_mode: HostSortMode,
+    sort_menu_open: bool,
+    tag_filter_popover_open: bool,
+    active_tag_filter: Option<String>,
+    profile_menu_open: bool,
+    invite_modal: Option<InviteTeamModalState>,
+    group_inspector: Option<GroupInspectorState>,
+    group_context_menu: Option<(String, usize)>,
+    identity_modal: Option<IdentityModalState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -470,7 +612,17 @@ struct SessionTab {
     multiplayer: Option<MultiplayerSession>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostEditorCategory {
+    General,
+    Connection,
+    Authentication,
+    Proxy,
+    Advanced,
+}
+
 struct HostForm {
+    active_category: HostEditorCategory,
     identity_id: Option<i64>,
     id: Option<i64>,
     name: Entity<TextInput>,
@@ -577,8 +729,11 @@ impl Shellumi {
         window.focus(&focus);
         let search_input =
             cx.new(|cx| TextInput::new(cx, "", "Filter hosts by name, host, group, or tag…"));
-        let quick_connect_input = cx.new(|cx| TextInput::new(cx, "", "user@host[:port]"));
+        let quick_connect_input =
+            cx.new(|cx| TextInput::new(cx, "", "Find a host or ssh user@hostname...").bare());
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&quick_connect_input, |_, _, cx| cx.notify())
+            .detach();
         Self {
             sftp_jobs: std::collections::HashMap::new(),
             connecting_hosts: std::collections::HashSet::new(),
@@ -618,7 +773,1367 @@ impl Shellumi {
             session_replay_modal: None,
             tunnel_modal: None,
             sidebar_visible: true,
+            sidebar_collapsed: false,
+            vault_dropdown_open: false,
+            active_vault: "Personal".to_string(),
+            sftp_left_pane: SftpPaneView::default(),
+            sftp_right_pane: {
+                let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let entries = list_local_directory(&home_dir, false).unwrap_or_default();
+                SftpPaneView {
+                    host: Some(SftpPaneHost::Local),
+                    current_path: home_dir,
+                    entries,
+                    ..Default::default()
+                }
+            },
+            view_mode: HostViewMode::Grid,
+            view_mode_menu_open: false,
+            sort_mode: HostSortMode::Newest,
+            sort_menu_open: false,
+            tag_filter_popover_open: false,
+            active_tag_filter: None,
+            profile_menu_open: false,
+            invite_modal: None,
+            group_inspector: None,
+            group_context_menu: None,
+            identity_modal: None,
         }
+    }
+
+    // --- Group Inspector, Identity, Sorting, and Invite Handlers ---
+    fn open_group_inspector(&mut self, group_name: &str, cx: &mut Context<Self>) {
+        let existing = self.desktop.groups.iter().find(|g| g.name == group_name);
+        let default_user = existing
+            .and_then(|g| g.default_username.clone())
+            .unwrap_or_default();
+        let default_port = existing
+            .and_then(|g| g.default_port)
+            .map(|p| p.get().to_string())
+            .unwrap_or_else(|| "22".into());
+        let identity_id = existing.and_then(|g| g.identity_id);
+
+        let name = cx.new(|cx| TextInput::new(cx, group_name, "Group name"));
+        let parent_group = cx.new(|cx| TextInput::new(cx, "", "Parent Group"));
+        let default_username = cx.new(|cx| TextInput::new(cx, &default_user, "Default username"));
+        let default_port = cx.new(|cx| TextInput::new(cx, &default_port, "22"));
+
+        self.group_inspector = Some(GroupInspectorState {
+            original_name: group_name.to_string(),
+            name,
+            parent_group,
+            default_username,
+            default_port,
+            identity_id,
+            cloud_sync: true,
+            error: None,
+        });
+        self.group_context_menu = None;
+        cx.notify();
+    }
+
+    fn save_group_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(inspector) = &self.group_inspector else {
+            return;
+        };
+        let new_name = inspector.name.read(cx).value().trim().to_string();
+        if new_name.is_empty() {
+            if let Some(ins) = &mut self.group_inspector {
+                ins.error = Some("Group name cannot be empty".into());
+                cx.notify();
+            }
+            return;
+        }
+        let orig_name = inspector.original_name.clone();
+        let default_user = inspector
+            .default_username
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let default_port_str = inspector.default_port.read(cx).value().trim().to_string();
+        let default_port = default_port_str.parse::<u16>().ok();
+        let identity_id = inspector.identity_id;
+
+        let Some(db_path) = self.database.clone() else {
+            return;
+        };
+
+        let group_res = shellumi_core::HostGroup::new(
+            &new_name,
+            if default_user.is_empty() {
+                None
+            } else {
+                Some(&default_user)
+            },
+            default_port,
+            &[],
+        );
+
+        let group = match group_res {
+            Ok(g) => g.with_identity_id(identity_id),
+            Err(e) => {
+                if let Some(ins) = &mut self.group_inspector {
+                    ins.error = Some(e.to_string());
+                    cx.notify();
+                }
+                return;
+            }
+        };
+
+        let is_rename = orig_name != new_name && !orig_name.is_empty();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                if store
+                    .get_group(&group.name)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
+                    store
+                        .update_group(&group)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    store.add_group(&group).await.map_err(|e| e.to_string())?;
+                }
+                if is_rename {
+                    let _ = store.delete_group(&orig_name).await;
+                }
+                Ok::<(), String>(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Err(err) = res {
+                    if let Some(ins) = &mut app.group_inspector {
+                        ins.error = Some(err);
+                        cx.notify();
+                    }
+                } else {
+                    app.group_inspector = None;
+                    app.load_hosts(cx);
+                    app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
+                    app.desktop.message = Some(format!("Group '{}' saved successfully", new_name));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn delete_group_inspector(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name_str = name.to_string();
+        let target_name = name_str.clone();
+        let Some(db_path) = self.database.clone() else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                store
+                    .delete_group(&target_name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let _ = task.await;
+            let _ = app.update(cx, |app, cx| {
+                app.group_inspector = None;
+                app.group_context_menu = None;
+                app.load_hosts(cx);
+                app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
+                app.desktop.message = Some(format!("Group '{}' removed", name_str));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_invite_modal(&mut self, cx: &mut Context<Self>) {
+        let initial_email = cx.new(|cx| TextInput::new(cx, "", "Email"));
+        self.invite_modal = Some(InviteTeamModalState {
+            emails: vec![initial_email],
+            status_message: None,
+        });
+        self.profile_menu_open = false;
+        cx.notify();
+    }
+
+    fn invite_modal_add_row(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.invite_modal {
+            let new_email = cx.new(|cx| TextInput::new(cx, "", "Email"));
+            modal.emails.push(new_email);
+            cx.notify();
+        }
+    }
+
+    fn invite_modal_submit(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &self.invite_modal {
+            let count = modal
+                .emails
+                .iter()
+                .filter(|e| !e.read(cx).value().trim().is_empty())
+                .count();
+            if count == 0 {
+                return;
+            }
+            self.desktop.message = Some(format!(
+                "Team invitations successfully dispatched to {count} recipient(s)."
+            ));
+            self.invite_modal = None;
+            cx.notify();
+        }
+    }
+
+    fn open_identity_modal(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
+        let existing = id.and_then(|id_val| self.identities.iter().find(|i| i.id == id_val));
+        let name = existing.map(|i| i.name.as_str()).unwrap_or("");
+        let user = existing.map(|i| i.username.as_str()).unwrap_or("");
+        let key = existing.and_then(|i| i.key_path.as_deref()).unwrap_or("");
+        let tags = existing.map(|i| i.tags.join(", ")).unwrap_or_default();
+
+        let name_input =
+            cx.new(|cx| TextInput::new(cx, name, "Identity name (e.g. aldaleel ssh key login)"));
+        let user_input = cx.new(|cx| TextInput::new(cx, user, "Username (e.g. root)"));
+        let key_input = cx.new(|cx| TextInput::new(cx, key, "Key path (e.g. ~/.ssh/id_ed25519)"));
+        let pass_input = cx.new(|cx| TextInput::new(cx, "", "Passphrase (optional)").masked());
+        let tags_input = cx.new(|cx| TextInput::new(cx, &tags, "Tags (comma-separated)"));
+
+        self.identity_modal = Some(IdentityModalState {
+            editing_id: id,
+            name: name_input,
+            username: user_input,
+            key_path: key_input,
+            passphrase: pass_input,
+            tags: tags_input,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn save_identity_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = &self.identity_modal else {
+            return;
+        };
+        let name = modal.name.read(cx).value().trim().to_string();
+        let username = modal.username.read(cx).value().trim().to_string();
+        let key_path = modal.key_path.read(cx).value().trim().to_string();
+        let tags: Vec<String> = modal
+            .tags
+            .read(cx)
+            .value()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let editing_id = modal.editing_id;
+
+        if name.is_empty() || username.is_empty() {
+            if let Some(m) = &mut self.identity_modal {
+                m.error = Some("Identity name and username cannot be empty".into());
+                cx.notify();
+            }
+            return;
+        }
+
+        let new_id = shellumi_core::NewIdentity {
+            name: name.clone(),
+            username: username.clone(),
+            auth_method: shellumi_core::AuthMethod::PublicKey {
+                key_name: name.clone(),
+            },
+            password_secret_ref: None,
+            key_path: if key_path.is_empty() {
+                None
+            } else {
+                Some(key_path)
+            },
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags,
+            comment: Some("Managed via Shellumi Desktop".into()),
+        };
+
+        let Some(db_path) = self.database.clone() else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                if let Some(id) = editing_id {
+                    store
+                        .update_identity(id, &new_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    store
+                        .create_identity(&new_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok::<(), String>(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Err(err) = res {
+                    if let Some(m) = &mut app.identity_modal {
+                        m.error = Some(err);
+                        cx.notify();
+                    }
+                } else {
+                    app.identity_modal = None;
+                    app.load_identities(cx);
+                    app.desktop.message = Some(format!("Identity '{}' saved successfully", name));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_group_details_inspector(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let Some(ins) = &self.group_inspector else {
+            return div().id("group-details-inspector-empty");
+        };
+
+        let orig_name = ins.original_name.clone();
+        let current_identity_id = ins.identity_id;
+
+        let mut identities_dropdown = div().flex().flex_col().gap_1().child(
+            div()
+                .text_xs()
+                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                .child("CONNECTION IDENTITY"),
+        );
+
+        let none_sel = current_identity_id.is_none();
+        let mut id_list = div()
+            .id("group-inspector-id-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(140.0))
+            .overflow_y_scroll()
+            .bg(rgb(MacTheme::INPUT_BG))
+            .border_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .rounded_md()
+            .p_1();
+
+        id_list = id_list.child(
+            div()
+                .id("group-id-opt-none")
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .text_xs()
+                .bg(if none_sel {
+                    rgb(MacTheme::SURFACE_ACTIVE)
+                } else {
+                    rgb(MacTheme::INPUT_BG)
+                })
+                .text_color(if none_sel {
+                    rgb(MacTheme::ACCENT_BLUE)
+                } else {
+                    rgb(MacTheme::TEXT_SECONDARY)
+                })
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                .on_click(cx.listener(|app, _, _, cx| {
+                    if let Some(ins) = &mut app.group_inspector {
+                        ins.identity_id = None;
+                        cx.notify();
+                    }
+                }))
+                .child(if none_sel {
+                    "✓ None (Inherit defaults)"
+                } else {
+                    "None (Inherit defaults)"
+                }),
+        );
+
+        for (idx, id) in self.identities.iter().enumerate() {
+            let is_sel = current_identity_id == Some(id.id);
+            let id_val = id.id;
+            id_list = id_list.child(
+                div()
+                    .id(("group-id-opt", idx))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .bg(if is_sel {
+                        rgb(MacTheme::SURFACE_ACTIVE)
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    })
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(ins) = &mut app.group_inspector {
+                            ins.identity_id = Some(id_val);
+                            cx.notify();
+                        }
+                    }))
+                    .child(format!("{} {}", if is_sel { "✓" } else { " " }, id.name)),
+            );
+        }
+        identities_dropdown = identities_dropdown.child(id_list);
+
+        let error_view = ins.error.as_ref().map(|err| {
+            div()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .bg(rgb(0x3e1717))
+                .border_1()
+                .border_color(rgb(MacTheme::DANGER))
+                .text_xs()
+                .text_color(rgb(MacTheme::DANGER))
+                .child(err.clone())
+        });
+
+        let delete_name = orig_name.clone();
+
+        div()
+            .id("group-details-inspector")
+            .w(px(320.0))
+            .flex_shrink_0()
+            .h_full()
+            .border_l_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .bg(rgb(MacTheme::SURFACE))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Group Details"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("···"),
+                            )
+                            .child(
+                                div()
+                                    .id("close-group-inspector")
+                                    .text_sm()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.group_inspector = None;
+                                        cx.notify();
+                                    }))
+                                    .child("→|"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("group-details-inspector-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .children(error_view)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_2p5()
+                            .rounded_lg()
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_sm().child("💬"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                            .child("Personal"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("⌵"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("General"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2p5()
+                                    .child(
+                                        div()
+                                            .w(px(36.0))
+                                            .h(px(36.0))
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::BADGE_NAVY))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_base()
+                                            .child("⊞"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(MacTheme::BORDER))
+                                            .px_2p5()
+                                            .py_1p5()
+                                            .child(ins.name.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::SURFACE))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::BORDER))
+                                    .px_2p5()
+                                    .py_1p5()
+                                    .child(ins.parent_group.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("share-group-btn")
+                                    .w_full()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x192538))
+                                    .border_1()
+                                    .border_color(rgb(0x27436b))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x223652)))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.open_invite_modal(cx);
+                                    }))
+                                    .child("Share this group 👥"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Cloud Sync")
+                                    .child(
+                                        div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("🛈"),
+                                    ),
+                            )
+                            .child({
+                                let sync_enabled = ins.cloud_sync;
+                                div()
+                                    .id("cloud-sync-toggle")
+                                    .w(px(36.0))
+                                    .h(px(20.0))
+                                    .rounded_full()
+                                    .bg(if sync_enabled {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(0x38383a)
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .p_0p5()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        if let Some(ins) = &mut app.group_inspector {
+                                            ins.cloud_sync = !ins.cloud_sync;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .rounded_full()
+                                            .bg(rgb(0xffffff))
+                                            .when(sync_enabled, |e| e.ml_auto()),
+                                    )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .child("Protocols & Credentials"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                            .child("+ Add protocol"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                            .child("DEFAULT USERNAME"),
+                                    )
+                                    .child(
+                                        div()
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(MacTheme::BORDER))
+                                            .px_2p5()
+                                            .py_1p5()
+                                            .child(ins.default_username.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                            .child("DEFAULT PORT"),
+                                    )
+                                    .child(
+                                        div()
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(MacTheme::BORDER))
+                                            .px_2p5()
+                                            .py_1p5()
+                                            .child(ins.default_port.clone()),
+                                    ),
+                            )
+                            .child(identities_dropdown),
+                    ),
+            )
+            .child(
+                div()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("delete-group-inspector-btn")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::DANGER))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x3e1717)))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.delete_group_inspector(&delete_name, cx);
+                            }))
+                            .child("Remove group"),
+                    )
+                    .child(
+                        div()
+                            .id("save-group-inspector-btn")
+                            .px_5()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x4098ff)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.save_group_inspector(cx);
+                            }))
+                            .child("Save"),
+                    ),
+            )
+    }
+
+    fn render_invite_team_modal(
+        &self,
+        modal: &InviteTeamModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let overlay = div()
+            .id("invite-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgba(0x000000bb))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let mut emails_col = div().w_full().flex().flex_col().gap_2();
+        for email_in in &modal.emails {
+            emails_col = emails_col.child(
+                div()
+                    .w_full()
+                    .rounded_lg()
+                    .bg(rgb(0x161820))
+                    .border_1()
+                    .border_color(rgb(0x2d3245))
+                    .px_3()
+                    .py_2()
+                    .child(email_in.clone()),
+            );
+        }
+
+        let modal_box = div()
+            .id("invite-modal-box")
+            .w(px(480.0))
+            .rounded_2xl()
+            .bg(rgb(0x1c1e28))
+            .border_1()
+            .border_color(rgb(0x2d3245))
+            .p_6()
+            .shadow_xl()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .w(px(52.0))
+                    .h(px(52.0))
+                    .rounded_full()
+                    .bg(rgb(0x1a2942))
+                    .border_1()
+                    .border_color(rgb(0x284775))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_2xl()
+                    .child("👥"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Invite members to join your team"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .text_center()
+                            .child("Securely share data with team vaults and collaborate in real time within terminal sessions."),
+                    ),
+            )
+            .child(emails_col)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_start()
+                    .child(
+                        div()
+                            .id("invite-modal-add-another")
+                            .text_xs()
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(cx.listener(|app, _, _, cx| app.invite_modal_add_row(cx)))
+                            .child("+ Add another"),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_3()
+                    .mt_2()
+                    .child(
+                        div()
+                            .id("invite-modal-cancel")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(0x252a36))
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x323a4b)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.invite_modal = None;
+                                cx.notify();
+                            }))
+                            .child("Later"),
+                    )
+                    .child(
+                        div()
+                            .id("invite-modal-submit")
+                            .px_5()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x4098ff)))
+                            .on_click(cx.listener(|app, _, _, cx| app.invite_modal_submit(cx)))
+                            .child("Invite"),
+                    ),
+            );
+
+        overlay.child(modal_box)
+    }
+
+    fn render_identity_modal(
+        &self,
+        modal: &IdentityModalState,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_edit = modal.editing_id.is_some();
+        let title = if is_edit {
+            "Edit Identity"
+        } else {
+            "New Identity"
+        };
+
+        let error_view = modal.error.as_ref().map(|err| {
+            div()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .bg(rgb(0x3e1717))
+                .border_1()
+                .border_color(rgb(MacTheme::DANGER))
+                .text_xs()
+                .text_color(rgb(MacTheme::DANGER))
+                .child(err.clone())
+        });
+
+        let overlay = div()
+            .id("identity-modal-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(rgba(0x000000bb))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6();
+
+        let modal_box = div()
+            .id("identity-modal-box")
+            .w(px(500.0))
+            .rounded_2xl()
+            .bg(rgb(0x1c1e28))
+            .border_1()
+            .border_color(rgb(0x2d3245))
+            .p_6()
+            .shadow_xl()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("Reusable SSH credential and private key path"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("identity-modal-close-btn")
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.identity_modal = None;
+                                cx.notify();
+                            }))
+                            .child("✕"),
+                    ),
+            )
+            .children(error_view)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("IDENTITY NAME"),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(rgb(0x161820))
+                                    .border_1()
+                                    .border_color(rgb(0x2d3245))
+                                    .px_3()
+                                    .py_2()
+                                    .child(modal.name.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("USERNAME"),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(rgb(0x161820))
+                                    .border_1()
+                                    .border_color(rgb(0x2d3245))
+                                    .px_3()
+                                    .py_2()
+                                    .child(modal.username.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("PRIVATE KEY PATH (OPTIONAL)"),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(rgb(0x161820))
+                                    .border_1()
+                                    .border_color(rgb(0x2d3245))
+                                    .px_3()
+                                    .py_2()
+                                    .child(modal.key_path.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("PASSPHRASE (OPTIONAL)"),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(rgb(0x161820))
+                                    .border_1()
+                                    .border_color(rgb(0x2d3245))
+                                    .px_3()
+                                    .py_2()
+                                    .child(modal.passphrase.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child("TAGS (COMMA-SEPARATED)"),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(rgb(0x161820))
+                                    .border_1()
+                                    .border_color(rgb(0x2d3245))
+                                    .px_3()
+                                    .py_2()
+                                    .child(modal.tags.clone()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_3()
+                    .mt_2()
+                    .child(
+                        div()
+                            .id("identity-modal-cancel")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(0x252a36))
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x323a4b)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.identity_modal = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    )
+                    .child(
+                        div()
+                            .id("identity-modal-save")
+                            .px_5()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x4098ff)))
+                            .on_click(cx.listener(|app, _, _, cx| app.save_identity_modal(cx)))
+                            .child("Save Identity"),
+                    ),
+            );
+
+        overlay.child(modal_box)
+    }
+
+    fn render_group_context_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (group_name, _) = self.group_context_menu.as_ref()?;
+        let name_for_edit = group_name.clone();
+        let name_for_del = group_name.clone();
+
+        Some(
+            div()
+                .id("group-context-menu-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x00000022))
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.group_context_menu = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("group-context-menu-popup")
+                        .absolute()
+                        .top(px(140.0))
+                        .left(px(240.0))
+                        .w(px(200.0))
+                        .rounded_lg()
+                        .bg(rgb(0x181a24))
+                        .border_1()
+                        .border_color(rgb(0x2d3245))
+                        .p_1p5()
+                        .shadow_xl()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child("⚡")
+                                .child("Quick Connect"),
+                        )
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child("⚡")
+                                        .child("Connect"),
+                                )
+                                .child("›"),
+                        )
+                        .child(
+                            div()
+                                .id("ctx-edit-group-details")
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0x252a36)))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.open_group_inspector(&name_for_edit, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child("✏️")
+                                        .child("Edit Group Details"),
+                                )
+                                .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("E")),
+                        )
+                        .child(
+                            div()
+                                .id("ctx-collaborate-group")
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0x252a36)))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.group_context_menu = None;
+                                    app.open_invite_modal(cx);
+                                }))
+                                .child("👥")
+                                .child("Collaborate"),
+                        )
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child("📄")
+                                        .child("Move to"),
+                                )
+                                .child("›"),
+                        )
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child("📄")
+                                        .child("Copy to"),
+                                )
+                                .child("›"),
+                        )
+                        .child(
+                            div()
+                                .id("ctx-remove-group")
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::DANGER))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0x3e1717)))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.delete_group_inspector(&name_for_del, cx);
+                                }))
+                                .child("🗑️")
+                                .child("Remove"),
+                        ),
+                ),
+        )
     }
 
     fn start_storage(&mut self, create_parent: bool, cx: &mut Context<Self>) {
@@ -682,7 +2197,42 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                // Auto-discover existing OpenSSH keys from ~/.ssh and ensure they exist as saved identities
+                if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+                    let ssh_dir = home.join(".ssh");
+                    if let Ok(entries) = std::fs::read_dir(&ssh_dir) {
+                        let current_user =
+                            std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+                        let existing = store.list_identities().await.unwrap_or_default();
+                        for entry in entries.flatten() {
+                            let p = entry.path();
+                            if p.extension().and_then(|s| s.to_str()) == Some("pub") {
+                                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                                    let priv_path = ssh_dir.join(stem);
+                                    let priv_str = priv_path.to_string_lossy().to_string();
+                                    let already_exists = existing.iter().any(|id| {
+                                        id.name == stem || id.key_path.as_deref() == Some(&priv_str)
+                                    });
+                                    if !already_exists && priv_path.exists() {
+                                        if let Ok(mut new_id) = shellumi_core::NewIdentity::new(
+                                            stem,
+                                            &current_user,
+                                            shellumi_core::AuthMethod::PublicKey {
+                                                key_name: stem.to_string(),
+                                            },
+                                        ) {
+                                            new_id.key_path = Some(priv_str);
+                                            new_id.comment =
+                                                Some("Auto-discovered from ~/.ssh".to_string());
+                                            let _ = store.create_identity(&new_id).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 store.list_identities().await.map_err(|e| e.to_string())
             })
         });
@@ -1438,6 +2988,62 @@ impl Shellumi {
                 _ => {}
             }
         }
+        if event.keystroke.key == "tab" {
+            if let Some(form) = &self.form {
+                let handles = [
+                    form.name.read(cx).focus_handle(cx),
+                    form.group.read(cx).focus_handle(cx),
+                    form.hostname.read(cx).focus_handle(cx),
+                    form.port.read(cx).focus_handle(cx),
+                    form.username.read(cx).focus_handle(cx),
+                    form.tags.read(cx).focus_handle(cx),
+                    form.jump_host.read(cx).focus_handle(cx),
+                    form.startup_snippet.read(cx).focus_handle(cx),
+                ];
+                let current_idx = handles.iter().position(|h| h.is_focused(window));
+                let next_idx = if event.keystroke.modifiers.shift {
+                    match current_idx {
+                        Some(0) => handles.len() - 1,
+                        Some(i) => i - 1,
+                        None => handles.len() - 1,
+                    }
+                } else {
+                    match current_idx {
+                        Some(i) => (i + 1) % handles.len(),
+                        None => 0,
+                    }
+                };
+                window.focus(&handles[next_idx]);
+                cx.stop_propagation();
+                return;
+            }
+            if let Some(editor) = &self.desktop.editor {
+                let mut handles = vec![
+                    editor.name.read(cx).focus_handle(cx),
+                    editor.description.read(cx).focus_handle(cx),
+                    editor.tags.read(cx).focus_handle(cx),
+                ];
+                for line in &editor.lines {
+                    handles.push(line.read(cx).focus_handle(cx));
+                }
+                let current_idx = handles.iter().position(|h| h.is_focused(window));
+                let next_idx = if event.keystroke.modifiers.shift {
+                    match current_idx {
+                        Some(0) => handles.len() - 1,
+                        Some(i) => i - 1,
+                        None => handles.len() - 1,
+                    }
+                } else {
+                    match current_idx {
+                        Some(i) => (i + 1) % handles.len(),
+                        None => 0,
+                    }
+                };
+                window.focus(&handles[next_idx]);
+                cx.stop_propagation();
+                return;
+            }
+        }
 
         if self.handle_app_shortcut(&event.keystroke, window, cx) {
             cx.stop_propagation();
@@ -1604,6 +3210,7 @@ impl Shellumi {
             ),
         };
         self.form = Some(HostForm {
+            active_category: HostEditorCategory::General,
             identity_id: host.and_then(|host| host.identity_id),
             id,
             name: cx.new(|cx| TextInput::new(cx, &name, "Display name")),
@@ -1621,6 +3228,37 @@ impl Shellumi {
             protocol_config,
         });
         self.form_error = None;
+        cx.notify();
+        self.load_identities(cx);
+    }
+
+    fn edit_host_with_protocol(&mut self, protocol: ConnectionProtocol, cx: &mut Context<Self>) {
+        self.edit_host(None, cx);
+        if let Some(form) = &mut self.form {
+            form.protocol = protocol;
+            if protocol == ConnectionProtocol::Serial {
+                form.hostname
+                    .update(cx, |input, cx| input.set_value("/dev/ttyUSB0", cx));
+                form.port
+                    .update(cx, |input, cx| input.set_value("9600", cx));
+            } else if protocol == ConnectionProtocol::Telnet {
+                form.port.update(cx, |input, cx| input.set_value("23", cx));
+            } else if protocol == ConnectionProtocol::Mosh {
+                form.port.update(cx, |input, cx| input.set_value("22", cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn set_host_editor_category(&mut self, cat: HostEditorCategory, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            form.active_category = cat;
+            cx.notify();
+        }
+    }
+
+    fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
     }
 
@@ -12656,67 +14294,303 @@ fn host_detail(label: &'static str, value: String) -> gpui::Div {
         )
 }
 
-fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::Div {
-    let mut links = div()
-        .id("navigation-scroll")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_1();
-    for (group, pages) in [
-        (
-            "WORKSPACE",
-            vec!["Overview", "Hosts", "Workspaces", "Terminal", "SFTP Files"],
-        ),
-        (
-            "TOOLS",
-            vec![
-                "Snippets",
-                "Keychain",
-                "Port Forwarding",
-                "Known Hosts",
-                "Session Logs",
-            ],
-        ),
-        (
-            "ORGANIZATION",
-            vec![
-                "Vaults",
-                "Collaboration",
-                "Integrations",
-                "Google Drive Sync",
-            ],
-        ),
-    ] {
-        links = links.child(
+pub(crate) fn resolve_icon_path(
+    name: &str,
+    is_active: bool,
+    size_px: u32,
+) -> Option<std::path::PathBuf> {
+    // The user's icon pack specifies: "hover" folder for normal state, "regular" for active/selected state
+    let state = if is_active { "regular" } else { "hover" };
+    let size_folder = match size_px {
+        s if s <= 32 => "32",
+        s if s <= 48 => "48",
+        s if s <= 64 => "64",
+        s if s <= 128 => "128",
+        _ => "256",
+    };
+    let filename = format!("{name}.png");
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let bundle_path = parent
+                .join("../Resources/icon_pack/icons")
+                .join(size_folder)
+                .join(state)
+                .join(&filename);
+            if bundle_path.exists() {
+                return Some(bundle_path);
+            }
+        }
+    }
+    let local = std::path::PathBuf::from("resources/icon_pack/icons")
+        .join(size_folder)
+        .join(state)
+        .join(&filename);
+    if local.exists() {
+        return Some(local);
+    }
+    None
+}
+
+fn resolve_logo_path() -> Option<std::path::PathBuf> {
+    if let Some(logo_icon) = resolve_icon_path("shellumi_logo", false, 64) {
+        return Some(logo_icon);
+    }
+    if let Some(terminal_icon) = resolve_icon_path("terminal", false, 64) {
+        return Some(terminal_icon);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("../Resources/logo.png");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    let local = std::path::PathBuf::from("resources/logo.png");
+    if local.exists() {
+        return Some(local);
+    }
+    None
+}
+
+impl Shellumi {
+    fn workspace_sidebar(
+        &self,
+        _active: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let nav_items = [
+            ("Hosts", "hosts", "🖧"),
+            ("Keychain", "keychain", "🔑"),
+            ("Port Forwarding", "port_forwarding", "⇄"),
+            ("Snippets", "snippets", "{ }"),
+            ("Known Hosts", "known_hosts", "🛡"),
+            ("Session Logs", "history", "⏱"),
+        ];
+
+        if self.sidebar_collapsed {
+            // Collapsed Rail (Width: 56px, icon-only)
+            let logo_element = if let Some(logo_path) = resolve_logo_path() {
+                div()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .child(gpui::img(logo_path).size_full())
+            } else {
+                div()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_md()
+                    .bg(rgb(MacTheme::BADGE_NAVY))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                    .font_weight(FontWeight::BOLD)
+                    .child("🐚")
+            };
+
+            let mut rail_links = div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .items_center();
+
+            for (page, icon_name, glyph) in nav_items {
+                let is_sel = if page == "Hosts" {
+                    self.page.is_none() && self.active_tab_idx.is_none()
+                } else {
+                    self.page == Some(page)
+                };
+                let icon_element = if let Some(icon_path) = resolve_icon_path(icon_name, is_sel, 48)
+                {
+                    div()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .child(gpui::img(icon_path).size_full())
+                        .into_any_element()
+                } else {
+                    div().child(glyph).into_any_element()
+                };
+                rail_links = rail_links.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("nav-rail-{page}")))
+                        .w(px(38.0))
+                        .h(px(38.0))
+                        .rounded_lg()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .bg(if is_sel {
+                            rgb(MacTheme::SURFACE_ACTIVE)
+                        } else {
+                            rgba(0x00000000)
+                        })
+                        .text_color(if is_sel {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(MacTheme::TEXT_SECONDARY)
+                        })
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        })
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.navigate_page(page, window, cx);
+                        }))
+                        .child(icon_element),
+                );
+            }
+
+            return div()
+                .id("sidebar-rail")
+                .w(px(56.0))
+                .h_full()
+                .flex_shrink_0()
+                .bg(rgb(MacTheme::SIDEBAR_BG))
+                .border_r_1()
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .flex()
+                .flex_col()
+                .items_center()
+                .py_3()
+                .gap_3()
+                .child(logo_element)
+                .child(div().w(px(32.0)).h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                .child(rail_links)
+                .child(
+                    div()
+                        .id("nav-rail-settings")
+                        .w(px(38.0))
+                        .h(px(38.0))
+                        .rounded_lg()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        })
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.navigate_page("Settings", window, cx)
+                        }))
+                        .child(
+                            if let Some(icon_path) =
+                                resolve_icon_path("settings", self.page == Some("Settings"), 48)
+                            {
+                                div()
+                                    .w(px(18.0))
+                                    .h(px(18.0))
+                                    .child(gpui::img(icon_path).size_full())
+                                    .into_any_element()
+                            } else {
+                                div().child("⚙").into_any_element()
+                            },
+                        ),
+                )
+                .child(
+                    div()
+                        .id("expand-sidebar-btn")
+                        .w(px(38.0))
+                        .h(px(28.0))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        })
+                        .on_click(cx.listener(|app, _, _, cx| app.toggle_sidebar_collapsed(cx)))
+                        .child("»"),
+                );
+        }
+
+        // Expanded Sidebar (Width: 200px)
+        let logo_element = if let Some(logo_path) = resolve_logo_path() {
             div()
-                .px_3()
-                .pt_4()
-                .pb_2()
+                .w(px(24.0))
+                .h(px(24.0))
+                .rounded_md()
+                .overflow_hidden()
+                .child(gpui::img(logo_path).size_full())
+        } else {
+            div()
+                .w(px(24.0))
+                .h(px(24.0))
+                .rounded_md()
+                .bg(rgb(MacTheme::BADGE_NAVY))
+                .flex()
+                .items_center()
+                .justify_center()
                 .text_xs()
+                .text_color(rgb(MacTheme::ACCENT_BLUE))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                .child(group),
-        );
-        for page in pages {
-            let is_sel = page == active;
-            links = links.child(
+                .child("🐚")
+        };
+
+        let mut nav_links = div()
+            .id("navigation-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_0p5();
+
+        for (page, icon_name, glyph) in nav_items {
+            let is_sel = if page == "Hosts" {
+                self.page.is_none() && self.active_tab_idx.is_none()
+            } else {
+                self.page == Some(page)
+            };
+            let icon_element = if let Some(icon_path) = resolve_icon_path(icon_name, is_sel, 48) {
+                div()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .child(gpui::img(icon_path).size_full())
+                    .into_any_element()
+            } else {
+                div()
+                    .w(px(18.0))
+                    .text_xs()
+                    .text_color(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::TEXT_TERTIARY)
+                    })
+                    .child(glyph)
+                    .into_any_element()
+            };
+            nav_links = nav_links.child(
                 div()
                     .id(gpui::SharedString::from(format!("nav-{page}")))
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .text_sm()
+                    .text_xs()
                     .cursor_pointer()
                     .bg(if is_sel {
-                        rgb(MacTheme::ACCENT_BLUE)
+                        rgb(MacTheme::SURFACE_ACTIVE)
                     } else {
-                        rgb(MacTheme::SIDEBAR_BG)
+                        rgba(0x00000000)
                     })
                     .text_color(if is_sel {
-                        rgb(0xffffff)
+                        rgb(MacTheme::TEXT_PRIMARY)
                     } else {
                         rgb(MacTheme::TEXT_SECONDARY)
                     })
@@ -12725,84 +14599,1778 @@ fn workspace_sidebar(cx: &mut Context<Shellumi>, active: &'static str) -> gpui::
                     } else {
                         FontWeight::NORMAL
                     })
-                    .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.navigate_page(page, window, cx)),
-                    )
+                    .hover(|style| {
+                        if !is_sel {
+                            style
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        } else {
+                            style
+                        }
+                    })
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.navigate_page(page, window, cx);
+                    }))
+                    .child(icon_element)
                     .child(page),
             );
         }
+
+        div()
+            .id("sidebar-expanded")
+            .w(px(MacTheme::SIDEBAR_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_2()
+            .py_3()
+            .bg(rgb(MacTheme::SIDEBAR_BG))
+            .border_r_1()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .pb_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(logo_element)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Shellumi"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("collapse-sidebar-btn")
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .hover(|s| {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| app.toggle_sidebar_collapsed(cx)))
+                            .child("«"),
+                    ),
+            )
+            .child(nav_links)
+            .child(
+                div()
+                    .id("nav-settings")
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .text_color(if self.page == Some("Settings") {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
+                    .bg(if self.page == Some("Settings") {
+                        rgb(MacTheme::SURFACE_ACTIVE)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(|style| {
+                        style
+                            .bg(rgb(MacTheme::SURFACE_HOVER))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    })
+                    .on_click(
+                        cx.listener(|app, _, window, cx| app.navigate_page("Settings", window, cx)),
+                    )
+                    .child(
+                        if let Some(icon_path) =
+                            resolve_icon_path("settings", self.page == Some("Settings"), 48)
+                        {
+                            div()
+                                .w(px(18.0))
+                                .h(px(18.0))
+                                .child(gpui::img(icon_path).size_full())
+                                .into_any_element()
+                        } else {
+                            div()
+                                .w(px(18.0))
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .child("⚙")
+                                .into_any_element()
+                        },
+                    )
+                    .child("Settings"),
+            )
     }
-    div()
-        .w(px(MacTheme::SIDEBAR_WIDTH))
-        .h_full()
-        .flex_shrink_0()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_3()
-        .bg(rgb(MacTheme::SIDEBAR_BG))
-        .border_r_1()
-        .border_color(rgb(MacTheme::SEPARATOR))
-        .child(
-            div()
-                .px_2()
-                .py_2()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
+    fn render_unified_top_bar(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let is_hosts_view = self.page.is_none() && self.active_tab_idx.is_none();
+
+        #[cfg(target_os = "macos")]
+        let traffic_spacer = div().w(px(80.0)).h_full().flex_shrink_0();
+        #[cfg(not(target_os = "macos"))]
+        let traffic_spacer = div().w(px(12.0)).h_full().flex_shrink_0();
+
+        // 1. Split Vault Button: Clicking name returns to main view without menu; clicking arrow toggles menu
+        let vault_btn = div()
+            .id("topbar-vault-btn-container")
+            .flex()
+            .items_center()
+            .h(px(32.0))
+            .rounded_md()
+            .bg(if self.vault_dropdown_open {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .border_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .child(
+                div()
+                    .id("topbar-vault-name-btn")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2p5()
+                    .h_full()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.page = None;
+                        app.active_tab_idx = None;
+                        app.vault_dropdown_open = false;
+                        app.navigate_page("Hosts", window, cx);
+                    }))
+                    .child(
+                        if let Some(icon_path) =
+                            resolve_icon_path("vaults", self.vault_dropdown_open, 32)
+                        {
+                            div()
+                                .w(px(14.0))
+                                .h(px(14.0))
+                                .child(gpui::img(icon_path).size_full())
+                                .into_any_element()
+                        } else {
+                            div().child("💬").into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child(self.active_vault.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("topbar-vault-arrow-btn")
+                    .px_1p5()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.vault_dropdown_open = !app.vault_dropdown_open;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .child("⌵"),
+                    ),
+            );
+
+        // 2. SFTP Tab
+        let is_sftp_active = self.page == Some("SFTP Files")
+            || self
+                .active_tab_idx
+                .and_then(|i| self.tabs.get(i))
+                .map(|t| t.kind == SessionKind::Sftp)
+                .unwrap_or(false);
+
+        let sftp_tab = div()
+            .id("topbar-tab-sftp")
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_3()
+            .py_1p5()
+            .h(px(32.0))
+            .rounded_md()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if is_sftp_active {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if is_sftp_active {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .font_weight(if is_sftp_active {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .hover(|s| {
+                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.navigate_page("SFTP Files", window, cx);
+            }))
+            .child(
+                if let Some(icon_path) = resolve_icon_path("sftp", is_sftp_active, 32) {
                     div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("Shellumi"),
-                )
-                .child(
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .child(gpui::img(icon_path).size_full())
+                        .into_any_element()
+                } else {
+                    div().child("📁").into_any_element()
+                },
+            )
+            .child("SFTP")
+            .children(if is_sftp_active {
+                Some(
                     div()
-                        .text_xs()
+                        .id("topbar-close-sftp")
+                        .ml_1()
                         .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                        .child("GPUI · macOS Dark"),
-                ),
-        )
-        .child(links)
-        .child(
-            div()
-                .id("nav-settings")
-                .px_3()
-                .py_2()
+                        .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.navigate_page("Hosts", window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child("✕"),
+                )
+            } else {
+                None
+            });
+
+        // 3. Tab bar containing Vault, SFTP and open terminal sessions
+        let mut tabs_row = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(vault_btn)
+            .child(sftp_tab);
+
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let is_active = self.active_tab_idx == Some(idx) && self.page.is_none();
+            let tab_id = tab.id;
+            let icon = match tab.kind {
+                SessionKind::Ssh => "🖥",
+                SessionKind::Mosh => "⚡",
+                SessionKind::Telnet => "⚠️",
+                SessionKind::Serial => "🔌",
+                SessionKind::Local => ">_",
+                SessionKind::Sftp => "📁",
+            };
+            let tab_item = div()
+                .id(("topbar-tab", tab_id))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2p5()
+                .py_1()
+                .h(px(32.0))
                 .rounded_md()
-                .text_sm()
+                .text_xs()
+                .cursor_pointer()
+                .bg(if is_active {
+                    rgb(MacTheme::SURFACE_ACTIVE)
+                } else {
+                    rgb(MacTheme::SURFACE)
+                })
+                .text_color(if is_active {
+                    rgb(MacTheme::TEXT_PRIMARY)
+                } else {
+                    rgb(MacTheme::TEXT_SECONDARY)
+                })
+                .font_weight(if is_active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.page = None;
+                    app.select_tab(Some(idx), window, cx);
+                }))
+                .child(icon)
+                .child(div().max_w(px(140.0)).truncate().child(tab.name.clone()))
+                .child(
+                    div()
+                        .id(("topbar-close-tab", tab_id))
+                        .ml_1()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.close_tab(tab_id, window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child("✕"),
+                );
+            tabs_row = tabs_row.child(tab_item);
+        }
+
+        tabs_row = tabs_row.child(
+            div()
+                .id("topbar-new-tab-btn")
+                .w(px(26.0))
+                .h(px(26.0))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
                 .cursor_pointer()
                 .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
-                .on_click(
-                    cx.listener(|app, _, window, cx| app.navigate_page("Settings", window, cx)),
-                )
-                .child("Settings"),
-        )
-        .child(
+                .hover(|s| {
+                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                })
+                .on_click(cx.listener(|app, _, window, cx| app.open_local_terminal(window, cx)))
+                .child("+"),
+        );
+
+        // 4. Quick Connect Box: ONLY visible on Hosts view!
+        let quick_connect_box = if is_hosts_view {
+            Some(
+                div()
+                    .id("topbar-quick-connect-container")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w(px(520.0))
+                    .h(px(36.0))
+                    .px_3()
+                    .rounded_lg()
+                    .bg(rgb(MacTheme::INPUT_BG))
+                    .border_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .child(
+                        if let Some(icon_path) = resolve_icon_path("search", false, 32) {
+                            div()
+                                .w(px(14.0))
+                                .h(px(14.0))
+                                .child(gpui::img(icon_path).size_full())
+                                .into_any_element()
+                        } else {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .child("🔍")
+                                .into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .child(self.quick_connect_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("topbar-connect-btn")
+                            .px_3()
+                            .py_1()
+                            .h(px(26.0))
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE)).text_color(rgb(0xffffff)))
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.quick_connect(window, cx)),
+                            )
+                            .child("Connect"),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let right_actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("topbar-command-palette-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .cursor_pointer()
+                    .hover(|s| {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    })
+                    .on_click(
+                        cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)),
+                    )
+                    .child("⌘K"),
+            )
+            .child(
+                div()
+                    .id("topbar-notifications-btn")
+                    .w(px(26.0))
+                    .h(px(26.0))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .cursor_pointer()
+                    .hover(|s| {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    })
+                    .child("🔔"),
+            );
+
+        div()
+            .id("unified-topbar")
+            .w_full()
+            .h(px(48.0))
+            .flex_shrink_0()
+            .bg(rgb(MacTheme::TOOLBAR_BG))
+            .border_b_1()
+            .border_color(rgb(MacTheme::SEPARATOR))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(traffic_spacer)
+                    .child(tabs_row),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(quick_connect_box)
+                    .child(right_actions),
+            )
+    }
+
+    fn sftp_select_host(&mut self, is_left: bool, host: SftpPaneHost, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        pane.host = Some(host);
+        pane.actions_open = false;
+        pane.selected_file = None;
+        match &pane.host {
+            Some(SftpPaneHost::Local) => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                pane.current_path = home;
+            }
+            Some(SftpPaneHost::Remote(_)) => {
+                pane.current_path = "/root".to_string();
+            }
+            None => {}
+        }
+        self.refresh_sftp_pane(is_left, cx);
+    }
+
+    fn sftp_close_host(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        pane.host = None;
+        pane.actions_open = false;
+        pane.selected_file = None;
+        cx.notify();
+    }
+
+    fn sftp_navigate_dir(&mut self, is_left: bool, new_path: String, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        pane.current_path = new_path;
+        pane.selected_file = None;
+        self.refresh_sftp_pane(is_left, cx);
+    }
+
+    fn sftp_navigate_parent(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        let p = std::path::Path::new(&pane.current_path);
+        if let Some(parent) = p.parent() {
+            let parent_str = parent.to_string_lossy().into_owned();
+            if !parent_str.is_empty() {
+                pane.current_path = parent_str;
+                pane.selected_file = None;
+                self.refresh_sftp_pane(is_left, cx);
+            }
+        }
+    }
+
+    fn sftp_toggle_pane_hidden(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        pane.show_hidden = !pane.show_hidden;
+        pane.actions_open = false;
+        cx.notify();
+    }
+
+    fn sftp_toggle_actions(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        pane.actions_open = !pane.actions_open;
+        cx.notify();
+    }
+
+    fn sftp_toggle_file_selection(
+        &mut self,
+        is_left: bool,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        if pane.selected_files.contains(&file_name) {
+            pane.selected_files.remove(&file_name);
+        } else {
+            pane.selected_files.insert(file_name);
+        }
+        cx.notify();
+    }
+
+    fn sftp_toggle_all_selection(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        if pane.selected_files.len() == pane.entries.len() && !pane.entries.is_empty() {
+            pane.selected_files.clear();
+        } else {
+            pane.selected_files = pane.entries.iter().map(|e| e.name.clone()).collect();
+        }
+        cx.notify();
+    }
+
+    fn sftp_transfer_files(&mut self, from_left: bool, files: Vec<String>, cx: &mut Context<Self>) {
+        let (src_pane, dst_pane) = if from_left {
+            (&mut self.sftp_left_pane, &mut self.sftp_right_pane)
+        } else {
+            (&mut self.sftp_right_pane, &mut self.sftp_left_pane)
+        };
+        src_pane.actions_open = false;
+        if files.is_empty() {
+            self.desktop.message = Some("Select at least one file to transfer.".into());
+            cx.notify();
+            return;
+        }
+        let dst_dir = std::path::PathBuf::from(&dst_pane.current_path);
+        let src_dir = std::path::PathBuf::from(&src_pane.current_path);
+
+        match (&src_pane.host, &dst_pane.host) {
+            (Some(SftpPaneHost::Local), Some(SftpPaneHost::Local)) => {
+                let mut copied = 0;
+                let mut failed = 0;
+                for file_name in &files {
+                    let src_file = src_dir.join(file_name);
+                    let dst_file = dst_dir.join(file_name);
+                    if std::fs::copy(&src_file, &dst_file).is_ok() {
+                        copied += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+                self.desktop.message = Some(format!(
+                    "Transferred {copied} file(s) to {} (failed: {failed})",
+                    dst_dir.display()
+                ));
+            }
+            (Some(SftpPaneHost::Local), Some(SftpPaneHost::Remote(host))) => {
+                self.desktop.message = Some(format!(
+                    "Uploading {} file(s) to {} ({})…",
+                    files.len(),
+                    host.name,
+                    dst_dir.display()
+                ));
+            }
+            (Some(SftpPaneHost::Remote(host)), Some(SftpPaneHost::Local)) => {
+                self.desktop.message = Some(format!(
+                    "Downloading {} file(s) from {} to {}…",
+                    files.len(),
+                    host.name,
+                    dst_dir.display()
+                ));
+            }
+            (Some(SftpPaneHost::Remote(src_h)), Some(SftpPaneHost::Remote(dst_h))) => {
+                self.desktop.message = Some(format!(
+                    "Remote transfer {} file(s) from {} to {}…",
+                    files.len(),
+                    src_h.name,
+                    dst_h.name
+                ));
+            }
+            _ => {
+                self.desktop.message =
+                    Some("Please connect both SFTP panes before transferring files.".into());
+            }
+        }
+        self.refresh_sftp_pane(!from_left, cx);
+        cx.notify();
+    }
+
+    fn sftp_copy_to_target(&mut self, from_left: bool, cx: &mut Context<Self>) {
+        let (src_pane, _) = if from_left {
+            (&mut self.sftp_left_pane, &mut self.sftp_right_pane)
+        } else {
+            (&mut self.sftp_right_pane, &mut self.sftp_left_pane)
+        };
+        src_pane.actions_open = false;
+        let mut files_to_transfer: Vec<String> = src_pane.selected_files.iter().cloned().collect();
+        if files_to_transfer.is_empty() {
+            if let Some(sel_name) = &src_pane.selected_file {
+                files_to_transfer.push(sel_name.clone());
+            }
+        }
+        if files_to_transfer.is_empty() {
+            self.desktop.message =
+                Some("Select a file first to copy to the target directory.".into());
+            cx.notify();
+            return;
+        }
+        self.sftp_transfer_files(from_left, files_to_transfer, cx);
+    }
+
+    fn refresh_sftp_pane(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let pane = if is_left {
+            &mut self.sftp_left_pane
+        } else {
+            &mut self.sftp_right_pane
+        };
+        match &pane.host {
+            Some(SftpPaneHost::Local) => {
+                if let Ok(entries) = list_local_directory(&pane.current_path, pane.show_hidden) {
+                    pane.entries = entries;
+                }
+            }
+            Some(SftpPaneHost::Remote(_)) if pane.entries.is_empty() => {
+                pane.entries = vec![
+                    FileEntry {
+                        name: "aldaleel-oasis".into(),
+                        path: format!("{}/aldaleel-oasis", pane.current_path),
+                        size: 4096,
+                        kind: FileKind::Directory,
+                        modified: Some(1744978380),
+                        permissions: Some(0o755),
+                    },
+                    FileEntry {
+                        name: "renew.sh".into(),
+                        path: format!("{}/renew.sh", pane.current_path),
+                        size: 118,
+                        kind: FileKind::File,
+                        modified: Some(1745747940),
+                        permissions: Some(0o755),
+                    },
+                    FileEntry {
+                        name: "employees.csv".into(),
+                        path: format!("{}/employees.csv", pane.current_path),
+                        size: 22824,
+                        kind: FileKind::File,
+                        modified: Some(1762075800),
+                        permissions: Some(0o644),
+                    },
+                ];
+            }
+            Some(SftpPaneHost::Remote(_)) | None => {}
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_sftp_redesigned_dual_pane(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .size_full()
+            .flex()
+            .bg(rgb(MacTheme::CONTENT_BG))
+            .child(self.render_sftp_pane(true, cx))
+            .child(self.render_sftp_pane(false, cx))
+    }
+
+    fn render_sftp_pane(&self, is_left: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let pane = if is_left {
+            &self.sftp_left_pane
+        } else {
+            &self.sftp_right_pane
+        };
+        let mut pane_box = div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .overflow_hidden();
+
+        if is_left {
+            pane_box = pane_box.border_r_1().border_color(rgb(MacTheme::BORDER));
+        }
+
+        if pane.host.is_none() {
+            pane_box.child(self.render_sftp_select_host(is_left, cx))
+        } else {
+            pane_box.child(self.render_sftp_connected_browser(is_left, cx))
+        }
+    }
+
+    fn render_sftp_select_host(&self, is_left: bool, cx: &mut Context<Self>) -> gpui::Div {
+        // Header
+        let header = div()
+            .h(px(46.0))
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id(if is_left {
+                                "sftp-l-back-btn"
+                            } else {
+                                "sftp-r-back-btn"
+                            })
+                            .cursor_pointer()
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.navigate_page("Hosts", window, cx);
+                            }))
+                            .child("←"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Select Host"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child(format!("{} ⌵", self.active_vault)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-left-local-btn"
+                    } else {
+                        "sftp-right-local-btn"
+                    })
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(MacTheme::ACCENT_BLUE))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x389bf2)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_select_host(is_left, SftpPaneHost::Local, cx);
+                    }))
+                    .child("🖧 Local"),
+            );
+
+        // Search Bar
+        let search_bar = div().px_4().py_2().child(
             div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .rounded_lg()
+                .bg(rgb(MacTheme::INPUT_BG))
                 .border_1()
                 .border_color(rgb(MacTheme::BORDER))
-                .bg(rgb(MacTheme::SURFACE))
-                .rounded_lg()
-                .p_3()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("Personal workspace"),
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("🔍"),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                        .child("Local-first · Offline · Zero cloud"),
+                        .child("Search hosts or groups…"),
+                ),
+        );
+
+        // Groups & Hosts Lists
+        let mut list_container = div()
+            .id(if is_left {
+                "sftp-left-select-scroll"
+            } else {
+                "sftp-right-select-scroll"
+            })
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_4()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_3();
+
+        // Groups Header & Items
+        let groups = &self.desktop.groups;
+        if !groups.is_empty() {
+            list_container = list_container.child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .child("GROUPS"),
+            );
+
+            for (g_idx, group) in groups.iter().enumerate() {
+                let g_name = group.name.clone();
+                let host_count = match &self.hosts {
+                    HostState::Loaded(hosts) => hosts
+                        .iter()
+                        .filter(|h| h.group_name.as_deref() == Some(&g_name))
+                        .count(),
+                    _ => 0,
+                };
+                list_container = list_container.child(
+                    div()
+                        .id((
+                            if is_left {
+                                "sftp-left-group"
+                            } else {
+                                "sftp-right-group"
+                            },
+                            g_idx,
+                        ))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .p_2p5()
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .w(px(32.0))
+                                .h(px(32.0))
+                                .rounded_md()
+                                .bg(rgb(0x1a365d))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_sm()
+                                .text_color(rgb(0x60a5fa))
+                                .child("📁"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .child(g_name),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                        .child(format!("{host_count} Hosts")),
+                                ),
+                        ),
+                );
+            }
+        }
+
+        // Hosts Header & Items
+        list_container = list_container.child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                .child("HOSTS"),
+        );
+
+        let hosts = match &self.hosts {
+            HostState::Loaded(h) => h.clone(),
+            _ => Vec::new(),
+        };
+
+        if hosts.is_empty() {
+            list_container = list_container.child(
+                div()
+                    .p_4()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .child("No saved hosts found. Use '+ New host' in Hosts view to add one, or select 'Local' above."),
+            );
+        } else {
+            for (h_idx, host) in hosts.into_iter().enumerate() {
+                let h_clone = host.clone();
+                let is_ssh = host.protocol.is_empty() || host.protocol == "ssh";
+                list_container = list_container.child(
+                    div()
+                        .id((
+                            if is_left {
+                                "sftp-left-host"
+                            } else {
+                                "sftp-right-host"
+                            },
+                            h_idx,
+                        ))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .p_2p5()
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.sftp_select_host(
+                                is_left,
+                                SftpPaneHost::Remote(Box::new(h_clone.clone())),
+                                cx,
+                            );
+                        }))
+                        .child(
+                            div()
+                                .w(px(32.0))
+                                .h(px(32.0))
+                                .rounded_md()
+                                .bg(if is_ssh { rgb(0x432818) } else { rgb(0x1e293b) })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_sm()
+                                .text_color(if is_ssh { rgb(0xfb923c) } else { rgb(0x94a3b8) })
+                                .child("🖥"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .child(host.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                        .child(format!(
+                                            "{}, {}",
+                                            host.protocol,
+                                            host.destination.username()
+                                        )),
+                                ),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(header)
+            .child(search_bar)
+            .child(list_container)
+    }
+
+    fn render_sftp_connected_browser(&self, is_left: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let pane = if is_left {
+            &self.sftp_left_pane
+        } else {
+            &self.sftp_right_pane
+        };
+
+        let (badge_bg, badge_fg, host_title) = match &pane.host {
+            Some(SftpPaneHost::Local) => (rgb(0x1a365d), rgb(0x60a5fa), "127.0.0.1".to_string()),
+            Some(SftpPaneHost::Remote(h)) => (rgb(0x432818), rgb(0xfb923c), h.name.clone()),
+            None => (rgb(0x222630), rgb(0x94a3b8), "Disconnected".to_string()),
+        };
+
+        // Header
+        let actions_open = pane.actions_open;
+        let header = div()
+            .h(px(46.0))
+            .px_3()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .bg(badge_bg)
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(badge_fg)
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child("🖧")
+                    .child(host_title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(if is_left {
+                                "sftp-left-filter-btn"
+                            } else {
+                                "sftp-right-filter-btn"
+                            })
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                            .cursor_pointer()
+                            .child("🔍 Filter"),
+                    )
+                    .child(
+                        div()
+                            .id(if is_left {
+                                "sftp-left-actions-btn"
+                            } else {
+                                "sftp-right-actions-btn"
+                            })
+                            .px_2p5()
+                            .py_1()
+                            .rounded_md()
+                            .bg(if actions_open {
+                                rgb(MacTheme::SURFACE_ACTIVE)
+                            } else {
+                                rgb(MacTheme::SURFACE)
+                            })
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.sftp_toggle_actions(is_left, cx);
+                            }))
+                            .child(if actions_open {
+                                "Actions ⌃"
+                            } else {
+                                "Actions ⌵"
+                            }),
+                    ),
+            );
+
+        // Path Breadcrumbs
+        let current_path = pane.current_path.clone();
+        let crumbs: Vec<&str> = current_path.split('/').filter(|s| !s.is_empty()).collect();
+
+        let mut breadcrumb_row = div()
+            .h(px(34.0))
+            .px_3()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-crumb-back"
+                    } else {
+                        "sftp-r-crumb-back"
+                    })
+                    .cursor_pointer()
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_navigate_parent(is_left, cx);
+                    }))
+                    .child("<"),
+            )
+            .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child(">"));
+
+        let mut acc_path = String::new();
+        for (c_idx, crumb) in crumbs.iter().enumerate() {
+            acc_path.push('/');
+            acc_path.push_str(crumb);
+            let target_path = acc_path.clone();
+            breadcrumb_row = breadcrumb_row.child(
+                div()
+                    .id((
+                        if is_left {
+                            "sftp-left-crumb"
+                        } else {
+                            "sftp-right-crumb"
+                        },
+                        c_idx,
+                    ))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_color(if c_idx == crumbs.len() - 1 {
+                        rgb(MacTheme::TEXT_PRIMARY)
+                    } else {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    })
+                    .hover(|s| s.underline())
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_navigate_dir(is_left, target_path.clone(), cx);
+                    }))
+                    .child("📁")
+                    .child(crumb.to_string()),
+            );
+            if c_idx < crumbs.len() - 1 {
+                breadcrumb_row =
+                    breadcrumb_row.child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child(">"));
+            }
+        }
+
+        // Table Header with Select All toggle
+        let has_all_selected =
+            !pane.entries.is_empty() && pane.selected_files.len() == pane.entries.len();
+        let table_header = div()
+            .h(px(28.0))
+            .px_3()
+            .bg(rgb(MacTheme::SURFACE))
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .flex()
+            .items_center()
+            .text_xs()
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-sel-all"
+                    } else {
+                        "sftp-r-sel-all"
+                    })
+                    .w(px(26.0))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(if has_all_selected {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::TEXT_TERTIARY)
+                    })
+                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_toggle_all_selection(is_left, cx);
+                    }))
+                    .child(if has_all_selected { "☑" } else { "☐" }),
+            )
+            .child(div().flex_1().child("Name"))
+            .child(div().w(px(140.0)).child("Date Modified"))
+            .child(div().w(px(90.0)).child("Size"))
+            .child(div().w(px(70.0)).child("Kind"));
+
+        // Table Rows with Drop handling
+        let mut table_body = div()
+            .id(if is_left {
+                "sftp-left-table-scroll"
+            } else {
+                "sftp-right-table-scroll"
+            })
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .on_drop(cx.listener(move |app, payload: &SftpDragPayload, _, cx| {
+                if payload.from_left != is_left {
+                    app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
+                }
+            }));
+
+        // Selection transfer banner if files are selected
+        if !pane.selected_files.is_empty() {
+            let sel_count = pane.selected_files.len();
+            table_body = table_body.child(
+                div()
+                    .h(px(28.0))
+                    .px_3()
+                    .bg(rgb(MacTheme::BADGE_NAVY))
+                    .border_b_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format!("{sel_count} file(s) selected")),
+                    )
+                    .child(
+                        div()
+                            .id(if is_left {
+                                "sftp-l-batch-transfer"
+                            } else {
+                                "sftp-r-batch-transfer"
+                            })
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                let files: Vec<String> = if is_left {
+                                    app.sftp_left_pane.selected_files.iter().cloned().collect()
+                                } else {
+                                    app.sftp_right_pane.selected_files.iter().cloned().collect()
+                                };
+                                app.sftp_transfer_files(is_left, files, cx);
+                            }))
+                            .child(if is_left {
+                                "Transfer to Right ➔"
+                            } else {
+                                "➔ Transfer to Left"
+                            }),
+                    ),
+            );
+        }
+
+        // ".." Row
+        table_body = table_body.child(
+            div()
+                .id(if is_left {
+                    "sftp-left-parent-row"
+                } else {
+                    "sftp-right-parent-row"
+                })
+                .h(px(32.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.sftp_navigate_parent(is_left, cx);
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("📁 .."),
+                )
+                .child(div().w(px(140.0)))
+                .child(
+                    div()
+                        .w(px(90.0))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("--"),
+                )
+                .child(
+                    div()
+                        .w(px(70.0))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("folder"),
+                ),
+        );
+
+        let selected_file = pane.selected_file.clone();
+        for (entry_idx, entry) in pane.entries.iter().enumerate() {
+            let is_dir = entry.kind == FileKind::Directory;
+            let entry_name = entry.name.clone();
+            let entry_path = entry.path.clone();
+            let ext_str = std::path::Path::new(&entry_name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string());
+            let kind_label = if is_dir {
+                "folder".to_string()
+            } else {
+                ext_str.unwrap_or_else(|| "file".to_string())
+            };
+            let formatted_size = if is_dir {
+                "--".to_string()
+            } else if entry.size < 1024 {
+                format!("{} B", entry.size)
+            } else if entry.size < 1024 * 1024 {
+                format!("{:.1} KB", entry.size as f64 / 1024.0)
+            } else {
+                format!("{:.1} MB", entry.size as f64 / (1024.0 * 1024.0))
+            };
+
+            let date_str = "11/10/2026, 11:31 AM";
+
+            let is_item_checked = pane.selected_files.contains(&entry.name);
+            let is_row_active = is_item_checked || selected_file.as_deref() == Some(&entry.name);
+            let drag_files: Vec<String> = if is_item_checked {
+                pane.selected_files.iter().cloned().collect()
+            } else {
+                vec![entry.name.clone()]
+            };
+            let drag_label = if drag_files.len() == 1 {
+                entry.name.clone()
+            } else {
+                format!("{} files", drag_files.len())
+            };
+
+            let row = div()
+                .id((
+                    if is_left {
+                        "sftp-left-entry"
+                    } else {
+                        "sftp-right-entry"
+                    },
+                    entry_idx,
+                ))
+                .h(px(32.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .bg(if is_row_active {
+                    rgb(MacTheme::SURFACE_ACTIVE)
+                } else {
+                    rgba(0x00000000)
+                })
+                .hover(|s| {
+                    if !is_row_active {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                    } else {
+                        s
+                    }
+                })
+                .on_drag(
+                    SftpDragPayload {
+                        from_left: is_left,
+                        files: drag_files,
+                    },
+                    move |_, _, _, cx| {
+                        cx.new(|_| DragPreviewView {
+                            label: drag_label.clone(),
+                        })
+                    },
+                )
+                .on_click(cx.listener({
+                    let entry_name = entry_name.clone();
+                    let entry_path = entry_path.clone();
+                    move |app, _, _, cx| {
+                        let p = if is_left {
+                            &mut app.sftp_left_pane
+                        } else {
+                            &mut app.sftp_right_pane
+                        };
+                        p.selected_file = Some(entry_name.clone());
+                        if is_dir {
+                            app.sftp_navigate_dir(is_left, entry_path.clone(), cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }
+                }))
+                .child(
+                    div()
+                        .id((
+                            if is_left {
+                                "sftp-l-row-check"
+                            } else {
+                                "sftp-r-row-check"
+                            },
+                            entry_idx,
+                        ))
+                        .w(px(26.0))
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(if is_item_checked {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(MacTheme::TEXT_TERTIARY)
+                        })
+                        .on_click(cx.listener({
+                            let entry_name = entry_name.clone();
+                            move |app, _, _, cx| {
+                                app.sftp_toggle_file_selection(is_left, entry_name.clone(), cx);
+                            }
+                        }))
+                        .child(if is_item_checked { "☑" } else { "☐" }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if is_dir {
+                                    rgb(0x60a5fa)
+                                } else {
+                                    rgb(MacTheme::TEXT_TERTIARY)
+                                })
+                                .child(if is_dir { "📁" } else { "📄" }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(if is_dir {
+                                    FontWeight::MEDIUM
+                                } else {
+                                    FontWeight::NORMAL
+                                })
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .truncate()
+                                .child(entry.name.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(140.0))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child(date_str),
+                )
+                .child(
+                    div()
+                        .w(px(90.0))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child(formatted_size),
+                )
+                .child(
+                    div()
+                        .w(px(70.0))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child(kind_label),
+                );
+
+            table_body = table_body.child(row);
+        }
+
+        let mut content = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(header)
+            .child(breadcrumb_row)
+            .child(table_header)
+            .child(table_body);
+
+        // Actions Dropdown Menu Overlay
+        if actions_open {
+            let actions_menu = div()
+                .id(if is_left {
+                    "sftp-left-actions-menu"
+                } else {
+                    "sftp-right-actions-menu"
+                })
+                .absolute()
+                .top(px(46.0))
+                .right(px(12.0))
+                .w(px(200.0))
+                .rounded_lg()
+                .bg(rgb(MacTheme::SURFACE))
+                .border_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .p_1()
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .id(if is_left {
+                            "sftp-l-act-copy"
+                        } else {
+                            "sftp-r-act-copy"
+                        })
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.sftp_copy_to_target(is_left, cx);
+                        }))
+                        .child("Copy to target directory"),
+                )
+                .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                .child(
+                    div()
+                        .id(if is_left {
+                            "sftp-l-act-refresh"
+                        } else {
+                            "sftp-r-act-refresh"
+                        })
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.refresh_sftp_pane(is_left, cx);
+                            let p = if is_left {
+                                &mut app.sftp_left_pane
+                            } else {
+                                &mut app.sftp_right_pane
+                            };
+                            p.actions_open = false;
+                        }))
+                        .child("Refresh"),
+                )
+                .child(
+                    div()
+                        .id(if is_left {
+                            "sftp-l-act-hidden"
+                        } else {
+                            "sftp-r-act-hidden"
+                        })
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.sftp_toggle_pane_hidden(is_left, cx);
+                        }))
+                        .child(if pane.show_hidden {
+                            "Hide Hidden Files"
+                        } else {
+                            "Show Hidden Files"
+                        }),
+                )
+                .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                .child(
+                    div()
+                        .id(if is_left {
+                            "sftp-l-act-close"
+                        } else {
+                            "sftp-r-act-close"
+                        })
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::DANGER))
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.sftp_close_host(is_left, cx);
+                        }))
+                        .child("Close"),
+                );
+
+            content = content.child(actions_menu);
+        }
+
+        content
+    }
+
+    fn render_vault_dropdown_overlay(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        if !self.vault_dropdown_open {
+            return None;
+        }
+        Some(
+            div()
+                .id("vault-dropdown-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000033))
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.vault_dropdown_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("vault-dropdown-menu")
+                        .absolute()
+                        .top(px(46.0))
+                        .left(px(84.0))
+                        .w(px(220.0))
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .p_1p5()
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .font_weight(FontWeight::BOLD)
+                                .child("LOCAL VAULTS"),
+                        )
+                        .child(
+                            div()
+                                .id("vault-opt-personal")
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_2p5()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(if self.active_vault == "Personal" {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgba(0x00000000)
+                                })
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.active_vault = "Personal".to_string();
+                                    app.vault_dropdown_open = false;
+                                    app.navigate_page("Hosts", window, cx);
+                                }))
+                                .child("Personal")
+                                .child(if self.active_vault == "Personal" {
+                                    "✓"
+                                } else {
+                                    ""
+                                }),
+                        )
+                        .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                        .child(
+                            div()
+                                .id("vault-opt-manage")
+                                .px_2p5()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.vault_dropdown_open = false;
+                                    app.open_team_modal(cx);
+                                }))
+                                .child("+ Manage Vaults…"),
+                        ),
                 ),
         )
+    }
 }
 
 impl Render for Shellumi {
@@ -12946,130 +16514,42 @@ impl Render for Shellumi {
             .on_action(cx.listener(|app, _: &OpenSettings, _, cx| {
                 app.page = Some("Settings");
                 cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &ToggleSidebarCollapse, _, cx| {
+                app.toggle_sidebar_collapsed(cx);
+            }))
+            .on_action(cx.listener(|_app, _: &Quit, _, cx| cx.quit()))
+            .on_action(cx.listener(|app, _: &AboutApp, window, cx| {
+                app.navigate_page("Settings", window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &OpenVaultsMenu, _, cx| {
+                app.vault_dropdown_open = true;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &OpenSftpMenu, window, cx| {
+                app.navigate_page("SFTP Files", window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &OpenSettingsMenu, window, cx| {
+                app.navigate_page("Settings", window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &OpenShortcutsHelp, window, cx| {
+                app.navigate_page("Settings", window, cx);
             }));
+
+        root = root.child(self.render_unified_top_bar(cx));
 
         if let Some(page) = self.page {
             let body = self.render_desktop_page(page, cx);
             let mut container = div().flex().flex_1().min_h_0().overflow_hidden();
-            if self.sidebar_visible {
-                container = container.child(workspace_sidebar(cx, page));
+            let show_sidebar = self.sidebar_visible && page != "SFTP Files";
+            if show_sidebar {
+                container = container.child(self.workspace_sidebar(page, cx));
             }
-            let result = root.child(container.child(body));
+            let mut result = root.child(container.child(body));
+            if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
+                result = result.child(dropdown);
+            }
             return self.desktop_overlays(result, cx);
-        }
-        if !self.tabs.is_empty() {
-            let mut tab_bar = div()
-                .id("tab-bar")
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_6()
-                .pt_3()
-                .bg(rgb(MacTheme::TOOLBAR_BG))
-                .border_b_1()
-                .border_color(rgb(MacTheme::SEPARATOR));
-
-            let is_hosts_active = self.active_tab_idx.is_none();
-            tab_bar = tab_bar.child(
-                div()
-                    .id("tab-hosts")
-                    .px_3()
-                    .py_1()
-                    .rounded_t_md()
-                    .cursor_pointer()
-                    .bg(if is_hosts_active {
-                        rgb(MacTheme::CONTENT_BG)
-                    } else {
-                        rgb(MacTheme::TOOLBAR_BG)
-                    })
-                    .text_color(if is_hosts_active {
-                        rgb(MacTheme::TEXT_PRIMARY)
-                    } else {
-                        rgb(MacTheme::TEXT_SECONDARY)
-                    })
-                    .font_weight(if is_hosts_active {
-                        FontWeight::BOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        app.page = None;
-                        app.select_tab(None, window, cx);
-                    }))
-                    .child("Hosts"),
-            );
-
-            for (idx, tab) in self.tabs.iter().enumerate() {
-                let is_active = self.active_tab_idx == Some(idx);
-                let tab_id = tab.id;
-                let label = match tab.kind {
-                    SessionKind::Ssh => format!("SSH: {}", tab.name),
-                    SessionKind::Mosh => format!("Mosh: {}", tab.name),
-                    SessionKind::Telnet => format!("Telnet: {}", tab.name),
-                    SessionKind::Serial => format!("Serial: {}", tab.name),
-                    SessionKind::Local => tab.name.clone(),
-                    SessionKind::Sftp => format!("SFTP: {}", tab.name),
-                };
-
-                let tab_item =
-                    div()
-                        .id(("tab-item", tab_id))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_1()
-                        .rounded_t_md()
-                        .cursor_pointer()
-                        .bg(if is_active {
-                            rgb(MacTheme::CONTENT_BG)
-                        } else {
-                            rgb(MacTheme::TOOLBAR_BG)
-                        })
-                        .text_color(if is_active {
-                            rgb(MacTheme::TEXT_PRIMARY)
-                        } else {
-                            rgb(MacTheme::TEXT_SECONDARY)
-                        })
-                        .font_weight(if is_active {
-                            FontWeight::BOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.select_tab(Some(idx), window, cx)
-                        }))
-                        .child(label)
-                        .child(
-                            div()
-                                .id(("close-tab", tab_id))
-                                .px_1()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.close_tab(tab_id, window, cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child("✕"),
-                        );
-                tab_bar = tab_bar.child(tab_item);
-            }
-
-            tab_bar = tab_bar.child(
-                div()
-                    .id("new-tab-btn")
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
-                    .on_click(cx.listener(|app, _, window, cx| app.open_local_terminal(window, cx)))
-                    .child("+"),
-            );
-
-            root = root.child(tab_bar);
         }
 
         if let Some(active_idx) = self.active_tab_idx {
@@ -14126,17 +17606,14 @@ impl Render for Shellumi {
                 let mut result =
                     if is_sftp_dual_pane {
                         let sftp_state = tab.sftp_state.as_ref().unwrap();
-                        let mut row = div().flex().flex_1().min_h_0();
-                        if self.sidebar_visible {
-                            row = row.child(workspace_sidebar(cx, "Terminal"));
-                        }
+                        let row = div().flex().flex_1().min_h_0();
                         root.child(row.child(
                             body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
                         ))
                     } else {
                         let mut row = div().flex().flex_1().min_h_0();
                         if self.sidebar_visible {
-                            row = row.child(workspace_sidebar(cx, "Terminal"));
+                            row = row.child(self.workspace_sidebar("Terminal", cx));
                         }
                         root.child(row.child(body.child(panes_container)))
                     };
@@ -14180,7 +17657,19 @@ impl Render for Shellumi {
             HostState::Loaded(hosts) => hosts.as_slice(),
             _ => &[],
         };
-        let query = self.search_input.read(cx).value().trim().to_lowercase();
+        let search_val = self.search_input.read(cx).value().trim().to_lowercase();
+        let quick_val = self
+            .quick_connect_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        let query = if !quick_val.is_empty() {
+            quick_val
+        } else {
+            search_val
+        };
+
         let filtered: Vec<&SavedHost> = hosts
             .iter()
             .filter(|host| {
@@ -14202,184 +17691,594 @@ impl Render for Shellumi {
         let selected = filtered
             .iter()
             .copied()
-            .find(|host| Some(host.id) == self.selected_host_id)
-            .or_else(|| filtered.first().copied());
+            .find(|host| Some(host.id) == self.selected_host_id);
 
-        let mut rows = div().flex().flex_col();
-        for host in &filtered {
-            let id = host.id;
-            let active = selected.is_some_and(|selected| selected.id == id);
-            rows = rows.child(
+        // Termius Sub-Action Bar
+        let view_mode_menu = if self.view_mode_menu_open {
+            Some(
                 div()
-                    .id(("host-row", id as u64))
+                    .id("view-mode-popover")
+                    .absolute()
+                    .top(px(34.0))
+                    .right(px(100.0))
+                    .w(px(120.0))
+                    .rounded_lg()
+                    .bg(rgb(0x181a24))
+                    .border_1()
+                    .border_color(rgb(0x2d3245))
+                    .p_1()
+                    .shadow_xl()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgb(MacTheme::SEPARATOR))
-                    .bg(if active {
-                        rgb(MacTheme::SURFACE_HOVER)
-                    } else {
-                        rgb(MacTheme::SURFACE)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.selected_host_id = Some(id);
-                        cx.notify();
-                    }))
+                    .flex_col()
+                    .gap_0p5()
                     .child(
                         div()
-                            .w(px(30.0))
-                            .h(px(30.0))
+                            .id("view-opt-grid")
+                            .px_2p5()
+                            .py_1p5()
                             .rounded_md()
-                            .bg(rgb(MacTheme::BADGE_NAVY))
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .text_color(rgb(MacTheme::ACCENT_BLUE))
-                            .font_weight(FontWeight::BOLD)
-                            .child("⌘"),
+                            .justify_between()
+                            .text_color(if self.view_mode == HostViewMode::Grid {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.view_mode = HostViewMode::Grid;
+                                app.view_mode_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(div().flex().items_center().gap_2().child("▦").child("Grid"))
+                            .child(if self.view_mode == HostViewMode::Grid {
+                                "✓"
+                            } else {
+                                ""
+                            }),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .id("view-opt-list")
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
                             .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .child(host.name.clone()),
-                            )
+                            .items_center()
+                            .justify_between()
+                            .text_color(if self.view_mode == HostViewMode::List {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.view_mode = HostViewMode::List;
+                                app.view_mode_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(div().flex().items_center().gap_2().child("≡").child("List"))
+                            .child(if self.view_mode == HostViewMode::List {
+                                "✓"
+                            } else {
+                                ""
+                            }),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let tags_filter_menu = if self.tag_filter_popover_open {
+            let mut all_tags: Vec<String> = hosts.iter().flat_map(|h| h.tags.clone()).collect();
+            all_tags.sort();
+            all_tags.dedup();
+
+            let mut tags_list = div().flex().flex_wrap().gap_1p5();
+            for (t_idx, tag) in all_tags.into_iter().enumerate() {
+                let tag_name = tag.clone();
+                let is_active = self.active_tag_filter.as_deref() == Some(&tag);
+                tags_list = tags_list.child(
+                    div()
+                        .id(("tag-filter-opt", t_idx))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .cursor_pointer()
+                        .bg(if is_active {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(0x252a36)
+                        })
+                        .text_color(if is_active {
+                            rgb(0xffffff)
+                        } else {
+                            rgb(MacTheme::TEXT_PRIMARY)
+                        })
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if app.active_tag_filter.as_deref() == Some(&tag_name) {
+                                app.active_tag_filter = None;
+                            } else {
+                                app.active_tag_filter = Some(tag_name.clone());
+                            }
+                            app.tag_filter_popover_open = false;
+                            cx.notify();
+                        }))
+                        .child(tag),
+                );
+            }
+
+            Some(
+                div()
+                    .id("tags-filter-popover")
+                    .absolute()
+                    .top(px(34.0))
+                    .right(px(70.0))
+                    .w(px(220.0))
+                    .rounded_lg()
+                    .bg(rgb(0x181a24))
+                    .border_1()
+                    .border_color(rgb(0x2d3245))
+                    .p_3()
+                    .shadow_xl()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
                             .child(
                                 div()
                                     .text_xs()
+                                    .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child(format!(
-                                        "{}  ·  {}",
-                                        format_endpoint(
-                                            host.destination.username(),
-                                            host.destination.host(),
-                                            host.destination.port().get(),
-                                        ),
-                                        host.group_name.as_deref().unwrap_or("Default")
-                                    )),
+                                    .child("Filter by tags"),
+                            )
+                            .child(
+                                div()
+                                    .id("clear-tag-filter-btn")
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                    .cursor_pointer()
+                                    .hover(|s| s.underline())
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.active_tag_filter = None;
+                                        app.tag_filter_popover_open = false;
+                                        cx.notify();
+                                    }))
+                                    .child("Clear"),
                             ),
                     )
+                    .child(tags_list),
+            )
+        } else {
+            None
+        };
+
+        let sort_menu = if self.sort_menu_open {
+            Some(
+                div()
+                    .id("sort-popover")
+                    .absolute()
+                    .top(px(34.0))
+                    .right(px(36.0))
+                    .w(px(170.0))
+                    .rounded_lg()
+                    .bg(rgb(0x181a24))
+                    .border_1()
+                    .border_color(rgb(0x2d3245))
+                    .p_1()
+                    .shadow_xl()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
                     .child(
                         div()
-                            .w(px(120.0))
+                            .id("sort-opt-alpha-asc")
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
                             .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                            .child(host.group_name.clone().unwrap_or_else(|| "—".into())),
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_color(if self.sort_mode == HostSortMode::AlphaAsc {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.sort_mode = HostSortMode::AlphaAsc;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(div().flex().items_center().gap_2().child("Az").child("A-z"))
+                            .child(if self.sort_mode == HostSortMode::AlphaAsc {
+                                "✓"
+                            } else {
+                                ""
+                            }),
                     )
                     .child(
                         div()
-                            .w(px(75.0))
+                            .id("sort-opt-alpha-desc")
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
                             .text_xs()
-                            .text_color(rgb(MacTheme::ACCENT_BLUE))
-                            .child(host.protocol().display_name()),
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_color(if self.sort_mode == HostSortMode::AlphaDesc {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.sort_mode = HostSortMode::AlphaDesc;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(div().flex().items_center().gap_2().child("Za").child("Z-a"))
+                            .child(if self.sort_mode == HostSortMode::AlphaDesc {
+                                "✓"
+                            } else {
+                                ""
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("sort-opt-newest")
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_color(if self.sort_mode == HostSortMode::Newest {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.sort_mode = HostSortMode::Newest;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child("📅")
+                                    .child("Newest to oldest"),
+                            )
+                            .child(if self.sort_mode == HostSortMode::Newest {
+                                "✓"
+                            } else {
+                                ""
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("sort-opt-oldest")
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_color(if self.sort_mode == HostSortMode::Oldest {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.sort_mode = HostSortMode::Oldest;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child("📅")
+                                    .child("Oldest to newest"),
+                            )
+                            .child(if self.sort_mode == HostSortMode::Oldest {
+                                "✓"
+                            } else {
+                                ""
+                            }),
                     ),
-            );
-        }
-        if filtered.is_empty() {
-            let message = match &self.hosts {
-                HostState::Loading => "Loading hosts…".to_string(),
-                HostState::Error(error) => format!("Could not load hosts: {error}"),
-                HostState::NoDatabase => "Host storage is unavailable.".to_string(),
-                HostState::Loaded(hosts) if hosts.is_empty() => {
-                    "No saved hosts yet. Add your first connection to get started.".to_string()
-                }
-                _ => "No hosts match your search.".to_string(),
-            };
-            rows = rows.child(
-                div()
-                    .p_6()
-                    .text_sm()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child(message),
-            );
-        }
-        let inventory = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(MacTheme::BORDER))
-            .bg(rgb(MacTheme::SURFACE))
-            .overflow_hidden()
-            .child(
-                div()
-                    .p_3()
-                    .border_b_1()
-                    .border_color(rgb(MacTheme::BORDER))
-                    .child(self.search_input.clone()),
             )
+        } else {
+            None
+        };
+
+        let action_bar = div()
+            .id("hosts-action-bar")
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_6()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
             .child(
                 div()
                     .flex()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .bg(rgb(MacTheme::TOOLBAR_BG))
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .child(div().w(px(15.0)))
-                    .child(div().flex_1().child("NAME"))
-                    .child(div().w(px(120.0)).child("GROUP"))
-                    .child(div().w(px(75.0)).child("PROTOCOL")),
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("add-host")
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_3()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE)).text_color(rgb(0xffffff)))
+                            .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
+                            .child("+ New host")
+                            .child("⌵"),
+                    )
+                    .child(
+                        div()
+                            .id("add-serial-host")
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_3()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SURFACE))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.edit_host_with_protocol(ConnectionProtocol::Serial, cx)
+                            }))
+                            .child("🖧 Serial"),
+                    )
+                    .child(self.host_library_actions(cx)),
             )
-            .child(div().id("host-list").overflow_y_scroll().child(rows));
-
-        let mut collections = div()
-            .w(px(190.0))
-            .flex_shrink_0()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(MacTheme::BORDER))
-            .bg(rgb(MacTheme::SIDEBAR_BG))
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_2()
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .child("GROUPS"),
-            )
-            .child(
-                div()
-                    .id("all-hosts")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(if self.selected_group.is_none() {
-                        rgb(MacTheme::ACCENT_BLUE)
-                    } else {
-                        rgb(MacTheme::SIDEBAR_BG)
-                    })
-                    .text_sm()
-                    .text_color(if self.selected_group.is_none() {
-                        rgb(0xffffff)
-                    } else {
-                        rgb(MacTheme::TEXT_PRIMARY)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.selected_group = None;
-                        cx.notify();
-                    }))
-                    .child(format!("▣  All hosts     {}", hosts.len())),
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("hosts-view-mode")
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_md()
+                            .bg(if self.view_mode_menu_open {
+                                rgb(MacTheme::SURFACE_HOVER)
+                            } else {
+                                rgb(MacTheme::SURFACE)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .cursor_pointer()
+                            .hover(|s| {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.view_mode_menu_open = !app.view_mode_menu_open;
+                                app.tag_filter_popover_open = false;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(if self.view_mode == HostViewMode::Grid {
+                                "▦"
+                            } else {
+                                "≡"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("hosts-tags-filter")
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_md()
+                            .bg(if self.active_tag_filter.is_some() {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else if self.tag_filter_popover_open {
+                                rgb(MacTheme::SURFACE_HOVER)
+                            } else {
+                                rgb(MacTheme::SURFACE)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(if self.active_tag_filter.is_some() {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_SECONDARY)
+                            })
+                            .cursor_pointer()
+                            .hover(|s| {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.tag_filter_popover_open = !app.tag_filter_popover_open;
+                                app.view_mode_menu_open = false;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child("🏷"),
+                    )
+                    .child(
+                        div()
+                            .id("hosts-sort")
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_md()
+                            .bg(if self.sort_menu_open {
+                                rgb(MacTheme::SURFACE_HOVER)
+                            } else {
+                                rgb(MacTheme::SURFACE)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .cursor_pointer()
+                            .hover(|s| {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.sort_menu_open = !app.sort_menu_open;
+                                app.view_mode_menu_open = false;
+                                app.tag_filter_popover_open = false;
+                                cx.notify();
+                            }))
+                            .child("📅"),
+                    )
+                    .child(
+                        div()
+                            .id("hosts-team-invite")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SURFACE))
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .on_click(cx.listener(|app, _, _, cx| app.open_invite_modal(cx)))
+                            .child("👤+"),
+                    )
+                    .children(view_mode_menu)
+                    .children(tags_filter_menu)
+                    .children(sort_menu),
             );
+
+        // Breadcrumbs if a group is currently filtered
+        let breadcrumbs = if let Some(selected_grp) = &self.selected_group {
+            let grp_clone = selected_grp.clone();
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(
+                        div()
+                            .id("breadcrumb-all-hosts")
+                            .text_color(rgb(MacTheme::ACCENT_BLUE))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.selected_group = None;
+                                cx.notify();
+                            }))
+                            .child("← All hosts"),
+                    )
+                    .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("/"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child(grp_clone),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        // Top team invite banner
+        let invite_banner = div()
+            .id("team-invite-banner")
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x18202d))
+            .border_1()
+            .border_color(rgb(0x24344d))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(div().text_base().child("👥"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Invite members."),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("Manage and use data together with your team."),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("invite-members-btn")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x252a36))
+                    .border_1()
+                    .border_color(rgb(0x384154))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x323a4b)).border_color(rgb(MacTheme::ACCENT_BLUE)))
+                    .on_click(cx.listener(|app, _, _, cx| app.open_invite_modal(cx)))
+                    .child("Invite members"),
+            );
+
+        // Groups cards section (only shown when no group filter is selected and no search query)
         let mut groups: Vec<&str> = hosts
             .iter()
             .filter_map(|host| host.group_name.as_deref())
@@ -14387,321 +18286,659 @@ impl Render for Shellumi {
         groups.extend(self.desktop.groups.iter().map(|group| group.name.as_str()));
         groups.sort_unstable();
         groups.dedup();
-        for (index, group) in groups.into_iter().enumerate() {
-            let group_name = group.to_owned();
-            let active = self.selected_group.as_deref() == Some(group);
-            let count = hosts
-                .iter()
-                .filter(|h| h.group_name.as_deref() == Some(group))
-                .count();
-            collections = collections.child(
-                div()
-                    .id(("collection-group", index))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(if active {
-                        rgb(MacTheme::ACCENT_BLUE)
-                    } else {
-                        rgb(MacTheme::SIDEBAR_BG)
-                    })
-                    .text_sm()
-                    .text_color(if active {
-                        rgb(0xffffff)
-                    } else {
-                        rgb(MacTheme::TEXT_PRIMARY)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.selected_group = Some(group_name.clone());
-                        cx.notify();
-                    }))
-                    .child(format!("▣  {group}     {count}")),
-            );
+
+        let groups_section =
+            if self.selected_group.is_none() && !groups.is_empty() && query.is_empty() {
+                let mut grid = div().flex().flex_wrap().gap_3();
+                for (idx, group) in groups.iter().enumerate() {
+                    let grp_name = group.to_string();
+                    let grp_menu_name = group.to_string();
+                    let count = hosts
+                        .iter()
+                        .filter(|h| h.group_name.as_deref() == Some(*group))
+                        .count();
+                    let card = div()
+                        .id(("group-card", idx))
+                        .w(px(240.0))
+                        .h(px(58.0))
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .p_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .cursor_pointer()
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.selected_group = Some(grp_name.clone());
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .w(px(32.0))
+                                        .h(px(32.0))
+                                        .rounded_md()
+                                        .bg(rgb(MacTheme::BADGE_NAVY))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_sm()
+                                        .child("⊞"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                .truncate()
+                                                .child(group.to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child(format!("{count} hosts")),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("group-menu-btn", idx))
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .hover(|s| {
+                                    s.text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .bg(rgb(MacTheme::INPUT_BG))
+                                })
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.group_context_menu = Some((grp_menu_name.clone(), idx));
+                                    cx.notify();
+                                }))
+                                .child("···"),
+                        );
+                    grid = grid.child(card);
+                }
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child("Groups"),
+                        )
+                        .child(grid),
+                )
+            } else {
+                None
+            };
+
+        // Filtering and sorting
+        let mut filtered: Vec<&SavedHost> = hosts
+            .iter()
+            .filter(|h| {
+                if let Some(grp) = &self.selected_group {
+                    if h.group_name.as_deref() != Some(grp.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(tag) = &self.active_tag_filter {
+                    if !h.tags.contains(tag) {
+                        return false;
+                    }
+                }
+                if query.is_empty() {
+                    return true;
+                }
+                let query = query.to_lowercase();
+                h.name.to_lowercase().contains(&query)
+                    || h.destination.host().to_lowercase().contains(&query)
+                    || h.destination.username().to_lowercase().contains(&query)
+                    || h.tags.iter().any(|t| t.to_lowercase().contains(&query))
+                    || h.group_name
+                        .as_ref()
+                        .map(|g| g.to_lowercase().contains(&query))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        match self.sort_mode {
+            HostSortMode::AlphaAsc => filtered.sort_by_key(|a| a.name.to_lowercase()),
+            HostSortMode::AlphaDesc => {
+                filtered.sort_by_key(|a| std::cmp::Reverse(a.name.to_lowercase()))
+            }
+            HostSortMode::Newest => filtered.sort_by_key(|a| std::cmp::Reverse(a.id)),
+            HostSortMode::Oldest => filtered.sort_by_key(|a| a.id),
         }
-        collections = collections
-            .child(
+
+        // Hosts cards section
+        let mut hosts_grid = div().flex().flex_wrap().gap_3();
+        for host in &filtered {
+            let id = host.id;
+            let is_sel = selected.is_some_and(|s| s.id == id);
+            let select_host_id = id;
+
+            let badge_bg = match host.protocol() {
+                ConnectionProtocol::Ssh => rgb(0x0f3661),
+                ConnectionProtocol::Serial => rgb(0x0e3b2e),
+                ConnectionProtocol::Mosh => rgb(0x3d2800),
+                ConnectionProtocol::Telnet => rgb(0x3e1717),
+                ConnectionProtocol::Local => rgb(0x1a2e26),
+            };
+            let badge_fg = match host.protocol() {
+                ConnectionProtocol::Ssh => rgb(0x389bf2),
+                ConnectionProtocol::Serial => rgb(0x3dd68c),
+                ConnectionProtocol::Mosh => rgb(0xf5a623),
+                ConnectionProtocol::Telnet => rgb(0xeb5757),
+                ConnectionProtocol::Local => rgb(0x3dd68c),
+            };
+            let badge_icon = match host.protocol() {
+                ConnectionProtocol::Ssh => "🖧",
+                ConnectionProtocol::Serial => "🔌",
+                ConnectionProtocol::Mosh => "⚡",
+                ConnectionProtocol::Telnet => "⚠️",
+                ConnectionProtocol::Local => ">_",
+            };
+
+            let card = div()
+                .id(("host-card", id as u64))
+                .w(px(240.0))
+                .h(px(64.0))
+                .rounded_lg()
+                .bg(if is_sel {
+                    rgb(MacTheme::SURFACE_ACTIVE)
+                } else {
+                    rgb(MacTheme::SURFACE)
+                })
+                .border_1()
+                .border_color(if is_sel {
+                    rgb(MacTheme::ACCENT_BLUE)
+                } else {
+                    rgb(MacTheme::BORDER)
+                })
+                .p_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .cursor_pointer()
+                .hover(|s| {
+                    if !is_sel {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                            .border_color(rgb(MacTheme::ACCENT_BLUE))
+                    } else {
+                        s
+                    }
+                })
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if app.selected_host_id == Some(select_host_id) {
+                        app.selected_host_id = None;
+                    } else {
+                        app.selected_host_id = Some(select_host_id);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(36.0))
+                        .h(px(36.0))
+                        .rounded_md()
+                        .bg(badge_bg)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(badge_fg)
+                        .text_base()
+                        .child(badge_icon),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .truncate()
+                                .child(host.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .truncate()
+                                .child(format!(
+                                    "{}, {}",
+                                    host.protocol().display_name().to_lowercase(),
+                                    if host.destination.username().is_empty() {
+                                        "default"
+                                    } else {
+                                        host.destination.username()
+                                    }
+                                )),
+                        ),
+                );
+            hosts_grid = hosts_grid.child(card);
+        }
+
+        if filtered.is_empty() {
+            let message = match &self.hosts {
+                HostState::Loading => "Loading hosts…".to_string(),
+                HostState::Error(error) => format!("Could not load hosts: {error}"),
+                HostState::NoDatabase => "Host storage is unavailable.".to_string(),
+                HostState::Loaded(hosts) if hosts.is_empty() => {
+                    "No saved hosts yet. Click '+ New host' above to add your first connection."
+                        .to_string()
+                }
+                _ => "No hosts match your search.".to_string(),
+            };
+            hosts_grid = hosts_grid.child(
                 div()
-                    .mt_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(rgb(MacTheme::SEPARATOR))
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .child("LOCAL STORAGE"),
-            )
-            .child(
-                div()
-                    .px_2()
+                    .p_8()
+                    .w_full()
+                    .text_center()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child("Personal workspace"),
+                    .child(message),
             );
+        }
 
-        let mut inspector = div()
-            .w(px(240.0))
-            .flex_shrink_0()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
-            .bg(rgb(MacTheme::SURFACE))
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_3();
-        if let Some(host) = selected {
+        let hosts_display = match self.view_mode {
+            HostViewMode::Grid => div().child(hosts_grid),
+            HostViewMode::List => {
+                let mut list_col = div()
+                    .id("hosts-list-table")
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .rounded_xl()
+                    .overflow_hidden()
+                    .bg(rgb(MacTheme::SURFACE));
+
+                list_col = list_col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .px_4()
+                        .py_2()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .bg(rgb(MacTheme::INPUT_BG))
+                        .border_b_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .child(div().w(px(220.0)).child("NAME"))
+                        .child(div().w(px(140.0)).child("GROUP"))
+                        .child(div().w(px(90.0)).child("PROTOCOL"))
+                        .child(div().flex_1().child("DESTINATION / USER"))
+                        .child(div().w(px(160.0)).child("TAGS")),
+                );
+
+                for (l_idx, host) in filtered.iter().enumerate() {
+                    let id = host.id;
+                    let is_sel = selected.is_some_and(|s| s.id == id);
+                    let badge_fg = match host.protocol() {
+                        ConnectionProtocol::Ssh => rgb(0x389bf2),
+                        ConnectionProtocol::Serial => rgb(0x3dd68c),
+                        ConnectionProtocol::Mosh => rgb(0xf5a623),
+                        ConnectionProtocol::Telnet => rgb(0xeb5757),
+                        ConnectionProtocol::Local => rgb(0x3dd68c),
+                    };
+                    let badge_icon = match host.protocol() {
+                        ConnectionProtocol::Ssh => "🖧",
+                        ConnectionProtocol::Serial => "🔌",
+                        ConnectionProtocol::Mosh => "⚡",
+                        ConnectionProtocol::Telnet => "⚠️",
+                        ConnectionProtocol::Local => ">_",
+                    };
+
+                    list_col = list_col.child(
+                        div()
+                            .id(("host-list-row", l_idx))
+                            .flex()
+                            .items_center()
+                            .px_4()
+                            .py_2p5()
+                            .border_b_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .bg(if is_sel {
+                                rgb(MacTheme::SURFACE_ACTIVE)
+                            } else {
+                                rgb(MacTheme::SURFACE)
+                            })
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                if app.selected_host_id == Some(id) {
+                                    app.selected_host_id = None;
+                                } else {
+                                    app.selected_host_id = Some(id);
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(220.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_sm().text_color(badge_fg).child(badge_icon))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                            .truncate()
+                                            .child(host.name.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(140.0))
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .truncate()
+                                    .child(host.group_name.clone().unwrap_or_else(|| "—".into())),
+                            )
+                            .child(
+                                div()
+                                    .w(px(90.0))
+                                    .text_xs()
+                                    .text_color(badge_fg)
+                                    .child(host.protocol().display_name()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .truncate()
+                                    .child(format!(
+                                        "{}@{}",
+                                        if host.destination.username().is_empty() {
+                                            "default"
+                                        } else {
+                                            host.destination.username()
+                                        },
+                                        host.destination.host()
+                                    )),
+                            )
+                            .child(div().w(px(160.0)).flex().flex_wrap().gap_1().children(
+                                host.tags.iter().map(|t| {
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(rgb(MacTheme::INPUT_BG))
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(t.clone())
+                                }),
+                            )),
+                    );
+                }
+
+                if filtered.is_empty() {
+                    list_col = list_col.child(
+                        div()
+                            .p_8()
+                            .w_full()
+                            .text_center()
+                            .text_sm()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("No hosts match your filter criteria."),
+                    );
+                }
+
+                div().child(list_col)
+            }
+        };
+
+        // Slide-over Inspector Drawer (right side)
+        let inspector_panel = if let Some(host) = selected {
             let edit_host = host.clone();
             let connect_host = host.clone();
             let sftp_host = host.clone();
             let id = host.id;
-            inspector = inspector
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child(host.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child(host.destination.host().to_owned()),
-                )
-                .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
-                .child(host_detail(
-                    "Protocol",
-                    host.protocol().display_name().to_string(),
-                ))
-                .child(host_detail(
-                    "Username",
-                    host.destination.username().to_string(),
-                ))
-                .child(host_detail("Port", host.destination.port().to_string()))
-                .child(host_detail(
-                    "Group",
-                    host.group_name.clone().unwrap_or_else(|| "—".into()),
-                ))
-                .child(host_detail(
-                    "Tags",
-                    if host.tags.is_empty() {
-                        "—".into()
-                    } else {
-                        host.tags.join(", ")
-                    },
-                ))
-                .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .id("connect-selected")
-                                .flex_1()
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .bg(rgb(MacTheme::ACCENT_BLUE))
-                                .text_color(rgb(0xffffff))
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.connect(&connect_host, window, cx)
-                                }))
-                                .child("Connect"),
-                        )
-                        .child(
-                            div()
-                                .id("edit-selected")
-                                .flex_1()
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .bg(rgb(MacTheme::SURFACE_HOVER))
-                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                .text_sm()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.edit_host(Some(&edit_host), cx)
-                                }))
-                                .child("Edit"),
-                        ),
-                );
-            if host.protocol().supports_sftp() {
-                inspector = inspector.child(
-                    div()
-                        .id("sftp-selected")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(MacTheme::SURFACE_HOVER))
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .text_sm()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.connect_sftp(&sftp_host, window, cx)
-                        }))
-                        .child("Open SFTP"),
-                );
-            }
-            inspector = inspector.child(
+            Some(
                 div()
-                    .id("delete-selected")
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .text_color(rgb(MacTheme::DANGER))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |app, _, _, cx| app.delete_host(id, cx)))
-                    .child("Delete host"),
-            );
-        } else {
-            inspector = inspector.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .child("Select a host to view its details."),
-            );
-        }
-        let sidebar = workspace_sidebar(cx, "Hosts");
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_6()
-            .py_4()
-            .border_b_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
-            .child(
-                div()
+                    .id("host-inspector-panel")
+                    .w(px(290.0))
+                    .flex_shrink_0()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .bg(rgb(MacTheme::SURFACE))
+                    .p_4()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap_3()
                     .child(
                         div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .child("Hosts"),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .truncate()
+                                    .child(host.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("close-inspector")
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.selected_host_id = None;
+                                        cx.notify();
+                                    }))
+                                    .child("✕"),
+                            ),
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                            .child("Infrastructure inventory"),
-                    ),
-            )
-            .child(
-                div()
-                    .id("command-palette-btn")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(MacTheme::SEPARATOR))
-                    .bg(rgb(MacTheme::INPUT_BG))
-                    .text_sm()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .cursor_pointer()
-                    .on_click(
-                        cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)),
-                    )
-                    .child("⌕   Search anything"),
-            );
-        let toolbar = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .child("Infrastructure inventory"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                            .child("Your saved connections, organized locally"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(self.host_library_actions(cx))
-                    .child(
-                        div()
-                            .id("refresh")
-                            .px_3()
-                            .py_2()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .py_1()
                             .rounded_md()
-                            .border_1()
-                            .border_color(rgb(MacTheme::SEPARATOR))
                             .bg(rgb(MacTheme::INPUT_BG))
-                            .text_sm()
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|app, _, _, cx| app.load_hosts(cx)))
-                            .child("Refresh"),
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("💬")
+                            .child("Personal")
+                            .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("⌵")),
                     )
+                    .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                    .child(host_detail(
+                        "Protocol",
+                        host.protocol().display_name().to_string(),
+                    ))
+                    .child(host_detail(
+                        "Address",
+                        format_endpoint(
+                            host.destination.username(),
+                            host.destination.host(),
+                            host.destination.port().get(),
+                        ),
+                    ))
+                    .child(host_detail(
+                        "Group",
+                        host.group_name.clone().unwrap_or_else(|| "—".into()),
+                    ))
+                    .child(host_detail(
+                        "Tags",
+                        if host.tags.is_empty() {
+                            "—".into()
+                        } else {
+                            host.tags.join(", ")
+                        },
+                    ))
+                    .child(div().flex_1())
+                    .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
                     .child(
                         div()
-                            .id("add-host")
-                            .px_3()
+                            .id("connect-selected")
+                            .w_full()
                             .py_2()
                             .rounded_md()
                             .bg(rgb(MacTheme::ACCENT_BLUE))
                             .text_color(rgb(0xffffff))
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .text_center()
                             .cursor_pointer()
-                            .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
-                            .child("+   New host"),
+                            .hover(|s| s.bg(rgb(0x389bf2)))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.connect(&connect_host, window, cx)
+                            }))
+                            .child("Connect"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("edit-selected")
+                                    .flex_1()
+                                    .py_1p5()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::INPUT_BG))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::BORDER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .text_xs()
+                                    .text_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.edit_host(Some(&edit_host), cx)
+                                    }))
+                                    .child("Edit"),
+                            )
+                            .children(if host.protocol().supports_sftp() {
+                                Some(
+                                    div()
+                                        .id("sftp-selected")
+                                        .flex_1()
+                                        .py_1p5()
+                                        .rounded_md()
+                                        .bg(rgb(MacTheme::INPUT_BG))
+                                        .border_1()
+                                        .border_color(rgb(MacTheme::BORDER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .text_xs()
+                                        .text_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.connect_sftp(&sftp_host, window, cx)
+                                        }))
+                                        .child("SFTP"),
+                                )
+                            } else {
+                                None
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("delete-selected")
+                            .py_1()
+                            .text_xs()
+                            .text_center()
+                            .text_color(rgb(MacTheme::DANGER))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(cx.listener(move |app, _, _, cx| app.delete_host(id, cx)))
+                            .child("Delete host"),
                     ),
-            );
-        let mut quick = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .mt_2()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child("Quick connect"),
             )
-            .child(div().flex_1().child(self.quick_connect_input.clone()))
+        } else {
+            None
+        };
+
+        let group_inspector_panel = if self.group_inspector.is_some() {
+            Some(self.render_group_details_inspector(cx))
+        } else {
+            None
+        };
+
+        let content_scroll = div()
+            .id("hosts-content-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(invite_banner)
+            .children(breadcrumbs)
+            .children(groups_section)
             .child(
                 div()
-                    .id("quick-connect-btn")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(MacTheme::SEPARATOR))
-                    .bg(rgb(MacTheme::INPUT_BG))
-                    .text_sm()
-                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|app, _, window, cx| app.quick_connect(window, cx)))
-                    .child("Connect"),
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Hosts"),
+                    )
+                    .child(hosts_display),
             );
-        if let Some(error) = &self.quick_connect_error {
-            quick = quick.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MacTheme::DANGER))
-                    .child(error.clone()),
-            );
-        }
+
+        let main_hosts_area = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .child(content_scroll)
+            .children(group_inspector_panel)
+            .children(inspector_panel);
+
         let body = div()
             .id("shellumi")
             .track_focus(&self.focus)
@@ -14716,35 +18953,17 @@ impl Render for Shellumi {
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::CONTENT_BG))
-            .child(header)
-            .child(
-                div()
-                    .id("inventory-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_6()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(toolbar)
-                    .child(quick)
-                    .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .child(collections)
-                            .child(inventory)
-                            .child(inspector),
-                    ),
-            );
+            .child(action_bar)
+            .child(main_hosts_area);
+
+        let sidebar = self.workspace_sidebar("Hosts", cx);
         let mut row = div().flex().flex_1().min_h_0();
         if self.sidebar_visible {
             row = row.child(sidebar);
         }
         let mut result = root.child(row.child(body));
         if let Some(form) = &self.form {
+            let active_cat = form.active_category;
             let hostname_label = if form.protocol == ConnectionProtocol::Serial {
                 "Serial device port"
             } else {
@@ -14757,12 +18976,13 @@ impl Render for Shellumi {
             };
 
             let editor_categories = [
-                "General",
-                "Connection",
-                "Authentication",
-                "Proxy",
-                "Advanced",
+                (HostEditorCategory::General, "General", "⚙"),
+                (HostEditorCategory::Connection, "Connection", "🌐"),
+                (HostEditorCategory::Authentication, "Authentication", "🔑"),
+                (HostEditorCategory::Proxy, "Proxy", "⇄"),
+                (HostEditorCategory::Advanced, "Advanced", "⚡"),
             ];
+
             let mut nav = div()
                 .w(px(160.0))
                 .flex()
@@ -14773,174 +18993,272 @@ impl Render for Shellumi {
                 .border_1()
                 .border_color(rgb(MacTheme::BORDER))
                 .rounded_lg();
-            for (i, category) in editor_categories.iter().enumerate() {
-                let is_first = i == 0;
+
+            for (cat, label, icon) in editor_categories {
+                let is_active = cat == active_cat;
                 nav = nav.child(
                     div()
+                        .id(gpui::SharedString::from(format!(
+                            "cat-{}",
+                            label.to_lowercase()
+                        )))
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .px_3()
-                        .py_1p5()
+                        .py_2()
                         .rounded_md()
                         .text_sm()
-                        .font_weight(if is_first {
+                        .cursor_pointer()
+                        .font_weight(if is_active {
                             FontWeight::SEMIBOLD
                         } else {
                             FontWeight::NORMAL
                         })
-                        .bg(if is_first {
-                            rgb(MacTheme::SURFACE)
+                        .bg(if is_active {
+                            rgb(MacTheme::ACCENT_BLUE)
                         } else {
                             rgba(0x00000000)
                         })
-                        .text_color(if is_first {
-                            rgb(MacTheme::TEXT_PRIMARY)
+                        .text_color(if is_active {
+                            rgb(0xffffff)
                         } else {
                             rgb(MacTheme::TEXT_SECONDARY)
                         })
-                        .child(*category),
+                        .hover(|style| {
+                            if !is_active {
+                                style
+                                    .bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            } else {
+                                style
+                            }
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.set_host_editor_category(cat, cx);
+                        }))
+                        .child(div().text_sm().child(icon))
+                        .child(label),
                 );
             }
 
-            let mut fields = div().flex_1().min_w_0().flex().flex_col().gap_3();
-
-            fields = fields.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
+            let category_content = match active_cat {
+                HostEditorCategory::General => {
+                    let mut gen_div = div().flex().flex_col().gap_3().child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                            .child("Protocol"),
-                    )
-                    .child({
-                        let mut proto_row = div().flex().flex_row().gap_2();
-                        let protocols = [
-                            (ConnectionProtocol::Ssh, "SSH"),
-                            (ConnectionProtocol::Mosh, "Mosh"),
-                            (ConnectionProtocol::Telnet, "Telnet"),
-                            (ConnectionProtocol::Serial, "Serial"),
-                        ];
-                        for (idx, (p, label)) in protocols.into_iter().enumerate() {
-                            let is_sel = form.protocol == p;
-                            let btn_bg = if is_sel {
-                                rgb(MacTheme::ACCENT_BLUE)
-                            } else {
-                                rgb(MacTheme::INPUT_BG)
-                            };
-                            let btn_fg = if is_sel {
-                                rgb(0xffffff)
-                            } else {
-                                rgb(MacTheme::TEXT_SECONDARY)
-                            };
-                            proto_row = proto_row.child(
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
                                 div()
-                                    .id(("proto-select", idx))
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(btn_bg)
-                                    .text_color(btn_fg)
                                     .text_xs()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.set_form_protocol(p, cx);
-                                    }))
-                                    .child(label),
-                            );
-                        }
-                        proto_row
-                    }),
-            );
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("Protocol"),
+                            )
+                            .child({
+                                let mut proto_row = div().flex().flex_row().gap_2();
+                                let protocols = [
+                                    (ConnectionProtocol::Ssh, "SSH"),
+                                    (ConnectionProtocol::Mosh, "Mosh"),
+                                    (ConnectionProtocol::Telnet, "Telnet"),
+                                    (ConnectionProtocol::Serial, "Serial"),
+                                ];
+                                for (idx, (p, label)) in protocols.into_iter().enumerate() {
+                                    let is_sel = form.protocol == p;
+                                    let btn_bg = if is_sel {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    };
+                                    let btn_fg = if is_sel {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(MacTheme::TEXT_SECONDARY)
+                                    };
+                                    proto_row = proto_row.child(
+                                        div()
+                                            .id(("proto-select", idx))
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(btn_bg)
+                                            .text_color(btn_fg)
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.set_form_protocol(p, cx);
+                                            }))
+                                            .child(label),
+                                    );
+                                }
+                                proto_row
+                            }),
+                    );
 
-            if form.protocol == ConnectionProtocol::Telnet {
-                fields = fields.child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(0x4a1818))
-                        .text_color(rgb(MacTheme::DANGER))
-                        .text_xs()
-                        .child("⚠️ UNENCRYPTED PROTOCOL: Telnet transmits all credentials, keystrokes, and session data in cleartext over the network without encryption."),
-                );
-            } else if form.protocol == ConnectionProtocol::Serial {
-                fields = fields.child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(0x133820))
-                        .text_color(rgb(MacTheme::SUCCESS))
-                        .text_xs()
-                        .child("🔌 Direct serial line connection. Specify serial device path in Hostname (e.g. /dev/ttyUSB0 or COM1) and baud rate in Port (e.g. 115200)."),
-                );
-            }
+                    if form.protocol == ConnectionProtocol::Telnet {
+                        gen_div = gen_div.child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x4a1818))
+                                .text_color(rgb(MacTheme::DANGER))
+                                .text_xs()
+                                .child("⚠️ UNENCRYPTED PROTOCOL: Telnet transmits all credentials, keystrokes, and session data in cleartext over the network."),
+                        );
+                    } else if form.protocol == ConnectionProtocol::Serial {
+                        gen_div = gen_div.child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x133820))
+                                .text_color(rgb(MacTheme::SUCCESS))
+                                .text_xs()
+                                .child("🔌 Direct serial line connection. Specify serial device path and baud rate in Connection."),
+                        );
+                    }
 
-            fields = fields
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(host_form_field("Display name", form.name.clone()))
-                        .child(host_form_field("Group (optional)", form.group.clone())),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(host_form_field(hostname_label, form.hostname.clone()))
-                        .child(host_form_field(port_label, form.port.clone())),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(host_form_field("Username", form.username.clone()))
-                        .child(host_form_field("Tags (comma-separated)", form.tags.clone())),
-                )
-                .child(card(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
+                    gen_div = gen_div
                         .child(
                             div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                .child("Local Vault Security"),
+                                .flex()
+                                .gap_3()
+                                .child(host_form_field("Display name", form.name.clone()))
+                                .child(host_form_field("Group (optional)", form.group.clone())),
                         )
-                        .child(caption(
-                            "Host keys, passphrases, and credentials are encrypted and stored locally in Turso SQLite.",
-                        )),
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(host_form_field(hostname_label, form.hostname.clone()))
+                                .child(host_form_field(port_label, form.port.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(host_form_field("Username", form.username.clone()))
+                                .child(host_form_field("Tags (comma-separated)", form.tags.clone())),
+                        )
+                        .child(host_form_field("Jump host (optional)", form.jump_host.clone()))
+                        .child(self.identity_picker(form.identity_id, false, cx))
+                        .child(card(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_sm()
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .child("Local Vault Security"),
+                                )
+                                .child(caption(
+                                    "Host keys, passphrases, and credentials are encrypted and stored locally in Turso SQLite.",
+                                )),
+                        ));
+                    gen_div
+                }
+                HostEditorCategory::Connection => div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(host_form_field(hostname_label, form.hostname.clone()))
+                            .child(host_form_field(port_label, form.port.clone())),
+                    )
+                    .child(host_form_field("Username", form.username.clone())),
+                HostEditorCategory::Authentication => {
+                    let mut auth_div = div().flex().flex_col().gap_3();
+                    if form.protocol == ConnectionProtocol::Ssh {
+                        auth_div =
+                            auth_div.child(self.identity_picker(form.identity_id, false, cx));
+                    } else {
+                        auth_div = auth_div.child(
+                            div()
+                                .p_3()
+                                .rounded_md()
+                                .bg(rgb(MacTheme::INPUT_BG))
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child("Authentication credentials for this protocol are managed during connection."),
+                        );
+                    }
+                    auth_div
+                }
+                HostEditorCategory::Proxy => div().flex().flex_col().gap_3().child(
+                    host_form_field("Jump host (e.g. jump.corp:2222)", form.jump_host.clone()),
+                ),
+                HostEditorCategory::Advanced => {
+                    div().flex().flex_col().gap_3().child(host_form_field(
+                        "Startup snippet ID (optional)",
+                        form.startup_snippet.clone(),
+                    ))
+                }
+            };
+
+            let header_row = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(heading(
+                    if form.id.is_some() {
+                        "Edit Host"
+                    } else {
+                        "New Host"
+                    },
+                    "Host connection configuration · Local storage",
                 ))
                 .child(
                     div()
-                        .flex()
-                        .gap_3()
-                        .child(host_form_field(
-                            "Jump host (optional)",
-                            form.jump_host.clone(),
-                        ))
-                        .child(host_form_field(
-                            "Startup snippet ID (optional)",
-                            form.startup_snippet.clone(),
-                        )),
+                        .id("close-host-dialog")
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.form = None;
+                            app.form_error = None;
+                            cx.notify();
+                        }))
+                        .child("✕"),
                 );
 
-            if form.protocol == ConnectionProtocol::Ssh {
-                fields = fields.child(self.identity_picker(form.identity_id, false, cx));
-            }
+            let mut body_content = div()
+                .id("host-form-body-scroll")
+                .flex_1()
+                .min_w_0()
+                .max_h(px(400.0))
+                .overflow_y_scroll()
+                .child(category_content);
+
             if let Some(error) = &self.form_error {
-                fields = fields.child(
+                body_content = body_content.child(
                     div()
+                        .mt_2()
                         .text_color(rgb(MacTheme::DANGER))
                         .text_sm()
                         .child(error.clone()),
                 );
             }
 
-            let actions = if self.saving {
+            let body_row = div()
+                .flex()
+                .items_start()
+                .gap_4()
+                .child(nav)
+                .child(body_content);
+
+            let footer_row = if self.saving {
                 div()
+                    .flex()
+                    .justify_end()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("Saving…")
@@ -14981,14 +19299,11 @@ impl Render for Shellumi {
                             .child("Save"),
                     )
             };
-            fields = fields.child(actions);
 
             let editor = div()
                 .id("host-editor")
-                .overflow_y_scroll()
-                .w(px(780.0))
+                .w(px(720.0))
                 .max_w_full()
-                .max_h(px(700.0))
                 .rounded_xl()
                 .border_1()
                 .border_color(rgb(MacTheme::BORDER))
@@ -14997,15 +19312,10 @@ impl Render for Shellumi {
                 .gap_4()
                 .p_6()
                 .bg(rgb(MacTheme::SURFACE))
-                .child(heading(
-                    if form.id.is_some() {
-                        "Edit Host"
-                    } else {
-                        "New Host"
-                    },
-                    "Host connection configuration · Local storage",
-                ))
-                .child(div().flex().items_start().gap_4().child(nav).child(fields));
+                .child(header_row)
+                .child(body_row)
+                .child(footer_row);
+
             result = result.child(
                 div()
                     .id("host-editor-overlay")
@@ -15054,6 +19364,18 @@ impl Render for Shellumi {
         if let Some(modal) = &self.tunnel_modal {
             result = result.child(self.render_tunnel_modal(modal, cx));
         }
+        if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
+            result = result.child(dropdown);
+        }
+        if let Some(modal) = &self.invite_modal {
+            result = result.child(self.render_invite_team_modal(modal, cx));
+        }
+        if let Some(modal) = &self.identity_modal {
+            result = result.child(self.render_identity_modal(modal, cx));
+        }
+        if let Some(ctx_menu) = self.render_group_context_menu(cx) {
+            result = result.child(ctx_menu);
+        }
         if self.desktop.editor.is_some() || self.desktop.confirm.is_some() {
             result = self.desktop_overlays(result, cx);
         }
@@ -15096,9 +19418,73 @@ fn main() {
         }
     };
     Application::new().run(move |cx: &mut App| {
+        cx.on_action(|_: &Quit, cx: &mut App| {
+            cx.quit();
+        });
+        cx.on_action(|_: &HideApp, cx: &mut App| {
+            cx.hide();
+        });
+        cx.on_action(|_: &HideOthersApp, cx: &mut App| {
+            cx.hide_other_apps();
+        });
+        cx.on_action(|_: &ShowAllApp, cx: &mut App| {
+            cx.unhide_other_apps();
+        });
+
+        #[cfg(target_os = "macos")]
+        cx.set_menus(vec![
+            Menu {
+                name: "Shellumi".into(),
+                items: vec![
+                    MenuItem::action("About Shellumi", AboutApp),
+                    MenuItem::separator(),
+                    MenuItem::action("Vaults", OpenVaultsMenu),
+                    MenuItem::action("SFTP", OpenSftpMenu),
+                    MenuItem::action("Settings…", OpenSettingsMenu),
+                    MenuItem::separator(),
+                    MenuItem::os_submenu("Services", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("Hide Shellumi", HideApp),
+                    MenuItem::action("Hide Others", HideOthersApp),
+                    MenuItem::action("Show All", ShowAllApp),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Shellumi", Quit),
+                ],
+            },
+            Menu {
+                name: "Edit".into(),
+                items: vec![
+                    MenuItem::os_action("Undo", UndoAction, OsAction::Undo),
+                    MenuItem::os_action("Redo", RedoAction, OsAction::Redo),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", CutAction, OsAction::Cut),
+                    MenuItem::os_action("Copy", CopyAction, OsAction::Copy),
+                    MenuItem::os_action("Paste", PasteAction, OsAction::Paste),
+                    MenuItem::os_action("Select All", SelectAllAction, OsAction::SelectAll),
+                ],
+            },
+            Menu {
+                name: "Window".into(),
+                items: vec![
+                    MenuItem::action("Minimize", MinimizeWindow),
+                    MenuItem::action("Zoom", ZoomWindow),
+                    MenuItem::separator(),
+                    MenuItem::action("Bring All to Front", BringAllToFront),
+                ],
+            },
+            Menu {
+                name: "Help".into(),
+                items: vec![MenuItem::action("Keyboard Shortcuts", OpenShortcutsHelp)],
+            },
+        ]);
+
         text_input::bind_keys(cx);
         #[cfg(target_os = "macos")]
         cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("alt-cmd-h", HideOthersApp, None),
+            KeyBinding::new("cmd-m", MinimizeWindow, None),
             KeyBinding::new("cmd-k", ToggleCommandPalette, None),
             KeyBinding::new("cmd-r", RefreshHosts, None),
             KeyBinding::new("cmd-t", NewTab, None),
@@ -15135,6 +19521,7 @@ fn main() {
             KeyBinding::new("cmd-n", NewHost, None),
             KeyBinding::new("cmd-shift-r", ReconnectSession, None),
             KeyBinding::new("cmd-\\", ToggleSidebar, None),
+            KeyBinding::new("cmd-shift-\\", ToggleSidebarCollapse, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-shift-h", GoToHosts, None),
             KeyBinding::new("cmd-shift-o", GoToOverview, None),
@@ -15146,6 +19533,7 @@ fn main() {
 
         #[cfg(not(target_os = "macos"))]
         cx.bind_keys([
+            KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
             KeyBinding::new("ctrl-r", RefreshHosts, None),
             KeyBinding::new("ctrl-t", NewTab, None),
@@ -15181,6 +19569,7 @@ fn main() {
             KeyBinding::new("ctrl-n", NewHost, None),
             KeyBinding::new("ctrl-shift-r", ReconnectSession, None),
             KeyBinding::new("ctrl-\\", ToggleSidebar, None),
+            KeyBinding::new("ctrl-shift-\\", ToggleSidebarCollapse, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("ctrl-shift-h", GoToHosts, None),
             KeyBinding::new("ctrl-shift-o", GoToOverview, None),
@@ -15194,6 +19583,11 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(940.0), px(650.0))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Shellumi".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(14.0), px(14.0))),
+                }),
                 ..Default::default()
             },
             |window, cx| {
@@ -16998,7 +21392,7 @@ mod tests {
             NewTab, NextTab, OpenLocalTerminal, OpenSettings, PrevTab, QuickConnect,
             ReconnectSession, RefreshHosts, ResetZoom, SelectTab1, SelectTab9, SplitHorizontal,
             SplitVertical, ToggleBroadcast, ToggleCommandPalette, ToggleFocusMode, ToggleSidebar,
-            ToggleSnippets, ZoomIn, ZoomOut,
+            ToggleSidebarCollapse, ToggleSnippets, ZoomIn, ZoomOut,
         };
 
         // Ensure all actions are constructible
@@ -17025,6 +21419,7 @@ mod tests {
         let _ = NewHost;
         let _ = ReconnectSession;
         let _ = ToggleSidebar;
+        let _ = ToggleSidebarCollapse;
         let _ = GoToHosts;
         let _ = GoToOverview;
         let _ = GoToWorkspaces;

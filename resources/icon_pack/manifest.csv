@@ -1,0 +1,29 @@
+index,row,column,name,label,regular_256,hover_256
+1,1,1,hosts,Hosts / Servers,icons/256/regular/hosts.png,icons/256/hover/hosts.png
+2,1,2,connect,Connect / Sign in,icons/256/regular/connect.png,icons/256/hover/connect.png
+3,1,3,sftp,SFTP / Files,icons/256/regular/sftp.png,icons/256/hover/sftp.png
+4,1,4,snippets,Snippets / Scripts,icons/256/regular/snippets.png,icons/256/hover/snippets.png
+5,1,5,history,History,icons/256/regular/history.png,icons/256/hover/history.png
+6,2,1,keychain,SSH Keychain,icons/256/regular/keychain.png,icons/256/hover/keychain.png
+7,2,2,vaults,Vaults,icons/256/regular/vaults.png,icons/256/hover/vaults.png
+8,2,3,workspaces,Workspaces,icons/256/regular/workspaces.png,icons/256/hover/workspaces.png
+9,2,4,cloud_sync,Cloud Sync,icons/256/regular/cloud_sync.png,icons/256/hover/cloud_sync.png
+10,2,5,settings,Settings,icons/256/regular/settings.png,icons/256/hover/settings.png
+11,3,1,add_host,Add Host,icons/256/regular/add_host.png,icons/256/hover/add_host.png
+12,3,2,search,Search,icons/256/regular/search.png,icons/256/hover/search.png
+13,3,3,terminal,SSH Terminal,icons/256/regular/terminal.png,icons/256/hover/terminal.png
+14,3,4,serial,Serial Connection,icons/256/regular/serial.png,icons/256/hover/serial.png
+15,3,5,split_view,Split View,icons/256/regular/split_view.png,icons/256/hover/split_view.png
+16,4,1,grid_view,Grid View,icons/256/regular/grid_view.png,icons/256/hover/grid_view.png
+17,4,2,list_view,List View,icons/256/regular/list_view.png,icons/256/hover/list_view.png
+18,4,3,groups,Groups,icons/256/regular/groups.png,icons/256/hover/groups.png
+19,4,4,tags,Tags,icons/256/regular/tags.png,icons/256/hover/tags.png
+20,4,5,favorite,Favorites,icons/256/regular/favorite.png,icons/256/hover/favorite.png
+21,5,1,more,More / Menu,icons/256/regular/more.png,icons/256/hover/more.png
+22,5,2,edit,Edit,icons/256/regular/edit.png,icons/256/hover/edit.png
+23,5,3,delete,Delete,icons/256/regular/delete.png,icons/256/hover/delete.png
+24,5,4,refresh,Refresh,icons/256/regular/refresh.png,icons/256/hover/refresh.png
+25,5,5,profile,Account / Profile,icons/256/regular/profile.png,icons/256/hover/profile.png
+26,6,1,known_hosts,Known Hosts,icons/256/regular/known_hosts.png,icons/256/hover/known_hosts.png
+27,6,2,port_forwarding,Port Forwarding,icons/256/regular/port_forwarding.png,icons/256/hover/port_forwarding.png
+28,6,3,shellumi_logo,Shellumi Logo,icons/256/regular/shellumi_logo.png,icons/256/hover/shellumi_logo.png

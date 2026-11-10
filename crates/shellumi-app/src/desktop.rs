@@ -233,32 +233,29 @@ impl Shellumi {
         self.batch_modal = None;
         self.diagnostics_modal = None;
         self.command_palette = None;
+        self.form = None;
         self.desktop.editor = None;
         self.desktop.confirm = None;
         self.desktop.message = None;
-        self.page = if page == "Hosts" { None } else { Some(page) };
+        self.active_tab_idx = None;
+        self.page = if page == "Hosts" {
+            None
+        } else if page == "Logs" {
+            Some("Session Logs")
+        } else {
+            Some(page)
+        };
         if page == "Terminal" {
-            if let Some(index) = self
-                .active_tab_idx
-                .or_else(|| (!self.tabs.is_empty()).then_some(0))
-            {
+            if let Some(index) = (!self.tabs.is_empty()).then_some(0) {
                 self.select_tab(Some(index), window, cx);
             }
         }
         if page == "Keychain" || page == "Known Hosts" {
             self.refresh_public_inventory(cx);
         }
-        match page {
-            "Port Forwarding" if self.tunnel_modal.is_none() => self.open_tunnel_modal(cx),
-            "Session Logs" if self.session_replay_modal.is_none() => {
-                self.open_session_replay_modal(cx)
-            }
-            "Vaults" if self.team_modal.is_none() => self.open_team_modal(cx),
-            "Integrations" if self.infra_modal.is_none() => self.open_infra_modal(cx),
-            _ => {}
-        }
         if page == "SFTP Files" {
-            self.refresh_local_files(cx);
+            self.refresh_sftp_pane(true, cx);
+            self.refresh_sftp_pane(false, cx);
         }
         cx.notify();
     }
@@ -505,53 +502,15 @@ impl Shellumi {
         page: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let subtitle = match page {
-            "Overview" => "Everything in one secure place",
-            "Snippets" => "Reusable command library",
-            "Workspaces" => "Saved layouts and sessions",
-            "Settings" => "Customize Shellumi",
-            "SFTP Files" => "Secure file transfer",
-            "Keychain" => "Keys, certificates and identities",
-            "Known Hosts" => "SSH server trust records",
-            "Vaults" => "Local vaults and encrypted backups",
-            "Collaboration" => "Session sharing and team access",
-            "Integrations" => "Cloud inventory and infrastructure",
-            "Google Drive Sync" => "Optional encrypted synchronization",
-            _ => "Your infrastructure workspace",
-        };
-        let header =
-            div()
-                .flex()
-                .justify_between()
-                .items_center()
-                .px_6()
-                .py_4()
-                .border_b_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                .child(page),
-                        )
-                        .child(muted(subtitle)),
-                )
-                .child(button("page-search", "Search anything").on_click(
-                    cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)),
-                ));
+        if page == "SFTP Files" {
+            return self.render_sftp_redesigned_dual_pane(cx);
+        }
         let content = match page {
             "Snippets" => self.snippets_page(cx),
             "Settings" => self.settings_page(cx),
             "Workspaces" => self.workspaces_page(cx),
             "Overview" => self.overview_page(cx),
             "Terminal" => self.sessions_page(false, cx),
-            "SFTP Files" => self.files_page(cx),
             _ => self.tools_page(page, cx),
         };
         let mut body = div()
@@ -562,7 +521,6 @@ impl Shellumi {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(header)
             .child(
                 div()
                     .id("page-scroll")
@@ -1759,6 +1717,12 @@ impl Shellumi {
                 root = root.child(self.render_tunnel_modal(modal, cx));
             }
         }
+        if let Some(modal) = &self.invite_modal {
+            root = root.child(self.render_invite_team_modal(modal, cx));
+        }
+        if let Some(modal) = &self.identity_modal {
+            root = root.child(self.render_identity_modal(modal, cx));
+        }
         root
     }
 }
@@ -1796,259 +1760,462 @@ impl Shellumi {
     }
     fn public_inventory_page(&self, page: &'static str, cx: &mut Context<Self>) -> gpui::Div {
         let keys = page == "Keychain";
-        let mut table = panel().flex_1().min_w_0().flex().flex_col().gap_2();
         if keys {
+            let toolbar = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .pb_3()
+                .border_b_1()
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            primary("generate-ssh-key", "+ New key ⌵").on_click(
+                                cx.listener(|app, _, window, cx| {
+                                    app.start_session(
+                                        "Generate SSH identity".into(),
+                                        SessionKind::Local,
+                                        TerminalCommand::new("ssh-keygen").args(["-t", "ed25519"]),
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        )
+                        .child(
+                            button("new-identity-btn", "🪪 + New Identity").on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.open_identity_modal(None, cx);
+                                }),
+                            ),
+                        )
+                        .child(
+                            button("cert-btn", "📄 Certificate").on_click(cx.listener(|app, _, _, cx| {
+                                app.desktop.message = Some("Certificate management: add certificates to identities or OpenSSH config.".into());
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            button("fido2-btn", "🪪 FIDO2").on_click(cx.listener(|app, _, _, cx| {
+                                app.desktop.message = Some("FIDO2 hardware keys supported via OpenSSH sk-ecdsa/sk-ed25519 keys.".into());
+                                cx.notify();
+                            })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("keychain-search-btn")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                .on_click(cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)))
+                                .child("🔍"),
+                        )
+                        .child(
+                            div()
+                                .id("keychain-grid-btn")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                .child("⊞"),
+                        )
+                        .child(
+                            div()
+                                .id("keychain-refresh-btn")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                .on_click(cx.listener(|app, _, _, cx| app.refresh_public_inventory(cx)))
+                                .child("📅"),
+                        ),
+                );
+
+            let mut keys_grid = div().flex().flex_wrap().gap_3();
+            for (idx, record) in self.desktop.public_records.iter().enumerate() {
+                let is_sel = idx == self.desktop.public_selected;
+                keys_grid = keys_grid.child(
+                    div()
+                        .id(("key-card", idx))
+                        .w(px(250.0))
+                        .p_3p5()
+                        .rounded_xl()
+                        .bg(rgb(if is_sel {
+                            MacTheme::SURFACE_ACTIVE
+                        } else {
+                            MacTheme::SURFACE
+                        }))
+                        .border_1()
+                        .border_color(rgb(if is_sel {
+                            MacTheme::ACCENT_BLUE
+                        } else {
+                            MacTheme::BORDER
+                        }))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.desktop.public_selected = idx;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .h(px(36.0))
+                                .rounded_lg()
+                                .bg(rgb(MacTheme::BADGE_NAVY))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_base()
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                .child("🔑"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .truncate()
+                                        .child(record.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(format!("Type {}", record.key_type)),
+                                ),
+                        ),
+                );
+            }
+            if self.desktop.public_records.is_empty() {
+                keys_grid = keys_grid.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("No SSH keys found in ~/.ssh."),
+                );
+            }
+
+            let mut identities_grid = div().flex().flex_wrap().gap_3();
+            for (idx, id) in self.identities.iter().enumerate() {
+                let edit_id = id.id;
+                identities_grid = identities_grid.child(
+                    div()
+                        .id(("identity-card", idx))
+                        .w(px(260.0))
+                        .p_3p5()
+                        .rounded_xl()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.open_identity_modal(Some(edit_id), cx);
+                        }))
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .h(px(36.0))
+                                .rounded_lg()
+                                .bg(rgb(MacTheme::BADGE_NAVY))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_base()
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                .child("🪪"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .truncate()
+                                        .child(id.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(format!("User: {}", id.username)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("edit-identity-badge", idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(MacTheme::INPUT_BG))
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                .child("✏️ Edit"),
+                        ),
+                );
+            }
+            if self.identities.is_empty() {
+                identities_grid = identities_grid.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("No saved reusable identities yet."),
+                );
+            }
+
             let daemon = shellumi_core::probe_keychain_daemon();
-            let status_badge_color = if daemon.is_available {
-                rgb(MacTheme::SUCCESS)
-            } else {
-                rgb(MacTheme::WARNING)
-            };
-            let status_badge_bg = if daemon.is_available {
-                rgba(0x30d15826)
-            } else {
-                rgba(0xffd60a26)
-            };
             let daemon_card = div()
                 .p_3()
                 .rounded_lg()
                 .bg(rgb(MacTheme::SURFACE))
                 .border_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
+                .border_color(rgb(MacTheme::BORDER))
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .justify_between()
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .gap_2()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                        .child(format!(
-                                            "🔐 OS Keychain Daemon: {}",
-                                            daemon.backend_name
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .p_1()
-                                        .rounded_md()
-                                        .text_xs()
-                                        .bg(status_badge_bg)
-                                        .text_color(status_badge_color)
-                                        .child(if daemon.is_available {
-                                            "ACTIVE"
-                                        } else {
-                                            "FALLBACK"
-                                        }),
-                                ),
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child(format!("🔐 OS Keychain Daemon: {}", daemon.backend_name)),
                         )
                         .child(
                             div()
+                                .p_1()
+                                .rounded_md()
                                 .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child(format!("Daemon: {}", daemon.daemon_identifier)),
+                                .bg(if daemon.is_available {
+                                    rgba(0x30d15826)
+                                } else {
+                                    rgba(0xffd60a26)
+                                })
+                                .text_color(if daemon.is_available {
+                                    rgb(MacTheme::SUCCESS)
+                                } else {
+                                    rgb(MacTheme::WARNING)
+                                })
+                                .child(if daemon.is_available {
+                                    "ACTIVE"
+                                } else {
+                                    "FALLBACK"
+                                }),
                         ),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                        .child(daemon.details),
+                        .child(format!("Daemon: {}", daemon.daemon_identifier)),
                 );
 
-            table = table.child(daemon_card).child(div().h(px(4.0)));
-            table = table.child(heading("Saved Reusable Identities"));
-            if self.identities.is_empty() {
-                table = table.child(muted("No reusable identities saved. Add identities via `shellumi identity add <name> --username <user> --key-path <path>`."));
-            } else {
-                for id in &self.identities {
-                    let cert_info = if let Some(ref cert) = id.certificate_path {
-                        format!(" (Cert: {cert})")
-                    } else {
-                        String::new()
-                    };
-                    let method_badge = format!("{} • {}{}", id.username, id.auth_method, cert_info);
-                    let has_keychain_ref =
-                        id.password_secret_ref.is_some() || id.passphrase_secret_ref.is_some();
-                    table = table.child(
-                        div()
-                            .p_2()
-                            .rounded_md()
-                            .bg(rgb(MacTheme::SURFACE))
-                            .border_1()
-                            .border_color(rgb(MacTheme::SEPARATOR))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                                    .child(id.name.clone()),
-                                            )
-                                            .children(if has_keychain_ref {
-                                                Some(
-                                                    div()
-                                                        .p_1()
-                                                        .rounded_sm()
-                                                        .bg(rgba(0x0a84ff26))
-                                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                                        .text_xs()
-                                                        .child("🔐 Keychain"),
-                                                )
-                                            } else {
-                                                None
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                            .child(method_badge),
-                                    ),
-                            )
-                            .child(if let Some(ref kp) = id.key_path {
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                    .child(kp.clone())
-                            } else {
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child("Passphrase/Agent".to_string())
-                            }),
-                    );
-                }
-            }
-            table = table
-                .child(div().h(px(8.0)))
-                .child(heading("System SSH Keys (~/.ssh)"));
-        }
-        for (index, record) in self.desktop.public_records.iter().enumerate() {
-            let is_sel = index == self.desktop.public_selected;
-            let icon = if keys { "⚿" } else { "🛡" };
-            table = table.child(
-                button(("public-record", index), format!("{icon}  {}", record.name))
-                    .bg(if is_sel {
-                        rgb(MacTheme::ACCENT_BLUE)
-                    } else {
-                        rgb(MacTheme::SURFACE)
-                    })
-                    .text_color(if is_sel {
-                        rgb(0xffffff)
-                    } else {
-                        rgb(MacTheme::TEXT_PRIMARY)
-                    })
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.desktop.public_selected = index;
-                        cx.notify();
-                    })),
-            );
-        }
-        if self.desktop.public_records.is_empty() {
-            table=table.child(muted(if keys{"No public SSH keys were found in your .ssh directory."}else{"No known-host records were found. OpenSSH adds records after you explicitly trust a server."}));
-        }
-        let mut inspector = panel().w(px(290.0)).flex().flex_col().gap_3();
-        if let Some(record) = self
-            .desktop
-            .public_records
-            .get(self.desktop.public_selected)
-        {
-            let text = record.public_key.clone();
-            inspector = inspector
-                .child(heading(record.name.clone()))
-                .child(muted(record.key_type.clone()))
-                .child(muted(record.fingerprint.clone()))
-                .child(muted(record.path.to_string_lossy().into_owned()))
+            div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(toolbar)
                 .child(
-                    button("copy-public-key", "Copy public key").on_click(cx.listener(
-                        move |_, _, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
-                        },
-                    )),
-                );
-            if !keys {
-                if let Some(raw) = &record.trust_record {
-                    if !raw.starts_with('@') {
-                        let command = Command::RevokeKnownHost {
-                            path: record.path.clone(),
-                            expected: raw.clone(),
-                        };
-                        inspector=inspector.child(button("revoke-known-host","Revoke trust…").text_color(rgb(MacTheme::DANGER)).on_click(cx.listener(move|app,_,_,cx|{app.desktop.confirm=Some(("Revoke this server key? Future connections with this key will be rejected.".into(),command.clone()));cx.notify();})));
-                    }
-                }
-            }
-            if keys {
-                let private_path = record
-                    .path
-                    .with_extension("")
-                    .to_string_lossy()
-                    .into_owned();
-                inspector = inspector.child(
-                    button("load-agent-identity", "Load identity into SSH agent…").on_click(
-                        cx.listener(move |app, _, window, cx| {
-                            app.start_session(
-                                "SSH agent".into(),
-                                SessionKind::Local,
-                                TerminalCommand::new("ssh-add").arg(private_path.clone()),
-                                window,
-                                cx,
-                            )
-                        }),
-                    ),
-                );
-            }
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("Keys"),
+                )
+                .child(keys_grid)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("Identities"),
+                )
+                .child(identities_grid)
+                .child(div().h(px(8.0)))
+                .child(daemon_card)
         } else {
-            inspector = inspector.child(muted("Select a record to inspect its public metadata."));
+            // Known Hosts view
+            let toolbar = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .pb_3()
+                .border_b_1()
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .child(button("import-known-hosts", "Import").on_click(cx.listener(
+                    |app, _, _, cx| {
+                        app.refresh_public_inventory(cx);
+                    },
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("known-hosts-search-btn")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .cursor_pointer()
+                                .hover(|s| {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                })
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.open_command_palette(window, cx)
+                                }))
+                                .child("🔍"),
+                        )
+                        .child(
+                            div()
+                                .id("known-hosts-grid-btn")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .cursor_pointer()
+                                .hover(|s| {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                })
+                                .child("⊞"),
+                        )
+                        .child(
+                            div()
+                                .id("known-hosts-refresh-btn")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .cursor_pointer()
+                                .hover(|s| {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                })
+                                .on_click(
+                                    cx.listener(|app, _, _, cx| app.refresh_public_inventory(cx)),
+                                )
+                                .child("📅"),
+                        ),
+                );
+
+            let mut hosts_grid = div().flex().flex_wrap().gap_3();
+            for (idx, record) in self.desktop.public_records.iter().enumerate() {
+                hosts_grid = hosts_grid.child(
+                    div()
+                        .id(("known-host-card", idx))
+                        .w(px(250.0))
+                        .p_3p5()
+                        .rounded_xl()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .h(px(36.0))
+                                .rounded_lg()
+                                .bg(rgb(MacTheme::BADGE_NAVY))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_base()
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                .child("⎙"),
+                        )
+                        .child(
+                            div().flex().flex_col().gap_0p5().min_w_0().child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .truncate()
+                                    .child(record.name.clone()),
+                            ),
+                        ),
+                );
+            }
+            if self.desktop.public_records.is_empty() {
+                hosts_grid = hosts_grid.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                        .child("No known-host records found in ~/.ssh/known_hosts."),
+                );
+            }
+
+            div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(toolbar)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("Known Hosts"),
+                )
+                .child(hosts_grid)
         }
-        let mut toolbar = div()
-            .flex()
-            .justify_between()
-            .child(heading(if keys {
-                "SSH identities"
-            } else {
-                "Trusted server records"
-            }))
-            .child(
-                button("refresh-ssh-records", "Refresh")
-                    .on_click(cx.listener(|app, _, _, cx| app.refresh_public_inventory(cx))),
-            );
-        if keys {
-            toolbar = toolbar.child(primary("generate-ssh-key", "Generate key…").on_click(
-                cx.listener(|app, _, window, cx| {
-                    app.start_session(
-                        "Generate SSH identity".into(),
-                        SessionKind::Local,
-                        TerminalCommand::new("ssh-keygen").args(["-t", "ed25519"]),
-                        window,
-                        cx,
-                    )
-                }),
-            ));
-        }
-        div().flex().flex_col().gap_4().child(toolbar).child(muted(if keys{"System OpenSSH manages private keys. Key generation prompts for a storage path and passphrase in the terminal."}else{"Trust decisions are handled by OpenSSH with strict verification. This view never accepts or replaces server keys automatically."})).child(div().flex().items_start().gap_4().child(table).child(inspector))
     }
 }
 
@@ -2151,6 +2318,7 @@ impl Shellumi {
         })
         .detach();
     }
+    #[allow(dead_code)]
     fn files_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut local = panel()
             .flex_1()
@@ -2378,13 +2546,18 @@ impl Shellumi {
             },
         )];
         entries.extend(self.identities.iter().map(|identity| {
+            let key_detail = identity
+                .key_path
+                .as_deref()
+                .or(identity.certificate_path.as_deref())
+                .unwrap_or(&identity.username);
             (
                 Some(identity.id),
                 format!(
-                    "{} · {} · {}",
+                    "🔑 {} ({}) · {}",
                     identity.name,
-                    identity.username,
-                    identity.auth_method.as_str()
+                    identity.auth_method.as_str(),
+                    key_detail
                 ),
             )
         }));

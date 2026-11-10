@@ -1,0 +1,271 @@
+{
+  "name": "Shellumi GPUI Icon Pack",
+  "license": "Generated design assets based on user-provided images",
+  "states": [
+    "regular",
+    "hover"
+  ],
+  "pixel_sizes": [
+    256,
+    128,
+    64,
+    48,
+    32
+  ],
+  "format": "Transparent PNG RGBA",
+  "icons": [
+    {
+      "index": 1,
+      "row": 1,
+      "column": 1,
+      "name": "hosts",
+      "label": "Hosts / Servers",
+      "regular_256": "icons/256/regular/hosts.png",
+      "hover_256": "icons/256/hover/hosts.png"
+    },
+    {
+      "index": 2,
+      "row": 1,
+      "column": 2,
+      "name": "connect",
+      "label": "Connect / Sign in",
+      "regular_256": "icons/256/regular/connect.png",
+      "hover_256": "icons/256/hover/connect.png"
+    },
+    {
+      "index": 3,
+      "row": 1,
+      "column": 3,
+      "name": "sftp",
+      "label": "SFTP / Files",
+      "regular_256": "icons/256/regular/sftp.png",
+      "hover_256": "icons/256/hover/sftp.png"
+    },
+    {
+      "index": 4,
+      "row": 1,
+      "column": 4,
+      "name": "snippets",
+      "label": "Snippets / Scripts",
+      "regular_256": "icons/256/regular/snippets.png",
+      "hover_256": "icons/256/hover/snippets.png"
+    },
+    {
+      "index": 5,
+      "row": 1,
+      "column": 5,
+      "name": "history",
+      "label": "History",
+      "regular_256": "icons/256/regular/history.png",
+      "hover_256": "icons/256/hover/history.png"
+    },
+    {
+      "index": 6,
+      "row": 2,
+      "column": 1,
+      "name": "keychain",
+      "label": "SSH Keychain",
+      "regular_256": "icons/256/regular/keychain.png",
+      "hover_256": "icons/256/hover/keychain.png"
+    },
+    {
+      "index": 7,
+      "row": 2,
+      "column": 2,
+      "name": "vaults",
+      "label": "Vaults",
+      "regular_256": "icons/256/regular/vaults.png",
+      "hover_256": "icons/256/hover/vaults.png"
+    },
+    {
+      "index": 8,
+      "row": 2,
+      "column": 3,
+      "name": "workspaces",
+      "label": "Workspaces",
+      "regular_256": "icons/256/regular/workspaces.png",
+      "hover_256": "icons/256/hover/workspaces.png"
+    },
+    {
+      "index": 9,
+      "row": 2,
+      "column": 4,
+      "name": "cloud_sync",
+      "label": "Cloud Sync",
+      "regular_256": "icons/256/regular/cloud_sync.png",
+      "hover_256": "icons/256/hover/cloud_sync.png"
+    },
+    {
+      "index": 10,
+      "row": 2,
+      "column": 5,
+      "name": "settings",
+      "label": "Settings",
+      "regular_256": "icons/256/regular/settings.png",
+      "hover_256": "icons/256/hover/settings.png"
+    },
+    {
+      "index": 11,
+      "row": 3,
+      "column": 1,
+      "name": "add_host",
+      "label": "Add Host",
+      "regular_256": "icons/256/regular/add_host.png",
+      "hover_256": "icons/256/hover/add_host.png"
+    },
+    {
+      "index": 12,
+      "row": 3,
+      "column": 2,
+      "name": "search",
+      "label": "Search",
+      "regular_256": "icons/256/regular/search.png",
+      "hover_256": "icons/256/hover/search.png"
+    },
+    {
+      "index": 13,
+      "row": 3,
+      "column": 3,
+      "name": "terminal",
+      "label": "SSH Terminal",
+      "regular_256": "icons/256/regular/terminal.png",
+      "hover_256": "icons/256/hover/terminal.png"
+    },
+    {
+      "index": 14,
+      "row": 3,
+      "column": 4,
+      "name": "serial",
+      "label": "Serial Connection",
+      "regular_256": "icons/256/regular/serial.png",
+      "hover_256": "icons/256/hover/serial.png"
+    },
+    {
+      "index": 15,
+      "row": 3,
+      "column": 5,
+      "name": "split_view",
+      "label": "Split View",
+      "regular_256": "icons/256/regular/split_view.png",
+      "hover_256": "icons/256/hover/split_view.png"
+    },
+    {
+      "index": 16,
+      "row": 4,
+      "column": 1,
+      "name": "grid_view",
+      "label": "Grid View",
+      "regular_256": "icons/256/regular/grid_view.png",
+      "hover_256": "icons/256/hover/grid_view.png"
+    },
+    {
+      "index": 17,
+      "row": 4,
+      "column": 2,
+      "name": "list_view",
+      "label": "List View",
+      "regular_256": "icons/256/regular/list_view.png",
+      "hover_256": "icons/256/hover/list_view.png"
+    },
+    {
+      "index": 18,
+      "row": 4,
+      "column": 3,
+      "name": "groups",
+      "label": "Groups",
+      "regular_256": "icons/256/regular/groups.png",
+      "hover_256": "icons/256/hover/groups.png"
+    },
+    {
+      "index": 19,
+      "row": 4,
+      "column": 4,
+      "name": "tags",
+      "label": "Tags",
+      "regular_256": "icons/256/regular/tags.png",
+      "hover_256": "icons/256/hover/tags.png"
+    },
+    {
+      "index": 20,
+      "row": 4,
+      "column": 5,
+      "name": "favorite",
+      "label": "Favorites",
+      "regular_256": "icons/256/regular/favorite.png",
+      "hover_256": "icons/256/hover/favorite.png"
+    },
+    {
+      "index": 21,
+      "row": 5,
+      "column": 1,
+      "name": "more",
+      "label": "More / Menu",
+      "regular_256": "icons/256/regular/more.png",
+      "hover_256": "icons/256/hover/more.png"
+    },
+    {
+      "index": 22,
+      "row": 5,
+      "column": 2,
+      "name": "edit",
+      "label": "Edit",
+      "regular_256": "icons/256/regular/edit.png",
+      "hover_256": "icons/256/hover/edit.png"
+    },
+    {
+      "index": 23,
+      "row": 5,
+      "column": 3,
+      "name": "delete",
+      "label": "Delete",
+      "regular_256": "icons/256/regular/delete.png",
+      "hover_256": "icons/256/hover/delete.png"
+    },
+    {
+      "index": 24,
+      "row": 5,
+      "column": 4,
+      "name": "refresh",
+      "label": "Refresh",
+      "regular_256": "icons/256/regular/refresh.png",
+      "hover_256": "icons/256/hover/refresh.png"
+    },
+    {
+      "index": 25,
+      "row": 5,
+      "column": 5,
+      "name": "profile",
+      "label": "Account / Profile",
+      "regular_256": "icons/256/regular/profile.png",
+      "hover_256": "icons/256/hover/profile.png"
+    },
+    {
+      "index": 26,
+      "row": 6,
+      "column": 1,
+      "name": "known_hosts",
+      "label": "Known Hosts",
+      "regular_256": "icons/256/regular/known_hosts.png",
+      "hover_256": "icons/256/hover/known_hosts.png"
+    },
+    {
+      "index": 27,
+      "row": 6,
+      "column": 2,
+      "name": "port_forwarding",
+      "label": "Port Forwarding",
+      "regular_256": "icons/256/regular/port_forwarding.png",
+      "hover_256": "icons/256/hover/port_forwarding.png"
+    },
+    {
+      "index": 28,
+      "row": 6,
+      "column": 3,
+      "name": "shellumi_logo",
+      "label": "Shellumi Logo",
+      "regular_256": "icons/256/regular/shellumi_logo.png",
+      "hover_256": "icons/256/hover/shellumi_logo.png"
+    }
+  ],
+  "icon_count": 28
+}

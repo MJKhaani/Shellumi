@@ -1,6 +1,6 @@
 # Shellumi roadmap
 
-The current milestone is **v0.0.4-alpha**. Requirements remain in
+The current milestone is **v0.0.6-alpha**. Requirements remain in
 [PROJECT.md](../PROJECT.md); the [feature matrix](FEATURE_MATRIX.md) and
 [GUI status](GUI_STATUS.md) describe implementation evidence and limitations.
 
@@ -10,6 +10,12 @@ The following work is included in the alpha source:
 
 - Native Rust/GPUI desktop with native macOS Dark visual direction and design tokens,
   navigation, host inventory/inspector, centered editors and local-first startup.
+- Group Details Inspector slide-over drawer (Group icon, name, parent group, cloud sync toggle, default username/port/identity, and save/remove actions).
+- Group card context menu (`⚡ Quick Connect`, `⚡ Connect >`, `✏️ Edit Group Details`, `👥 Collaborate`, `📄 Move to >`, `📄 Copy to >`, `🗑️ Remove`).
+- In-place Reusable Identity Settings Modal to edit/create identity name, username, key path, passphrase, and tags.
+- Advanced Host view controls: Grid (▦) vs List (≡) mode switcher, 🏷 Tag filter popover, and 📅 Sort mode dropdown (A-z, Z-a, Newest to oldest, Oldest to newest).
+- Team collaboration invite modal dialog with multiple email recipients, and top host invite banner.
+- Host destination username strictly takes precedence over identity username, allowing custom users like `root` with user keys.
 - Automatic platform data paths, Turso database creation and migration,
   asynchronous storage, and persistent preferences.
 - Host/group editing, filters, jump hosts, OpenSSH config import/export and

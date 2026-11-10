@@ -26,6 +26,8 @@ actions!(
         Paste,
         Cut,
         Copy,
+        TabFocusNext,
+        TabFocusPrev,
     ]
 );
 
@@ -40,6 +42,7 @@ pub(crate) struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     masked: bool,
+    bare: bool,
 }
 
 impl TextInput {
@@ -78,6 +81,16 @@ impl TextInput {
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
+    }
+
+    fn tab_next(&mut self, _: &TabFocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_next();
+        cx.notify();
+    }
+
+    fn tab_prev(&mut self, _: &TabFocusPrev, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_prev();
+        cx.notify();
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -574,7 +587,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let base = div()
             .flex()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
@@ -588,6 +601,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::tab_next))
+            .on_action(cx.listener(Self::tab_prev))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -595,22 +610,31 @@ impl Render for TextInput {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0x303034))
-            .text_color(rgb(0xf5f5f7))
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(0x46464a))
-            .line_height(px(24.))
-            .text_size(px(14.))
-            .child(
-                div()
-                    .h(px(24. + 4. * 2.))
-                    .w_full()
-                    .p(px(4.))
-                    .bg(rgb(0x303034))
-                    .child(TextElement { input: cx.entity() }),
-            )
+            .on_mouse_move(cx.listener(Self::on_mouse_move));
+
+        if self.bare {
+            base.text_color(rgb(0xf5f5f7))
+                .line_height(px(22.))
+                .text_size(px(13.))
+                .w_full()
+                .child(div().w_full().child(TextElement { input: cx.entity() }))
+        } else {
+            base.bg(rgb(0x303034))
+                .text_color(rgb(0xf5f5f7))
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x46464a))
+                .line_height(px(24.))
+                .text_size(px(14.))
+                .child(
+                    div()
+                        .h(px(24. + 4. * 2.))
+                        .w_full()
+                        .p(px(4.))
+                        .bg(rgb(0x303034))
+                        .child(TextElement { input: cx.entity() }),
+                )
+        }
     }
 }
 
@@ -623,7 +647,7 @@ impl Focusable for TextInput {
 impl TextInput {
     pub(crate) fn new(cx: &mut Context<Self>, value: &str, placeholder: &str) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: value.to_owned().into(),
             placeholder: placeholder.to_owned().into(),
             selected_range: value.len()..value.len(),
@@ -633,7 +657,12 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             masked: false,
+            bare: false,
         }
+    }
+    pub(crate) fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
     pub(crate) fn masked(mut self) -> Self {
         self.masked = true;
@@ -669,5 +698,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-x"), Cut, Some("TextInput")),
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
+        KeyBinding::new("tab", TabFocusNext, Some("TextInput")),
+        KeyBinding::new("shift-tab", TabFocusPrev, Some("TextInput")),
     ]);
 }

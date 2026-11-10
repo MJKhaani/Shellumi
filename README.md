@@ -16,8 +16,11 @@ using Shellumi for administration.
 
 ## App screenshots
 
-These are captures of the running macOS development app using an isolated test
-database, rather than images from the design prototype.
+These are captures of the running macOS desktop application:
+
+**Infrastructure manager & group inspector** — redesigned desktop interface featuring group settings, reusable identity manager, tag filters, and team collaboration.
+
+![Shellumi modern macOS interface](resources/screenshots/redesign-macos.png)
 
 **Snippet library** — saved commands, tags, script previews and terminal actions.
 

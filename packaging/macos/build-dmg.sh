@@ -6,7 +6,7 @@ set -euo pipefail
 
 ARCH="${1:-$(uname -m)}"
 BIN_PATH="${2:-target/release/shellumi-app}"
-VERSION="${SHELLUMI_VERSION:-0.0.4-alpha}"
+VERSION="${SHELLUMI_VERSION:-0.0.6-alpha}"
 OUTPUT_DIR="dist"
 APP_NAME="Shellumi.app"
 APP_BUNDLE="${OUTPUT_DIR}/${APP_NAME}"
@@ -25,8 +25,16 @@ if [ -f "resources/AppIcon.icns" ]; then
 fi
 if [ -f "resources/AppIcon.png" ]; then
     cp resources/AppIcon.png "${APP_BUNDLE}/Contents/Resources/AppIcon.png"
-elif [ -f "resources/logo.png" ]; then
-    cp resources/logo.png "${APP_BUNDLE}/Contents/Resources/AppIcon.png"
+fi
+if [ -f "resources/logo.png" ]; then
+    cp resources/logo.png "${APP_BUNDLE}/Contents/Resources/logo.png"
+fi
+if [ -f "resources/logo.svg" ]; then
+    cp resources/logo.svg "${APP_BUNDLE}/Contents/Resources/logo.svg"
+fi
+if [ -d "resources/icon_pack/icons" ]; then
+    mkdir -p "${APP_BUNDLE}/Contents/Resources/icon_pack"
+    cp -r resources/icon_pack/icons "${APP_BUNDLE}/Contents/Resources/icon_pack/"
 fi
 
 echo "==> Application bundle created at ${APP_BUNDLE}"
