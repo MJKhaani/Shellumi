@@ -82,12 +82,11 @@ Verification commands: `cargo test --locked --offline --workspace` (321 passed,
 integration tests requiring a loopback listener were run with loopback access.
 
 
-## README screenshots
+## README screenshot
 
-`resources/screenshots/snippets-macos.jpg` and `settings-macos.jpg` are captures
-of the running macOS development app with isolated test data. They are not design
-prototype renders, do not establish cross-platform behavior, and may differ in
-minor details from subsequent builds.
+`resources/screenshots/shellumi-macos.png` is a capture of the running macOS desktop
+application. It reflects the modern unified interface with groups, hosts,
+vault switcher, and action toolbars.
 
 
 ## Credential and synchronization configuration

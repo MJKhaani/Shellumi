@@ -9,26 +9,16 @@ Shellumi is built in Rust with a native GPUI interface and a local Turso databas
 It aims to provide an alternative to Termius without mandatory accounts,
 telemetry, subscriptions, or cloud storage requirements. Licensed under MIT.
 
-**Current milestone: `v0.0.4-alpha`.** This is an early testing release. The
+**Current milestone: `v0.0.6-alpha`.** This is an early testing release. The
 macOS desktop has been exercised locally; Linux and Windows remain target
 platforms requiring runtime validation. Review the limitations below before
 using Shellumi for administration.
 
-## App screenshots
+## App screenshot
 
-These are captures of the running macOS desktop application:
+A capture of the running macOS desktop application:
 
-**Infrastructure manager & group inspector** — redesigned desktop interface featuring group settings, reusable identity manager, tag filters, and team collaboration.
-
-![Shellumi modern macOS interface](resources/screenshots/redesign-macos.png)
-
-**Snippet library** — saved commands, tags, script previews and terminal actions.
-
-![Shellumi snippet library on macOS](resources/screenshots/snippets-macos.jpg)
-
-**Settings** — local preferences, including terminal font size and scrollback.
-
-![Shellumi terminal settings on macOS](resources/screenshots/settings-macos.jpg)
+![Shellumi modern macOS interface](resources/screenshots/shellumi-macos.png)
 
 ## What works in this alpha
 
