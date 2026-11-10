@@ -10,6 +10,7 @@ pub const ICON_NAMES: &[&str] = &[
     "grid_view", "list_view", "groups", "tags", "favorite",
     "more", "edit", "delete", "refresh", "profile",
     "known_hosts", "port_forwarding", "shellumi_logo",
+    "group_settings", "import", "export", "tag", "calendar_sort",
 ];
 
 /// `root` is the unpacked icon-pack folder (which contains `icons/`).

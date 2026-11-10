@@ -28,7 +28,7 @@
       "row": 1,
       "column": 2,
       "name": "connect",
-      "label": "Connect / Sign in",
+      "label": "Connect",
       "regular_256": "icons/256/regular/connect.png",
       "hover_256": "icons/256/hover/connect.png"
     },
@@ -265,7 +265,57 @@
       "label": "Shellumi Logo",
       "regular_256": "icons/256/regular/shellumi_logo.png",
       "hover_256": "icons/256/hover/shellumi_logo.png"
+    },
+    {
+      "index": 29,
+      "row": 6,
+      "column": 4,
+      "name": "group_settings",
+      "label": "Group Settings",
+      "regular_256": "icons/256/regular/group_settings.png",
+      "hover_256": "icons/256/hover/group_settings.png"
+    },
+    {
+      "index": 30,
+      "row": 6,
+      "column": 5,
+      "name": "import",
+      "label": "Import",
+      "regular_256": "icons/256/regular/import.png",
+      "hover_256": "icons/256/hover/import.png"
+    },
+    {
+      "index": 31,
+      "row": 7,
+      "column": 1,
+      "name": "export",
+      "label": "Export",
+      "regular_256": "icons/256/regular/export.png",
+      "hover_256": "icons/256/hover/export.png"
+    },
+    {
+      "index": 32,
+      "row": 7,
+      "column": 2,
+      "name": "tag",
+      "label": "Tag",
+      "regular_256": "icons/256/regular/tag.png",
+      "hover_256": "icons/256/hover/tag.png"
+    },
+    {
+      "index": 33,
+      "row": 7,
+      "column": 3,
+      "name": "calendar_sort",
+      "label": "Calendar Sort",
+      "regular_256": "icons/256/regular/calendar_sort.png",
+      "hover_256": "icons/256/hover/calendar_sort.png"
     }
   ],
-  "icon_count": 28
+  "icon_count": 33,
+  "state_definitions": {
+    "regular": "Borderless standalone metallic-blue/silver artwork on transparent background (no dark rounded-square tile).",
+    "hover": "Metallic-blue/silver icon on a bordered dark rounded-square macOS tile."
+  },
+  "exported_png_count": 330
 }

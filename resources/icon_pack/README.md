@@ -1,27 +1,38 @@
-# Shellumi — macOS Dark GPUI Icon Pack
+# Shellumi — GPUI macOS Dark Icon Pack · v4 (state-corrected)
 
-28 matching icons in two states, exported from the image sheets in this conversation and extended with three additional icons in the same style.
+**Corrected asset states:**
 
-- **regular** = the first sheet style (floating glossy icon on transparent background).
-- **hover** = the second sheet style (icon presented on a dark rounded-square hover tile).
-- **28 icons × 2 states = 56 unique artworks**, in **5 raster resolutions** = 280 PNG files.
-- All PNGs are RGBA with transparency, and each regular/hover pair has exactly the same pixel dimensions and placement canvas.
-- Original source sheets and a preview HTML gallery are included.
+- `regular/` — **no rounded tile/border**. Standalone metallic-blue/silver artwork on a transparent canvas.
+- `hover/` — **dark rounded-square tile with border** around the icon.
 
-## Included additional icons
+**33 named icons × 2 states × 5 resolutions = 330 individual RGBA PNGs**.
 
-- `known_hosts`
-- `port_forwarding`
-- `shellumi_logo`
+This version fixes 22 reversed icon pairs from the earlier archive. It preserves all artwork and only changes the folders where needed. Includes `known_hosts`, `port_forwarding`, `shellumi_logo`, `group_settings`, `import`, `export`, `tag`, `calendar_sort`, `connect`, `grid_view`, and `list_view`.
 
-## File naming
+## File organization
 
-`icons/256/regular/hosts.png` and `icons/256/hover/hosts.png` form a pair.
+```text
+shellumi_gpui_icon_pack/
+├── icons/
+│   ├── 32/
+│   ├── 48/
+│   ├── 64/
+│   ├── 128/
+│   └── 256/
+│       ├── regular/hosts.png    # borderless
+│       └── hover/hosts.png      # dark bordered tile
+├── gpui_icon.rs
+├── manifest.json
+├── manifest.csv
+├── preview.html
+├── contact_sheet.jpg
+└── source_sheets/
+    ├── regular.png              # borderless sheet
+    └── hover.png                # bordered sheet
+```
 
-Available sizes: `256`, `128`, `64`, `48`, `32` (square pixels). For a 24-point icon on a Retina macOS screen, the `48` folder is the nominal 2× size; you can also use the `256` master for high-quality downscaling.
+Use GPUI's `img()` for full-color PNGs, as shown in `gpui_icon.rs`. Images are stored as transparent RGBA canvases at exactly 32, 48, 64, 128, and 256 square pixels.
 
-## Rust / GPUI
+## QA
 
-GPUI uses `img()` for full-color PNGs. It is intentionally not `svg()` because that treats the artwork as a single-color mask and would lose the multicolor styling. GPUI's `img()` accepts a `PathBuf` pointing to an actual PNG on disk. If passing a string path, it is interpreted as an embedded asset key and requires a registered `AssetSource`.
-
-See `gpui_icon.rs` for a simple helper.
+Every size and state is present for all 33 names. Both states use identically sized canvases. Asset changes are folder moves; there is no re-rendering of old icons in this correction.

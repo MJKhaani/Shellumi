@@ -1,6 +1,6 @@
 index,row,column,name,label,regular_256,hover_256
 1,1,1,hosts,Hosts / Servers,icons/256/regular/hosts.png,icons/256/hover/hosts.png
-2,1,2,connect,Connect / Sign in,icons/256/regular/connect.png,icons/256/hover/connect.png
+2,1,2,connect,Connect,icons/256/regular/connect.png,icons/256/hover/connect.png
 3,1,3,sftp,SFTP / Files,icons/256/regular/sftp.png,icons/256/hover/sftp.png
 4,1,4,snippets,Snippets / Scripts,icons/256/regular/snippets.png,icons/256/hover/snippets.png
 5,1,5,history,History,icons/256/regular/history.png,icons/256/hover/history.png
@@ -27,3 +27,8 @@ index,row,column,name,label,regular_256,hover_256
 26,6,1,known_hosts,Known Hosts,icons/256/regular/known_hosts.png,icons/256/hover/known_hosts.png
 27,6,2,port_forwarding,Port Forwarding,icons/256/regular/port_forwarding.png,icons/256/hover/port_forwarding.png
 28,6,3,shellumi_logo,Shellumi Logo,icons/256/regular/shellumi_logo.png,icons/256/hover/shellumi_logo.png
+29,6,4,group_settings,Group Settings,icons/256/regular/group_settings.png,icons/256/hover/group_settings.png
+30,6,5,import,Import,icons/256/regular/import.png,icons/256/hover/import.png
+31,7,1,export,Export,icons/256/regular/export.png,icons/256/hover/export.png
+32,7,2,tag,Tag,icons/256/regular/tag.png,icons/256/hover/tag.png
+33,7,3,calendar_sort,Calendar Sort,icons/256/regular/calendar_sort.png,icons/256/hover/calendar_sort.png

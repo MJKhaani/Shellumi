@@ -1346,7 +1346,19 @@ impl Shellumi {
                                             .text_color(rgb(MacTheme::ACCENT_BLUE))
                                             .font_weight(FontWeight::BOLD)
                                             .text_base()
-                                            .child("⊞"),
+                                            .child(
+                                                if let Some(p) =
+                                                    resolve_icon_path("groups", false, 32)
+                                                {
+                                                    div()
+                                                        .w(px(22.0))
+                                                        .h(px(22.0))
+                                                        .child(gpui::img(p).size_full())
+                                                        .into_any_element()
+                                                } else {
+                                                    div().child("⊞").into_any_element()
+                                                },
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -14299,8 +14311,9 @@ pub(crate) fn resolve_icon_path(
     is_active: bool,
     size_px: u32,
 ) -> Option<std::path::PathBuf> {
-    // The user's icon pack specifies: "hover" folder for normal state, "regular" for active/selected state
-    let state = if is_active { "regular" } else { "hover" };
+    // Corrected asset states: "regular" folder is normal state (borderless), "hover" folder is active/hover state (dark rounded tile)
+    let state = if is_active { "hover" } else { "regular" };
+    let alt_state = if is_active { "regular" } else { "hover" };
     let size_folder = match size_px {
         s if s <= 32 => "32",
         s if s <= 48 => "48",
@@ -14320,6 +14333,14 @@ pub(crate) fn resolve_icon_path(
             if bundle_path.exists() {
                 return Some(bundle_path);
             }
+            let bundle_alt = parent
+                .join("../Resources/icon_pack/icons")
+                .join(size_folder)
+                .join(alt_state)
+                .join(&filename);
+            if bundle_alt.exists() {
+                return Some(bundle_alt);
+            }
         }
     }
     let local = std::path::PathBuf::from("resources/icon_pack/icons")
@@ -14328,6 +14349,13 @@ pub(crate) fn resolve_icon_path(
         .join(&filename);
     if local.exists() {
         return Some(local);
+    }
+    let local_alt = std::path::PathBuf::from("resources/icon_pack/icons")
+        .join(size_folder)
+        .join(alt_state)
+        .join(&filename);
+    if local_alt.exists() {
+        return Some(local_alt);
     }
     None
 }
@@ -17733,7 +17761,28 @@ impl Render for Shellumi {
                                 app.view_mode_menu_open = false;
                                 cx.notify();
                             }))
-                            .child(div().flex().items_center().gap_2().child("▦").child("Grid"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        if let Some(p) = resolve_icon_path(
+                                            "grid_view",
+                                            self.view_mode == HostViewMode::Grid,
+                                            32,
+                                        ) {
+                                            div()
+                                                .w(px(14.0))
+                                                .h(px(14.0))
+                                                .child(gpui::img(p).size_full())
+                                                .into_any_element()
+                                        } else {
+                                            div().child("▦").into_any_element()
+                                        },
+                                    )
+                                    .child("Grid"),
+                            )
                             .child(if self.view_mode == HostViewMode::Grid {
                                 "✓"
                             } else {
@@ -17762,7 +17811,28 @@ impl Render for Shellumi {
                                 app.view_mode_menu_open = false;
                                 cx.notify();
                             }))
-                            .child(div().flex().items_center().gap_2().child("≡").child("List"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        if let Some(p) = resolve_icon_path(
+                                            "list_view",
+                                            self.view_mode == HostViewMode::List,
+                                            32,
+                                        ) {
+                                            div()
+                                                .w(px(14.0))
+                                                .h(px(14.0))
+                                                .child(gpui::img(p).size_full())
+                                                .into_any_element()
+                                        } else {
+                                            div().child("≡").into_any_element()
+                                        },
+                                    )
+                                    .child("List"),
+                            )
                             .child(if self.view_mode == HostViewMode::List {
                                 "✓"
                             } else {
@@ -17838,10 +17908,25 @@ impl Render for Shellumi {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child("Filter by tags"),
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(if let Some(p) = resolve_icon_path("tag", false, 32) {
+                                        div()
+                                            .w(px(14.0))
+                                            .h(px(14.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().child("🏷").into_any_element()
+                                    })
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .child("Filter by tags"),
+                                    ),
                             )
                             .child(
                                 div()
@@ -17966,7 +18051,21 @@ impl Render for Shellumi {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child("📅")
+                                    .child(
+                                        if let Some(p) = resolve_icon_path(
+                                            "calendar_sort",
+                                            self.sort_mode == HostSortMode::Newest,
+                                            32,
+                                        ) {
+                                            div()
+                                                .w(px(14.0))
+                                                .h(px(14.0))
+                                                .child(gpui::img(p).size_full())
+                                                .into_any_element()
+                                        } else {
+                                            div().child("📅").into_any_element()
+                                        },
+                                    )
                                     .child("Newest to oldest"),
                             )
                             .child(if self.sort_mode == HostSortMode::Newest {
@@ -18002,7 +18101,21 @@ impl Render for Shellumi {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child("📅")
+                                    .child(
+                                        if let Some(p) = resolve_icon_path(
+                                            "calendar_sort",
+                                            self.sort_mode == HostSortMode::Oldest,
+                                            32,
+                                        ) {
+                                            div()
+                                                .w(px(14.0))
+                                                .h(px(14.0))
+                                                .child(gpui::img(p).size_full())
+                                                .into_any_element()
+                                        } else {
+                                            div().child("📅").into_any_element()
+                                        },
+                                    )
                                     .child("Oldest to newest"),
                             )
                             .child(if self.sort_mode == HostSortMode::Oldest {
@@ -18066,7 +18179,16 @@ impl Render for Shellumi {
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.edit_host_with_protocol(ConnectionProtocol::Serial, cx)
                             }))
-                            .child("🖧 Serial"),
+                            .child(if let Some(p) = resolve_icon_path("serial", false, 32) {
+                                div()
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .child(gpui::img(p).size_full())
+                                    .into_any_element()
+                            } else {
+                                div().child("🖧").into_any_element()
+                            })
+                            .child("Serial"),
                     )
                     .child(self.host_library_actions(cx)),
             )
@@ -18103,11 +18225,31 @@ impl Render for Shellumi {
                                 app.sort_menu_open = false;
                                 cx.notify();
                             }))
-                            .child(if self.view_mode == HostViewMode::Grid {
-                                "▦"
-                            } else {
-                                "≡"
-                            }),
+                            .child(
+                                if let Some(p) = resolve_icon_path(
+                                    if self.view_mode == HostViewMode::Grid {
+                                        "grid_view"
+                                    } else {
+                                        "list_view"
+                                    },
+                                    self.view_mode_menu_open,
+                                    32,
+                                ) {
+                                    div()
+                                        .w(px(16.0))
+                                        .h(px(16.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .child(if self.view_mode == HostViewMode::Grid {
+                                            "▦"
+                                        } else {
+                                            "≡"
+                                        })
+                                        .into_any_element()
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -18142,7 +18284,22 @@ impl Render for Shellumi {
                                 app.sort_menu_open = false;
                                 cx.notify();
                             }))
-                            .child("🏷"),
+                            .child(
+                                if let Some(p) = resolve_icon_path(
+                                    "tag",
+                                    self.active_tag_filter.is_some()
+                                        || self.tag_filter_popover_open,
+                                    32,
+                                ) {
+                                    div()
+                                        .w(px(16.0))
+                                        .h(px(16.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    div().child("🏷").into_any_element()
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -18171,20 +18328,43 @@ impl Render for Shellumi {
                                 app.tag_filter_popover_open = false;
                                 cx.notify();
                             }))
-                            .child("📅"),
+                            .child(
+                                if let Some(p) =
+                                    resolve_icon_path("calendar_sort", self.sort_menu_open, 32)
+                                {
+                                    div()
+                                        .w(px(16.0))
+                                        .h(px(16.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    div().child("📅").into_any_element()
+                                },
+                            ),
                     )
                     .child(
                         div()
                             .id("hosts-team-invite")
-                            .px_2()
-                            .py_1()
+                            .w(px(28.0))
+                            .h(px(28.0))
                             .rounded_md()
                             .bg(rgb(MacTheme::SURFACE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .text_xs()
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(cx.listener(|app, _, _, cx| app.open_invite_modal(cx)))
-                            .child("👤+"),
+                            .child(if let Some(p) = resolve_icon_path("profile", false, 32) {
+                                div()
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .child(gpui::img(p).size_full())
+                                    .into_any_element()
+                            } else {
+                                div().child("👤+").into_any_element()
+                            }),
                     )
                     .children(view_mode_menu)
                     .children(tags_filter_menu)
@@ -18337,7 +18517,18 @@ impl Render for Shellumi {
                                         .text_color(rgb(MacTheme::ACCENT_BLUE))
                                         .font_weight(FontWeight::BOLD)
                                         .text_sm()
-                                        .child("⊞"),
+                                        .child(
+                                            if let Some(p) = resolve_icon_path("groups", false, 32)
+                                            {
+                                                div()
+                                                    .w(px(20.0))
+                                                    .h(px(20.0))
+                                                    .child(gpui::img(p).size_full())
+                                                    .into_any_element()
+                                            } else {
+                                                div().child("⊞").into_any_element()
+                                            },
+                                        ),
                                 )
                                 .child(
                                     div()
