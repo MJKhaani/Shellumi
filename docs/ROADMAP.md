@@ -1,6 +1,6 @@
 # Shellumi roadmap
 
-The current milestone is **v0.0.6-alpha**. Requirements remain in
+The current milestone is **v0.0.7-alpha**. Requirements remain in
 [PROJECT.md](../PROJECT.md); the [feature matrix](FEATURE_MATRIX.md) and
 [GUI status](GUI_STATUS.md) describe implementation evidence and limitations.
 
@@ -8,6 +8,9 @@ The current milestone is **v0.0.6-alpha**. Requirements remain in
 
 The following work is included in the alpha source:
 
+- Uniform pinned 56px action bar and scrolling content architecture across all application views (`Hosts`, `Keychain`, `Port Forwarding`, `Snippets`, `Known Hosts`, `Session Logs`, `Settings`, and `Workspaces`), eliminating visual jitter and vertical margin discrepancies.
+- Fully functional 4-scenario SFTP file manager (Local-Local, Local-Remote, Remote-Local, Remote-Remote) with recursive directory transfers, platform folder MIME icons, dedicated selection status bar with instant "Deselect" action, empty space click-to-deselect, and hover-isolated context menus.
+- Upgraded Command Palette (`Cmd+K`) and view mode menus with high-resolution vector SVG iconography.
 - Native Rust/GPUI desktop with native macOS Dark visual direction and design tokens,
   navigation, host inventory/inspector, centered editors and local-first startup.
 - Group Details Inspector slide-over drawer (Group icon, name, parent group, cloud sync toggle, default username/port/identity, and save/remove actions).

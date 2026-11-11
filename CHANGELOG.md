@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.0.7-alpha
+
+### Dual-Pane Graphical SFTP File Manager
+- Implemented full 4-scenario SFTP file management: Local-to-Local, Local-to-Remote, Remote-to-Local, and Remote-to-Remote.
+- Native macOS folder MIME icons (`Documents`, `Downloads`, `Desktop`, `Movies`, `Music`, `Pictures`, `Applications`, `Public`, and generic `folder`) integrated into both table file rows and macOS breadcrumb path bar.
+- Interactive macOS breadcrumb path bar with history back/forward navigation (`<` and `>`), detailed columns (Name, Permissions, Date Modified, Size, Kind), and natural parent navigation (`..`).
+- Recursive file and folder transfer engines (`sftp_local_copy_recursive`, `sftp_upload_recursive`, `sftp_download_recursive`) supporting arbitrary directory hierarchies without OS errors.
+- Dedicated per-pane status bar (`h(px(26.0))`) displaying real-time selection counts and instant "Deselect" action.
+- Empty space click-to-deselect with event stop propagation on row clicks to prevent selection conflicts.
+- Isolated context menu overlay with transparent click-outside backdrop (`inset_0()`) and hover isolation preventing underlying row highlighting.
+
+### Uniform Action Bar & Navigation Architecture
+- Fixed top padding inconsistencies across all pages (`Hosts`, `Keychain`, `Port Forwarding`, `Snippets`, `Known Hosts`, `Session Logs`, `Settings`, and `Workspaces`).
+- Every page now features a pinned 56px action bar flush with the window top divider (`border_b_1().border_color(rgb(MacTheme::BORDER))`) and uniform scrollable content area (`p_6()`).
+- Eliminates vertical jitter and alignment jumps when navigating between sidebar items.
+
+### Command Palette & Navigation Iconography Overhaul
+- Upgraded Command Palette (`Cmd+K`) icons with high-resolution vector assets (`edit`, `invite member`, `Hosts`, `Infrastructure`, `Diagnostics`, `Terminal`, `Mobile`).
+- Upgraded filtering, sorting, grid/list view mode icons and popover menus.
+- Connected group settings inspector and reusable identity settings modal dialogs.
+- Fixed identity selection precedence so host destination usernames (e.g. `root`) take precedence over local user defaults when selecting an existing SSH key.
+
+## 0.0.6-alpha
+
+### Modern Desktop Navigation & Group Details Inspector
+- Added slide-over Group Details Inspector panel with parent group hierarchies, cloud sync toggles, and protocol defaults.
+- Group card context menu with Quick Connect, Connect, Edit Group Details, Collaborate, Move To, Copy To, and Remove actions.
+- Reusable Identity settings modal dialog for managing keys, passphrases, and usernames.
+- Team member invite modal dialog supporting multi-recipient team collaboration invitations.
+- Multi-protocol support foundations (Telnet, Serial, Mosh, Local, SFTP, Remote Desktop VNC/RDP).
+
 ## 0.0.4-alpha
 
 ### macOS Dark Gallery UI Overhaul

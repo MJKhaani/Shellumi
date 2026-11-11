@@ -1,4 +1,4 @@
-# Feature status — v0.0.6-alpha
+# Feature status — v0.0.7-alpha
 
 This matrix describes the current application. [PROJECT.md](../PROJECT.md) is
 the target scope; domain types and packaging prototypes alone do not constitute
