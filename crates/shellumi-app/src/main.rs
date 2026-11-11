@@ -1514,7 +1514,20 @@ impl Shellumi {
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.open_invite_modal(cx);
                                     }))
-                                    .child("Share this group 👥"),
+                                    .child(
+                                        if let Some(p) =
+                                            resolve_icon_path("invite_member", false, 48)
+                                        {
+                                            div()
+                                                .w(px(16.0))
+                                                .h(px(16.0))
+                                                .child(gpui::img(p).size_full())
+                                                .into_any_element()
+                                        } else {
+                                            div().child("👥").into_any_element()
+                                        },
+                                    )
+                                    .child("Share this group"),
                             ),
                     )
                     .child(
@@ -1748,8 +1761,15 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_2xl()
-                    .child("👥"),
+                    .child(if let Some(p) = resolve_icon_path("invite_member", false, 48) {
+                        div()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().text_2xl().child("👥").into_any_element()
+                    }),
             )
             .child(
                 div()
@@ -2171,7 +2191,17 @@ impl Shellumi {
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child("✏️")
+                                        .child(
+                                            if let Some(p) = resolve_icon_path("edit", false, 32) {
+                                                div()
+                                                    .w(px(14.0))
+                                                    .h(px(14.0))
+                                                    .child(gpui::img(p).size_full())
+                                                    .into_any_element()
+                                            } else {
+                                                div().child("✏️").into_any_element()
+                                            },
+                                        )
                                         .child("Edit Group Details"),
                                 )
                                 .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("E")),
@@ -2193,7 +2223,17 @@ impl Shellumi {
                                     app.group_context_menu = None;
                                     app.open_invite_modal(cx);
                                 }))
-                                .child("👥")
+                                .child(
+                                    if let Some(p) = resolve_icon_path("invite_member", false, 32) {
+                                        div()
+                                            .w(px(14.0))
+                                            .h(px(14.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().child("👥").into_any_element()
+                                    },
+                                )
                                 .child("Collaborate"),
                         )
                         .child(
@@ -8968,6 +9008,16 @@ impl Shellumi {
             .on_key_down(cx.listener(Self::handle_palette_key_down));
 
         // Search Input Header
+        let search_icon = if let Some(p) = resolve_icon_path("search", false, 48) {
+            div()
+                .w(px(18.0))
+                .h(px(18.0))
+                .child(gpui::img(p).size_full())
+                .into_any_element()
+        } else {
+            div().text_lg().child("🔍").into_any_element()
+        };
+
         let search_header = div()
             .flex()
             .items_center()
@@ -8977,7 +9027,7 @@ impl Shellumi {
             .bg(rgb(MacTheme::SIDEBAR_BG))
             .border_b_1()
             .border_color(rgb(MacTheme::SEPARATOR))
-            .child(div().text_lg().child("🔍"))
+            .child(search_icon)
             .child(div().flex_1().child(palette.input.clone()))
             .child(
                 div()
@@ -8996,6 +9046,16 @@ impl Shellumi {
 
         // Results Container
         if matches.is_empty() {
+            let empty_icon = if let Some(p) = resolve_icon_path("search", false, 64) {
+                div()
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .opacity(0.5)
+                    .child(gpui::img(p).size_full())
+                    .into_any_element()
+            } else {
+                div().text_2xl().child("🔍").into_any_element()
+            };
             let empty_view = div()
                 .p_8()
                 .flex()
@@ -9003,7 +9063,7 @@ impl Shellumi {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(div().text_2xl().child("🔍"))
+                .child(empty_icon)
                 .child(
                     div()
                         .text_sm()
@@ -9046,6 +9106,99 @@ impl Shellumi {
                 };
 
                 let action = mat.command.action.clone();
+                let action_icon_name = match &action {
+                    PaletteAction::ConnectHost { .. } => "hosts",
+                    PaletteAction::ConnectSftp { .. } => "sftp",
+                    PaletteAction::ExecuteSnippet { .. }
+                    | PaletteAction::ExecuteBatchSnippet { .. } => "snippets",
+                    PaletteAction::QuickConnect => "connect",
+                    PaletteAction::TriggerSync | PaletteAction::OpenConflictResolver => {
+                        "cloud_sync"
+                    }
+                    PaletteAction::NewLocalTerminal => "terminal",
+                    PaletteAction::SplitVertical | PaletteAction::SplitHorizontal => "split_view",
+                    PaletteAction::CloseActiveTab => "delete",
+                    PaletteAction::ToggleBroadcastInput => "terminal",
+                    PaletteAction::SaveCurrentLayoutAsWorkspace
+                    | PaletteAction::LoadWorkspace { .. } => "workspaces",
+                    PaletteAction::OpenSnippetsDrawer => "snippets",
+                    PaletteAction::AddNewHost => "add_host",
+                    PaletteAction::AddNewSnippet => "edit",
+                    PaletteAction::AddNewTunnel => "port_forwarding",
+                    PaletteAction::NavigateToHosts => "hosts",
+                    PaletteAction::SwitchToTab(_) => "terminal",
+                    PaletteAction::OpenTeamCollaboration
+                    | PaletteAction::ToggleMultiplayerCollaboration => "invite_member",
+                    PaletteAction::OpenInfrastructureManager
+                    | PaletteAction::SyncCloudInfrastructure => "infrastructure",
+                    PaletteAction::ImportAnsibleInventory => "import",
+                    PaletteAction::ExportAnsibleInventory => "export",
+                    PaletteAction::RunDiagnostics | PaletteAction::RunBenchmarks => "diagnostics",
+                    PaletteAction::OpenMobileSimulator => "mobile",
+                    PaletteAction::OpenShellIntegrationModal => "terminal",
+                    PaletteAction::OpenSessionRecordings => "log",
+                };
+
+                let cat_icon_name = match cat {
+                    PaletteCategory::Host => "hosts",
+                    PaletteCategory::Snippet => "snippets",
+                    PaletteCategory::Terminal => "terminal",
+                    PaletteCategory::Sync => "cloud_sync",
+                    PaletteCategory::Tunnel => "port_forwarding",
+                    PaletteCategory::Sftp => "sftp",
+                    PaletteCategory::Navigation => "hosts",
+                    PaletteCategory::Workspace => "workspaces",
+                    PaletteCategory::Collaboration => "invite_member",
+                    PaletteCategory::Infrastructure => "infrastructure",
+                    PaletteCategory::Diagnostics => "diagnostics",
+                    PaletteCategory::Mobile => "mobile",
+                };
+
+                let action_icon_el =
+                    if let Some(p) = resolve_icon_path(action_icon_name, is_selected, 48) {
+                        div()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .rounded_md()
+                            .bg(if is_selected {
+                                rgb(MacTheme::SURFACE_ACTIVE)
+                            } else {
+                                rgb(0x232733)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .child(gpui::img(p).size_full()),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .rounded_md()
+                            .bg(rgb(0x232733))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .child(cat.badge_icon())
+                            .into_any_element()
+                    };
+
+                let cat_icon_el = if let Some(p) = resolve_icon_path(cat_icon_name, false, 32) {
+                    div()
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .child(gpui::img(p).size_full())
+                        .into_any_element()
+                } else {
+                    div().child(cat.badge_icon()).into_any_element()
+                };
+
                 let mut row = div()
                     .id(("palette-item", idx))
                     .flex()
@@ -9066,21 +9219,12 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(
-                        div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cat_bg)
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(cat_fg)
-                            .child(format!("{} {}", cat.badge_icon(), cat.as_str())),
-                    )
+                    .child(action_icon_el)
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .gap_0p5()
                             .child(
                                 div()
                                     .text_sm()
@@ -9095,14 +9239,35 @@ impl Shellumi {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x9ca3af))
+                                    .text_color(if is_selected {
+                                        rgb(0xd1d5db)
+                                    } else {
+                                        rgb(0x9ca3af)
+                                    })
                                     .child(mat.command.description.clone()),
                             ),
                     );
                 row = row.child(left_content);
 
+                let mut right_content = div().flex().items_center().gap_2();
+                right_content = right_content.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(cat_bg)
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cat_fg)
+                        .child(cat_icon_el)
+                        .child(cat.as_str()),
+                );
+
                 if let Some(sc) = &mat.command.shortcut {
-                    row = row.child(
+                    right_content = right_content.child(
                         div()
                             .px_2()
                             .py_0p5()
@@ -9116,6 +9281,8 @@ impl Shellumi {
                             .child(sc.clone()),
                     );
                 }
+
+                row = row.child(right_content);
 
                 results_list = results_list.child(row);
             }
@@ -9189,13 +9356,28 @@ impl Shellumi {
             .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
-                div().flex().items_center().gap_2().child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("👥 Team Collaboration & Shared Vaults"),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        if let Some(p) = resolve_icon_path("invite_member", false, 48) {
+                            div()
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().child("👥").into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Team Collaboration & Shared Vaults"),
+                    ),
             )
             .child(
                 div()
@@ -10107,13 +10289,28 @@ impl Shellumi {
             .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
-                div().flex().items_center().gap_2().child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("Infrastructure inventory"),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        if let Some(p) = resolve_icon_path("infrastructure", false, 48) {
+                            div()
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().child("☁️").into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Infrastructure inventory"),
+                    ),
             )
             .child(
                 div()
@@ -10877,13 +11074,28 @@ impl Shellumi {
             .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
-                div().flex().items_center().gap_2().child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("🩺 System Diagnostics & Production Health Check"),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        if let Some(p) = resolve_icon_path("diagnostics", false, 48) {
+                            div()
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().child("🩺").into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("System Diagnostics & Production Health Check"),
+                    ),
             )
             .child(
                 div()
@@ -11483,13 +11695,26 @@ impl Shellumi {
             .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
-                div().flex().items_center().gap_2().child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("📱 Mobile Touch & Virtual Key Simulator (Phase 11)"),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(if let Some(p) = resolve_icon_path("mobile", false, 48) {
+                        div()
+                            .w(px(22.0))
+                            .h(px(22.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().child("📱").into_any_element()
+                    })
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Mobile Touch & Virtual Key Simulator (Phase 11)"),
+                    ),
             )
             .child(
                 div()
@@ -12674,10 +12899,21 @@ impl Shellumi {
                     .gap_1()
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .child("Session logs"),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(if let Some(p) = resolve_icon_path("log", false, 48) {
+                                div().w(px(22.0)).h(px(22.0)).child(gpui::img(p).size_full()).into_any_element()
+                            } else {
+                                div().child("⏱").into_any_element()
+                            })
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Session logs"),
+                            ),
                     )
                     .child(
                         div()
@@ -13356,13 +13592,28 @@ impl Shellumi {
             .border_color(rgb(MacTheme::SEPARATOR))
             .pb_3()
             .child(
-                div().flex().items_center().gap_2().child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child("Port forwarding"),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        if let Some(p) = resolve_icon_path("port_forwarding", false, 48) {
+                            div()
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().child("⇄").into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Port forwarding"),
+                    ),
             )
             .child(
                 div()
@@ -16113,22 +16364,62 @@ impl Shellumi {
         for (idx, tab) in self.tabs.iter().enumerate() {
             let is_active = self.active_tab_idx == Some(idx) && self.page.is_none();
             let tab_id = tab.id;
-            let icon = match tab.kind {
-                SessionKind::Ssh => "🖥",
-                SessionKind::Mosh => "⚡",
-                SessionKind::Telnet => "⚠️",
-                SessionKind::Serial => "🔌",
-                SessionKind::Local => ">_",
-                SessionKind::Sftp => "📁",
+            let tab_icon = match tab.kind {
+                SessionKind::Local => {
+                    if let Some(p) = resolve_icon_path("terminal", is_active, 48) {
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().child(">_").into_any_element()
+                    }
+                }
+                SessionKind::Ssh => {
+                    if let Some(p) = resolve_icon_path("hosts", is_active, 48) {
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().child("🖥").into_any_element()
+                    }
+                }
+                SessionKind::Serial => {
+                    if let Some(p) = resolve_icon_path("serial", is_active, 48) {
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().child("🔌").into_any_element()
+                    }
+                }
+                SessionKind::Sftp => {
+                    if let Some(p) = resolve_icon_path("sftp", is_active, 48) {
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().child("📁").into_any_element()
+                    }
+                }
+                SessionKind::Mosh => div().child("⚡").into_any_element(),
+                SessionKind::Telnet => div().child("⚠️").into_any_element(),
                 SessionKind::RemoteDesktop => {
                     if tab
                         .remote_desktop_state
                         .as_ref()
                         .is_some_and(|r| r.protocol == RemoteDesktopProtocol::Vnc)
                     {
-                        "🖥️"
+                        div().child("🖥️").into_any_element()
                     } else {
-                        "🪟"
+                        div().child("🪟").into_any_element()
                     }
                 }
             };
@@ -16163,7 +16454,7 @@ impl Shellumi {
                     app.page = None;
                     app.select_tab(Some(idx), window, cx);
                 }))
-                .child(icon)
+                .child(tab_icon)
                 .child(div().max_w(px(140.0)).truncate().child(tab.name.clone()))
                 .child(
                     div()
@@ -17775,7 +18066,22 @@ impl Shellumi {
                                 p.filter_active = !p.filter_active;
                                 cx.notify();
                             }))
-                            .child("🔍 Filter"),
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                if let Some(p) = resolve_icon_path("search", pane.filter_active, 32)
+                                {
+                                    div()
+                                        .w(px(14.0))
+                                        .h(px(14.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    div().child("🔍").into_any_element()
+                                },
+                            )
+                            .child("Filter"),
                     )
                     .child(
                         div()
@@ -20438,15 +20744,15 @@ impl Render for Shellumi {
                 div()
                     .id("view-mode-popover")
                     .absolute()
-                    .top(px(34.0))
-                    .right(px(100.0))
+                    .top(px(48.0))
+                    .right(px(120.0))
                     .w(px(120.0))
                     .rounded_lg()
                     .bg(rgb(0x181a24))
                     .border_1()
                     .border_color(rgb(0x2d3245))
                     .p_1()
-                    .shadow_xl()
+                    .shadow_2xl()
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -20560,55 +20866,78 @@ impl Render for Shellumi {
             all_tags.sort();
             all_tags.dedup();
 
-            let mut tags_list = div().flex().flex_wrap().gap_1p5();
-            for (t_idx, tag) in all_tags.into_iter().enumerate() {
-                let tag_name = tag.clone();
-                let is_active = self.active_tag_filter.as_deref() == Some(&tag);
-                tags_list = tags_list.child(
-                    div()
-                        .id(("tag-filter-opt", t_idx))
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .text_xs()
-                        .cursor_pointer()
-                        .bg(if is_active {
-                            rgb(MacTheme::ACCENT_BLUE)
-                        } else {
-                            rgb(0x252a36)
-                        })
-                        .text_color(if is_active {
-                            rgb(0xffffff)
-                        } else {
-                            rgb(MacTheme::TEXT_PRIMARY)
-                        })
-                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            if app.active_tag_filter.as_deref() == Some(&tag_name) {
-                                app.active_tag_filter = None;
-                            } else {
-                                app.active_tag_filter = Some(tag_name.clone());
-                            }
-                            app.tag_filter_popover_open = false;
-                            cx.notify();
-                        }))
-                        .child(tag),
-                );
-            }
-
-            Some(
+            let tag_content = if all_tags.is_empty() {
                 div()
-                    .id("tags-filter-popover")
-                    .absolute()
-                    .top(px(34.0))
-                    .right(px(70.0))
-                    .w(px(220.0))
-                    .rounded_lg()
-                    .bg(rgb(0x181a24))
-                    .border_1()
-                    .border_color(rgb(0x2d3245))
-                    .p_3()
-                    .shadow_xl()
+                    .py_4()
+                    .px_3()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_center()
+                    .child(
+                        if let Some(p) = resolve_icon_path("tags", false, 48) {
+                            div()
+                                .w(px(32.0))
+                                .h(px(32.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().text_xl().child("🏷").into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Add tags"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Tags help you filter your hosts. You can add a tag when editing a host."),
+                    )
+            } else {
+                let mut tags_list = div().flex().flex_wrap().gap_1p5();
+                for (t_idx, tag) in all_tags.into_iter().enumerate() {
+                    let tag_name = tag.clone();
+                    let is_active = self.active_tag_filter.as_deref() == Some(&tag);
+                    tags_list = tags_list.child(
+                        div()
+                            .id(("tag-filter-opt", t_idx))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .bg(if is_active {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(0x252a36)
+                            })
+                            .text_color(if is_active {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                if app.active_tag_filter.as_deref() == Some(&tag_name) {
+                                    app.active_tag_filter = None;
+                                } else {
+                                    app.active_tag_filter = Some(tag_name.clone());
+                                }
+                                app.tag_filter_popover_open = false;
+                                cx.notify();
+                            }))
+                            .child(tag),
+                    );
+                }
+
+                div()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -20622,7 +20951,7 @@ impl Render for Shellumi {
                                     .flex()
                                     .items_center()
                                     .gap_1p5()
-                                    .child(if let Some(p) = resolve_icon_path("tag", false, 32) {
+                                    .child(if let Some(p) = resolve_icon_path("tags", false, 32) {
                                         div()
                                             .w(px(14.0))
                                             .h(px(14.0))
@@ -20654,7 +20983,23 @@ impl Render for Shellumi {
                                     .child("Clear"),
                             ),
                     )
-                    .child(tags_list),
+                    .child(tags_list)
+            };
+
+            Some(
+                div()
+                    .id("tags-filter-popover")
+                    .absolute()
+                    .top(px(48.0))
+                    .right(px(64.0))
+                    .w(px(220.0))
+                    .rounded_lg()
+                    .bg(rgb(0x181a24))
+                    .border_1()
+                    .border_color(rgb(0x2d3245))
+                    .p_3()
+                    .shadow_2xl()
+                    .child(tag_content),
             )
         } else {
             None
@@ -20665,7 +21010,7 @@ impl Render for Shellumi {
                 div()
                     .id("sort-popover")
                     .absolute()
-                    .top(px(34.0))
+                    .top(px(48.0))
                     .right(px(36.0))
                     .w(px(170.0))
                     .rounded_lg()
@@ -20673,7 +21018,7 @@ impl Render for Shellumi {
                     .border_1()
                     .border_color(rgb(0x2d3245))
                     .p_1()
-                    .shadow_xl()
+                    .shadow_2xl()
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -20840,6 +21185,91 @@ impl Render for Shellumi {
             None
         };
 
+        let profile_menu = if self.profile_menu_open {
+            Some(
+                div()
+                    .id("profile-popover")
+                    .absolute()
+                    .top(px(48.0))
+                    .right(px(24.0))
+                    .w(px(220.0))
+                    .rounded_xl()
+                    .bg(rgb(0x181a24))
+                    .border_1()
+                    .border_color(rgb(0x2d3245))
+                    .p_1p5()
+                    .shadow_2xl()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id("profile-opt-invite-members")
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x252a36)))
+                            .flex()
+                            .items_center()
+                            .gap_2p5()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.profile_menu_open = false;
+                                app.open_invite_modal(cx);
+                            }))
+                            .child(
+                                if let Some(p) = resolve_icon_path("invite_member", false, 48) {
+                                    div()
+                                        .w(px(18.0))
+                                        .h(px(18.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    div().child("👤+").into_any_element()
+                                },
+                            )
+                            .child("Invite team members"),
+                    )
+                    .child(
+                        div()
+                            .id("profile-opt-user-info")
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .flex()
+                            .items_center()
+                            .gap_2p5()
+                            .hover(|s| s.bg(rgb(0x252a36)))
+                            .child(if let Some(p) = resolve_icon_path("profile", false, 48) {
+                                div()
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .rounded_full()
+                                    .overflow_hidden()
+                                    .child(gpui::img(p).size_full())
+                                    .into_any_element()
+                            } else {
+                                div().child("👤").into_any_element()
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .truncate()
+                                    .child("javaj2se.5@gmail.com"),
+                            ),
+                    ),
+            )
+        } else {
+            None
+        };
+
         let action_bar = div()
             .id("hosts-action-bar")
             .flex()
@@ -20925,6 +21355,7 @@ impl Render for Shellumi {
                                 app.view_mode_menu_open = !app.view_mode_menu_open;
                                 app.tag_filter_popover_open = false;
                                 app.sort_menu_open = false;
+                                app.profile_menu_open = false;
                                 cx.notify();
                             }))
                             .child(
@@ -20986,6 +21417,7 @@ impl Render for Shellumi {
                                 app.tag_filter_popover_open = !app.tag_filter_popover_open;
                                 app.view_mode_menu_open = false;
                                 app.sort_menu_open = false;
+                                app.profile_menu_open = false;
                                 cx.notify();
                             }))
                             .child(
@@ -21032,6 +21464,7 @@ impl Render for Shellumi {
                                 app.sort_menu_open = !app.sort_menu_open;
                                 app.view_mode_menu_open = false;
                                 app.tag_filter_popover_open = false;
+                                app.profile_menu_open = false;
                                 cx.notify();
                             }))
                             .child(
@@ -21054,7 +21487,11 @@ impl Render for Shellumi {
                             .w(px(32.0))
                             .h(px(32.0))
                             .rounded_md()
-                            .bg(rgb(MacTheme::SURFACE))
+                            .bg(if self.profile_menu_open {
+                                rgb(MacTheme::SURFACE_HOVER)
+                            } else {
+                                rgb(MacTheme::SURFACE)
+                            })
                             .border_1()
                             .border_color(rgb(MacTheme::BORDER))
                             .flex()
@@ -21063,20 +21500,27 @@ impl Render for Shellumi {
                             .text_xs()
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                            .on_click(cx.listener(|app, _, _, cx| app.open_invite_modal(cx)))
-                            .child(if let Some(p) = resolve_icon_path("profile", false, 48) {
-                                div()
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .child(gpui::img(p).size_full())
-                                    .into_any_element()
-                            } else {
-                                div().child("👤+").into_any_element()
-                            }),
-                    )
-                    .children(view_mode_menu)
-                    .children(tags_filter_menu)
-                    .children(sort_menu),
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.profile_menu_open = !app.profile_menu_open;
+                                app.view_mode_menu_open = false;
+                                app.tag_filter_popover_open = false;
+                                app.sort_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                if let Some(p) =
+                                    resolve_icon_path("profile", self.profile_menu_open, 48)
+                                {
+                                    div()
+                                        .w(px(20.0))
+                                        .h(px(20.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    div().child("👤+").into_any_element()
+                                },
+                            ),
+                    ),
             );
 
         // Breadcrumbs if a group is currently filtered
@@ -21128,7 +21572,17 @@ impl Render for Shellumi {
                     .flex()
                     .items_center()
                     .gap_2p5()
-                    .child(div().text_base().child("👥"))
+                    .child(
+                        if let Some(p) = resolve_icon_path("invite_member", false, 48) {
+                            div()
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().text_base().child("👥").into_any_element()
+                        },
+                    )
                     .child(
                         div()
                             .flex()
@@ -21888,8 +22342,9 @@ impl Render for Shellumi {
             .children(group_inspector_panel)
             .children(inspector_panel);
 
-        let body = div()
+        let mut body = div()
             .id("shellumi")
+            .relative()
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &RefreshHosts, _, cx| app.load_hosts(cx)))
             .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
@@ -21904,6 +22359,37 @@ impl Render for Shellumi {
             .bg(rgb(MacTheme::CONTENT_BG))
             .child(action_bar)
             .child(main_hosts_area);
+
+        if self.view_mode_menu_open
+            || self.tag_filter_popover_open
+            || self.sort_menu_open
+            || self.profile_menu_open
+        {
+            let backdrop = div()
+                .id("hosts-popover-backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.view_mode_menu_open = false;
+                    app.tag_filter_popover_open = false;
+                    app.sort_menu_open = false;
+                    app.profile_menu_open = false;
+                    cx.notify();
+                }));
+            body = body.child(backdrop);
+            if let Some(menu) = view_mode_menu {
+                body = body.child(menu);
+            }
+            if let Some(menu) = tags_filter_menu {
+                body = body.child(menu);
+            }
+            if let Some(menu) = sort_menu {
+                body = body.child(menu);
+            }
+            if let Some(menu) = profile_menu {
+                body = body.child(menu);
+            }
+        }
 
         let sidebar = self.workspace_sidebar("Hosts", cx);
         let mut row = div().flex().flex_1().min_h_0();

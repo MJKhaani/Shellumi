@@ -588,14 +588,21 @@ impl Shellumi {
                     .flex()
                     .gap_2()
                     .child(
-                        button("import-snippets", "Import package").on_click(cx.listener(
-                            |app, _, _, cx| app.edit_library_item(EditorKind::Import, None, cx),
-                        )),
+                        button_icon("import-snippets", "import", "Import package").on_click(
+                            cx.listener(|app, _, _, cx| {
+                                app.edit_library_item(EditorKind::Import, None, cx)
+                            }),
+                        ),
                     )
                     .child(
-                        primary("new-snippet", "+ New snippet").on_click(cx.listener(
-                            |app, _, _, cx| app.edit_library_item(EditorKind::Snippet, None, cx),
-                        )),
+                        button_icon("new-snippet", "edit", "+ New snippet")
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .border_color(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.edit_library_item(EditorKind::Snippet, None, cx)
+                            })),
                     ),
             );
         let mut packages = panel()
@@ -606,13 +613,30 @@ impl Shellumi {
             .gap_1()
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .child("PACKAGES"),
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        if let Some(p) = crate::resolve_icon_path("tags", false, 32) {
+                            div()
+                                .w(px(12.0))
+                                .h(px(12.0))
+                                .child(gpui::img(p).size_full())
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .child("PACKAGES"),
+                    ),
             )
             .child(
-                button("all-snippets", "▣  All snippets")
+                button("all-snippets", "All snippets")
                     .bg(if self.desktop.snippet_tag.is_none() {
                         rgb(MacTheme::ACCENT_BLUE)
                     } else {
@@ -636,7 +660,7 @@ impl Shellumi {
             let selected_tag = tag.clone();
             let is_sel = self.desktop.snippet_tag.as_deref() == Some(&tag);
             packages = packages.child(
-                button(("snippet-tag", index), format!("▣  {tag}"))
+                button(("snippet-tag", index), tag)
                     .bg(if is_sel {
                         rgb(MacTheme::ACCENT_BLUE)
                     } else {
@@ -713,116 +737,116 @@ impl Shellumi {
                 variables: snippet.variables.clone(),
             }])
             .unwrap_or_default();
-            editor = editor
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(heading(snippet.name.clone()))
-                        .child(button("edit-snippet", "Edit").on_click(cx.listener(
-                            move |app, _, _, cx| {
-                                app.edit_library_item(EditorKind::Snippet, Some(id), cx)
-                            },
-                        ))),
-                )
-                .child(muted(snippet.description.clone().unwrap_or_default()))
-                .child(muted(snippet.tags.join(" · ")))
-                .child(
-                    div()
-                        .min_h(px(260.0))
-                        .p_4()
-                        .rounded_lg()
-                        .bg(rgb(MacTheme::CODE_BG))
-                        .border_1()
-                        .border_color(rgb(MacTheme::BORDER))
-                        .font_family(MONOSPACE_FONT)
-                        .text_sm()
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .children(snippet.command.lines().enumerate().map(|(i, line)| {
-                            div()
-                                .flex()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .w(px(28.0))
-                                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                        .child(format!("{}", i + 1)),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(if i == 0 && line.starts_with('#') {
-                                            rgb(MacTheme::SUCCESS)
-                                        } else {
-                                            rgb(MacTheme::TEXT_PRIMARY)
-                                        })
-                                        .child(line.to_owned()),
-                                )
-                        })),
-                )
-                .child(muted(format!(
-                    "{} template parameters · execution always requires your action",
-                    snippet.variables.len()
-                )))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(button("copy-snippet", "Copy").on_click(cx.listener(
-                            move |_, _, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    command.clone(),
-                                ))
-                            },
-                        )))
-                        .child(
-                            button("export-snippet", "Copy JSON package").on_click(cx.listener(
+            editor =
+                editor
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(heading(snippet.name.clone()))
+                            .child(button_icon("edit-snippet", "edit", "Edit").on_click(
+                                cx.listener(move |app, _, _, cx| {
+                                    app.edit_library_item(EditorKind::Snippet, Some(id), cx)
+                                }),
+                            )),
+                    )
+                    .child(muted(snippet.description.clone().unwrap_or_default()))
+                    .child(muted(snippet.tags.join(" · ")))
+                    .child(
+                        div()
+                            .min_h(px(260.0))
+                            .p_4()
+                            .rounded_lg()
+                            .bg(rgb(MacTheme::CODE_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .font_family(MONOSPACE_FONT)
+                            .text_sm()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .children(snippet.command.lines().enumerate().map(|(i, line)| {
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(28.0))
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                            .child(format!("{}", i + 1)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(if i == 0 && line.starts_with('#') {
+                                                rgb(MacTheme::SUCCESS)
+                                            } else {
+                                                rgb(MacTheme::TEXT_PRIMARY)
+                                            })
+                                            .child(line.to_owned()),
+                                    )
+                            })),
+                    )
+                    .child(muted(format!(
+                        "{} template parameters · execution always requires your action",
+                        snippet.variables.len()
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(button("copy-snippet", "Copy").on_click(cx.listener(
                                 move |_, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        command.clone(),
+                                    ))
+                                },
+                            )))
+                            .child(button("export-snippet", "Copy JSON package").on_click(
+                                cx.listener(move |_, _, _, cx| {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                         export.clone(),
                                     ))
+                                }),
+                            ))
+                            .child(button("paste-snippet", "Paste into terminal").on_click(
+                                cx.listener(move |app, _, window, cx| {
+                                    if app.active_tab_idx.is_none() {
+                                        app.desktop.message =
+                                            Some("Open a terminal session first.".into());
+                                        cx.notify();
+                                    } else {
+                                        app.page = None;
+                                        app.insert_snippet(id, false, cx);
+                                        window.focus(&app.focus);
+                                    }
+                                }),
+                            ))
+                            .child(primary("run-snippet", "Run…").on_click(cx.listener(
+                                move |app, _, _, cx| {
+                                    if app.active_tab_idx.is_none() {
+                                        app.desktop.message = Some(
+                                            "Open a terminal session before running a snippet."
+                                                .into(),
+                                        );
+                                        cx.notify();
+                                    } else {
+                                        app.open_snippet_modal_for_run(id, cx);
+                                    }
                                 },
-                            )),
-                        )
-                        .child(button("paste-snippet", "Paste into terminal").on_click(
-                            cx.listener(move |app, _, window, cx| {
-                                if app.active_tab_idx.is_none() {
-                                    app.desktop.message =
-                                        Some("Open a terminal session first.".into());
-                                    cx.notify();
-                                } else {
-                                    app.page = None;
-                                    app.insert_snippet(id, false, cx);
-                                    window.focus(&app.focus);
-                                }
-                            }),
-                        ))
-                        .child(primary("run-snippet", "Run…").on_click(cx.listener(
-                            move |app, _, _, cx| {
-                                if app.active_tab_idx.is_none() {
-                                    app.desktop.message = Some(
-                                        "Open a terminal session before running a snippet.".into(),
-                                    );
-                                    cx.notify();
-                                } else {
-                                    app.open_snippet_modal_for_run(id, cx);
-                                }
-                            },
-                        )))
-                        .child(
-                            button("delete-snippet", "Delete")
-                                .border_color(rgb(MacTheme::DANGER))
-                                .text_color(rgb(MacTheme::DANGER))
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.desktop.confirm = Some((
-                                        format!("Delete snippet '{name}'?"),
-                                        Command::DeleteSnippet(id),
-                                    ));
-                                    cx.notify();
-                                })),
-                        ),
-                );
+                            )))
+                            .child(
+                                button("delete-snippet", "Delete")
+                                    .border_color(rgb(MacTheme::DANGER))
+                                    .text_color(rgb(MacTheme::DANGER))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.desktop.confirm = Some((
+                                            format!("Delete snippet '{name}'?"),
+                                            Command::DeleteSnippet(id),
+                                        ));
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
         } else {
             editor = editor.child(heading("Your command library")).child(muted(
                 "Create a snippet to save commands, scripts and parameterized templates.",
@@ -1806,17 +1830,22 @@ impl Shellumi {
                         .items_center()
                         .gap_2()
                         .child(
-                            primary("generate-ssh-key", "+ New key ⌵").on_click(
-                                cx.listener(|app, _, window, cx| {
-                                    app.start_session(
-                                        "Generate SSH identity".into(),
-                                        SessionKind::Local,
-                                        TerminalCommand::new("ssh-keygen").args(["-t", "ed25519"]),
-                                        window,
-                                        cx,
-                                    )
-                                }),
-                            ),
+                            button_icon("generate-ssh-key", "private_key", "+ New key ⌵")
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                .text_color(rgb(0xffffff))
+                                .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                                .on_click(
+                                    cx.listener(|app, _, window, cx| {
+                                        app.start_session(
+                                            "Generate SSH identity".into(),
+                                            SessionKind::Local,
+                                            TerminalCommand::new("ssh-keygen").args(["-t", "ed25519"]),
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                                ),
                         )
                         .child(
                             button_icon("new-identity-btn", "identity_card", "+ New Identity").on_click(
@@ -1846,40 +1875,101 @@ impl Shellumi {
                         .child(
                             div()
                                 .id("keychain-search-btn")
-                                .px_2p5()
-                                .py_1()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                                .on_click(cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)))
-                                .child("🔍"),
+                                .hover(|s| {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                })
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.open_command_palette(window, cx)
+                                }))
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("search", false, 48)
+                                    {
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().text_xs().child("🔍").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div()
                                 .id("keychain-grid-btn")
-                                .px_2p5()
-                                .py_1()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                                .child("⊞"),
+                                .hover(|s| {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                })
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("grid_view", false, 48)
+                                    {
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().text_xs().child("⊞").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div()
                                 .id("keychain-refresh-btn")
-                                .px_2p5()
-                                .py_1()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)).text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                                .on_click(cx.listener(|app, _, _, cx| app.refresh_public_inventory(cx)))
-                                .child("📅"),
+                                .hover(|s| {
+                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                })
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.refresh_public_inventory(cx)
+                                }))
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("calendar_sort", false, 48)
+                                    {
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().text_xs().child("📅").into_any_element()
+                                    },
+                                ),
                         ),
                 );
 
@@ -2049,7 +2139,21 @@ impl Shellumi {
                                 .text_xs()
                                 .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                 .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                                .child("✏️ Edit"),
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    if let Some(p) = crate::resolve_icon_path("edit", false, 32) {
+                                        div()
+                                            .w(px(12.0))
+                                            .h(px(12.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().child("✏️").into_any_element()
+                                    },
+                                )
+                                .child("Edit"),
                         ),
                 );
             }
@@ -2145,11 +2249,13 @@ impl Shellumi {
                 .pb_3()
                 .border_b_1()
                 .border_color(rgb(MacTheme::SEPARATOR))
-                .child(button("import-known-hosts", "Import").on_click(cx.listener(
-                    |app, _, _, cx| {
-                        app.refresh_public_inventory(cx);
-                    },
-                )))
+                .child(
+                    button_icon("import-known-hosts", "import", "Import").on_click(cx.listener(
+                        |app, _, _, cx| {
+                            app.refresh_public_inventory(cx);
+                        },
+                    )),
+                )
                 .child(
                     div()
                         .flex()
@@ -2158,11 +2264,15 @@ impl Shellumi {
                         .child(
                             div()
                                 .id("known-hosts-search-btn")
-                                .px_2p5()
-                                .py_1()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .cursor_pointer()
                                 .hover(|s| {
                                     s.bg(rgb(MacTheme::SURFACE_HOVER))
@@ -2171,31 +2281,61 @@ impl Shellumi {
                                 .on_click(cx.listener(|app, _, window, cx| {
                                     app.open_command_palette(window, cx)
                                 }))
-                                .child("🔍"),
+                                .child(
+                                    if let Some(p) = crate::resolve_icon_path("search", false, 48) {
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().text_xs().child("🔍").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div()
                                 .id("known-hosts-grid-btn")
-                                .px_2p5()
-                                .py_1()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .cursor_pointer()
                                 .hover(|s| {
                                     s.bg(rgb(MacTheme::SURFACE_HOVER))
                                         .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 })
-                                .child("⊞"),
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("grid_view", false, 48)
+                                    {
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().text_xs().child("⊞").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div()
                                 .id("known-hosts-refresh-btn")
-                                .px_2p5()
-                                .py_1()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .cursor_pointer()
                                 .hover(|s| {
                                     s.bg(rgb(MacTheme::SURFACE_HOVER))
@@ -2204,7 +2344,19 @@ impl Shellumi {
                                 .on_click(
                                     cx.listener(|app, _, _, cx| app.refresh_public_inventory(cx)),
                                 )
-                                .child("📅"),
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("calendar_sort", false, 48)
+                                    {
+                                        div()
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().text_xs().child("📅").into_any_element()
+                                    },
+                                ),
                         ),
                 );
 
