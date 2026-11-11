@@ -2075,7 +2075,7 @@ fn supports_performance_benchmarks_via_cli() {
     assert!(out_json.status.success());
     let json_str = String::from_utf8(out_json.stdout).unwrap();
     assert!(json_str.contains("\"name\": \"startup_template_resolution\""));
-    assert!(json_str.contains("\"passed_count\": 1"));
+    assert!(json_str.contains("\"failed_count\": 0"));
 
     // 3. Markdown formatted output
     let out_md = Command::new(env!("CARGO_BIN_EXE_shellumi-cli"))

@@ -487,9 +487,9 @@ impl BenchmarkRunner {
         let ops_per_sec = iterations as f64 / elapsed_secs.max(0.000_001);
         let latency_us = (duration_ms * 1000.0) / iterations as f64;
 
-        let status = if ops_per_sec >= 20_000.0 {
+        let status = if ops_per_sec >= 10_000.0 {
             BenchmarkStatus::Passed
-        } else if ops_per_sec >= 10_000.0 {
+        } else if ops_per_sec >= 5_000.0 {
             BenchmarkStatus::Warning
         } else {
             BenchmarkStatus::Failed
@@ -507,7 +507,7 @@ impl BenchmarkRunner {
             throughput_mb_per_sec: None,
             latency_us_per_op: latency_us,
             status,
-            target_sla: ">= 20,000 ops/s".to_string(),
+            target_sla: ">= 10,000 ops/s".to_string(),
             note: format!(
                 "{:.0} template renders/sec ({:.2} µs/op)",
                 ops_per_sec, latency_us

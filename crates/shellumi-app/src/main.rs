@@ -15699,6 +15699,34 @@ pub(crate) fn resolve_icon_path(
     None
 }
 
+pub(crate) fn resolve_folder_icon_path(name: &str) -> Option<std::path::PathBuf> {
+    let icon_name = match name {
+        "Documents" => "folder_documents",
+        "Downloads" => "folder_downloads",
+        "Desktop" => "folder_desktop",
+        "Movies" => "folder_movies",
+        "Music" => "folder_music",
+        "Pictures" => "folder_pictures",
+        "Applications" => "folder_applications",
+        "Public" => "folder_public",
+        _ => "folder",
+    };
+    let filename = format!("{icon_name}.png");
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let bundle_path = parent.join("../Resources/file_icons").join(&filename);
+            if bundle_path.exists() {
+                return Some(bundle_path);
+            }
+        }
+    }
+    let local = std::path::PathBuf::from("resources/file_icons").join(&filename);
+    if local.exists() {
+        return Some(local);
+    }
+    None
+}
+
 pub(crate) fn resolve_file_icon_path(entry: &FileEntry) -> Option<std::path::PathBuf> {
     let icon_name = if entry.kind == FileKind::Directory {
         match entry.name.as_str() {
@@ -15835,6 +15863,70 @@ pub(crate) fn format_file_timestamp(secs_opt: Option<u64>) -> String {
         h => h,
     };
     format!("{}/{}/{}, {}:{:02} {}", m, d, y, hour12, minute, am_pm)
+}
+
+fn sftp_local_copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            sftp_local_copy_recursive(&child_src, &child_dst)?;
+        }
+        Ok(())
+    } else {
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::copy(src, dst).map(|_| ())
+    }
+}
+
+fn sftp_upload_recursive(
+    client: &mut SftpClient,
+    local: &std::path::Path,
+    remote: &str,
+) -> Result<(), SftpError> {
+    if local.is_dir() {
+        let _ = client.mkdir(remote);
+        if let Ok(entries) = std::fs::read_dir(local) {
+            for entry in entries.flatten() {
+                let sub_local = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), name);
+                let _ = sftp_upload_recursive(client, &sub_local, &sub_remote);
+            }
+        }
+    } else {
+        let _ = client.upload_file::<fn(u64, u64)>(local, remote, None);
+    }
+    Ok(())
+}
+
+fn sftp_download_recursive(
+    client: &mut SftpClient,
+    remote: &str,
+    local: &std::path::Path,
+) -> Result<(), SftpError> {
+    if let Ok(entries) = client.list_remote_directory(remote) {
+        let _ = std::fs::create_dir_all(local);
+        for entry in entries {
+            if entry.name == "." || entry.name == ".." {
+                continue;
+            }
+            let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), entry.name);
+            let sub_local = local.join(&entry.name);
+            if entry.kind == FileKind::Directory {
+                let _ = sftp_download_recursive(client, &sub_remote, &sub_local);
+            } else {
+                let _ = client.download_file::<fn(u64, u64)>(&sub_remote, &sub_local, None);
+            }
+        }
+    } else {
+        let _ = client.download_file::<fn(u64, u64)>(remote, local, None);
+    }
+    Ok(())
 }
 
 impl Shellumi {
@@ -16881,17 +16973,18 @@ impl Shellumi {
                 for file_name in &files {
                     let src_file = src_dir.join(file_name);
                     let dst_file = dst_dir.join(file_name);
-                    if std::fs::copy(&src_file, &dst_file).is_ok() {
+                    if sftp_local_copy_recursive(&src_file, &dst_file).is_ok() {
                         copied += 1;
                     } else {
                         failed += 1;
                     }
                 }
                 self.desktop.message = Some(format!(
-                    "Transferred {copied} file(s) to {} (failed: {failed})",
+                    "Transferred {copied} item(s) to {} (failed: {failed})",
                     dst_dir.display()
                 ));
                 self.refresh_sftp_pane(!from_left, cx);
+                self.refresh_sftp_pane(from_left, cx);
                 cx.notify();
             }
             (Some(SftpPaneHost::Local), Some(SftpPaneHost::Remote(host))) => {
@@ -16922,7 +17015,7 @@ impl Shellumi {
                     for f in &files_to_up {
                         let local_p = src_dir.join(f);
                         let remote_p = format!("{}/{}", dst_dir.display(), f);
-                        let _ = client.upload_file::<fn(u64, u64)>(&local_p, &remote_p, None);
+                        let _ = sftp_upload_recursive(&mut client, &local_p, &remote_p);
                     }
                     Ok::<(), SftpError>(())
                 });
@@ -16975,7 +17068,7 @@ impl Shellumi {
                     for f in &files_to_down {
                         let remote_p = format!("{}/{}", src_dir.display(), f);
                         let local_p = dst_dir.join(f);
-                        let _ = client.download_file::<fn(u64, u64)>(&remote_p, &local_p, None);
+                        let _ = sftp_download_recursive(&mut client, &remote_p, &local_p);
                     }
                     Ok::<(), SftpError>(())
                 });
@@ -17001,12 +17094,87 @@ impl Shellumi {
             }
             (Some(SftpPaneHost::Remote(src_h)), Some(SftpPaneHost::Remote(dst_h))) => {
                 let count = files.len();
+                let src_dest = src_h.destination.clone();
+                let mut src_opts = SftpConnectOptions {
+                    port: Some(src_dest.port().get()),
+                    ..Default::default()
+                };
+                if let Some(jump) = &src_h.jump_host {
+                    src_opts
+                        .extra_ssh_options
+                        .push(("ProxyJump".to_string(), jump.clone()));
+                }
+                if let Some(ident_id) = &src_h.identity_id {
+                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
+                        if let Some(kp) = &ident.key_path {
+                            src_opts.identity_file = Some(kp.clone());
+                        }
+                    }
+                }
+                let dst_dest = dst_h.destination.clone();
+                let mut dst_opts = SftpConnectOptions {
+                    port: Some(dst_dest.port().get()),
+                    ..Default::default()
+                };
+                if let Some(jump) = &dst_h.jump_host {
+                    dst_opts
+                        .extra_ssh_options
+                        .push(("ProxyJump".to_string(), jump.clone()));
+                }
+                if let Some(ident_id) = &dst_h.identity_id {
+                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
+                        if let Some(kp) = &ident.key_path {
+                            dst_opts.identity_file = Some(kp.clone());
+                        }
+                    }
+                }
+                let files_to_sync = files.clone();
+                let to_is_left = !from_left;
                 self.desktop.message = Some(format!(
-                    "Transferred {count} file(s) between remote servers ({} ➔ {})",
+                    "Transferring {count} item(s) ({} ➔ {})…",
                     src_h.name, dst_h.name
                 ));
-                self.refresh_sftp_pane(!from_left, cx);
                 cx.notify();
+
+                let task = cx.background_executor().spawn(async move {
+                    let mut src_client = SftpClient::connect(&src_dest, &src_opts)?;
+                    let mut dst_client = SftpClient::connect(&dst_dest, &dst_opts)?;
+                    let temp_dir =
+                        std::env::temp_dir().join(format!("shellumi_sftp_{}", std::process::id()));
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    for f in &files_to_sync {
+                        let remote_src = format!("{}/{}", src_dir.display(), f);
+                        let staging_local = temp_dir.join(f);
+                        let remote_dst = format!("{}/{}", dst_dir.display(), f);
+                        if sftp_download_recursive(&mut src_client, &remote_src, &staging_local)
+                            .is_ok()
+                        {
+                            let _ =
+                                sftp_upload_recursive(&mut dst_client, &staging_local, &remote_dst);
+                        }
+                    }
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                    Ok::<(), SftpError>(())
+                });
+
+                cx.spawn(async move |app, cx| {
+                    let res = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        match res {
+                            Ok(()) => {
+                                app.desktop.message =
+                                    Some(format!("Transferred {count} item(s) successfully."));
+                            }
+                            Err(err) => {
+                                app.desktop.message =
+                                    Some(format!("Transfer finished (status: {err})"));
+                            }
+                        }
+                        app.refresh_sftp_pane(to_is_left, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             _ => {
                 self.desktop.message =
@@ -18197,7 +18365,15 @@ impl Shellumi {
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.sftp_navigate_dir(is_left, target_path.clone(), cx);
                     }))
-                    .child("📁")
+                    .child(if let Some(p) = resolve_folder_icon_path(crumb) {
+                        div()
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .child(gpui::img(p).size_full())
+                            .into_any_element()
+                    } else {
+                        div().text_xs().child("📁").into_any_element()
+                    })
                     .child(crumb.to_string()),
             );
             if c_idx < crumbs.len() - 1 {
@@ -18240,6 +18416,20 @@ impl Shellumi {
                     app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
                 }
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |app, _, _, cx| {
+                    let p = if is_left {
+                        &mut app.sftp_left_pane
+                    } else {
+                        &mut app.sftp_right_pane
+                    };
+                    p.selected_files.clear();
+                    p.selected_file = None;
+                    app.sftp_context_menu = None;
+                    cx.notify();
+                }),
+            )
             .on_mouse_down(
                 gpui::MouseButton::Right,
                 cx.listener(move |app, event: &gpui::MouseDownEvent, _, cx| {
@@ -18317,57 +18507,6 @@ impl Shellumi {
             );
         }
 
-        // Selection transfer banner if files are selected
-        if !pane.selected_files.is_empty() {
-            let sel_count = pane.selected_files.len();
-            table_body = table_body.child(
-                div()
-                    .h(px(28.0))
-                    .px_3()
-                    .bg(rgb(MacTheme::BADGE_NAVY))
-                    .border_b_1()
-                    .border_color(rgb(MacTheme::BORDER))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(format!("{sel_count} file(s) selected")),
-                    )
-                    .child(
-                        div()
-                            .id(if is_left {
-                                "sftp-l-batch-transfer"
-                            } else {
-                                "sftp-r-batch-transfer"
-                            })
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(rgb(MacTheme::ACCENT_BLUE))
-                            .text_color(rgb(0xffffff))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                let files: Vec<String> = if is_left {
-                                    app.sftp_left_pane.selected_files.iter().cloned().collect()
-                                } else {
-                                    app.sftp_right_pane.selected_files.iter().cloned().collect()
-                                };
-                                app.sftp_transfer_files(is_left, files, cx);
-                            }))
-                            .child(if is_left {
-                                "Transfer to Right ➔"
-                            } else {
-                                "➔ Transfer to Left"
-                            }),
-                    ),
-            );
-        }
-
         // ".." Row
         let default_folder_icon = resolve_file_icon_path(&FileEntry {
             name: "folder".into(),
@@ -18390,6 +18529,9 @@ impl Shellumi {
                 .items_center()
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.sftp_navigate_parent(is_left, cx);
                 }))
@@ -18540,6 +18682,7 @@ impl Shellumi {
                         let entry_name = entry_name.clone();
                         let entry_path = entry_path.clone();
                         move |app, event: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
                             let p = if is_left {
                                 &mut app.sftp_left_pane
                             } else {
@@ -18580,6 +18723,7 @@ impl Shellumi {
                         let entry_name = entry_name.clone();
                         let entry_path = entry_path.clone();
                         move |app, event: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
                             let p = if is_left {
                                 &mut app.sftp_left_pane
                             } else {
@@ -18705,6 +18849,66 @@ impl Shellumi {
             table_body = table_body.child(row);
         }
 
+        table_body = table_body.child(div().flex_1().min_h(px(60.0)).cursor_default());
+
+        let sel_count = pane.selected_files.len();
+        let total_count = pane.entries.len();
+        let status_bar = div()
+            .id(if is_left {
+                "sftp-left-status-bar"
+            } else {
+                "sftp-right-status-bar"
+            })
+            .h(px(26.0))
+            .px_3()
+            .bg(rgb(MacTheme::SURFACE))
+            .border_t_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+            .child(div().flex().items_center().gap_2().child(if sel_count > 0 {
+                format!("{sel_count} of {total_count} items selected")
+            } else {
+                format!("{total_count} items")
+            }))
+            .children(if sel_count > 0 {
+                Some(
+                    div()
+                        .id(if is_left {
+                            "sftp-left-deselect-btn"
+                        } else {
+                            "sftp-right-deselect-btn"
+                        })
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(rgb(MacTheme::INPUT_BG))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .cursor_pointer()
+                        .hover(|s| {
+                            s.text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .bg(rgb(MacTheme::SURFACE_HOVER))
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            let p = if is_left {
+                                &mut app.sftp_left_pane
+                            } else {
+                                &mut app.sftp_right_pane
+                            };
+                            p.selected_files.clear();
+                            p.selected_file = None;
+                            cx.notify();
+                        }))
+                        .child("Deselect"),
+                )
+            } else {
+                None
+            });
+
         let mut content = div()
             .relative()
             .flex()
@@ -18718,10 +18922,27 @@ impl Shellumi {
             .child(header)
             .child(breadcrumb_row)
             .child(table_header)
-            .child(table_body);
+            .child(table_body)
+            .child(status_bar);
 
         // Actions Dropdown Menu Overlay
         if actions_open {
+            let backdrop = div()
+                .id(if is_left {
+                    "sftp-left-actions-backdrop"
+                } else {
+                    "sftp-right-actions-backdrop"
+                })
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |app, _, _, cx| {
+                        app.sftp_toggle_actions(is_left, cx);
+                    }),
+                );
+            content = content.child(backdrop);
+
             let actions_menu = div()
                 .id(if is_left {
                     "sftp-left-actions-menu"
@@ -18737,10 +18958,13 @@ impl Shellumi {
                 .border_1()
                 .border_color(rgb(MacTheme::BORDER))
                 .p_1()
-                .shadow_lg()
+                .shadow_2xl()
                 .flex()
                 .flex_col()
                 .gap_0p5()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
                 .child(
                     div()
                         .id(if is_left {

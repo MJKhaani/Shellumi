@@ -537,31 +537,37 @@ impl Shellumi {
         if page == "SFTP Files" {
             return self.render_sftp_redesigned_dual_pane(cx);
         }
-        let content = match page {
-            "Snippets" => self.snippets_page(cx),
-            "Settings" => self.settings_page(cx),
-            "Workspaces" => self.workspaces_page(cx),
-            "Overview" => self.overview_page(cx),
-            "Terminal" => self.sessions_page(false, cx),
-            _ => self.tools_page(page, cx),
+        let (view, is_full_view) = match page {
+            "Keychain" | "Known Hosts" => (self.public_inventory_page(page, cx), true),
+            "Snippets" => (self.snippets_page(cx), true),
+            "Settings" => (self.settings_page(cx), true),
+            "Workspaces" => (self.workspaces_page(cx), true),
+            "Port Forwarding" | "Session Logs" => (self.tools_page(page, cx), true),
+            "Overview" => (self.overview_page(cx), false),
+            "Terminal" => (self.sessions_page(false, cx), false),
+            _ => (self.tools_page(page, cx), false),
         };
-        let mut body = div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .child(
-                div()
-                    .id("page-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_6()
-                    .child(content),
-            );
+        let mut body = if is_full_view {
+            view
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("page-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_6()
+                        .child(view),
+                )
+        };
         if self.desktop.busy {
             body = body.child(div().px_6().py_2().text_sm().child("Saving…"));
         }
@@ -578,10 +584,15 @@ impl Shellumi {
         body
     }
     fn snippets_page(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let toolbar = div()
+        let action_bar = div()
+            .id("snippets-action-bar")
             .flex()
-            .justify_between()
             .items_center()
+            .justify_between()
+            .px_6()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
             .child(heading("Command snippets"))
             .child(
                 div()
@@ -852,15 +863,31 @@ impl Shellumi {
                 "Create a snippet to save commands, scripts and parameterized templates.",
             ));
         }
-        div().flex().flex_col().gap_4().child(toolbar).child(
-            div()
-                .flex()
-                .items_start()
-                .gap_3()
-                .child(packages)
-                .child(list)
-                .child(editor),
-        )
+        let content_scroll = div()
+            .id("snippets-content-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .child(packages)
+                    .child(list)
+                    .child(editor),
+            );
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(MacTheme::CONTENT_BG))
+            .child(action_bar)
+            .child(content_scroll)
     }
     fn open_snippet_modal_for_run(&mut self, id: i64, cx: &mut Context<Self>) {
         let Some(snippet) = self.snippets.iter().find(|s| s.id == id).cloned() else {
@@ -1055,12 +1082,41 @@ impl Shellumi {
                 content=content.child(button("run-diagnostics-settings","Run diagnostics").on_click(cx.listener(|app,_,_,cx|app.open_diagnostics_modal(cx)))).child(muted("No telemetry. No mandatory account. Credentials are not stored in the host database."));
             }
         }
-        div()
+        let action_bar = div()
+            .id("settings-action-bar")
             .flex()
-            .items_start()
-            .gap_4()
-            .child(categories)
-            .child(content)
+            .items_center()
+            .justify_between()
+            .px_6()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .child(heading("Settings"));
+
+        let content_scroll = div()
+            .id("settings-content-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_4()
+                    .child(categories)
+                    .child(content),
+            );
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(MacTheme::CONTENT_BG))
+            .child(action_bar)
+            .child(content_scroll)
     }
     fn preference_stepper(
         &self,
@@ -1211,22 +1267,37 @@ impl Shellumi {
         if self.workspaces.is_empty() {
             grid=grid.child(empty("Build your workspace","Save named layouts containing local shells and SSH hosts. Opening a workspace starts new sessions."));
         }
+        let action_bar = div()
+            .id("workspaces-action-bar")
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_6()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .child(heading("Saved workspaces"))
+            .child(primary("new-workspace", "+ New workspace").on_click(
+                cx.listener(|app, _, _, cx| app.edit_library_item(EditorKind::Workspace, None, cx)),
+            ));
+
+        let content_scroll = div()
+            .id("workspaces-content-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6()
+            .child(grid);
+
         div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(heading("Saved workspaces"))
-                    .child(
-                        primary("new-workspace", "+ New workspace").on_click(cx.listener(
-                            |app, _, _, cx| app.edit_library_item(EditorKind::Workspace, None, cx),
-                        )),
-                    ),
-            )
-            .child(grid)
+            .bg(rgb(MacTheme::CONTENT_BG))
+            .child(action_bar)
+            .child(content_scroll)
     }
     fn overview_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let hosts = match &self.hosts {
@@ -1425,8 +1496,94 @@ impl Shellumi {
             }
         }
         match page {
-            "Port Forwarding"=> {if let Some(modal)=&self.tunnel_modal{return div().child(self.render_tunnel_modal(modal,cx));} empty("Port forwarding","Create and manage saved SSH tunnel rules.").child(primary("open-tunnels-page","Manage tunnels").on_click(cx.listener(|app,_,_,cx|app.open_tunnel_modal(cx))))},
-            "Session Logs"=>{if let Some(modal)=&self.session_replay_modal{return div().child(self.render_session_replay_modal(modal,cx));} empty("Session recordings","Recordings are opt-in and can contain sensitive terminal output.").child(primary("open-recordings-page","Open recordings").on_click(cx.listener(|app,_,_,cx|app.open_session_replay_modal(cx))))},
+            "Port Forwarding" => {
+                if let Some(modal) = &self.tunnel_modal {
+                    return div().child(self.render_tunnel_modal(modal, cx));
+                }
+                let action_bar = div()
+                    .id("port-forwarding-action-bar")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_6()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .child(heading("Port Forwarding"))
+                    .child(
+                        button_icon("new-tunnel-btn", "port_forwarding", "+ New Tunnel")
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .border_color(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.open_tunnel_modal(cx);
+                            })),
+                    );
+                let content_scroll = div()
+                    .id("port-forwarding-content-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_6()
+                    .child(
+                        empty("Port forwarding", "Create and manage saved SSH tunnel rules.")
+                            .child(primary("open-tunnels-page", "Manage tunnels").on_click(cx.listener(|app, _, _, cx| app.open_tunnel_modal(cx)))),
+                    );
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(MacTheme::CONTENT_BG))
+                    .child(action_bar)
+                    .child(content_scroll)
+            }
+            "Session Logs" => {
+                if let Some(modal) = &self.session_replay_modal {
+                    return div().child(self.render_session_replay_modal(modal, cx));
+                }
+                let action_bar = div()
+                    .id("session-logs-action-bar")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_6()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .child(heading("Session Recordings & Logs"))
+                    .child(
+                        button_icon("open-recordings-btn", "log", "Open recordings")
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .border_color(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.open_session_replay_modal(cx);
+                            })),
+                    );
+                let content_scroll = div()
+                    .id("session-logs-content-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_6()
+                    .child(
+                        empty("Session recordings", "Recordings are opt-in and can contain sensitive terminal output.")
+                            .child(primary("open-recordings-page", "Open recordings").on_click(cx.listener(|app, _, _, cx| app.open_session_replay_modal(cx)))),
+                    );
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(MacTheme::CONTENT_BG))
+                    .child(action_bar)
+                    .child(content_scroll)
+            }
             "Vaults"=>empty("Local vault records","Manage vault metadata and local team membership. Network sharing is not connected.").child(primary("vault-records","Manage vaults").on_click(cx.listener(|app,_,_,cx|app.open_team_modal(cx)))),
             "Collaboration"=>empty("Session access","Network terminal sharing is not implemented. Local membership records are available under Vaults."),
             "Integrations"=>empty("Infrastructure inventory","Manage provider records and inspect inventory with the existing infrastructure tools.").child(primary("integration-records","Manage infrastructure").on_click(cx.listener(|app,_,_,cx|app.open_infra_modal(cx)))),
@@ -1817,13 +1974,15 @@ impl Shellumi {
     fn public_inventory_page(&self, page: &'static str, cx: &mut Context<Self>) -> gpui::Div {
         let keys = page == "Keychain";
         if keys {
-            let toolbar = div()
+            let action_bar = div()
+                .id("keychain-action-bar")
                 .flex()
                 .items_center()
                 .justify_between()
-                .pb_3()
+                .px_6()
+                .py_3()
                 .border_b_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
+                .border_color(rgb(MacTheme::BORDER))
                 .child(
                     div()
                         .flex()
@@ -2217,11 +2376,15 @@ impl Shellumi {
                         .child(format!("Daemon: {}", daemon.daemon_identifier)),
                 );
 
-            div()
+            let content_scroll = div()
+                .id("keychain-content-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p_6()
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(toolbar)
                 .child(
                     div()
                         .text_sm()
@@ -2239,16 +2402,28 @@ impl Shellumi {
                 )
                 .child(identities_grid)
                 .child(div().h(px(8.0)))
-                .child(daemon_card)
+                .child(daemon_card);
+
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(MacTheme::CONTENT_BG))
+                .child(action_bar)
+                .child(content_scroll)
         } else {
             // Known Hosts view
-            let toolbar = div()
+            let action_bar = div()
+                .id("known-hosts-action-bar")
                 .flex()
                 .items_center()
                 .justify_between()
-                .pb_3()
+                .px_6()
+                .py_3()
                 .border_b_1()
-                .border_color(rgb(MacTheme::SEPARATOR))
+                .border_color(rgb(MacTheme::BORDER))
                 .child(
                     button_icon("import-known-hosts", "import", "Import").on_click(cx.listener(
                         |app, _, _, cx| {
@@ -2422,11 +2597,15 @@ impl Shellumi {
                 );
             }
 
-            div()
+            let content_scroll = div()
+                .id("known-hosts-content-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p_6()
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(toolbar)
                 .child(
                     div()
                         .text_sm()
@@ -2434,7 +2613,17 @@ impl Shellumi {
                         .text_color(rgb(MacTheme::TEXT_SECONDARY))
                         .child("Known Hosts"),
                 )
-                .child(hosts_grid)
+                .child(hosts_grid);
+
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(MacTheme::CONTENT_BG))
+                .child(action_bar)
+                .child(content_scroll)
         }
     }
 }
