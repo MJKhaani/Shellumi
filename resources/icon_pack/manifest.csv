@@ -19,7 +19,7 @@ index,row,column,name,label,regular_256,hover_256
 18,4,3,groups,Groups,icons/256/regular/groups.png,icons/256/hover/groups.png
 19,4,4,tags,Tags,icons/256/regular/tags.png,icons/256/hover/tags.png
 20,4,5,favorite,Favorites,icons/256/regular/favorite.png,icons/256/hover/favorite.png
-21,5,1,more,More / Menu,icons/256/regular/more.png,icons/256/hover/more.png
+21,5,1,more,More / Options,icons/256/regular/more.png,icons/256/hover/more.png
 22,5,2,edit,Edit,icons/256/regular/edit.png,icons/256/hover/edit.png
 23,5,3,delete,Delete,icons/256/regular/delete.png,icons/256/hover/delete.png
 24,5,4,refresh,Refresh,icons/256/regular/refresh.png,icons/256/hover/refresh.png
@@ -32,3 +32,20 @@ index,row,column,name,label,regular_256,hover_256
 31,7,1,export,Export,icons/256/regular/export.png,icons/256/hover/export.png
 32,7,2,tag,Tag,icons/256/regular/tag.png,icons/256/hover/tag.png
 33,7,3,calendar_sort,Calendar Sort,icons/256/regular/calendar_sort.png,icons/256/hover/calendar_sort.png
+34,7,4,certificate,Certificate,icons/256/regular/certificate.png,icons/256/hover/certificate.png
+35,7,5,private_key,Private Key,icons/256/regular/private_key.png,icons/256/hover/private_key.png
+36,8,1,public_key,Public Key,icons/256/regular/public_key.png,icons/256/hover/public_key.png
+37,8,2,identity_card,Identity Card,icons/256/regular/identity_card.png,icons/256/hover/identity_card.png
+38,8,3,os_arch,Arch Linux,icons/256/regular/os_arch.png,icons/256/hover/os_arch.png
+39,8,4,os_ubuntu,Ubuntu,icons/256/regular/os_ubuntu.png,icons/256/hover/os_ubuntu.png
+40,8,5,os_macos,macOS,icons/256/regular/os_macos.png,icons/256/hover/os_macos.png
+41,9,1,os_freebsd,FreeBSD,icons/256/regular/os_freebsd.png,icons/256/hover/os_freebsd.png
+42,9,2,os_netbsd,NetBSD,icons/256/regular/os_netbsd.png,icons/256/hover/os_netbsd.png
+43,9,3,os_openbsd,OpenBSD,icons/256/regular/os_openbsd.png,icons/256/hover/os_openbsd.png
+44,9,4,os_linux,Linux,icons/256/regular/os_linux.png,icons/256/hover/os_linux.png
+45,9,5,os_windows,Windows,icons/256/regular/os_windows.png,icons/256/hover/os_windows.png
+46,10,1,server,Server,icons/256/regular/server.png,icons/256/hover/server.png
+47,10,2,fido2,FIDO2,icons/256/regular/fido2.png,icons/256/hover/fido2.png
+48,10,3,fingerprint,Fingerprint,icons/256/regular/fingerprint.png,icons/256/hover/fingerprint.png
+49,10,4,log,Log,icons/256/regular/log.png,icons/256/hover/log.png
+50,10,5,bell,Bell,icons/256/regular/bell.png,icons/256/hover/bell.png

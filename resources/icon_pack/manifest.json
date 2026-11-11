@@ -199,7 +199,7 @@
       "row": 5,
       "column": 1,
       "name": "more",
-      "label": "More / Menu",
+      "label": "More / Options",
       "regular_256": "icons/256/regular/more.png",
       "hover_256": "icons/256/hover/more.png"
     },
@@ -310,9 +310,162 @@
       "label": "Calendar Sort",
       "regular_256": "icons/256/regular/calendar_sort.png",
       "hover_256": "icons/256/hover/calendar_sort.png"
+    },
+    {
+      "index": 34,
+      "row": 7,
+      "column": 4,
+      "name": "certificate",
+      "label": "Certificate",
+      "regular_256": "icons/256/regular/certificate.png",
+      "hover_256": "icons/256/hover/certificate.png"
+    },
+    {
+      "index": 35,
+      "row": 7,
+      "column": 5,
+      "name": "private_key",
+      "label": "Private Key",
+      "regular_256": "icons/256/regular/private_key.png",
+      "hover_256": "icons/256/hover/private_key.png"
+    },
+    {
+      "index": 36,
+      "row": 8,
+      "column": 1,
+      "name": "public_key",
+      "label": "Public Key",
+      "regular_256": "icons/256/regular/public_key.png",
+      "hover_256": "icons/256/hover/public_key.png"
+    },
+    {
+      "index": 37,
+      "row": 8,
+      "column": 2,
+      "name": "identity_card",
+      "label": "Identity Card",
+      "regular_256": "icons/256/regular/identity_card.png",
+      "hover_256": "icons/256/hover/identity_card.png"
+    },
+    {
+      "index": 38,
+      "row": 8,
+      "column": 3,
+      "name": "os_arch",
+      "label": "Arch Linux",
+      "regular_256": "icons/256/regular/os_arch.png",
+      "hover_256": "icons/256/hover/os_arch.png"
+    },
+    {
+      "index": 39,
+      "row": 8,
+      "column": 4,
+      "name": "os_ubuntu",
+      "label": "Ubuntu",
+      "regular_256": "icons/256/regular/os_ubuntu.png",
+      "hover_256": "icons/256/hover/os_ubuntu.png"
+    },
+    {
+      "index": 40,
+      "row": 8,
+      "column": 5,
+      "name": "os_macos",
+      "label": "macOS",
+      "regular_256": "icons/256/regular/os_macos.png",
+      "hover_256": "icons/256/hover/os_macos.png"
+    },
+    {
+      "index": 41,
+      "row": 9,
+      "column": 1,
+      "name": "os_freebsd",
+      "label": "FreeBSD",
+      "regular_256": "icons/256/regular/os_freebsd.png",
+      "hover_256": "icons/256/hover/os_freebsd.png"
+    },
+    {
+      "index": 42,
+      "row": 9,
+      "column": 2,
+      "name": "os_netbsd",
+      "label": "NetBSD",
+      "regular_256": "icons/256/regular/os_netbsd.png",
+      "hover_256": "icons/256/hover/os_netbsd.png"
+    },
+    {
+      "index": 43,
+      "row": 9,
+      "column": 3,
+      "name": "os_openbsd",
+      "label": "OpenBSD",
+      "regular_256": "icons/256/regular/os_openbsd.png",
+      "hover_256": "icons/256/hover/os_openbsd.png"
+    },
+    {
+      "index": 44,
+      "row": 9,
+      "column": 4,
+      "name": "os_linux",
+      "label": "Linux",
+      "regular_256": "icons/256/regular/os_linux.png",
+      "hover_256": "icons/256/hover/os_linux.png"
+    },
+    {
+      "index": 45,
+      "row": 9,
+      "column": 5,
+      "name": "os_windows",
+      "label": "Windows",
+      "regular_256": "icons/256/regular/os_windows.png",
+      "hover_256": "icons/256/hover/os_windows.png"
+    },
+    {
+      "index": 46,
+      "row": 10,
+      "column": 1,
+      "name": "server",
+      "label": "Server",
+      "regular_256": "icons/256/regular/server.png",
+      "hover_256": "icons/256/hover/server.png"
+    },
+    {
+      "index": 47,
+      "row": 10,
+      "column": 2,
+      "name": "fido2",
+      "label": "FIDO2",
+      "regular_256": "icons/256/regular/fido2.png",
+      "hover_256": "icons/256/hover/fido2.png"
+    },
+    {
+      "index": 48,
+      "row": 10,
+      "column": 3,
+      "name": "fingerprint",
+      "label": "Fingerprint",
+      "regular_256": "icons/256/regular/fingerprint.png",
+      "hover_256": "icons/256/hover/fingerprint.png"
+    },
+    {
+      "index": 49,
+      "row": 10,
+      "column": 4,
+      "name": "log",
+      "label": "Log",
+      "regular_256": "icons/256/regular/log.png",
+      "hover_256": "icons/256/hover/log.png"
+    },
+    {
+      "index": 50,
+      "row": 10,
+      "column": 5,
+      "name": "bell",
+      "label": "Bell",
+      "regular_256": "icons/256/regular/bell.png",
+      "hover_256": "icons/256/hover/bell.png"
     }
   ],
-  "icon_count": 33,
+  "icon_count": 50,
   "state_definitions": {
     "regular": "Borderless standalone metallic-blue/silver artwork on transparent background (no dark rounded-square tile).",
     "hover": "Metallic-blue/silver icon on a bordered dark rounded-square macOS tile."

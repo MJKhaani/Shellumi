@@ -114,6 +114,38 @@ fn button(
         .text_color(rgb(MacTheme::TEXT_PRIMARY))
         .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
 }
+fn button_icon(
+    id: impl Into<gpui::ElementId>,
+    icon_name: &str,
+    text: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    let icon_el = if let Some(p) = crate::resolve_icon_path(icon_name, false, 32) {
+        div()
+            .w(px(14.0))
+            .h(px(14.0))
+            .child(gpui::img(p).size_full())
+            .into_any_element()
+    } else {
+        div().into_any_element()
+    };
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .px_3()
+        .py_1p5()
+        .rounded(px(MacTheme::CONTROL_RADIUS))
+        .border_1()
+        .border_color(rgb(MacTheme::SEPARATOR))
+        .bg(rgb(0x323236))
+        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+        .text_sm()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
+        .child(icon_el)
+        .child(text.into())
+}
 fn primary(
     id: impl Into<gpui::ElementId>,
     text: impl Into<gpui::SharedString>,
@@ -1787,20 +1819,20 @@ impl Shellumi {
                             ),
                         )
                         .child(
-                            button("new-identity-btn", "🪪 + New Identity").on_click(
+                            button_icon("new-identity-btn", "identity_card", "+ New Identity").on_click(
                                 cx.listener(|app, _, _, cx| {
                                     app.open_identity_modal(None, cx);
                                 }),
                             ),
                         )
                         .child(
-                            button("cert-btn", "📄 Certificate").on_click(cx.listener(|app, _, _, cx| {
+                            button_icon("cert-btn", "certificate", "Certificate").on_click(cx.listener(|app, _, _, cx| {
                                 app.desktop.message = Some("Certificate management: add certificates to identities or OpenSSH config.".into());
                                 cx.notify();
                             })),
                         )
                         .child(
-                            button("fido2-btn", "🪪 FIDO2").on_click(cx.listener(|app, _, _, cx| {
+                            button_icon("fido2-btn", "fido2", "FIDO2").on_click(cx.listener(|app, _, _, cx| {
                                 app.desktop.message = Some("FIDO2 hardware keys supported via OpenSSH sk-ecdsa/sk-ed25519 keys.".into());
                                 cx.notify();
                             })),
@@ -1891,7 +1923,19 @@ impl Shellumi {
                                 .justify_center()
                                 .text_base()
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                .child("🔑"),
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("public_key", false, 32)
+                                    {
+                                        div()
+                                            .w(px(18.0))
+                                            .h(px(18.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().child("🔑").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div()
@@ -1960,7 +2004,19 @@ impl Shellumi {
                                 .justify_center()
                                 .text_base()
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                .child("🪪"),
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("identity_card", false, 32)
+                                    {
+                                        div()
+                                            .w(px(18.0))
+                                            .h(px(18.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().child("🪪").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div()
@@ -2225,62 +2281,67 @@ impl Shellumi {
             .flex()
             .gap_2()
             .child(
-                button("import-host-config", "Import").on_click(cx.listener(|app, _, _, cx| {
-                    app.edit_library_item(EditorKind::ImportHosts, None, cx)
-                })),
+                button_icon("import-host-config", "import", "Import").on_click(cx.listener(
+                    |app, _, _, cx| app.edit_library_item(EditorKind::ImportHosts, None, cx),
+                )),
             )
             .child(
-                button("new-group", "Group settings").on_click(cx.listener(|app, _, _, cx| {
-                    app.edit_library_item(EditorKind::Group, None, cx);
-                    let group = app
-                        .selected_group
-                        .as_ref()
-                        .and_then(|name| {
-                            app.desktop.groups.iter().find(|group| &group.name == name)
-                        })
-                        .cloned();
-                    if let (Some(group), Some(editor)) = (group, app.desktop.editor.as_mut()) {
-                        editor.identity_id = group.identity_id;
-                        editor
-                            .name
-                            .update(cx, |input, cx| input.set_value(&group.name, cx));
-                        editor.description.update(cx, |input, cx| {
-                            input.set_value(group.default_username.as_deref().unwrap_or(""), cx)
-                        });
-                        editor
-                            .tags
-                            .update(cx, |input, cx| input.set_value(&group.tags.join(", "), cx));
-                        editor.lines[0].update(cx, |input, cx| {
-                            input.set_value(
-                                &group
-                                    .default_port
-                                    .map(|port| port.to_string())
-                                    .unwrap_or_default(),
-                                cx,
-                            )
-                        });
-                    }
-                })),
-            )
-            .child(
-                button("export-host-config", "Export").on_click(cx.listener(|app, _, _, cx| {
-                    if let HostState::Loaded(hosts) = &app.hosts {
-                        let entries = hosts
-                            .iter()
-                            .map(|host| {
-                                shellumi_core::HostConfigEntry::new(
-                                    host.name.clone(),
-                                    host.destination.clone(),
-                                )
+                button_icon("new-group", "group_settings", "Group settings").on_click(cx.listener(
+                    |app, _, _, cx| {
+                        app.edit_library_item(EditorKind::Group, None, cx);
+                        let group = app
+                            .selected_group
+                            .as_ref()
+                            .and_then(|name| {
+                                app.desktop.groups.iter().find(|group| &group.name == name)
                             })
-                            .collect::<Vec<_>>();
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            shellumi_core::export_ssh_config(&entries),
-                        ));
-                        app.desktop.message = Some("OpenSSH config copied to clipboard.".into());
-                        cx.notify();
-                    }
-                })),
+                            .cloned();
+                        if let (Some(group), Some(editor)) = (group, app.desktop.editor.as_mut()) {
+                            editor.identity_id = group.identity_id;
+                            editor
+                                .name
+                                .update(cx, |input, cx| input.set_value(&group.name, cx));
+                            editor.description.update(cx, |input, cx| {
+                                input.set_value(group.default_username.as_deref().unwrap_or(""), cx)
+                            });
+                            editor.tags.update(cx, |input, cx| {
+                                input.set_value(&group.tags.join(", "), cx)
+                            });
+                            editor.lines[0].update(cx, |input, cx| {
+                                input.set_value(
+                                    &group
+                                        .default_port
+                                        .map(|port| port.to_string())
+                                        .unwrap_or_default(),
+                                    cx,
+                                )
+                            });
+                        }
+                    },
+                )),
+            )
+            .child(
+                button_icon("export-host-config", "export", "Export").on_click(cx.listener(
+                    |app, _, _, cx| {
+                        if let HostState::Loaded(hosts) = &app.hosts {
+                            let entries = hosts
+                                .iter()
+                                .map(|host| {
+                                    shellumi_core::HostConfigEntry::new(
+                                        host.name.clone(),
+                                        host.destination.clone(),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                shellumi_core::export_ssh_config(&entries),
+                            ));
+                            app.desktop.message =
+                                Some("OpenSSH config copied to clipboard.".into());
+                            cx.notify();
+                        }
+                    },
+                )),
             )
     }
 }

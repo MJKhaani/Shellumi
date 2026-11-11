@@ -1,38 +1,12 @@
-# Shellumi — GPUI macOS Dark Icon Pack · v4 (state-corrected)
+# Shellumi — macOS Dark GPUI Icon Pack
 
-**Corrected asset states:**
+Updated pack with corrected folder semantics:
+- **regular/** = standalone icon style with no tile border
+- **hover/** = dark rounded-square tile style
 
-- `regular/` — **no rounded tile/border**. Standalone metallic-blue/silver artwork on a transparent canvas.
-- `hover/` — **dark rounded-square tile with border** around the icon.
+Added icons: certificate, private_key, public_key, identity_card, os_arch, os_ubuntu, os_macos, os_freebsd, os_netbsd, os_openbsd, os_linux, os_windows, server, fido2, fingerprint, log, bell.
 
-**33 named icons × 2 states × 5 resolutions = 330 individual RGBA PNGs**.
+Updated icon: `more` is re-centered.
 
-This version fixes 22 reversed icon pairs from the earlier archive. It preserves all artwork and only changes the folders where needed. Includes `known_hosts`, `port_forwarding`, `shellumi_logo`, `group_settings`, `import`, `export`, `tag`, `calendar_sort`, `connect`, `grid_view`, and `list_view`.
-
-## File organization
-
-```text
-shellumi_gpui_icon_pack/
-├── icons/
-│   ├── 32/
-│   ├── 48/
-│   ├── 64/
-│   ├── 128/
-│   └── 256/
-│       ├── regular/hosts.png    # borderless
-│       └── hover/hosts.png      # dark bordered tile
-├── gpui_icon.rs
-├── manifest.json
-├── manifest.csv
-├── preview.html
-├── contact_sheet.jpg
-└── source_sheets/
-    ├── regular.png              # borderless sheet
-    └── hover.png                # bordered sheet
-```
-
-Use GPUI's `img()` for full-color PNGs, as shown in `gpui_icon.rs`. Images are stored as transparent RGBA canvases at exactly 32, 48, 64, 128, and 256 square pixels.
-
-## QA
-
-Every size and state is present for all 33 names. Both states use identically sized canvases. Asset changes are folder moves; there is no re-rendering of old icons in this correction.
+Total icons: 50
+PNG sizes: 32, 48, 64, 128, 256

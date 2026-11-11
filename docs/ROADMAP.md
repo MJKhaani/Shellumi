@@ -29,6 +29,7 @@ The following work is included in the alpha source:
 - Reusable identity management with OpenSSH certificate parsing/validation,
   database persistence (schema v14), host/group GUI identity selection and inheritance,
   SSH/SFTP/workspace/tunnel launch policy, reference-only askpass, and Keychain display.
+- Redesigned Termius-matched 4-scenario SFTP file manager (Local-Local, Local-Remote, Remote-Local, Remote-Remote) with interactive breadcrumb path navigation (< and >), detailed columns (Name, permissions, date modified, size, kind), file/folder multi-selection with batch transfers, full context menu (Copy to target directory, Rename, Delete, Refresh, New Folder, Edit Permissions), and complete icon pack integration.
 - Protocol coverage expansion with VNC (RFB v3.8 protocol codec and frame decoders) and RDP (TPKT/X.224 negotiation request and MS-RDPBCGR connection codecs).
 - Embedded graphical Remote Desktop client session tab with live metrics (latency, FPS, resolution, color depth), interactive canvas with mouse/click/keystroke forwarding, scaling switcher (Fit/100%/Fill), view-only toggle, SAS shortcuts (Ctrl+Alt+Del, Win, Alt+Tab), and clipboard synchronization.
 - Live graphical remote SFTP transport engine over SSH subsystem (`ssh -s sftp`)
