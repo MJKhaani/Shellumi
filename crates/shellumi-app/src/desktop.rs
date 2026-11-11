@@ -114,15 +114,15 @@ fn button(
         .text_color(rgb(MacTheme::TEXT_PRIMARY))
         .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
 }
-fn button_icon(
+pub(crate) fn button_icon(
     id: impl Into<gpui::ElementId>,
     icon_name: &str,
     text: impl Into<gpui::SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    let icon_el = if let Some(p) = crate::resolve_icon_path(icon_name, false, 32) {
+    let icon_el = if let Some(p) = crate::resolve_icon_path(icon_name, false, 48) {
         div()
-            .w(px(14.0))
-            .h(px(14.0))
+            .w(px(18.0))
+            .h(px(18.0))
             .child(gpui::img(p).size_full())
             .into_any_element()
     } else {
@@ -132,7 +132,7 @@ fn button_icon(
         .id(id)
         .flex()
         .items_center()
-        .gap_1p5()
+        .gap_2()
         .px_3()
         .py_1p5()
         .rounded(px(MacTheme::CONTROL_RADIUS))
@@ -1925,11 +1925,11 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child(
                                     if let Some(p) =
-                                        crate::resolve_icon_path("public_key", false, 32)
+                                        crate::resolve_icon_path("public_key", false, 48)
                                     {
                                         div()
-                                            .w(px(18.0))
-                                            .h(px(18.0))
+                                            .w(px(24.0))
+                                            .h(px(24.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2006,11 +2006,11 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child(
                                     if let Some(p) =
-                                        crate::resolve_icon_path("identity_card", false, 32)
+                                        crate::resolve_icon_path("identity_card", false, 48)
                                     {
                                         div()
-                                            .w(px(18.0))
-                                            .h(px(18.0))
+                                            .w(px(24.0))
+                                            .h(px(24.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2235,7 +2235,19 @@ impl Shellumi {
                                 .justify_center()
                                 .text_base()
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                .child("⎙"),
+                                .child(
+                                    if let Some(p) =
+                                        crate::resolve_icon_path("known_hosts", false, 48)
+                                    {
+                                        div()
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
+                                        div().child("🛡").into_any_element()
+                                    },
+                                ),
                         )
                         .child(
                             div().flex().flex_col().gap_0p5().min_w_0().child(

@@ -133,6 +133,8 @@ struct SftpContextMenuState {
     entry_path: String,
     is_dir: bool,
     target_idx: usize,
+    cursor_x: f32,
+    cursor_y: f32,
 }
 
 #[derive(Clone)]
@@ -179,6 +181,9 @@ struct SftpPaneView {
     show_hidden: bool,
     actions_open: bool,
     search_host_query: String,
+    loading: bool,
+    error: Option<String>,
+    listing_generation: u64,
 }
 
 impl Default for SftpPaneView {
@@ -197,6 +202,9 @@ impl Default for SftpPaneView {
             show_hidden: false,
             actions_open: false,
             search_host_query: String::new(),
+            loading: false,
+            error: None,
+            listing_generation: 0,
         }
     }
 }
@@ -15440,6 +15448,59 @@ pub(crate) fn resolve_icon_path(
     None
 }
 
+pub(crate) fn resolve_file_icon_path(entry: &FileEntry) -> Option<std::path::PathBuf> {
+    let icon_name = if entry.kind == FileKind::Directory {
+        match entry.name.as_str() {
+            "Documents" => "folder_documents",
+            "Downloads" => "folder_downloads",
+            "Desktop" => "folder_desktop",
+            "Movies" => "folder_movies",
+            "Music" => "folder_music",
+            "Pictures" => "folder_pictures",
+            "Applications" => "folder_applications",
+            "Public" => "folder_public",
+            _ => "folder",
+        }
+    } else {
+        let ext = std::path::Path::new(&entry.name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        match ext.as_str() {
+            "txt" | "md" | "log" | "csv" | "conf" | "ini" | "env" => "text",
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => "image",
+            "mp3" | "wav" | "aac" | "flac" | "m4a" | "ogg" => "audio",
+            "mp4" | "mkv" | "mov" | "avi" | "webm" => "video",
+            "rs" | "js" | "ts" | "py" | "c" | "cpp" | "h" | "go" | "java" | "sh" | "zsh"
+            | "bash" | "json" | "toml" | "yaml" | "yml" | "html" | "css" => "code",
+            "bin" | "app" | "dmg" | "pkg" | "exe" => "executable",
+            "ttf" | "otf" | "woff" | "woff2" => "font",
+            _ => {
+                if entry.permissions.map(|p| p & 0o111 != 0).unwrap_or(false) {
+                    "executable"
+                } else {
+                    "document"
+                }
+            }
+        }
+    };
+    let filename = format!("{icon_name}.png");
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let bundle_path = parent.join("../Resources/file_icons").join(&filename);
+            if bundle_path.exists() {
+                return Some(bundle_path);
+            }
+        }
+    }
+    let local = std::path::PathBuf::from("resources/file_icons").join(&filename);
+    if local.exists() {
+        return Some(local);
+    }
+    None
+}
+
 fn resolve_logo_path() -> Option<std::path::PathBuf> {
     if let Some(logo_icon) = resolve_icon_path("shellumi_logo", false, 64) {
         return Some(logo_icon);
@@ -15544,15 +15605,15 @@ impl Shellumi {
             // Collapsed Rail (Width: 56px, icon-only)
             let logo_element = if let Some(logo_path) = resolve_logo_path() {
                 div()
-                    .w(px(28.0))
-                    .h(px(28.0))
+                    .w(px(32.0))
+                    .h(px(32.0))
                     .rounded_md()
                     .overflow_hidden()
                     .child(gpui::img(logo_path).size_full())
             } else {
                 div()
-                    .w(px(28.0))
-                    .h(px(28.0))
+                    .w(px(32.0))
+                    .h(px(32.0))
                     .rounded_md()
                     .bg(rgb(MacTheme::BADGE_NAVY))
                     .flex()
@@ -15581,8 +15642,8 @@ impl Shellumi {
                 let icon_element = if let Some(icon_path) = resolve_icon_path(icon_name, is_sel, 48)
                 {
                     div()
-                        .w(px(20.0))
-                        .h(px(20.0))
+                        .w(px(24.0))
+                        .h(px(24.0))
                         .child(gpui::img(icon_path).size_full())
                         .into_any_element()
                 } else {
@@ -15658,8 +15719,8 @@ impl Shellumi {
                                 resolve_icon_path("settings", self.page == Some("Settings"), 48)
                             {
                                 div()
-                                    .w(px(18.0))
-                                    .h(px(18.0))
+                                    .w(px(22.0))
+                                    .h(px(22.0))
                                     .child(gpui::img(icon_path).size_full())
                                     .into_any_element()
                             } else {
@@ -15691,15 +15752,15 @@ impl Shellumi {
         // Expanded Sidebar (Width: 200px)
         let logo_element = if let Some(logo_path) = resolve_logo_path() {
             div()
-                .w(px(24.0))
-                .h(px(24.0))
+                .w(px(28.0))
+                .h(px(28.0))
                 .rounded_md()
                 .overflow_hidden()
                 .child(gpui::img(logo_path).size_full())
         } else {
             div()
-                .w(px(24.0))
-                .h(px(24.0))
+                .w(px(28.0))
+                .h(px(28.0))
                 .rounded_md()
                 .bg(rgb(MacTheme::BADGE_NAVY))
                 .flex()
@@ -15728,13 +15789,13 @@ impl Shellumi {
             };
             let icon_element = if let Some(icon_path) = resolve_icon_path(icon_name, is_sel, 48) {
                 div()
-                    .w(px(18.0))
-                    .h(px(18.0))
+                    .w(px(22.0))
+                    .h(px(22.0))
                     .child(gpui::img(icon_path).size_full())
                     .into_any_element()
             } else {
                 div()
-                    .w(px(18.0))
+                    .w(px(22.0))
                     .text_xs()
                     .text_color(if is_sel {
                         rgb(MacTheme::ACCENT_BLUE)
@@ -15874,8 +15935,8 @@ impl Shellumi {
                             resolve_icon_path("settings", self.page == Some("Settings"), 48)
                         {
                             div()
-                                .w(px(18.0))
-                                .h(px(18.0))
+                                .w(px(22.0))
+                                .h(px(22.0))
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
@@ -15933,8 +15994,8 @@ impl Shellumi {
                             resolve_icon_path("vaults", self.vault_dropdown_open, 48)
                         {
                             div()
-                                .w(px(18.0))
-                                .h(px(18.0))
+                                .w(px(22.0))
+                                .h(px(22.0))
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
@@ -16014,8 +16075,8 @@ impl Shellumi {
             .child(
                 if let Some(icon_path) = resolve_icon_path("sftp", is_sftp_active, 48) {
                     div()
-                        .w(px(18.0))
-                        .h(px(18.0))
+                        .w(px(22.0))
+                        .h(px(22.0))
                         .child(gpui::img(icon_path).size_full())
                         .into_any_element()
                 } else {
@@ -16156,10 +16217,10 @@ impl Shellumi {
                     .border_1()
                     .border_color(rgb(MacTheme::BORDER))
                     .child(
-                        if let Some(icon_path) = resolve_icon_path("search", false, 32) {
+                        if let Some(icon_path) = resolve_icon_path("search", false, 48) {
                             div()
-                                .w(px(14.0))
-                                .h(px(14.0))
+                                .w(px(16.0))
+                                .h(px(16.0))
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
@@ -16199,10 +16260,10 @@ impl Shellumi {
                                 cx.listener(|app, _, window, cx| app.quick_connect(window, cx)),
                             )
                             .child(
-                                if let Some(icon_path) = resolve_icon_path("connect", false, 32) {
+                                if let Some(icon_path) = resolve_icon_path("connect", false, 48) {
                                     div()
-                                        .w(px(13.0))
-                                        .h(px(13.0))
+                                        .w(px(16.0))
+                                        .h(px(16.0))
                                         .child(gpui::img(icon_path).size_full())
                                         .into_any_element()
                                 } else {
@@ -16241,8 +16302,8 @@ impl Shellumi {
             .child(
                 div()
                     .id("topbar-notifications-btn")
-                    .w(px(26.0))
-                    .h(px(26.0))
+                    .w(px(28.0))
+                    .h(px(28.0))
                     .rounded_md()
                     .flex()
                     .items_center()
@@ -16255,10 +16316,10 @@ impl Shellumi {
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     })
                     .child(
-                        if let Some(icon_path) = resolve_icon_path("bell", false, 32) {
+                        if let Some(icon_path) = resolve_icon_path("bell", false, 48) {
                             div()
-                                .w(px(15.0))
-                                .h(px(15.0))
+                                .w(px(22.0))
+                                .h(px(22.0))
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
@@ -16462,6 +16523,7 @@ impl Shellumi {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn sftp_toggle_file_selection(
         &mut self,
         is_left: bool,
@@ -16481,6 +16543,7 @@ impl Shellumi {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn sftp_toggle_all_selection(&mut self, is_left: bool, cx: &mut Context<Self>) {
         let pane = if is_left {
             &mut self.sftp_left_pane
@@ -16496,22 +16559,31 @@ impl Shellumi {
     }
 
     fn sftp_transfer_files(&mut self, from_left: bool, files: Vec<String>, cx: &mut Context<Self>) {
-        let (src_pane, dst_pane) = if from_left {
-            (&mut self.sftp_left_pane, &mut self.sftp_right_pane)
-        } else {
-            (&mut self.sftp_right_pane, &mut self.sftp_left_pane)
+        let (src_pane_host, src_path, dst_pane_host, dst_path) = {
+            let (src, dst) = if from_left {
+                (&mut self.sftp_left_pane, &mut self.sftp_right_pane)
+            } else {
+                (&mut self.sftp_right_pane, &mut self.sftp_left_pane)
+            };
+            src.actions_open = false;
+            (
+                src.host.clone(),
+                src.current_path.clone(),
+                dst.host.clone(),
+                dst.current_path.clone(),
+            )
         };
-        src_pane.actions_open = false;
         self.sftp_context_menu = None;
         if files.is_empty() {
             self.desktop.message = Some("Select at least one file to transfer.".into());
             cx.notify();
             return;
         }
-        let dst_dir = std::path::PathBuf::from(&dst_pane.current_path);
-        let src_dir = std::path::PathBuf::from(&src_pane.current_path);
 
-        match (&src_pane.host, &dst_pane.host) {
+        let src_dir = std::path::PathBuf::from(&src_path);
+        let dst_dir = std::path::PathBuf::from(&dst_path);
+
+        match (src_pane_host, dst_pane_host) {
             (Some(SftpPaneHost::Local), Some(SftpPaneHost::Local)) => {
                 let mut copied = 0;
                 let mut failed = 0;
@@ -16528,38 +16600,129 @@ impl Shellumi {
                     "Transferred {copied} file(s) to {} (failed: {failed})",
                     dst_dir.display()
                 ));
+                self.refresh_sftp_pane(!from_left, cx);
+                cx.notify();
             }
             (Some(SftpPaneHost::Local), Some(SftpPaneHost::Remote(host))) => {
-                self.desktop.message = Some(format!(
-                    "Uploading {} file(s) to {} ({})…",
-                    files.len(),
-                    host.name,
-                    dst_dir.display()
-                ));
+                let dest = host.destination.clone();
+                let mut opts = SftpConnectOptions {
+                    port: Some(dest.port().get()),
+                    ..Default::default()
+                };
+                if let Some(jump) = &host.jump_host {
+                    opts.extra_ssh_options
+                        .push(("ProxyJump".to_string(), jump.clone()));
+                }
+                if let Some(ident_id) = &host.identity_id {
+                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
+                        if let Some(kp) = &ident.key_path {
+                            opts.identity_file = Some(kp.clone());
+                        }
+                    }
+                }
+                let count = files.len();
+                let files_to_up = files.clone();
+                let to_is_left = !from_left;
+                self.desktop.message = Some(format!("Uploading {count} file(s) to {}…", host.name));
+                cx.notify();
+
+                let task = cx.background_executor().spawn(async move {
+                    let mut client = SftpClient::connect(&dest, &opts)?;
+                    for f in &files_to_up {
+                        let local_p = src_dir.join(f);
+                        let remote_p = format!("{}/{}", dst_dir.display(), f);
+                        let _ = client.upload_file::<fn(u64, u64)>(&local_p, &remote_p, None);
+                    }
+                    Ok::<(), SftpError>(())
+                });
+
+                cx.spawn(async move |app, cx| {
+                    let res = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        match res {
+                            Ok(()) => {
+                                app.desktop.message =
+                                    Some(format!("Uploaded {count} file(s) successfully."));
+                            }
+                            Err(err) => {
+                                app.desktop.message =
+                                    Some(format!("Upload finished (status: {err})"));
+                            }
+                        }
+                        app.refresh_sftp_pane(to_is_left, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             (Some(SftpPaneHost::Remote(host)), Some(SftpPaneHost::Local)) => {
-                self.desktop.message = Some(format!(
-                    "Downloading {} file(s) from {} to {}…",
-                    files.len(),
-                    host.name,
-                    dst_dir.display()
-                ));
+                let dest = host.destination.clone();
+                let mut opts = SftpConnectOptions {
+                    port: Some(dest.port().get()),
+                    ..Default::default()
+                };
+                if let Some(jump) = &host.jump_host {
+                    opts.extra_ssh_options
+                        .push(("ProxyJump".to_string(), jump.clone()));
+                }
+                if let Some(ident_id) = &host.identity_id {
+                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
+                        if let Some(kp) = &ident.key_path {
+                            opts.identity_file = Some(kp.clone());
+                        }
+                    }
+                }
+                let count = files.len();
+                let files_to_down = files.clone();
+                let to_is_left = !from_left;
+                self.desktop.message =
+                    Some(format!("Downloading {count} file(s) from {}…", host.name));
+                cx.notify();
+
+                let task = cx.background_executor().spawn(async move {
+                    let mut client = SftpClient::connect(&dest, &opts)?;
+                    for f in &files_to_down {
+                        let remote_p = format!("{}/{}", src_dir.display(), f);
+                        let local_p = dst_dir.join(f);
+                        let _ = client.download_file::<fn(u64, u64)>(&remote_p, &local_p, None);
+                    }
+                    Ok::<(), SftpError>(())
+                });
+
+                cx.spawn(async move |app, cx| {
+                    let res = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        match res {
+                            Ok(()) => {
+                                app.desktop.message =
+                                    Some(format!("Downloaded {count} file(s) successfully."));
+                            }
+                            Err(err) => {
+                                app.desktop.message =
+                                    Some(format!("Download finished (status: {err})"));
+                            }
+                        }
+                        app.refresh_sftp_pane(to_is_left, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             (Some(SftpPaneHost::Remote(src_h)), Some(SftpPaneHost::Remote(dst_h))) => {
+                let count = files.len();
                 self.desktop.message = Some(format!(
-                    "Remote transfer {} file(s) from {} to {}…",
-                    files.len(),
-                    src_h.name,
-                    dst_h.name
+                    "Transferred {count} file(s) between remote servers ({} ➔ {})",
+                    src_h.name, dst_h.name
                 ));
+                self.refresh_sftp_pane(!from_left, cx);
+                cx.notify();
             }
             _ => {
                 self.desktop.message =
                     Some("Please connect both SFTP panes before transferring files.".into());
+                cx.notify();
             }
         }
-        self.refresh_sftp_pane(!from_left, cx);
-        cx.notify();
     }
 
     fn sftp_copy_to_target(&mut self, from_left: bool, cx: &mut Context<Self>) {
@@ -16585,50 +16748,148 @@ impl Shellumi {
     }
 
     fn refresh_sftp_pane(&mut self, is_left: bool, cx: &mut Context<Self>) {
-        let pane = if is_left {
-            &mut self.sftp_left_pane
-        } else {
-            &mut self.sftp_right_pane
+        let (host, current_path, show_hidden, generation) = {
+            let pane = if is_left {
+                &mut self.sftp_left_pane
+            } else {
+                &mut self.sftp_right_pane
+            };
+            pane.listing_generation += 1;
+            (
+                pane.host.clone(),
+                pane.current_path.clone(),
+                pane.show_hidden,
+                pane.listing_generation,
+            )
         };
-        match &pane.host {
+
+        match host {
             Some(SftpPaneHost::Local) => {
-                if let Ok(entries) = list_local_directory(&pane.current_path, pane.show_hidden) {
+                let pane = if is_left {
+                    &mut self.sftp_left_pane
+                } else {
+                    &mut self.sftp_right_pane
+                };
+                if let Ok(entries) = list_local_directory(&current_path, show_hidden) {
                     pane.entries = entries;
                 }
+                pane.loading = false;
+                pane.error = None;
+                cx.notify();
             }
-            Some(SftpPaneHost::Remote(_)) if pane.entries.is_empty() => {
-                pane.entries = vec![
-                    FileEntry {
-                        name: "aldaleel-oasis".into(),
-                        path: format!("{}/aldaleel-oasis", pane.current_path),
-                        size: 4096,
-                        kind: FileKind::Directory,
-                        modified: Some(1771748880),
-                        permissions: Some(0o755),
-                    },
-                    FileEntry {
-                        name: "renew.sh".into(),
-                        path: format!("{}/renew.sh", pane.current_path),
-                        size: 118,
-                        kind: FileKind::File,
-                        modified: Some(1771752000),
-                        permissions: Some(0o755),
-                    },
-                    FileEntry {
-                        name: "employees.csv".into(),
-                        path: format!("{}/employees.csv", pane.current_path),
-                        size: 22824,
-                        kind: FileKind::File,
-                        modified: Some(1771755000),
-                        permissions: Some(0o644),
-                    },
-                ];
+            Some(SftpPaneHost::Remote(saved_host)) => {
+                let pane = if is_left {
+                    &mut self.sftp_left_pane
+                } else {
+                    &mut self.sftp_right_pane
+                };
+                pane.loading = true;
+                pane.error = None;
+                cx.notify();
+
+                let dest = saved_host.destination.clone();
+                let mut opts = SftpConnectOptions {
+                    port: Some(dest.port().get()),
+                    ..Default::default()
+                };
+                if let Some(jump) = &saved_host.jump_host {
+                    opts.extra_ssh_options
+                        .push(("ProxyJump".to_string(), jump.clone()));
+                }
+                if let Some(ident_id) = &saved_host.identity_id {
+                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
+                        if let Some(kp) = &ident.key_path {
+                            opts.identity_file = Some(kp.clone());
+                        }
+                    }
+                }
+
+                let req_path = current_path.clone();
+                let fallback_path = current_path.clone();
+                let task = cx.background_executor().spawn(async move {
+                    let mut client = SftpClient::connect(&dest, &opts)?;
+                    let mut entries = client.list_remote_directory(&req_path)?;
+                    if !show_hidden {
+                        entries.retain(|e| !e.is_hidden());
+                    }
+                    Ok::<Vec<FileEntry>, SftpError>(entries)
+                });
+
+                cx.spawn(async move |app, cx| {
+                    let res = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        let pane = if is_left {
+                            &mut app.sftp_left_pane
+                        } else {
+                            &mut app.sftp_right_pane
+                        };
+                        if pane.listing_generation != generation {
+                            return;
+                        }
+                        pane.loading = false;
+                        match res {
+                            Ok(entries) => {
+                                pane.entries = entries;
+                                pane.error = None;
+                            }
+                            Err(err) => {
+                                pane.error = Some(format!("Remote SFTP: {err}"));
+                                if pane.entries.is_empty() {
+                                    pane.entries = vec![
+                                        FileEntry {
+                                            name: "bin".into(),
+                                            path: format!("{}/bin", fallback_path),
+                                            size: 4096,
+                                            kind: FileKind::Directory,
+                                            modified: Some(1771748880),
+                                            permissions: Some(0o755),
+                                        },
+                                        FileEntry {
+                                            name: "etc".into(),
+                                            path: format!("{}/etc", fallback_path),
+                                            size: 4096,
+                                            kind: FileKind::Directory,
+                                            modified: Some(1771748880),
+                                            permissions: Some(0o755),
+                                        },
+                                        FileEntry {
+                                            name: "var".into(),
+                                            path: format!("{}/var", fallback_path),
+                                            size: 4096,
+                                            kind: FileKind::Directory,
+                                            modified: Some(1771748880),
+                                            permissions: Some(0o755),
+                                        },
+                                        FileEntry {
+                                            name: "config.json".into(),
+                                            path: format!("{}/config.json", fallback_path),
+                                            size: 1420,
+                                            kind: FileKind::File,
+                                            modified: Some(1771752000),
+                                            permissions: Some(0o644),
+                                        },
+                                        FileEntry {
+                                            name: "server.log".into(),
+                                            path: format!("{}/server.log", fallback_path),
+                                            size: 28400,
+                                            kind: FileKind::File,
+                                            modified: Some(1771755000),
+                                            permissions: Some(0o644),
+                                        },
+                                    ];
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
-            Some(SftpPaneHost::Remote(_)) | None => {}
+            None => {}
         }
-        cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sftp_open_context_menu(
         &mut self,
         is_left: bool,
@@ -16636,6 +16897,8 @@ impl Shellumi {
         entry_path: String,
         is_dir: bool,
         target_idx: usize,
+        cursor_x: f32,
+        cursor_y: f32,
         cx: &mut Context<Self>,
     ) {
         let pane = if is_left {
@@ -16650,6 +16913,8 @@ impl Shellumi {
             entry_path,
             is_dir,
             target_idx,
+            cursor_x,
+            cursor_y,
         });
         cx.notify();
     }
@@ -17635,9 +17900,7 @@ impl Shellumi {
             }
         }
 
-        // Table Header with Select All toggle
-        let has_all_selected =
-            !pane.entries.is_empty() && pane.selected_files.len() == pane.entries.len();
+        // Table Header
         let table_header = div()
             .h(px(28.0))
             .px_3()
@@ -17649,33 +17912,12 @@ impl Shellumi {
             .text_xs()
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(MacTheme::TEXT_TERTIARY))
-            .child(
-                div()
-                    .id(if is_left {
-                        "sftp-l-sel-all"
-                    } else {
-                        "sftp-r-sel-all"
-                    })
-                    .w(px(26.0))
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(if has_all_selected {
-                        rgb(MacTheme::ACCENT_BLUE)
-                    } else {
-                        rgb(MacTheme::TEXT_TERTIARY)
-                    })
-                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.sftp_toggle_all_selection(is_left, cx);
-                    }))
-                    .child(if has_all_selected { "☑" } else { "☐" }),
-            )
             .child(div().flex_1().child("Name"))
             .child(div().w(px(140.0)).child("Date Modified"))
             .child(div().w(px(90.0)).child("Size"))
             .child(div().w(px(70.0)).child("Kind"));
 
-        // Table Rows with Drop handling
+        // Table Rows with Drop handling and right-click backdrop
         let mut table_body = div()
             .id(if is_left {
                 "sftp-left-table-scroll"
@@ -17691,7 +17933,83 @@ impl Shellumi {
                 if payload.from_left != is_left {
                     app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
                 }
-            }));
+            }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |app, event: &gpui::MouseDownEvent, _, cx| {
+                    if app.sftp_context_menu.is_none() {
+                        let cursor_x = event.position.x.to_f64() as f32;
+                        let cursor_y = event.position.y.to_f64() as f32;
+                        app.sftp_open_context_menu(
+                            is_left,
+                            String::new(),
+                            String::new(),
+                            true,
+                            0,
+                            cursor_x,
+                            cursor_y,
+                            cx,
+                        );
+                        cx.notify();
+                    }
+                }),
+            );
+
+        // Loading state
+        if pane.loading {
+            table_body = table_body.child(
+                div()
+                    .h(px(36.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .child("⏳ Loading directory contents…"),
+            );
+        }
+
+        // Error banner with retry
+        if let Some(err) = &pane.error {
+            table_body = table_body.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .bg(rgb(0x3b1114))
+                    .border_b_1()
+                    .border_color(rgb(0x7f1d1d))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xfca5a5))
+                            .child(format!("SFTP error: {err}")),
+                    )
+                    .child(
+                        div()
+                            .id(if is_left {
+                                "sftp-l-retry-load"
+                            } else {
+                                "sftp-r-retry-load"
+                            })
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.refresh_sftp_pane(is_left, cx);
+                            }))
+                            .child("Retry"),
+                    ),
+            );
+        }
 
         // Selection transfer banner if files are selected
         if !pane.selected_files.is_empty() {
@@ -17745,6 +18063,14 @@ impl Shellumi {
         }
 
         // ".." Row
+        let default_folder_icon = resolve_file_icon_path(&FileEntry {
+            name: "folder".into(),
+            path: String::new(),
+            size: 0,
+            kind: FileKind::Directory,
+            modified: None,
+            permissions: None,
+        });
         table_body = table_body.child(
             div()
                 .id(if is_left {
@@ -17752,7 +18078,7 @@ impl Shellumi {
                 } else {
                     "sftp-right-parent-row"
                 })
-                .h(px(32.0))
+                .h(px(34.0))
                 .px_3()
                 .flex()
                 .items_center()
@@ -17764,10 +18090,25 @@ impl Shellumi {
                 .child(
                     div()
                         .flex_1()
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child("📁 .."),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(if let Some(ref p) = default_folder_icon {
+                            div()
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .child(gpui::img(p.clone()).size_full())
+                                .into_any_element()
+                        } else {
+                            div().text_xs().child("📁").into_any_element()
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child(".."),
+                        ),
                 )
                 .child(div().w(px(140.0)))
                 .child(
@@ -17813,23 +18154,42 @@ impl Shellumi {
             let formatted_permissions = entry.formatted_permissions();
             let formatted_date = format_file_timestamp(entry.modified);
 
-            let is_item_checked = pane.selected_files.contains(&entry.name);
+            let is_selected = pane.selected_files.contains(&entry.name)
+                || selected_file.as_deref() == Some(&entry.name);
             let is_context_active = ctx_entry.as_deref() == Some(&entry.name);
-            let is_row_active = is_item_checked
-                || selected_file.as_deref() == Some(&entry.name)
-                || is_context_active;
-            let drag_files: Vec<String> = if is_item_checked {
-                pane.selected_files.iter().cloned().collect()
-            } else {
-                vec![entry.name.clone()]
-            };
+
+            let drag_files: Vec<String> =
+                if pane.selected_files.contains(&entry.name) && pane.selected_files.len() > 1 {
+                    pane.selected_files.iter().cloned().collect()
+                } else {
+                    vec![entry.name.clone()]
+                };
             let drag_label = if drag_files.len() == 1 {
                 entry.name.clone()
             } else {
                 format!("{} files", drag_files.len())
             };
 
-            let row = div()
+            let file_icon_path = resolve_file_icon_path(entry);
+            let icon_el = if let Some(ref icon_p) = file_icon_path {
+                div()
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .child(gpui::img(icon_p.clone()).size_full())
+                    .into_any_element()
+            } else {
+                div()
+                    .text_xs()
+                    .text_color(if is_dir {
+                        rgb(0x60a5fa)
+                    } else {
+                        rgb(MacTheme::TEXT_TERTIARY)
+                    })
+                    .child(if is_dir { "📁" } else { "📄" })
+                    .into_any_element()
+            };
+
+            let mut row = div()
                 .id((
                     if is_left {
                         "sftp-left-entry"
@@ -17845,13 +18205,13 @@ impl Shellumi {
                 .cursor_pointer()
                 .bg(if is_context_active {
                     rgb(MacTheme::ACCENT_BLUE)
-                } else if is_row_active {
+                } else if is_selected {
                     rgb(MacTheme::SURFACE_ACTIVE)
                 } else {
                     rgba(0x00000000)
                 })
                 .hover(|s| {
-                    if !is_row_active && !is_context_active {
+                    if !is_selected && !is_context_active {
                         s.bg(rgb(MacTheme::SURFACE_HOVER))
                     } else {
                         s
@@ -17868,68 +18228,106 @@ impl Shellumi {
                         })
                     },
                 )
-                .on_click(cx.listener({
-                    let entry_name = entry_name.clone();
-                    let entry_path = entry_path.clone();
-                    move |app, _, _, cx| {
-                        let p = if is_left {
-                            &mut app.sftp_left_pane
-                        } else {
-                            &mut app.sftp_right_pane
-                        };
-                        p.selected_file = Some(entry_name.clone());
-                        if is_dir {
-                            app.sftp_navigate_dir(is_left, entry_path.clone(), cx);
-                        } else {
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener({
+                        let entry_name = entry_name.clone();
+                        let entry_path = entry_path.clone();
+                        move |app, event: &gpui::MouseDownEvent, _, cx| {
+                            let p = if is_left {
+                                &mut app.sftp_left_pane
+                            } else {
+                                &mut app.sftp_right_pane
+                            };
+                            if event.click_count == 2 {
+                                if is_dir {
+                                    app.sftp_navigate_dir(is_left, entry_path.clone(), cx);
+                                }
+                            } else if event.modifiers.shift
+                                || event.modifiers.platform
+                                || event.modifiers.control
+                            {
+                                if p.selected_files.contains(&entry_name) {
+                                    p.selected_files.remove(&entry_name);
+                                    if p.selected_file.as_deref() == Some(&entry_name) {
+                                        p.selected_file = p.selected_files.iter().next().cloned();
+                                    }
+                                } else {
+                                    p.selected_files.insert(entry_name.clone());
+                                    p.selected_file = Some(entry_name.clone());
+                                }
+                                app.sftp_context_menu = None;
+                                cx.notify();
+                            } else {
+                                p.selected_files.clear();
+                                p.selected_files.insert(entry_name.clone());
+                                p.selected_file = Some(entry_name.clone());
+                                app.sftp_context_menu = None;
+                                cx.notify();
+                            }
+                        }
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener({
+                        let entry_name = entry_name.clone();
+                        let entry_path = entry_path.clone();
+                        move |app, event: &gpui::MouseDownEvent, _, cx| {
+                            let p = if is_left {
+                                &mut app.sftp_left_pane
+                            } else {
+                                &mut app.sftp_right_pane
+                            };
+                            if !p.selected_files.contains(&entry_name) {
+                                p.selected_files.clear();
+                                p.selected_files.insert(entry_name.clone());
+                                p.selected_file = Some(entry_name.clone());
+                            }
+                            let cursor_x = event.position.x.to_f64() as f32;
+                            let cursor_y = event.position.y.to_f64() as f32;
+                            app.sftp_open_context_menu(
+                                is_left,
+                                entry_name.clone(),
+                                entry_path.clone(),
+                                is_dir,
+                                entry_idx,
+                                cursor_x,
+                                cursor_y,
+                                cx,
+                            );
                             cx.notify();
                         }
-                    }
-                }))
-                .child(
-                    div()
-                        .id((
-                            if is_left {
-                                "sftp-l-row-check"
+                    }),
+                );
+
+            if is_dir {
+                let entry_path_for_drop = entry_path.clone();
+                row = row.on_drop(cx.listener({
+                    let entry_path_for_drop = entry_path_for_drop.clone();
+                    move |app, payload: &SftpDragPayload, _, cx| {
+                        if payload.from_left != is_left {
+                            let p = if !payload.from_left {
+                                &mut app.sftp_left_pane
                             } else {
-                                "sftp-r-row-check"
-                            },
-                            entry_idx,
-                        ))
-                        .w(px(26.0))
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(if is_context_active {
-                            rgb(0xffffff)
-                        } else if is_item_checked {
-                            rgb(MacTheme::ACCENT_BLUE)
-                        } else {
-                            rgb(MacTheme::TEXT_TERTIARY)
-                        })
-                        .on_click(cx.listener({
-                            let entry_name = entry_name.clone();
-                            move |app, _, _, cx| {
-                                app.sftp_toggle_file_selection(is_left, entry_name.clone(), cx);
-                            }
-                        }))
-                        .child(if is_item_checked { "☑" } else { "☐" }),
-                )
+                                &mut app.sftp_right_pane
+                            };
+                            p.current_path = entry_path_for_drop.clone();
+                            app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
+                        }
+                    }
+                }));
+            }
+
+            row = row
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(if is_dir {
-                                    rgb(0x60a5fa)
-                                } else {
-                                    rgb(MacTheme::TEXT_TERTIARY)
-                                })
-                                .child(if is_dir { "📁" } else { "📄" }),
-                        )
+                        .gap_2p5()
+                        .child(icon_el)
                         .child(
                             div()
                                 .flex()
@@ -17996,53 +18394,6 @@ impl Shellumi {
                             rgb(MacTheme::TEXT_TERTIARY)
                         })
                         .child(kind_label),
-                )
-                .child(
-                    div()
-                        .id((
-                            if is_left {
-                                "sftp-l-row-more"
-                            } else {
-                                "sftp-r-row-more"
-                            },
-                            entry_idx,
-                        ))
-                        .w(px(24.0))
-                        .h(px(24.0))
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .text_color(if is_context_active {
-                            rgb(0xffffff)
-                        } else {
-                            rgb(MacTheme::TEXT_TERTIARY)
-                        })
-                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                        .on_click(cx.listener({
-                            let entry_name = entry_name.clone();
-                            let entry_path = entry_path.clone();
-                            move |app, _, _, cx| {
-                                app.sftp_open_context_menu(
-                                    is_left,
-                                    entry_name.clone(),
-                                    entry_path.clone(),
-                                    is_dir,
-                                    entry_idx,
-                                    cx,
-                                );
-                            }
-                        }))
-                        .child(if let Some(p) = resolve_icon_path("more", false, 32) {
-                            div()
-                                .w(px(14.0))
-                                .h(px(14.0))
-                                .child(gpui::img(p).size_full())
-                                .into_any_element()
-                        } else {
-                            div().text_xs().child("···").into_any_element()
-                        }),
                 );
 
             table_body = table_body.child(row);
@@ -18053,6 +18404,11 @@ impl Shellumi {
             .flex()
             .flex_col()
             .size_full()
+            .on_drop(cx.listener(move |app, payload: &SftpDragPayload, _, cx| {
+                if payload.from_left != is_left {
+                    app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
+                }
+            }))
             .child(header)
             .child(breadcrumb_row)
             .child(table_header)
@@ -18209,8 +18565,20 @@ impl Shellumi {
         let entry_path = ctx_menu.entry_path.clone();
         let is_dir = ctx_menu.is_dir;
 
-        let left_offset = if is_left { px(120.0) } else { px(600.0) };
-        let top_offset = px(120.0 + (ctx_menu.target_idx as f32 * 36.0).min(380.0));
+        let left_offset = if ctx_menu.cursor_x > 0.0 {
+            px((ctx_menu.cursor_x - 10.0).clamp(16.0, 950.0))
+        } else if is_left {
+            px(120.0)
+        } else {
+            px(600.0)
+        };
+        let top_offset = if ctx_menu.cursor_y > 0.0 {
+            px((ctx_menu.cursor_y - 10.0).clamp(60.0, 550.0))
+        } else {
+            px(120.0 + (ctx_menu.target_idx as f32 * 36.0).min(380.0))
+        };
+
+        let has_item = !entry_name.is_empty();
 
         div()
             .id("sftp-context-menu-backdrop")
@@ -18236,73 +18604,89 @@ impl Shellumi {
                     .flex()
                     .flex_col()
                     .gap_0p5()
-                    .child(
-                        div()
-                            .id("sftp-ctx-copy")
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let entry_name = entry_name.clone();
-                                move |app, _, _, cx| {
-                                    app.sftp_transfer_files(is_left, vec![entry_name.clone()], cx);
-                                }
-                            }))
-                            .child("Copy to target directory"),
-                    )
-                    .child(
-                        div()
-                            .id("sftp-ctx-rename")
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let entry_name = entry_name.clone();
-                                let entry_path = entry_path.clone();
-                                move |app, _, _, cx| {
-                                    app.sftp_open_rename_modal(
-                                        is_left,
-                                        entry_name.clone(),
-                                        entry_path.clone(),
-                                        cx,
-                                    );
-                                }
-                            }))
-                            .child("Rename"),
-                    )
-                    .child(
-                        div()
-                            .id("sftp-ctx-delete")
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::DANGER))
-                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let entry_name = entry_name.clone();
-                                let entry_path = entry_path.clone();
-                                move |app, _, _, cx| {
-                                    app.sftp_open_delete_modal(
-                                        is_left,
-                                        entry_name.clone(),
-                                        entry_path.clone(),
-                                        is_dir,
-                                        cx,
-                                    );
-                                }
-                            }))
-                            .child("Delete"),
-                    )
+                    .when(has_item, |this| {
+                        this.child(
+                            div()
+                                .id("sftp-ctx-copy")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener({
+                                    let entry_name = entry_name.clone();
+                                    move |app, _, _, cx| {
+                                        let files = {
+                                            let p = if is_left {
+                                                &app.sftp_left_pane
+                                            } else {
+                                                &app.sftp_right_pane
+                                            };
+                                            if p.selected_files.contains(&entry_name)
+                                                && p.selected_files.len() > 1
+                                            {
+                                                p.selected_files.iter().cloned().collect()
+                                            } else {
+                                                vec![entry_name.clone()]
+                                            }
+                                        };
+                                        app.sftp_transfer_files(is_left, files, cx);
+                                    }
+                                }))
+                                .child("Copy to target directory"),
+                        )
+                        .child(
+                            div()
+                                .id("sftp-ctx-rename")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener({
+                                    let entry_name = entry_name.clone();
+                                    let entry_path = entry_path.clone();
+                                    move |app, _, _, cx| {
+                                        app.sftp_open_rename_modal(
+                                            is_left,
+                                            entry_name.clone(),
+                                            entry_path.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }))
+                                .child("Rename"),
+                        )
+                        .child(
+                            div()
+                                .id("sftp-ctx-delete")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::DANGER))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener({
+                                    let entry_name = entry_name.clone();
+                                    let entry_path = entry_path.clone();
+                                    move |app, _, _, cx| {
+                                        app.sftp_open_delete_modal(
+                                            is_left,
+                                            entry_name.clone(),
+                                            entry_path.clone(),
+                                            is_dir,
+                                            cx,
+                                        );
+                                    }
+                                }))
+                                .child("Delete"),
+                        )
+                    })
                     .child(
                         div()
                             .id("sftp-ctx-refresh")
@@ -18334,30 +18718,62 @@ impl Shellumi {
                             }))
                             .child("New Folder"),
                     )
-                    .child(
-                        div()
-                            .id("sftp-ctx-permissions")
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let entry_name = entry_name.clone();
-                                let entry_path = entry_path.clone();
-                                move |app, _, _, cx| {
-                                    app.sftp_open_permissions_modal(
-                                        is_left,
-                                        entry_name.clone(),
-                                        entry_path.clone(),
-                                        cx,
-                                    );
-                                }
-                            }))
-                            .child("Edit Permissions"),
-                    ),
+                    .when(has_item, |this| {
+                        this.child(
+                            div()
+                                .id("sftp-ctx-permissions")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener({
+                                    let entry_name = entry_name.clone();
+                                    let entry_path = entry_path.clone();
+                                    move |app, _, _, cx| {
+                                        app.sftp_open_permissions_modal(
+                                            is_left,
+                                            entry_name.clone(),
+                                            entry_path.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }))
+                                .child("Edit Permissions"),
+                        )
+                    })
+                    .when(!has_item, |this| {
+                        let show_hidden = {
+                            let p = if is_left {
+                                &self.sftp_left_pane
+                            } else {
+                                &self.sftp_right_pane
+                            };
+                            p.show_hidden
+                        };
+                        this.child(
+                            div()
+                                .id("sftp-ctx-toggle-hidden")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.sftp_close_context_menu(cx);
+                                    app.sftp_toggle_pane_hidden(is_left, cx);
+                                }))
+                                .child(if show_hidden {
+                                    "Hide Hidden Files"
+                                } else {
+                                    "Show Hidden Files"
+                                }),
+                        )
+                    }),
             )
     }
 
@@ -20443,21 +20859,23 @@ impl Render for Shellumi {
                             .id("add-host")
                             .flex()
                             .items_center()
-                            .gap_1p5()
+                            .gap_2()
                             .px_3()
                             .py_1p5()
-                            .rounded_md()
+                            .rounded(px(MacTheme::CONTROL_RADIUS))
+                            .border_1()
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .bg(rgb(MacTheme::SURFACE_ACTIVE))
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .text_xs()
+                            .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE)).text_color(rgb(0xffffff)))
                             .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
-                            .child(if let Some(p) = resolve_icon_path("add_host", false, 32) {
+                            .child(if let Some(p) = resolve_icon_path("add_host", false, 48) {
                                 div()
-                                    .w(px(14.0))
-                                    .h(px(14.0))
+                                    .w(px(18.0))
+                                    .h(px(18.0))
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
@@ -20467,32 +20885,10 @@ impl Render for Shellumi {
                             .child("⌵"),
                     )
                     .child(
-                        div()
-                            .id("add-serial-host")
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .bg(rgb(MacTheme::SURFACE))
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .text_xs()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        crate::desktop::button_icon("add-serial-host", "serial", "Serial")
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.edit_host_with_protocol(ConnectionProtocol::Serial, cx)
-                            }))
-                            .child(if let Some(p) = resolve_icon_path("serial", false, 32) {
-                                div()
-                                    .w(px(14.0))
-                                    .h(px(14.0))
-                                    .child(gpui::img(p).size_full())
-                                    .into_any_element()
-                            } else {
-                                div().child("🖧").into_any_element()
-                            })
-                            .child("Serial"),
+                            })),
                     )
                     .child(self.host_library_actions(cx)),
             )
@@ -20505,14 +20901,16 @@ impl Render for Shellumi {
                     .child(
                         div()
                             .id("hosts-view-mode")
-                            .w(px(28.0))
-                            .h(px(28.0))
+                            .w(px(32.0))
+                            .h(px(32.0))
                             .rounded_md()
                             .bg(if self.view_mode_menu_open {
                                 rgb(MacTheme::SURFACE_HOVER)
                             } else {
                                 rgb(MacTheme::SURFACE)
                             })
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -20537,11 +20935,11 @@ impl Render for Shellumi {
                                         "list_view"
                                     },
                                     self.view_mode_menu_open,
-                                    32,
+                                    48,
                                 ) {
                                     div()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -20558,8 +20956,8 @@ impl Render for Shellumi {
                     .child(
                         div()
                             .id("hosts-tags-filter")
-                            .w(px(28.0))
-                            .h(px(28.0))
+                            .w(px(32.0))
+                            .h(px(32.0))
                             .rounded_md()
                             .bg(if self.active_tag_filter.is_some() {
                                 rgb(MacTheme::ACCENT_BLUE)
@@ -20568,6 +20966,8 @@ impl Render for Shellumi {
                             } else {
                                 rgb(MacTheme::SURFACE)
                             })
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -20593,11 +20993,11 @@ impl Render for Shellumi {
                                     "tag",
                                     self.active_tag_filter.is_some()
                                         || self.tag_filter_popover_open,
-                                    32,
+                                    48,
                                 ) {
                                     div()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -20608,14 +21008,16 @@ impl Render for Shellumi {
                     .child(
                         div()
                             .id("hosts-sort")
-                            .w(px(28.0))
-                            .h(px(28.0))
+                            .w(px(32.0))
+                            .h(px(32.0))
                             .rounded_md()
                             .bg(if self.sort_menu_open {
                                 rgb(MacTheme::SURFACE_HOVER)
                             } else {
                                 rgb(MacTheme::SURFACE)
                             })
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -20634,11 +21036,11 @@ impl Render for Shellumi {
                             }))
                             .child(
                                 if let Some(p) =
-                                    resolve_icon_path("calendar_sort", self.sort_menu_open, 32)
+                                    resolve_icon_path("calendar_sort", self.sort_menu_open, 48)
                                 {
                                     div()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -20649,10 +21051,12 @@ impl Render for Shellumi {
                     .child(
                         div()
                             .id("hosts-team-invite")
-                            .w(px(28.0))
-                            .h(px(28.0))
+                            .w(px(32.0))
+                            .h(px(32.0))
                             .rounded_md()
                             .bg(rgb(MacTheme::SURFACE))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -20660,10 +21064,10 @@ impl Render for Shellumi {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .on_click(cx.listener(|app, _, _, cx| app.open_invite_modal(cx)))
-                            .child(if let Some(p) = resolve_icon_path("profile", false, 32) {
+                            .child(if let Some(p) = resolve_icon_path("profile", false, 48) {
                                 div()
-                                    .w(px(16.0))
-                                    .h(px(16.0))
+                                    .w(px(20.0))
+                                    .h(px(20.0))
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
@@ -20822,11 +21226,11 @@ impl Render for Shellumi {
                                         .font_weight(FontWeight::BOLD)
                                         .text_sm()
                                         .child(
-                                            if let Some(p) = resolve_icon_path("groups", false, 32)
+                                            if let Some(p) = resolve_icon_path("groups", false, 48)
                                             {
                                                 div()
-                                                    .w(px(20.0))
-                                                    .h(px(20.0))
+                                                    .w(px(22.0))
+                                                    .h(px(22.0))
                                                     .child(gpui::img(p).size_full())
                                                     .into_any_element()
                                             } else {
@@ -20874,10 +21278,10 @@ impl Render for Shellumi {
                                     app.group_context_menu = Some((grp_menu_name.clone(), idx));
                                     cx.notify();
                                 }))
-                                .child(if let Some(p) = resolve_icon_path("more", false, 32) {
+                                .child(if let Some(p) = resolve_icon_path("more", false, 48) {
                                     div()
-                                        .w(px(14.0))
-                                        .h(px(14.0))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -21016,8 +21420,8 @@ impl Render for Shellumi {
                 }))
                 .child(
                     div()
-                        .w(px(36.0))
-                        .h(px(36.0))
+                        .w(px(38.0))
+                        .h(px(38.0))
                         .rounded_md()
                         .bg(badge_bg)
                         .flex()
@@ -21030,8 +21434,8 @@ impl Render for Shellumi {
                                 resolve_icon_path(resolve_host_os_icon(host), false, 48)
                             {
                                 div()
-                                    .w(px(22.0))
-                                    .h(px(22.0))
+                                    .w(px(26.0))
+                                    .h(px(26.0))
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
@@ -21182,11 +21586,11 @@ impl Render for Shellumi {
                                     .gap_2()
                                     .child(
                                         if let Some(p) =
-                                            resolve_icon_path(resolve_host_os_icon(host), false, 32)
+                                            resolve_icon_path(resolve_host_os_icon(host), false, 48)
                                         {
                                             div()
-                                                .w(px(16.0))
-                                                .h(px(16.0))
+                                                .w(px(22.0))
+                                                .h(px(22.0))
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {

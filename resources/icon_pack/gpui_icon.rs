@@ -13,6 +13,10 @@ pub const ICON_NAMES: &[&str] = &[
     "group_settings", "import", "export", "tag", "calendar_sort",
 
     "certificate", "private_key", "public_key", "identity_card", "os_arch", "os_ubuntu", "os_macos", "os_freebsd", "os_netbsd", "os_openbsd", "os_linux", "os_windows", "server", "fido2", "fingerprint", "log", "bell",
+    "invite_member",
+    "infrastructure",
+    "diagnostics",
+    "mobile",
 ];
 
 /// `root` is the unpacked icon-pack folder (which contains `icons/`).

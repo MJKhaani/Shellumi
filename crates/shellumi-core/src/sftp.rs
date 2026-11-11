@@ -2358,6 +2358,26 @@ impl SftpClient {
             other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
         }
     }
+
+    /// Update permissions (chmod) for a remote path.
+    pub fn set_permissions(&mut self, path: &str, mode: u32) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::SetStat {
+            id: req_id,
+            path: path.to_string(),
+            attrs: FileAttributes::new().with_permissions(mode),
+        })?;
+
+        match self.read_packet()? {
+            SftpPacket::Status {
+                id: response,
+                code: StatusCode::Ok,
+                ..
+            } if response == req_id => Ok(()),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
 }
 
 impl Drop for SftpClient {

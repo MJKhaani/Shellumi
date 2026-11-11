@@ -49,3 +49,7 @@ index,row,column,name,label,regular_256,hover_256
 48,10,3,fingerprint,Fingerprint,icons/256/regular/fingerprint.png,icons/256/hover/fingerprint.png
 49,10,4,log,Log,icons/256/regular/log.png,icons/256/hover/log.png
 50,10,5,bell,Bell,icons/256/regular/bell.png,icons/256/hover/bell.png
+51,11,1,invite_member,Invite Member,icons/256/regular/invite_member.png,icons/256/hover/invite_member.png
+52,11,2,infrastructure,Infrastructure,icons/256/regular/infrastructure.png,icons/256/hover/infrastructure.png
+53,11,3,diagnostics,Diagnostics,icons/256/regular/diagnostics.png,icons/256/hover/diagnostics.png
+54,11,4,mobile,Mobile,icons/256/regular/mobile.png,icons/256/hover/mobile.png

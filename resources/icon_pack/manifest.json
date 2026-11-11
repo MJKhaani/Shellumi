@@ -463,12 +463,51 @@
       "label": "Bell",
       "regular_256": "icons/256/regular/bell.png",
       "hover_256": "icons/256/hover/bell.png"
+    },
+    {
+      "index": 51,
+      "row": 11,
+      "column": 1,
+      "name": "invite_member",
+      "label": "Invite Member",
+      "regular_256": "icons/256/regular/invite_member.png",
+      "hover_256": "icons/256/hover/invite_member.png"
+    },
+    {
+      "index": 52,
+      "row": 11,
+      "column": 2,
+      "name": "infrastructure",
+      "label": "Infrastructure",
+      "regular_256": "icons/256/regular/infrastructure.png",
+      "hover_256": "icons/256/hover/infrastructure.png"
+    },
+    {
+      "index": 53,
+      "row": 11,
+      "column": 3,
+      "name": "diagnostics",
+      "label": "Diagnostics",
+      "regular_256": "icons/256/regular/diagnostics.png",
+      "hover_256": "icons/256/hover/diagnostics.png"
+    },
+    {
+      "index": 54,
+      "row": 11,
+      "column": 4,
+      "name": "mobile",
+      "label": "Mobile",
+      "regular_256": "icons/256/regular/mobile.png",
+      "hover_256": "icons/256/hover/mobile.png"
     }
   ],
-  "icon_count": 50,
+  "icon_count": 54,
   "state_definitions": {
     "regular": "Borderless standalone metallic-blue/silver artwork on transparent background (no dark rounded-square tile).",
     "hover": "Metallic-blue/silver icon on a bordered dark rounded-square macOS tile."
   },
-  "exported_png_count": 330
+  "exported_png_count": 330,
+  "design_reference": "icon_pack v5",
+  "regular_definition": "standalone glyph, no border/tile",
+  "hover_definition": "dark rounded square tile/border"
 }

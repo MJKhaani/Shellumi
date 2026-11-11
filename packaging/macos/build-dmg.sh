@@ -36,6 +36,10 @@ if [ -d "resources/icon_pack/icons" ]; then
     mkdir -p "${APP_BUNDLE}/Contents/Resources/icon_pack"
     cp -r resources/icon_pack/icons "${APP_BUNDLE}/Contents/Resources/icon_pack/"
 fi
+if [ -d "resources/file_icons" ]; then
+    mkdir -p "${APP_BUNDLE}/Contents/Resources/file_icons"
+    cp -r resources/file_icons/* "${APP_BUNDLE}/Contents/Resources/file_icons/"
+fi
 
 echo "==> Application bundle created at ${APP_BUNDLE}"
 
