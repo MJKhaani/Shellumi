@@ -1712,6 +1712,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("invite-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -1881,6 +1882,7 @@ impl Shellumi {
 
         let overlay = div()
             .id("identity-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -3337,6 +3339,10 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape" && self.dismiss_top_dialog(cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.command_palette.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => {
@@ -3604,30 +3610,6 @@ impl Shellumi {
         self.form_error = None;
         cx.notify();
         self.load_identities(cx);
-    }
-
-    fn edit_host_with_protocol(&mut self, protocol: ConnectionProtocol, cx: &mut Context<Self>) {
-        self.edit_host(None, cx);
-        if let Some(form) = &mut self.form {
-            form.protocol = protocol;
-            if protocol == ConnectionProtocol::Serial {
-                form.hostname
-                    .update(cx, |input, cx| input.set_value("/dev/ttyUSB0", cx));
-                form.port
-                    .update(cx, |input, cx| input.set_value("9600", cx));
-            } else if protocol == ConnectionProtocol::Telnet {
-                form.port.update(cx, |input, cx| input.set_value("23", cx));
-            } else if protocol == ConnectionProtocol::Mosh {
-                form.port.update(cx, |input, cx| input.set_value("22", cx));
-            } else if protocol == ConnectionProtocol::Vnc {
-                form.port
-                    .update(cx, |input, cx| input.set_value("5900", cx));
-            } else if protocol == ConnectionProtocol::Rdp {
-                form.port
-                    .update(cx, |input, cx| input.set_value("3389", cx));
-            }
-        }
-        cx.notify();
     }
 
     fn set_host_editor_category(&mut self, cat: HostEditorCategory, cx: &mut Context<Self>) {
@@ -5570,12 +5552,49 @@ impl Shellumi {
         false
     }
 
+    fn dismiss_top_dialog(&mut self, cx: &mut Context<Self>) -> bool {
+        let dismissed = if self.desktop.confirm.take().is_some()
+            || dismiss_editor(&mut self.desktop.editor, self.desktop.busy)
+            || self.identity_modal.take().is_some()
+            || self.invite_modal.take().is_some()
+            || self.sftp_modal.take().is_some()
+            || self.tunnel_modal.take().is_some()
+            || self.session_replay_modal.take().is_some()
+            || self.shell_integration_modal.take().is_some()
+            || self.mobile_modal.take().is_some()
+            || self.diagnostics_modal.take().is_some()
+            || self.infra_modal.take().is_some()
+            || self.team_modal.take().is_some()
+            || self.command_palette.take().is_some()
+            || self.batch_modal.take().is_some()
+            || self.snippet_modal.take().is_some()
+            || self.conflict_modal.take().is_some()
+        {
+            true
+        } else if dismiss_editor(&mut self.form, self.saving) {
+            if self.form.is_none() {
+                self.form_error = None;
+            }
+            true
+        } else {
+            false
+        };
+        if dismissed {
+            cx.notify();
+        }
+        dismissed
+    }
+
     fn handle_palette_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape" && self.dismiss_top_dialog(cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.command_palette.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => {
@@ -7759,6 +7778,7 @@ impl Shellumi {
 
         let overlay = div()
             .id("conflict-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -8145,6 +8165,7 @@ impl Shellumi {
 
         let overlay = div()
             .id("snippet-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -8367,6 +8388,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("batch-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -8981,6 +9003,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("command-palette-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -9324,6 +9347,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("team-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -10257,6 +10281,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("infra-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -11044,6 +11069,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("diagnostics-modal-overlay")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(rgba(0x000000bb))
@@ -11665,6 +11691,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("mobile-modal-overlay")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(rgba(0x000000bb))
@@ -12264,6 +12291,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("shell-integration-modal-overlay")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(rgba(0x000000bb))
@@ -12866,6 +12894,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("session-replay-modal-overlay")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(rgba(0x000000bb))
@@ -13560,6 +13589,7 @@ impl Shellumi {
     ) -> impl IntoElement {
         let overlay = div()
             .id("tunnel-modal-overlay")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -15863,6 +15893,16 @@ pub(crate) fn format_file_timestamp(secs_opt: Option<u64>) -> String {
         h => h,
     };
     format!("{}/{}/{}, {}:{:02} {}", m, d, y, hour12, minute, am_pm)
+}
+
+fn dismiss_editor<T>(editor: &mut Option<T>, busy: bool) -> bool {
+    if editor.is_none() {
+        return false;
+    }
+    if !busy {
+        *editor = None;
+    }
+    true
 }
 
 fn sftp_valid_transfer_names(files: &[String]) -> bool {
@@ -19438,6 +19478,7 @@ impl Shellumi {
 
         div()
             .id("sftp-modal-backdrop")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(rgba(0x000000aa))
@@ -21517,12 +21558,6 @@ impl Render for Shellumi {
                             .child("New host")
                             .child("⌵"),
                     )
-                    .child(
-                        crate::desktop::button_icon("add-serial-host", "serial", "Serial")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.edit_host_with_protocol(ConnectionProtocol::Serial, cx)
-                            })),
-                    )
                     .child(self.host_library_actions(cx)),
             )
             .child(
@@ -21887,8 +21922,8 @@ impl Render for Shellumi {
                                             if let Some(p) = resolve_icon_path("groups", false, 48)
                                             {
                                                 div()
-                                                    .w(px(22.0))
-                                                    .h(px(22.0))
+                                                    .w(px(32.0))
+                                                    .h(px(32.0))
                                                     .child(gpui::img(p).size_full())
                                                     .into_any_element()
                                             } else {
@@ -22093,8 +22128,8 @@ impl Render for Shellumi {
                                 resolve_icon_path(resolve_host_os_icon(host), false, 48)
                             {
                                 div()
-                                    .w(px(26.0))
-                                    .h(px(26.0))
+                                    .w(px(38.0))
+                                    .h(px(38.0))
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
@@ -22989,6 +23024,7 @@ impl Render for Shellumi {
             result = result.child(
                 div()
                     .id("host-editor-overlay")
+                    .occlude()
                     .absolute()
                     .top_0()
                     .left_0()
@@ -23280,6 +23316,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn escape_dismisses_an_idle_editor_but_preserves_one_while_saving() {
+        let mut editor = Some("draft");
+        assert!(super::dismiss_editor(&mut editor, true));
+        assert_eq!(editor, Some("draft"));
+        assert!(super::dismiss_editor(&mut editor, false));
+        assert_eq!(editor, None);
+        assert!(!super::dismiss_editor(&mut editor, false));
+    }
+
     #[test]
     fn sftp_transfer_names_reject_paths_and_empty_selection() {
         assert!(super::sftp_valid_transfer_names(&[

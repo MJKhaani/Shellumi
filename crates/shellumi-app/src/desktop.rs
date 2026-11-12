@@ -146,6 +146,47 @@ pub(crate) fn button_icon(
         .child(icon_el)
         .child(text.into())
 }
+struct IconTooltip(&'static str);
+
+impl Render for IconTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(MacTheme::SURFACE_HOVER))
+            .text_sm()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .child(self.0)
+    }
+}
+
+fn icon_button(id: &'static str, icon: &str, hint: &'static str) -> gpui::Stateful<gpui::Div> {
+    let mut button = div()
+        .id(id)
+        .w(px(36.0))
+        .h(px(36.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(MacTheme::CONTROL_RADIUS))
+        .border_1()
+        .border_color(rgb(MacTheme::SEPARATOR))
+        .bg(rgb(MacTheme::SURFACE))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(MacTheme::SURFACE_HOVER)))
+        .tooltip(move |_, cx| cx.new(|_| IconTooltip(hint)).into());
+    if let Some(path) = crate::resolve_icon_path(icon, false, 48) {
+        button = button.child(
+            div()
+                .w(px(32.0))
+                .h(px(32.0))
+                .child(gpui::img(path).size_full()),
+        );
+    }
+    button
+}
+
 fn primary(
     id: impl Into<gpui::ElementId>,
     text: impl Into<gpui::SharedString>,
@@ -1841,6 +1882,8 @@ impl Shellumi {
             );
             root = root.child(
                 div()
+                    .id("library-editor-overlay")
+                    .occlude()
                     .absolute()
                     .inset_0()
                     .bg(rgba(0x030305dd))
@@ -1855,6 +1898,8 @@ impl Shellumi {
             let command = command.clone();
             root = root.child(
                 div()
+                    .id("library-confirm-overlay")
+                    .occlude()
                     .absolute()
                     .inset_0()
                     .bg(rgba(0x030305dd))
@@ -2177,8 +2222,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("public_key", false, 48)
                                     {
                                         div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
+                                            .w(px(36.0))
+                                            .h(px(36.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2258,8 +2303,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("identity_card", false, 48)
                                     {
                                         div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
+                                            .w(px(36.0))
+                                            .h(px(36.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2568,8 +2613,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("fingerprint", false, 48)
                                     {
                                         div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
+                                            .w(px(36.0))
+                                            .h(px(36.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2635,48 +2680,15 @@ impl Shellumi {
             .flex()
             .gap_2()
             .child(
-                button_icon("import-host-config", "import", "Import").on_click(cx.listener(
-                    |app, _, _, cx| app.edit_library_item(EditorKind::ImportHosts, None, cx),
-                )),
+                icon_button("import-host-config", "import", "Import OpenSSH config").on_click(
+                    cx.listener(|app, _, _, cx| {
+                        app.edit_library_item(EditorKind::ImportHosts, None, cx)
+                    }),
+                ),
             )
             .child(
-                button_icon("new-group", "group_settings", "Group settings").on_click(cx.listener(
-                    |app, _, _, cx| {
-                        app.edit_library_item(EditorKind::Group, None, cx);
-                        let group = app
-                            .selected_group
-                            .as_ref()
-                            .and_then(|name| {
-                                app.desktop.groups.iter().find(|group| &group.name == name)
-                            })
-                            .cloned();
-                        if let (Some(group), Some(editor)) = (group, app.desktop.editor.as_mut()) {
-                            editor.identity_id = group.identity_id;
-                            editor
-                                .name
-                                .update(cx, |input, cx| input.set_value(&group.name, cx));
-                            editor.description.update(cx, |input, cx| {
-                                input.set_value(group.default_username.as_deref().unwrap_or(""), cx)
-                            });
-                            editor.tags.update(cx, |input, cx| {
-                                input.set_value(&group.tags.join(", "), cx)
-                            });
-                            editor.lines[0].update(cx, |input, cx| {
-                                input.set_value(
-                                    &group
-                                        .default_port
-                                        .map(|port| port.to_string())
-                                        .unwrap_or_default(),
-                                    cx,
-                                )
-                            });
-                        }
-                    },
-                )),
-            )
-            .child(
-                button_icon("export-host-config", "export", "Export").on_click(cx.listener(
-                    |app, _, _, cx| {
+                icon_button("export-host-config", "export", "Copy OpenSSH config").on_click(
+                    cx.listener(|app, _, _, cx| {
                         if let HostState::Loaded(hosts) = &app.hosts {
                             let entries = hosts
                                 .iter()
@@ -2694,8 +2706,8 @@ impl Shellumi {
                                 Some("OpenSSH config copied to clipboard.".into());
                             cx.notify();
                         }
-                    },
-                )),
+                    }),
+                ),
             )
     }
 }
