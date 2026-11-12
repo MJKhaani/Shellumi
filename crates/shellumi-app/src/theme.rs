@@ -49,7 +49,7 @@ impl MacTheme {
     pub const PANEL_RADIUS: f32 = 10.0;
     pub const CONTROL_RADIUS: f32 = 8.0;
     pub const CONTROL_HEIGHT: f32 = 32.0;
-    pub const SIDEBAR_WIDTH: f32 = 228.0;
+    pub const SIDEBAR_WIDTH: f32 = 184.0;
     pub const ROW_HEIGHT: f32 = 40.0;
 }
 

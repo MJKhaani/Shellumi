@@ -121,8 +121,8 @@ pub(crate) fn button_icon(
 ) -> gpui::Stateful<gpui::Div> {
     let icon_el = if let Some(p) = crate::resolve_icon_path(icon_name, false, 48) {
         div()
-            .w(px(18.0))
-            .h(px(18.0))
+            .w(px(22.0))
+            .h(px(22.0))
             .child(gpui::img(p).size_full())
             .into_any_element()
     } else {
@@ -630,8 +630,8 @@ impl Shellumi {
                     .child(
                         if let Some(p) = crate::resolve_icon_path("tags", false, 32) {
                             div()
-                                .w(px(12.0))
-                                .h(px(12.0))
+                                .w(px(14.0))
+                                .h(px(14.0))
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
@@ -2056,8 +2056,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("search", false, 48)
                                     {
                                         div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2087,8 +2087,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("grid_view", false, 48)
                                     {
                                         div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2121,8 +2121,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("calendar_sort", false, 48)
                                     {
                                         div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2304,8 +2304,8 @@ impl Shellumi {
                                 .child(
                                     if let Some(p) = crate::resolve_icon_path("edit", false, 32) {
                                         div()
-                                            .w(px(12.0))
-                                            .h(px(12.0))
+                                            .w(px(14.0))
+                                            .h(px(14.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2459,8 +2459,8 @@ impl Shellumi {
                                 .child(
                                     if let Some(p) = crate::resolve_icon_path("search", false, 48) {
                                         div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2490,8 +2490,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("grid_view", false, 48)
                                     {
                                         div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2524,8 +2524,8 @@ impl Shellumi {
                                         crate::resolve_icon_path("calendar_sort", false, 48)
                                     {
                                         div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -2540,7 +2540,8 @@ impl Shellumi {
                 hosts_grid = hosts_grid.child(
                     div()
                         .id(("known-host-card", idx))
-                        .w(px(250.0))
+                        .min_w(px(250.0))
+                        .flex_1()
                         .p_3p5()
                         .rounded_xl()
                         .bg(rgb(MacTheme::SURFACE))
@@ -2564,7 +2565,7 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .child(
                                     if let Some(p) =
-                                        crate::resolve_icon_path("known_hosts", false, 48)
+                                        crate::resolve_icon_path("fingerprint", false, 48)
                                     {
                                         div()
                                             .w(px(24.0))

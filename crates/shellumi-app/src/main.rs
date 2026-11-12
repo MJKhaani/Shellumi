@@ -1358,8 +1358,8 @@ impl Shellumi {
                                     .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                     .child(if let Some(p) = resolve_icon_path("more", false, 32) {
                                         div()
-                                            .w(px(14.0))
-                                            .h(px(14.0))
+                                            .w(px(16.0))
+                                            .h(px(16.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -1519,8 +1519,8 @@ impl Shellumi {
                                             resolve_icon_path("invite_member", false, 48)
                                         {
                                             div()
-                                                .w(px(16.0))
-                                                .h(px(16.0))
+                                                .w(px(18.0))
+                                                .h(px(18.0))
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
@@ -2194,8 +2194,8 @@ impl Shellumi {
                                         .child(
                                             if let Some(p) = resolve_icon_path("edit", false, 32) {
                                                 div()
-                                                    .w(px(14.0))
-                                                    .h(px(14.0))
+                                                    .w(px(16.0))
+                                                    .h(px(16.0))
                                                     .child(gpui::img(p).size_full())
                                                     .into_any_element()
                                             } else {
@@ -2226,8 +2226,8 @@ impl Shellumi {
                                 .child(
                                     if let Some(p) = resolve_icon_path("invite_member", false, 32) {
                                         div()
-                                            .w(px(14.0))
-                                            .h(px(14.0))
+                                            .w(px(16.0))
+                                            .h(px(16.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -9010,8 +9010,8 @@ impl Shellumi {
         // Search Input Header
         let search_icon = if let Some(p) = resolve_icon_path("search", false, 48) {
             div()
-                .w(px(18.0))
-                .h(px(18.0))
+                .w(px(20.0))
+                .h(px(20.0))
                 .child(gpui::img(p).size_full())
                 .into_any_element()
         } else {
@@ -9170,8 +9170,8 @@ impl Shellumi {
                             .justify_center()
                             .child(
                                 div()
-                                    .w(px(16.0))
-                                    .h(px(16.0))
+                                    .w(px(18.0))
+                                    .h(px(18.0))
                                     .child(gpui::img(p).size_full()),
                             )
                             .into_any_element()
@@ -9191,8 +9191,8 @@ impl Shellumi {
 
                 let cat_icon_el = if let Some(p) = resolve_icon_path(cat_icon_name, false, 32) {
                     div()
-                        .w(px(12.0))
-                        .h(px(12.0))
+                        .w(px(14.0))
+                        .h(px(14.0))
                         .child(gpui::img(p).size_full())
                         .into_any_element()
                 } else {
@@ -15865,6 +15865,10 @@ pub(crate) fn format_file_timestamp(secs_opt: Option<u64>) -> String {
     format!("{}/{}/{}, {}:{:02} {}", m, d, y, hour12, minute, am_pm)
 }
 
+fn sftp_valid_transfer_names(files: &[String]) -> bool {
+    !files.is_empty() && files.iter().all(|name| PathUtils::is_safe_file_name(name))
+}
+
 fn sftp_local_copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     if src.is_dir() {
         std::fs::create_dir_all(dst)?;
@@ -15889,17 +15893,20 @@ fn sftp_upload_recursive(
     remote: &str,
 ) -> Result<(), SftpError> {
     if local.is_dir() {
-        let _ = client.mkdir(remote);
-        if let Ok(entries) = std::fs::read_dir(local) {
-            for entry in entries.flatten() {
-                let sub_local = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), name);
-                let _ = sftp_upload_recursive(client, &sub_local, &sub_remote);
-            }
+        match client.stat(remote) {
+            Ok(_) => {}
+            Err(SftpError::FileNotFound(_)) => client.mkdir(remote)?,
+            Err(err) => return Err(err),
+        }
+        for entry in std::fs::read_dir(local)? {
+            let entry = entry?;
+            let sub_local = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), name);
+            sftp_upload_recursive(client, &sub_local, &sub_remote)?;
         }
     } else {
-        let _ = client.upload_file::<fn(u64, u64)>(local, remote, None);
+        client.upload_file::<fn(u64, u64)>(local, remote, None)?;
     }
     Ok(())
 }
@@ -15910,21 +15917,26 @@ fn sftp_download_recursive(
     local: &std::path::Path,
 ) -> Result<(), SftpError> {
     if let Ok(entries) = client.list_remote_directory(remote) {
-        let _ = std::fs::create_dir_all(local);
+        std::fs::create_dir_all(local)?;
         for entry in entries {
             if entry.name == "." || entry.name == ".." {
                 continue;
             }
+            if !PathUtils::is_safe_file_name(&entry.name) {
+                return Err(SftpError::UnexpectedResponse(
+                    "Unsafe remote filename".into(),
+                ));
+            }
             let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), entry.name);
             let sub_local = local.join(&entry.name);
             if entry.kind == FileKind::Directory {
-                let _ = sftp_download_recursive(client, &sub_remote, &sub_local);
+                sftp_download_recursive(client, &sub_remote, &sub_local)?;
             } else {
-                let _ = client.download_file::<fn(u64, u64)>(&sub_remote, &sub_local, None);
+                client.download_file::<fn(u64, u64)>(&sub_remote, &sub_local, None)?;
             }
         }
     } else {
-        let _ = client.download_file::<fn(u64, u64)>(remote, local, None);
+        client.download_file::<fn(u64, u64)>(remote, local, None)?;
     }
     Ok(())
 }
@@ -15940,7 +15952,7 @@ impl Shellumi {
             ("Keychain", "keychain", "🔑"),
             ("Port Forwarding", "port_forwarding", "⇄"),
             ("Snippets", "snippets", "{ }"),
-            ("Known Hosts", "known_hosts", "🛡"),
+            ("Known Hosts", "fingerprint", "◉"),
             ("Session Logs", "log", "⏱"),
         ];
 
@@ -16132,8 +16144,8 @@ impl Shellumi {
             };
             let icon_element = if let Some(icon_path) = resolve_icon_path(icon_name, is_sel, 48) {
                 div()
-                    .w(px(22.0))
-                    .h(px(22.0))
+                    .w(px(26.0))
+                    .h(px(26.0))
                     .child(gpui::img(icon_path).size_full())
                     .into_any_element()
             } else {
@@ -16460,8 +16472,8 @@ impl Shellumi {
                 SessionKind::Local => {
                     if let Some(p) = resolve_icon_path("terminal", is_active, 48) {
                         div()
-                            .w(px(16.0))
-                            .h(px(16.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -16471,8 +16483,8 @@ impl Shellumi {
                 SessionKind::Ssh => {
                     if let Some(p) = resolve_icon_path("hosts", is_active, 48) {
                         div()
-                            .w(px(16.0))
-                            .h(px(16.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -16482,8 +16494,8 @@ impl Shellumi {
                 SessionKind::Serial => {
                     if let Some(p) = resolve_icon_path("serial", is_active, 48) {
                         div()
-                            .w(px(16.0))
-                            .h(px(16.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -16493,8 +16505,8 @@ impl Shellumi {
                 SessionKind::Sftp => {
                     if let Some(p) = resolve_icon_path("sftp", is_active, 48) {
                         div()
-                            .w(px(16.0))
-                            .h(px(16.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -16602,8 +16614,8 @@ impl Shellumi {
                     .child(
                         if let Some(icon_path) = resolve_icon_path("search", false, 48) {
                             div()
-                                .w(px(16.0))
-                                .h(px(16.0))
+                                .w(px(18.0))
+                                .h(px(18.0))
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
@@ -16645,8 +16657,8 @@ impl Shellumi {
                             .child(
                                 if let Some(icon_path) = resolve_icon_path("connect", false, 48) {
                                     div()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
                                         .child(gpui::img(icon_path).size_full())
                                         .into_any_element()
                                 } else {
@@ -16963,6 +16975,11 @@ impl Shellumi {
             return;
         }
 
+        if !sftp_valid_transfer_names(&files) {
+            self.desktop.message = Some("Cannot transfer an unsafe filename.".into());
+            cx.notify();
+            return;
+        }
         let src_dir = std::path::PathBuf::from(&src_path);
         let dst_dir = std::path::PathBuf::from(&dst_path);
 
@@ -17015,7 +17032,7 @@ impl Shellumi {
                     for f in &files_to_up {
                         let local_p = src_dir.join(f);
                         let remote_p = format!("{}/{}", dst_dir.display(), f);
-                        let _ = sftp_upload_recursive(&mut client, &local_p, &remote_p);
+                        sftp_upload_recursive(&mut client, &local_p, &remote_p)?;
                     }
                     Ok::<(), SftpError>(())
                 });
@@ -17068,7 +17085,7 @@ impl Shellumi {
                     for f in &files_to_down {
                         let remote_p = format!("{}/{}", src_dir.display(), f);
                         let local_p = dst_dir.join(f);
-                        let _ = sftp_download_recursive(&mut client, &remote_p, &local_p);
+                        sftp_download_recursive(&mut client, &remote_p, &local_p)?;
                     }
                     Ok::<(), SftpError>(())
                 });
@@ -17139,21 +17156,17 @@ impl Shellumi {
                 let task = cx.background_executor().spawn(async move {
                     let mut src_client = SftpClient::connect(&src_dest, &src_opts)?;
                     let mut dst_client = SftpClient::connect(&dst_dest, &dst_opts)?;
-                    let temp_dir =
-                        std::env::temp_dir().join(format!("shellumi_sftp_{}", std::process::id()));
-                    let _ = std::fs::create_dir_all(&temp_dir);
+                    let temp_dir = tempfile::Builder::new()
+                        .prefix("shellumi-sftp-")
+                        .tempdir()?;
                     for f in &files_to_sync {
                         let remote_src = format!("{}/{}", src_dir.display(), f);
-                        let staging_local = temp_dir.join(f);
+                        let staging_local = temp_dir.path().join(f);
                         let remote_dst = format!("{}/{}", dst_dir.display(), f);
-                        if sftp_download_recursive(&mut src_client, &remote_src, &staging_local)
-                            .is_ok()
-                        {
-                            let _ =
-                                sftp_upload_recursive(&mut dst_client, &staging_local, &remote_dst);
-                        }
+                        sftp_download_recursive(&mut src_client, &remote_src, &staging_local)?;
+                        sftp_upload_recursive(&mut dst_client, &staging_local, &remote_dst)?;
                     }
-                    let _ = std::fs::remove_dir_all(&temp_dir);
+                    temp_dir.close()?;
                     Ok::<(), SftpError>(())
                 });
 
@@ -17264,7 +17277,6 @@ impl Shellumi {
                 }
 
                 let req_path = current_path.clone();
-                let fallback_path = current_path.clone();
                 let task = cx.background_executor().spawn(async move {
                     let mut client = SftpClient::connect(&dest, &opts)?;
                     let mut entries = client.list_remote_directory(&req_path)?;
@@ -17293,50 +17305,7 @@ impl Shellumi {
                             }
                             Err(err) => {
                                 pane.error = Some(format!("Remote SFTP: {err}"));
-                                if pane.entries.is_empty() {
-                                    pane.entries = vec![
-                                        FileEntry {
-                                            name: "bin".into(),
-                                            path: format!("{}/bin", fallback_path),
-                                            size: 4096,
-                                            kind: FileKind::Directory,
-                                            modified: Some(1771748880),
-                                            permissions: Some(0o755),
-                                        },
-                                        FileEntry {
-                                            name: "etc".into(),
-                                            path: format!("{}/etc", fallback_path),
-                                            size: 4096,
-                                            kind: FileKind::Directory,
-                                            modified: Some(1771748880),
-                                            permissions: Some(0o755),
-                                        },
-                                        FileEntry {
-                                            name: "var".into(),
-                                            path: format!("{}/var", fallback_path),
-                                            size: 4096,
-                                            kind: FileKind::Directory,
-                                            modified: Some(1771748880),
-                                            permissions: Some(0o755),
-                                        },
-                                        FileEntry {
-                                            name: "config.json".into(),
-                                            path: format!("{}/config.json", fallback_path),
-                                            size: 1420,
-                                            kind: FileKind::File,
-                                            modified: Some(1771752000),
-                                            permissions: Some(0o644),
-                                        },
-                                        FileEntry {
-                                            name: "server.log".into(),
-                                            path: format!("{}/server.log", fallback_path),
-                                            size: 28400,
-                                            kind: FileKind::File,
-                                            modified: Some(1771755000),
-                                            permissions: Some(0o644),
-                                        },
-                                    ];
-                                }
+                                pane.entries.clear();
                             }
                         }
                         cx.notify();
@@ -17824,8 +17793,8 @@ impl Shellumi {
                     .child(
                         if let Some(p) = resolve_icon_path("cloud_sync", false, 32) {
                             div()
-                                .w(px(14.0))
-                                .h(px(14.0))
+                                .w(px(16.0))
+                                .h(px(16.0))
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
@@ -17856,8 +17825,8 @@ impl Shellumi {
                     .border_color(rgb(MacTheme::BORDER))
                     .child(if let Some(p) = resolve_icon_path("search", false, 32) {
                         div()
-                            .w(px(14.0))
-                            .h(px(14.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -17887,8 +17856,8 @@ impl Shellumi {
                     .cursor_pointer()
                     .child(if let Some(p) = resolve_icon_path("tags", false, 32) {
                         div()
-                            .w(px(14.0))
-                            .h(px(14.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -17909,8 +17878,8 @@ impl Shellumi {
                     .child(
                         if let Some(p) = resolve_icon_path("calendar_sort", false, 32) {
                             div()
-                                .w(px(14.0))
-                                .h(px(14.0))
+                                .w(px(16.0))
+                                .h(px(16.0))
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
@@ -17988,8 +17957,8 @@ impl Shellumi {
                                 .justify_center()
                                 .child(if let Some(p) = resolve_icon_path("groups", false, 32) {
                                     div()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -18088,8 +18057,8 @@ impl Shellumi {
                                 .justify_center()
                                 .child(if let Some(p) = resolve_icon_path(os_icon, false, 32) {
                                     div()
-                                        .w(px(20.0))
-                                        .h(px(20.0))
+                                        .w(px(22.0))
+                                        .h(px(22.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -18193,8 +18162,8 @@ impl Shellumi {
                     }))
                     .child(if let Some(p) = resolve_icon_path("server", false, 32) {
                         div()
-                            .w(px(14.0))
-                            .h(px(14.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -18241,8 +18210,8 @@ impl Shellumi {
                                 if let Some(p) = resolve_icon_path("search", pane.filter_active, 32)
                                 {
                                     div()
-                                        .w(px(14.0))
-                                        .h(px(14.0))
+                                        .w(px(16.0))
+                                        .h(px(16.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -18367,8 +18336,8 @@ impl Shellumi {
                     }))
                     .child(if let Some(p) = resolve_folder_icon_path(crumb) {
                         div()
-                            .w(px(14.0))
-                            .h(px(14.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
@@ -18414,6 +18383,7 @@ impl Shellumi {
             .on_drop(cx.listener(move |app, payload: &SftpDragPayload, _, cx| {
                 if payload.from_left != is_left {
                     app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
+                    cx.stop_propagation();
                 }
             }))
             .on_mouse_down(
@@ -18543,8 +18513,8 @@ impl Shellumi {
                         .gap_2()
                         .child(if let Some(ref p) = default_folder_icon {
                             div()
-                                .w(px(20.0))
-                                .h(px(20.0))
+                                .w(px(22.0))
+                                .h(px(22.0))
                                 .child(gpui::img(p.clone()).size_full())
                                 .into_any_element()
                         } else {
@@ -18762,8 +18732,16 @@ impl Shellumi {
                             } else {
                                 &mut app.sftp_right_pane
                             };
-                            p.current_path = entry_path_for_drop.clone();
+                            let previous_path =
+                                std::mem::replace(&mut p.current_path, entry_path_for_drop.clone());
                             app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
+                            let p = if is_left {
+                                &mut app.sftp_left_pane
+                            } else {
+                                &mut app.sftp_right_pane
+                            };
+                            p.current_path = previous_path;
+                            cx.stop_propagation();
                         }
                     }
                 }));
@@ -18917,6 +18895,7 @@ impl Shellumi {
             .on_drop(cx.listener(move |app, payload: &SftpDragPayload, _, cx| {
                 if payload.from_left != is_left {
                     app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
+                    cx.stop_propagation();
                 }
             }))
             .child(header)
@@ -21014,8 +20993,8 @@ impl Render for Shellumi {
                                             32,
                                         ) {
                                             div()
-                                                .w(px(14.0))
-                                                .h(px(14.0))
+                                                .w(px(16.0))
+                                                .h(px(16.0))
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
@@ -21064,8 +21043,8 @@ impl Render for Shellumi {
                                             32,
                                         ) {
                                             div()
-                                                .w(px(14.0))
-                                                .h(px(14.0))
+                                                .w(px(16.0))
+                                                .h(px(16.0))
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
@@ -21177,8 +21156,8 @@ impl Render for Shellumi {
                                     .gap_1p5()
                                     .child(if let Some(p) = resolve_icon_path("tags", false, 32) {
                                         div()
-                                            .w(px(14.0))
-                                            .h(px(14.0))
+                                            .w(px(16.0))
+                                            .h(px(16.0))
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
@@ -21338,8 +21317,8 @@ impl Render for Shellumi {
                                             32,
                                         ) {
                                             div()
-                                                .w(px(14.0))
-                                                .h(px(14.0))
+                                                .w(px(16.0))
+                                                .h(px(16.0))
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
@@ -21388,8 +21367,8 @@ impl Render for Shellumi {
                                             32,
                                         ) {
                                             div()
-                                                .w(px(14.0))
-                                                .h(px(14.0))
+                                                .w(px(16.0))
+                                                .h(px(16.0))
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
@@ -21447,8 +21426,8 @@ impl Render for Shellumi {
                             .child(
                                 if let Some(p) = resolve_icon_path("invite_member", false, 48) {
                                     div()
-                                        .w(px(18.0))
-                                        .h(px(18.0))
+                                        .w(px(20.0))
+                                        .h(px(20.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -21528,8 +21507,8 @@ impl Render for Shellumi {
                             .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
                             .child(if let Some(p) = resolve_icon_path("add_host", false, 48) {
                                 div()
-                                    .w(px(18.0))
-                                    .h(px(18.0))
+                                    .w(px(20.0))
+                                    .h(px(20.0))
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
@@ -21593,8 +21572,8 @@ impl Render for Shellumi {
                                     48,
                                 ) {
                                     div()
-                                        .w(px(18.0))
-                                        .h(px(18.0))
+                                        .w(px(20.0))
+                                        .h(px(20.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -21652,8 +21631,8 @@ impl Render for Shellumi {
                                     48,
                                 ) {
                                     div()
-                                        .w(px(18.0))
-                                        .h(px(18.0))
+                                        .w(px(20.0))
+                                        .h(px(20.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -21696,8 +21675,8 @@ impl Render for Shellumi {
                                     resolve_icon_path("calendar_sort", self.sort_menu_open, 48)
                                 {
                                     div()
-                                        .w(px(18.0))
-                                        .h(px(18.0))
+                                        .w(px(20.0))
+                                        .h(px(20.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -21736,8 +21715,8 @@ impl Render for Shellumi {
                                     resolve_icon_path("profile", self.profile_menu_open, 48)
                                 {
                                     div()
-                                        .w(px(20.0))
-                                        .h(px(20.0))
+                                        .w(px(22.0))
+                                        .h(px(22.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -21799,8 +21778,8 @@ impl Render for Shellumi {
                     .child(
                         if let Some(p) = resolve_icon_path("invite_member", false, 48) {
                             div()
-                                .w(px(20.0))
-                                .h(px(20.0))
+                                .w(px(22.0))
+                                .h(px(22.0))
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
@@ -21865,7 +21844,8 @@ impl Render for Shellumi {
                         .count();
                     let card = div()
                         .id(("group-card", idx))
-                        .w(px(240.0))
+                        .min_w(px(280.0))
+                        .flex_1()
                         .h(px(58.0))
                         .rounded_lg()
                         .bg(rgb(MacTheme::SURFACE))
@@ -21958,8 +21938,8 @@ impl Render for Shellumi {
                                 }))
                                 .child(if let Some(p) = resolve_icon_path("more", false, 48) {
                                     div()
-                                        .w(px(18.0))
-                                        .h(px(18.0))
+                                        .w(px(20.0))
+                                        .h(px(20.0))
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
@@ -22061,7 +22041,8 @@ impl Render for Shellumi {
 
             let card = div()
                 .id(("host-card", id as u64))
-                .w(px(240.0))
+                .min_w(px(280.0))
+                .flex_1()
                 .h(px(64.0))
                 .rounded_lg()
                 .bg(if is_sel {
@@ -23299,6 +23280,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sftp_transfer_names_reject_paths_and_empty_selection() {
+        assert!(super::sftp_valid_transfer_names(&[
+            "report.txt".into(),
+            "folder".into()
+        ]));
+        assert!(!super::sftp_valid_transfer_names(&[]));
+        for name in ["../secret", "/tmp/file", "..", "a/b", "a\\b", "bad\nname"] {
+            assert!(
+                !super::sftp_valid_transfer_names(&[name.into()]),
+                "{name:?}"
+            );
+        }
+    }
+
     #[test]
     fn collection_filter_matches_only_the_selected_group() {
         assert!(super::group_matches(Some("Production"), None));
