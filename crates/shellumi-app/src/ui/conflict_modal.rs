@@ -31,8 +31,8 @@ impl Shellumi {
 
         let mut modal_box = div()
             .id("conflict-modal-container")
-            .w(px(760.0))
-            .max_h(px(580.0))
+            .w(px(880.0))
+            .max_h(px(640.0))
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::SURFACE))
@@ -163,179 +163,196 @@ impl Shellumi {
 
         // Details of selected item
         if let Some(item) = selected_item {
-            let mut detail_col = div().flex_1().flex().flex_col().gap_3();
+            let detail_element: gpui::AnyElement = match item.entity_type {
+                shellumi_core::SyncEntityType::Snippet => self
+                    .render_snippet_conflict_diff(item, current_choice, cx)
+                    .into_any_element(),
+                shellumi_core::SyncEntityType::Tunnel => self
+                    .render_tunnel_conflict_diff(item, current_choice, cx)
+                    .into_any_element(),
+                _ => {
+                    let mut detail_col = div().flex_1().flex().flex_col().gap_3();
 
-            // Local vs Remote comparison cards
-            let mut comp_cards = div().flex().gap_3();
+                    // Local vs Remote comparison cards
+                    let mut comp_cards = div().flex().gap_3();
 
-            // Local card
-            let is_local_chosen = current_choice == ConflictResolutionChoice::KeepLocal;
-            let local_card = div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded_md()
-                .bg(rgb(MacTheme::INPUT_BG))
-                .border_2()
-                .border_color(if is_local_chosen {
-                    rgb(MacTheme::ACCENT_BLUE)
-                } else {
-                    rgb(MacTheme::SEPARATOR)
-                })
-                .child(
-                    div()
+                    // Local card
+                    let is_local_chosen = current_choice == ConflictResolutionChoice::KeepLocal;
+                    let local_card = div()
+                        .flex_1()
                         .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                .child("🖥 Local Version"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child(format!("v{}", item.local_version)),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child(item.local_summary.clone()),
-                )
-                .child(
-                    div()
-                        .id("choose-local-btn")
-                        .mt_auto()
-                        .px_3()
-                        .py_1p5()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
                         .rounded_md()
-                        .border_1()
+                        .bg(rgb(MacTheme::INPUT_BG))
+                        .border_2()
                         .border_color(if is_local_chosen {
                             rgb(MacTheme::ACCENT_BLUE)
                         } else {
                             rgb(MacTheme::SEPARATOR)
                         })
-                        .cursor_pointer()
-                        .bg(if is_local_chosen {
-                            rgb(MacTheme::ACCENT_BLUE)
-                        } else {
-                            rgb(0x323236)
-                        })
-                        .text_color(if is_local_chosen {
-                            rgb(0xffffff)
-                        } else {
-                            rgb(MacTheme::TEXT_PRIMARY)
-                        })
-                        .text_xs()
-                        .hover(move |s| {
-                            if is_local_chosen {
-                                s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
-                            } else {
-                                s.bg(rgb(MacTheme::SURFACE_HOVER))
-                            }
-                        })
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.set_conflict_choice(ConflictResolutionChoice::KeepLocal, cx);
-                        }))
-                        .child(if is_local_chosen {
-                            "✓ Selected (Keep Local)"
-                        } else {
-                            "Keep Local"
-                        }),
-                );
-            comp_cards = comp_cards.child(local_card);
-
-            // Remote card
-            let is_remote_chosen = current_choice == ConflictResolutionChoice::AcceptRemote;
-            let remote_card = div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded_md()
-                .bg(rgb(MacTheme::INPUT_BG))
-                .border_2()
-                .border_color(if is_remote_chosen {
-                    rgb(MacTheme::SUCCESS)
-                } else {
-                    rgb(MacTheme::SEPARATOR)
-                })
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
                         .child(
                             div()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(MacTheme::SUCCESS))
-                                .child("☁ Remote Vault"),
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                        .child("🖥 Local Version"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(format!("v{}", item.local_version)),
+                                ),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child(format!("v{}", item.remote_version)),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                        .child(item.remote_summary.clone()),
-                )
-                .child(
-                    div()
-                        .id("choose-remote-btn")
-                        .mt_auto()
-                        .px_3()
-                        .py_1p5()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child(item.local_summary.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("choose-local-btn")
+                                .mt_auto()
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(if is_local_chosen {
+                                    rgb(MacTheme::ACCENT_BLUE)
+                                } else {
+                                    rgb(MacTheme::SEPARATOR)
+                                })
+                                .cursor_pointer()
+                                .bg(if is_local_chosen {
+                                    rgb(MacTheme::ACCENT_BLUE)
+                                } else {
+                                    rgb(0x323236)
+                                })
+                                .text_color(if is_local_chosen {
+                                    rgb(0xffffff)
+                                } else {
+                                    rgb(MacTheme::TEXT_PRIMARY)
+                                })
+                                .text_xs()
+                                .hover(move |s| {
+                                    if is_local_chosen {
+                                        s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
+                                    } else {
+                                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    }
+                                })
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.set_conflict_choice(
+                                        ConflictResolutionChoice::KeepLocal,
+                                        cx,
+                                    );
+                                }))
+                                .child(if is_local_chosen {
+                                    "✓ Selected (Keep Local)"
+                                } else {
+                                    "Keep Local"
+                                }),
+                        );
+                    comp_cards = comp_cards.child(local_card);
+
+                    // Remote card
+                    let is_remote_chosen = current_choice == ConflictResolutionChoice::AcceptRemote;
+                    let remote_card = div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
                         .rounded_md()
-                        .border_1()
+                        .bg(rgb(MacTheme::INPUT_BG))
+                        .border_2()
                         .border_color(if is_remote_chosen {
                             rgb(MacTheme::SUCCESS)
                         } else {
                             rgb(MacTheme::SEPARATOR)
                         })
-                        .cursor_pointer()
-                        .bg(if is_remote_chosen {
-                            rgb(MacTheme::SUCCESS)
-                        } else {
-                            rgb(0x323236)
-                        })
-                        .text_color(if is_remote_chosen {
-                            rgb(0xffffff)
-                        } else {
-                            rgb(MacTheme::TEXT_PRIMARY)
-                        })
-                        .text_xs()
-                        .hover(move |s| {
-                            if is_remote_chosen {
-                                s.bg(rgb(MacTheme::SUCCESS))
-                            } else {
-                                s.bg(rgb(MacTheme::SURFACE_HOVER))
-                            }
-                        })
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.set_conflict_choice(ConflictResolutionChoice::AcceptRemote, cx);
-                        }))
-                        .child(if is_remote_chosen {
-                            "✓ Selected (Accept Remote)"
-                        } else {
-                            "Accept Remote"
-                        }),
-                );
-            comp_cards = comp_cards.child(remote_card);
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::SUCCESS))
+                                        .child("☁ Remote Vault"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(format!("v{}", item.remote_version)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child(item.remote_summary.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("choose-remote-btn")
+                                .mt_auto()
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(if is_remote_chosen {
+                                    rgb(MacTheme::SUCCESS)
+                                } else {
+                                    rgb(MacTheme::SEPARATOR)
+                                })
+                                .cursor_pointer()
+                                .bg(if is_remote_chosen {
+                                    rgb(MacTheme::SUCCESS)
+                                } else {
+                                    rgb(0x323236)
+                                })
+                                .text_color(if is_remote_chosen {
+                                    rgb(0xffffff)
+                                } else {
+                                    rgb(MacTheme::TEXT_PRIMARY)
+                                })
+                                .text_xs()
+                                .hover(move |s| {
+                                    if is_remote_chosen {
+                                        s.bg(rgb(MacTheme::SUCCESS))
+                                    } else {
+                                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    }
+                                })
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.set_conflict_choice(
+                                        ConflictResolutionChoice::AcceptRemote,
+                                        cx,
+                                    );
+                                }))
+                                .child(if is_remote_chosen {
+                                    "✓ Selected (Accept Remote)"
+                                } else {
+                                    "Accept Remote"
+                                }),
+                        );
+                    comp_cards = comp_cards.child(remote_card);
 
-            detail_col = detail_col.child(comp_cards);
-            list_row = list_row.child(detail_col);
+                    detail_col = detail_col.child(comp_cards);
+                    detail_col.into_any_element()
+                }
+            };
+            list_row = list_row.child(detail_element);
         }
 
         modal_box = modal_box.child(list_row);

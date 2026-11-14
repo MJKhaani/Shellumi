@@ -1017,6 +1017,47 @@ pub struct ConflictItemView {
     pub remote_updated_at: u64,
     pub local_summary: String,
     pub remote_summary: String,
+    #[serde(default)]
+    pub local_raw_json: Option<String>,
+    #[serde(default)]
+    pub remote_raw_json: Option<String>,
+}
+
+impl ConflictItemView {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        object_id: impl Into<String>,
+        entity_type: SyncEntityType,
+        local_version: u64,
+        remote_version: u64,
+        local_updated_at: u64,
+        remote_updated_at: u64,
+        local_summary: impl Into<String>,
+        remote_summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            object_id: object_id.into(),
+            entity_type,
+            local_version,
+            remote_version,
+            local_updated_at,
+            remote_updated_at,
+            local_summary: local_summary.into(),
+            remote_summary: remote_summary.into(),
+            local_raw_json: None,
+            remote_raw_json: None,
+        }
+    }
+
+    pub fn with_raw_json(
+        mut self,
+        local_raw_json: Option<String>,
+        remote_raw_json: Option<String>,
+    ) -> Self {
+        self.local_raw_json = local_raw_json;
+        self.remote_raw_json = remote_raw_json;
+        self
+    }
 }
 
 /// Builds human-readable `ConflictItemView` models for all conflicting items between local and remote records.
@@ -1036,6 +1077,21 @@ pub fn build_conflict_item_views(
                 .find(|r| r.object_id == diff.object_id);
 
             if let (Some(loc), Some(rem)) = (local, remote) {
+                let local_raw_json = passphrase.and_then(|pw| {
+                    loc.envelope.as_ref().and_then(|env| {
+                        decrypt_entity::<serde_json::Value>(pw, env)
+                            .ok()
+                            .and_then(|v| serde_json::to_string(&v).ok())
+                    })
+                });
+                let remote_raw_json = passphrase.and_then(|pw| {
+                    rem.envelope.as_ref().and_then(|env| {
+                        decrypt_entity::<serde_json::Value>(pw, env)
+                            .ok()
+                            .and_then(|v| serde_json::to_string(&v).ok())
+                    })
+                });
+
                 views.push(ConflictItemView {
                     object_id: diff.object_id.clone(),
                     entity_type: diff.entity_type,
@@ -1045,6 +1101,8 @@ pub fn build_conflict_item_views(
                     remote_updated_at: rem.updated_at,
                     local_summary: format_record_summary(passphrase, loc),
                     remote_summary: format_record_summary(passphrase, rem),
+                    local_raw_json,
+                    remote_raw_json,
                 });
             }
         }

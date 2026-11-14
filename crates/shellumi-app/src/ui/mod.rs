@@ -3,6 +3,7 @@ use super::*;
 
 mod batch_modal;
 mod command_palette;
+pub(crate) mod conflict_diff;
 mod conflict_modal;
 mod create_vault_modal;
 mod diagnostics_modal;

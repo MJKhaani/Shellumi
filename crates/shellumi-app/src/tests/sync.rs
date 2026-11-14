@@ -115,6 +115,8 @@ fn verifies_conflict_modal_state_and_resolution_flow() {
             remote_updated_at: 1050,
             local_summary: "Web Prod (alice@web1:22)".into(),
             remote_summary: "Web Prod (bob@web1:2222)".into(),
+            local_raw_json: None,
+            remote_raw_json: None,
         },
         ConflictItemView {
             object_id: "snippet-1".into(),
@@ -125,6 +127,8 @@ fn verifies_conflict_modal_state_and_resolution_flow() {
             remote_updated_at: 2050,
             local_summary: "Restart (systemctl restart)".into(),
             remote_summary: "Restart (service restart)".into(),
+            local_raw_json: None,
+            remote_raw_json: None,
         },
     ];
 
@@ -267,4 +271,196 @@ fn verifies_sync_cycle_execution_and_conflict_resolution_in_app() {
         }
         _ => panic!("Expected successful sync after resolution"),
     }
+}
+
+#[test]
+fn verifies_compute_line_diff_lcs_algorithm() {
+    use crate::ui::conflict_diff::{compute_line_diff, DiffLineKind};
+
+    // 1. Identical lines
+    let local = "echo hello\necho world";
+    let remote = "echo hello\necho world";
+    let diff = compute_line_diff(local, remote);
+    assert_eq!(diff.len(), 2);
+    assert!(diff.iter().all(|l| l.kind == DiffLineKind::Unchanged));
+    assert_eq!(diff[0].local_line_no, Some(1));
+    assert_eq!(diff[0].remote_line_no, Some(1));
+    assert_eq!(diff[1].local_line_no, Some(2));
+    assert_eq!(diff[1].remote_line_no, Some(2));
+
+    // 2. Addition and deletion
+    let local = "line 1\nold line\nline 3";
+    let remote = "line 1\nnew line\nline 3";
+    let diff = compute_line_diff(local, remote);
+    assert_eq!(diff.len(), 4);
+    assert_eq!(diff[0].kind, DiffLineKind::Unchanged);
+    assert_eq!(diff[0].content, "line 1");
+    let middle_kinds: Vec<_> = diff[1..3].iter().map(|d| d.kind).collect();
+    assert!(middle_kinds.contains(&DiffLineKind::LocalOnly));
+    assert!(middle_kinds.contains(&DiffLineKind::RemoteOnly));
+    assert_eq!(diff[3].kind, DiffLineKind::Unchanged);
+    assert_eq!(diff[3].content, "line 3");
+
+    // 3. Empty scripts
+    let diff_empty = compute_line_diff("", "");
+    assert!(diff_empty.is_empty());
+}
+
+#[test]
+fn verifies_snippet_conflict_model_parsing_and_fallback() {
+    use crate::ui::conflict_diff::{DiffLineKind, SnippetConflictModel};
+    use shellumi_core::{ConflictItemView, SyncEntityType};
+
+    // 1. Full JSON payload
+    let local_json = serde_json::json!({
+        "name": "Restart Nginx Local",
+        "command": "systemctl restart nginx\nsystemctl status nginx",
+        "description": "Restart web server",
+        "tags": ["web", "prod"]
+    })
+    .to_string();
+
+    let remote_json = serde_json::json!({
+        "name": "Restart Nginx Remote",
+        "command": "systemctl restart nginx\necho 'done'",
+        "description": "Restart server remotely",
+        "tags": ["web", "staging"]
+    })
+    .to_string();
+
+    let item = ConflictItemView {
+        object_id: "snip-1".into(),
+        entity_type: SyncEntityType::Snippet,
+        local_version: 1,
+        remote_version: 2,
+        local_updated_at: 100,
+        remote_updated_at: 200,
+        local_summary: "Snippet Restart".into(),
+        remote_summary: "Snippet Restart".into(),
+        local_raw_json: Some(local_json),
+        remote_raw_json: Some(remote_json),
+    };
+
+    let model = SnippetConflictModel::from_conflict_item(&item);
+    assert_eq!(model.local_name, "Restart Nginx Local");
+    assert_eq!(model.remote_name, "Restart Nginx Remote");
+    assert_eq!(
+        model.local_description.as_deref(),
+        Some("Restart web server")
+    );
+    assert_eq!(
+        model.remote_description.as_deref(),
+        Some("Restart server remotely")
+    );
+    assert_eq!(model.local_tags, vec!["web", "prod"]);
+    assert_eq!(model.remote_tags, vec!["web", "staging"]);
+    assert_eq!(model.diff_lines[0].kind, DiffLineKind::Unchanged);
+    assert_eq!(model.diff_lines[0].content, "systemctl restart nginx");
+
+    // 2. Summary fallback when raw JSON is absent
+    let fallback_item = ConflictItemView {
+        object_id: "snip-2".into(),
+        entity_type: SyncEntityType::Snippet,
+        local_version: 1,
+        remote_version: 1,
+        local_updated_at: 100,
+        remote_updated_at: 100,
+        local_summary: "Backup (`tar -czf backup.tar.gz /data`)".into(),
+        remote_summary: "Backup (`tar -czvf backup.tar.gz /data`)".into(),
+        local_raw_json: None,
+        remote_raw_json: None,
+    };
+
+    let fallback_model = SnippetConflictModel::from_conflict_item(&fallback_item);
+    assert_eq!(fallback_model.local_name, "snip-2");
+    assert_eq!(fallback_model.remote_name, "snip-2");
+    assert_eq!(fallback_model.local_command, "tar -czf backup.tar.gz /data");
+    assert_eq!(
+        fallback_model.remote_command,
+        "tar -czvf backup.tar.gz /data"
+    );
+}
+
+#[test]
+fn verifies_tunnel_conflict_model_and_cli_flag_generation() {
+    use crate::ui::conflict_diff::TunnelConflictModel;
+    use shellumi_core::{ConflictItemView, SyncEntityType};
+
+    // 1. Local port forward
+    let local_json = serde_json::json!({
+        "name": "DB Tunnel",
+        "forwarding_type": "Local",
+        "bind_address": "127.0.0.1",
+        "bind_port": 5432,
+        "target_host": "db.internal",
+        "target_port": 5432,
+        "auto_start": true
+    })
+    .to_string();
+
+    // 2. Remote port forward with changed target port
+    let remote_json = serde_json::json!({
+        "name": "DB Tunnel",
+        "forwarding_type": "Remote",
+        "bind_address": "0.0.0.0",
+        "bind_port": 5433,
+        "target_host": "db.prod",
+        "target_port": 5432,
+        "auto_start": false
+    })
+    .to_string();
+
+    let item = ConflictItemView {
+        object_id: "tun-1".into(),
+        entity_type: SyncEntityType::Tunnel,
+        local_version: 3,
+        remote_version: 3,
+        local_updated_at: 300,
+        remote_updated_at: 350,
+        local_summary: "Tunnel Local 5432".into(),
+        remote_summary: "Tunnel Remote 5433".into(),
+        local_raw_json: Some(local_json),
+        remote_raw_json: Some(remote_json),
+    };
+
+    let model = TunnelConflictModel::from_conflict_item(&item);
+    assert_eq!(model.local_name, "DB Tunnel");
+    assert_eq!(model.remote_name, "DB Tunnel");
+    assert_eq!(model.local_type, "Local");
+    assert_eq!(model.remote_type, "Remote");
+    assert_eq!(model.local_bind_port, 5432);
+    assert_eq!(model.remote_bind_port, 5433);
+    assert!(model.local_auto_start);
+    assert!(!model.remote_auto_start);
+    assert_eq!(
+        model.local_cli_flag,
+        "ssh -L 127.0.0.1:5432:db.internal:5432"
+    );
+    assert_eq!(model.remote_cli_flag, "ssh -R 0.0.0.0:5433:db.prod:5432");
+
+    // 3. Dynamic (SOCKS5) tunnel CLI flag
+    let dynamic_json = serde_json::json!({
+        "name": "SOCKS Proxy",
+        "forwarding_type": "Dynamic",
+        "bind_address": "127.0.0.1",
+        "bind_port": 1080,
+        "auto_start": false
+    })
+    .to_string();
+
+    let dynamic_item = ConflictItemView {
+        object_id: "tun-2".into(),
+        entity_type: SyncEntityType::Tunnel,
+        local_version: 1,
+        remote_version: 1,
+        local_updated_at: 100,
+        remote_updated_at: 100,
+        local_summary: "Dynamic Proxy".into(),
+        remote_summary: "Dynamic Proxy".into(),
+        local_raw_json: Some(dynamic_json.clone()),
+        remote_raw_json: Some(dynamic_json),
+    };
+
+    let dynamic_model = TunnelConflictModel::from_conflict_item(&dynamic_item);
+    assert_eq!(dynamic_model.local_cli_flag, "ssh -D 127.0.0.1:1080");
 }
