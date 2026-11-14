@@ -1,6 +1,7 @@
 //! RFB security types and VNCAuth DES challenge-response authentication.
 
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Standard RFB security types (RFC 6143 Section 7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +55,7 @@ pub fn vnc_auth_encrypt(challenge: &[u8; 16], password: &str) -> [u8; 16] {
 
     // 3. Encrypt both 8-byte halves of the 16-byte challenge with DES ECB
     let mut response = [0u8; 16];
-    let des = DesCipher::new(&key_bytes);
+    let mut des = DesCipher::new(&key_bytes);
 
     let first_half: [u8; 8] = challenge[0..8].try_into().unwrap();
     let second_half: [u8; 8] = challenge[8..16].try_into().unwrap();
@@ -64,6 +65,10 @@ pub fn vnc_auth_encrypt(challenge: &[u8; 16], password: &str) -> [u8; 16] {
 
     response[0..8].copy_from_slice(&enc_first);
     response[8..16].copy_from_slice(&enc_second);
+
+    // Zeroize sensitive DES key material and round keys
+    key_bytes.zeroize();
+    des.round_keys.zeroize();
 
     response
 }
@@ -75,6 +80,12 @@ pub fn vnc_auth_encrypt(challenge: &[u8; 16], password: &str) -> [u8; 16] {
 #[derive(Debug)]
 struct DesCipher {
     round_keys: [u64; 16],
+}
+
+impl Drop for DesCipher {
+    fn drop(&mut self) {
+        self.round_keys.zeroize();
+    }
 }
 
 impl DesCipher {

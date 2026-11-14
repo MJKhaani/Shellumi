@@ -4,6 +4,7 @@ use ironrdp_client::config::{Config, ConfigBuilder, Destination};
 use shellumi_remote_desktop::security::CertificateValidationPolicy;
 use shellumi_remote_desktop::{SessionConfig, MAX_FRAMEBUFFER_DIMENSION};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// RDP configuration building error.
 #[derive(Debug, Error)]
@@ -16,7 +17,7 @@ pub enum RdpConfigError {
 }
 
 /// Strongly typed client configuration wrapper for Shellumi RDP sessions.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RdpClientConfig {
     pub host: String,
     pub port: u16,
@@ -27,6 +28,30 @@ pub struct RdpClientConfig {
     pub height: u16,
     pub cert_policy: CertificateValidationPolicy,
     pub view_only: bool,
+}
+
+impl std::fmt::Debug for RdpClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RdpClientConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("domain", &self.domain)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("cert_policy", &self.cert_policy)
+            .field("view_only", &self.view_only)
+            .finish()
+    }
+}
+
+impl Drop for RdpClientConfig {
+    fn drop(&mut self) {
+        if let Some(pwd) = &mut self.password {
+            pwd.zeroize();
+        }
+    }
 }
 
 impl RdpClientConfig {
@@ -68,12 +93,12 @@ impl RdpClientConfig {
         let dest = Destination::new(format!("{}:{}", self.host, self.port))
             .map_err(|e| RdpConfigError::InvalidEndpoint(e.to_string()))?;
 
-        let password = self.password.clone().unwrap_or_default();
+        let mut password = self.password.clone().unwrap_or_default();
 
         let mut builder = ConfigBuilder::new()
             .with_destination(dest)
             .with_username(self.username.clone())
-            .with_password(password)
+            .with_password(password.clone())
             .with_client_build(2600)
             .with_client_name("Shellumi")
             .with_client_dir("C:\\Program Files\\Shellumi")
@@ -84,6 +109,8 @@ impl RdpClientConfig {
             .with_tls(true)
             .with_credssp(true)
             .with_autologon(self.password.is_some());
+
+        password.zeroize();
 
         if let Some(dom) = &self.domain {
             builder = builder.with_domain(dom.clone());

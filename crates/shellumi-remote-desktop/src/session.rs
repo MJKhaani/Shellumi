@@ -81,8 +81,10 @@ impl SessionState {
     }
 }
 
+use zeroize::Zeroize;
+
 /// Session parameters configured by the user before launching a connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub host: String,
     pub port: u16,
@@ -96,6 +98,33 @@ pub struct SessionConfig {
     pub password: Option<String>,
     pub domain: Option<String>,
     pub tls_strict: bool,
+}
+
+impl std::fmt::Debug for SessionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("protocol", &self.protocol)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("color_depth", &self.color_depth)
+            .field("view_only", &self.view_only)
+            .field("scale_mode", &self.scale_mode)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("domain", &self.domain)
+            .field("tls_strict", &self.tls_strict)
+            .finish()
+    }
+}
+
+impl Drop for SessionConfig {
+    fn drop(&mut self) {
+        if let Some(pwd) = &mut self.password {
+            pwd.zeroize();
+        }
+    }
 }
 
 impl SessionConfig {
@@ -152,5 +181,25 @@ mod tests {
         assert_eq!(cfg.target_endpoint(), "10.0.0.4:5900");
         assert_eq!(cfg.protocol.default_port(), 5900);
         assert!(cfg.tls_strict);
+    }
+
+    #[test]
+    fn verifies_session_config_zeroizes_password_and_redacts_debug() {
+        let mut cfg = SessionConfig::new("10.0.0.4", 5900, RemoteProtocol::Vnc);
+        cfg.password = Some("SuperSecretPassword123!".to_string());
+
+        let debug_str = format!("{cfg:?}");
+        assert!(!debug_str.contains("SuperSecretPassword123!"));
+        assert!(debug_str.contains("[REDACTED]"));
+
+        // Verify zeroization on drop
+        let mut pwd = cfg.password.take().unwrap();
+        assert!(!pwd.is_empty());
+        pwd.zeroize();
+        assert!(pwd.is_empty());
+
+        let mut byte_buffer = *b"SuperSecretPassword123!";
+        byte_buffer.zeroize();
+        assert_eq!(byte_buffer, [0u8; 23]);
     }
 }

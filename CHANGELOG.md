@@ -2,6 +2,21 @@
 
 ## 0.0.7-alpha
 
+### Remote Desktop Security Hardening, Credential Zeroization & Fuzzing (Phase 6)
+- **Credential Memory Zeroization:** Integrated `zeroize` crate across all remote desktop crates (`shellumi-remote-desktop`, `shellumi-vnc`, `shellumi-rdp`, and `shellumi-app`).
+  - Implemented `Drop for SessionConfig` and `Drop for RdpClientConfig` explicitly zeroizing password buffers on destruction.
+  - Redacted sensitive passwords from `Debug` representations (`password: "[REDACTED]"`).
+  - Implemented `Drop for DesCipher` in `shellumi-vnc` zeroizing internal DES round keys and key bytes.
+  - Zeroized ephemeral connection passwords held by `RemoteDesktopState` in `shellumi-app` when closing tabs or disconnecting.
+- **RFB Decoder Fuzzing & Adversarial Robustness:** Built comprehensive adversarial fuzz test suite (`crates/shellumi-vnc/tests/fuzz_adversarial_tests.rs`) covering:
+  - Decompression bomb detection: verified rejection of 500,000+ byte deflate bombs targeting 64x64 tiles with typed `RectangleError::DecompressionBombDetected`.
+  - Malformed and corrupt tile types: tested invalid ZRLE subencodings, out-of-bounds packed palettes, and corrupt RLE run lengths.
+  - Hextile coordinate clamping: verified subrectangles with extreme coordinates (`0xFF`, `0xFF`) are clamped to tile boundaries without panics.
+  - Corrupt JPEG and zlib payloads: verified invalid JPEG headers and corrupt bitstreams are safely reported via `RectangleError::DecompressionFailed`.
+  - Rectangle bounds and overflow protection: verified zero dimensions, excessive dimensions (> `MAX_RECTANGLE_DIMENSION`), and `u16` coordinate overflow edge cases.
+  - Pseudorandom byte stream fuzzing: confirmed panic-free error handling across hundreds of pseudo-random byte inputs across all decoders.
+- **Documentation & Compatibility:** Updated threat model (`docs/security/threat-model.md`), architecture specifications (`docs/ARCHITECTURE.md`), implementation guide (`docs/REMOTE_DESKTOP_IMPLEMENTATION.md`), and feature matrix (`docs/FEATURE_MATRIX.md`) with complete server compatibility notes and security policies.
+
 ### Remote Desktop UI Polish, Quick Connect & Workspace Persistence (Phase 5)
 - **Host Editor Upgrade:** Added protocol-specific parameters for VNC (resolution presets 1080p/1440p/4K/720p, custom width/height inputs, color depth 24/32-bit, view-only mode) and RDP (Windows Domain input, resolution presets/custom, color depth, view-only mode, and Strict CA vs TOFU pinned SHA-256 certificate policy).
 - **Interactive Quick Connect:** Extended Quick Connect to parse graphical targets (`vnc://[user@]host[:port]` and `rdp://[user@]host[:port]`). Prompts interactively on-canvas for credentials on demand without persisting secrets in URLs, command-line arguments, or unencrypted storage.

@@ -740,6 +740,15 @@ struct RemoteDesktopState {
     password_input: Option<Entity<TextInput>>,
 }
 
+impl Drop for RemoteDesktopState {
+    fn drop(&mut self) {
+        if let Some(pwd) = &mut self.password {
+            use zeroize::Zeroize;
+            pwd.zeroize();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitDirection {
     Grid,

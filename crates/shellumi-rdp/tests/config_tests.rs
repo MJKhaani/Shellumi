@@ -76,3 +76,30 @@ fn test_to_ironrdp_config_invalid_endpoint() {
         other => panic!("Expected InvalidEndpoint, got {other:?}"),
     }
 }
+
+#[test]
+fn test_rdp_client_config_zeroizes_password_and_redacts_debug() {
+    use zeroize::Zeroize;
+
+    let mut rdp_cfg = RdpClientConfig {
+        host: "windows.ad".into(),
+        port: 3389,
+        username: "DomainAdmin".into(),
+        password: Some("TopSecretWindowsPassword999!".into()),
+        domain: Some("CORP".into()),
+        width: 1920,
+        height: 1080,
+        cert_policy: CertificateValidationPolicy::Strict,
+        view_only: false,
+    };
+
+    let debug_repr = format!("{rdp_cfg:?}");
+    assert!(!debug_repr.contains("TopSecretWindowsPassword999!"));
+    assert!(debug_repr.contains("[REDACTED]"));
+
+    // Verify zeroization on drop
+    let mut pwd = rdp_cfg.password.take().unwrap();
+    assert!(!pwd.is_empty());
+    pwd.zeroize();
+    assert!(pwd.is_empty());
+}

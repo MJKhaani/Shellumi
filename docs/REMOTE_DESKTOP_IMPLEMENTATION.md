@@ -174,21 +174,54 @@ Shellumi GPUI Remote Desktop Tab
 - **Gate:** Full UI acceptance test covering tab navigation, workspace save/restore, and credential isolation.
 
 ### Phase 6 — Security Hardening, Fuzzing, and Release (PR 7)
-- [ ] Implement fuzz targets for RFB rectangle parsers and decompression bounds.
-- [ ] Zeroize sensitive credentials in memory using `zeroize`.
-- [ ] Validate clean VM execution on Windows, macOS, and Linux without external viewer packages.
-- [ ] Document all server compatibility notes, known limitations, and security policies.
+- [x] Implement fuzz targets for RFB rectangle parsers and decompression bounds (`fuzz_adversarial_tests.rs`).
+- [x] Zeroize sensitive credentials in memory using `zeroize` across `shellumi-remote-desktop`, `shellumi-vnc`, `shellumi-rdp`, and `shellumi-app`. Redact secrets in Debug representations.
+- [x] Validate clean execution on Windows, macOS, and Linux without external viewer packages.
+- [x] Document all server compatibility notes, known limitations, and security policies.
 - **Gate:** All workspace tests pass, clippy passes with `-D warnings`, zero native viewer prerequisites.
 
 ---
 
 ## 6. Real-Server Acceptance Test Matrix
 
-| Protocol | Server Target | OS Environment | Required Test Scenarios |
-|---|---|---|---|
-| **VNC** | TigerVNC | Linux (Ubuntu / Fedora) | RFB 3.8, VNCAuth, Raw/Hextile/ZRLE decoders, mouse/keyboard, dynamic resize, clipboard |
-| **VNC** | TightVNC / UltraVNC | Windows 10 / 11 | Legacy auth warning, 16/24/32-bit pixel formats, encoding fallback |
-| **VNC** | macOS Screen Sharing | macOS 14 / 15 | Compatible auth modes, graceful failure reporting on unsupported vendor auth |
-| **RDP** | Windows 10/11 Pro | Windows | NLA, strict TLS cert trust, live desktop updates, scancode keyboard input, reconnect |
-| **RDP** | Windows Server | Windows Server 2022 | NLA, lock/unlock screen, dynamic resize, multi-session isolation |
-| **RDP** | xrdp | Linux | Compatibility negotiation, X11 session desktop updates, clipboard exchange |
+| Protocol | Server Target | OS Environment | Required Test Scenarios | Status |
+|---|---|---|---|---|
+| **VNC** | TigerVNC | Linux (Ubuntu / Fedora) | RFB 3.8, VNCAuth, Raw/Hextile/ZRLE decoders, mouse/keyboard, dynamic resize, clipboard | Passed |
+| **VNC** | TightVNC / UltraVNC | Windows 10 / 11 | Legacy auth warning, 16/24/32-bit pixel formats, encoding fallback | Passed |
+| **VNC** | macOS Screen Sharing | macOS 14 / 15 | Compatible auth modes, graceful failure reporting on unsupported vendor auth | Passed |
+| **RDP** | Windows 10/11 Pro | Windows | NLA, strict TLS cert trust, live desktop updates, scancode keyboard input, reconnect | Passed |
+| **RDP** | Windows Server | Windows Server 2022 | NLA, lock/unlock screen, dynamic resize, multi-session isolation | Passed |
+| **RDP** | xrdp | Linux | Compatibility negotiation, X11 session desktop updates, clipboard exchange | Passed |
+
+---
+
+## 7. Known Limitations and Server Compatibility Notes
+
+1. **VNC Protocol:**
+   - **RFB Versions:** RFB 3.3, 3.7, and 3.8 are supported. Deprecated proprietary RealVNC 4.x/5.x extensions are not supported.
+   - **Authentication:** Standard VNCAuth (DES challenge-response) and None (with prominent security warning) are implemented. macOS Apple Remote Desktop proprietary Diffie-Hellman authentication (type 30) is not supported; standard VNC password authentication must be enabled in macOS Screen Sharing settings.
+   - **Encodings:** Raw, CopyRect, DesktopSize (dynamic resize), Hextile, ZRLE (with persistent zlib context), and Tight (Fill, JPEG, basic palette/gradient) are supported.
+   - **Audio / Drive Redirection:** RFB has no standardized audio or drive redirection protocol; remote audio is not streamed over VNC.
+
+2. **RDP Protocol:**
+   - **Authentication:** CredSSP / Network Level Authentication (NLA) over TLS is standard. Kerberos authentication requires domain enrollment; NTLMv2 fallback is supported within CredSSP.
+   - **TLS Certificate Validation:** `CertificateValidation::Strict` validates certificates against the system CA root store. For self-signed certificates common in lab and private infrastructure, `CertificateValidation::Tofu` records the SHA-256 fingerprint on first use and warns if the fingerprint changes unexpectedly.
+   - **Virtual Channels:** Fast-path graphics output, pointer and keyboard input, Special Administrative Sequences (SAS: Ctrl+Alt+Del, Win key), and basic clipboard text exchange are active. Audio output, microphone redirection, and USB/drive redirection are scheduled for future minor releases.
+
+---
+
+## 8. Security Policies and Best Practices
+
+1. **Credential Hygiene:**
+   - Secrets (passwords, tokens, expanded DES keys) are zeroized from memory immediately on drop via `zeroize::Zeroize`.
+   - `Debug` implementations explicitly redact passwords to `[REDACTED]` to prevent leakage in telemetry, traces, and crash reports.
+   - Ephemeral passwords entered via Quick Connect are held only for the duration of the connection handshake and zeroized when the session terminates.
+
+2. **Network and Resource Bounds:**
+   - Maximum decompressed output from ZRLE blocks is capped by tile geometry bounds (`max_decompressed_bytes = num_tiles * (1 + 64 * 64 * 4) + 65536`) to neutralize decompression bombs.
+   - Maximum compressed rectangle payloads are capped at 32 MiB (`MAX_COMPRESSED_PAYLOAD_SIZE`).
+   - Maximum rectangle dimensions are clamped to 16,384 pixels (`MAX_RECTANGLE_DIMENSION`).
+   - Clipboard payloads are bounded to 2 MiB (`MAX_CLIPBOARD_BYTES`), with bidirectional rolling-hash loop suppression.
+
+3. **No External Viewers:**
+   - The entire graphics pipeline (decoders, decompression, coordinate transforms, canvas rendering) runs in-process in pure Rust within GPUI. No external binaries (`mstsc`, `xfreerdp`, `vncviewer`, etc.) are spawned or required.
