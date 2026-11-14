@@ -6,7 +6,7 @@
 
 use crate::{
     HostStore, StorageError, SyncGroupPayload, SyncHostPayload, SyncIdentityPayload,
-    SyncSnippetPayload, SyncTunnelPayload,
+    SyncSnippetPayload, SyncTunnelPayload, SyncWorkspacePayload,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -408,8 +408,8 @@ impl ServerSyncEngine {
                         store
                             .connection
                             .execute(
-                                "DELETE FROM snippets WHERE name = ?1",
-                                (item.object_id.as_str(),),
+                                "DELETE FROM snippets WHERE name = ?1 AND vault_id = ?2",
+                                (item.object_id.as_str(), vault_str),
                             )
                             .await?;
                     }
@@ -417,8 +417,17 @@ impl ServerSyncEngine {
                         store
                             .connection
                             .execute(
-                                "DELETE FROM tunnels WHERE name = ?1",
-                                (item.object_id.as_str(),),
+                                "DELETE FROM tunnels WHERE name = ?1 AND vault_id = ?2",
+                                (item.object_id.as_str(), vault_str),
+                            )
+                            .await?;
+                    }
+                    "workspace" => {
+                        store
+                            .connection
+                            .execute(
+                                "DELETE FROM workspaces WHERE name = ?1 AND vault_id = ?2",
+                                (item.object_id.as_str(), vault_str),
                             )
                             .await?;
                     }
@@ -515,20 +524,21 @@ impl ServerSyncEngine {
                             store
                                 .connection
                                 .execute(
-                                    "DELETE FROM snippets WHERE name = ?1",
-                                    (payload.name.as_str(),),
+                                    "DELETE FROM snippets WHERE name = ?1 AND vault_id = ?2",
+                                    (payload.name.as_str(), vault_str),
                                 )
                                 .await?;
                             store
                                 .connection
                                 .execute(
-                                    "INSERT INTO snippets (name, command, description, tags)
-                                 VALUES (?1, ?2, ?3, ?4)",
+                                    "INSERT INTO snippets (name, command, description, tags, vault_id)
+                                 VALUES (?1, ?2, ?3, ?4, ?5)",
                                     (
                                         payload.name.as_str(),
                                         payload.command.as_str(),
                                         payload.description.as_deref(),
                                         tags_str.as_str(),
+                                        vault_str,
                                     ),
                                 )
                                 .await?;
@@ -539,13 +549,13 @@ impl ServerSyncEngine {
                             store
                                 .connection
                                 .execute(
-                                    "DELETE FROM tunnels WHERE name = ?1",
-                                    (payload.name.as_str(),),
+                                    "DELETE FROM tunnels WHERE name = ?1 AND vault_id = ?2",
+                                    (payload.name.as_str(), vault_str),
                                 )
                                 .await?;
                             store.connection.execute(
-                                "INSERT INTO tunnels (name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                "INSERT INTO tunnels (name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start, vault_id)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                                 (
                                     payload.name.as_str(),
                                     payload.forwarding_type.as_str(),
@@ -554,6 +564,35 @@ impl ServerSyncEngine {
                                     payload.target_host.as_deref(),
                                     payload.target_port.map(|p| p as i64),
                                     if payload.auto_start { 1i64 } else { 0i64 },
+                                    vault_str,
+                                ),
+                            ).await?;
+                        }
+                    }
+                    "workspace" => {
+                        if let Ok(payload) = decrypt_entity::<SyncWorkspacePayload>(passphrase, env)
+                        {
+                            let tags_serialized = serde_json::to_string(&payload.tags)
+                                .unwrap_or_else(|_| "[]".to_string());
+                            let sessions_json = serde_json::to_string(&payload.sessions)
+                                .unwrap_or_else(|_| "[]".to_string());
+                            store
+                                .connection
+                                .execute(
+                                    "DELETE FROM workspaces WHERE name = ?1 AND vault_id = ?2",
+                                    (payload.name.as_str(), vault_str),
+                                )
+                                .await?;
+                            store.connection.execute(
+                                "INSERT INTO workspaces (name, description, layout, sessions_json, tags, vault_id)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                (
+                                    payload.name.as_str(),
+                                    payload.description.as_deref(),
+                                    payload.layout.as_str(),
+                                    sessions_json.as_str(),
+                                    tags_serialized.as_str(),
+                                    vault_str,
                                 ),
                             ).await?;
                         }

@@ -110,7 +110,35 @@ pub struct Snapshot {
     pub preferences: Preferences,
 }
 pub async fn execute(database: &str, command: Command) -> Result<Snapshot, String> {
+    execute_scoped(database, None, command).await
+}
+
+pub async fn execute_scoped(
+    database: &str,
+    vault_id: Option<&str>,
+    command: Command,
+) -> Result<Snapshot, String> {
     let mut store = HostStore::open(database).await.map_err(|e| e.to_string())?;
+    let vid_str = if let Some(vid) = vault_id {
+        if let Ok(v) = shellumi_core::VaultId::new(vid) {
+            store.set_vault_id(v);
+            Some(vid.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let is_remote = if let Some(ref vid) = vid_str {
+        if let Ok(Some(ctx)) = store.get_vault_context(vid).await {
+            matches!(ctx.location(), shellumi_core::VaultLocation::Remote { .. })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     match command {
         Command::Refresh => {}
         Command::ExportBackup { path, passphrase } => {
@@ -255,9 +283,38 @@ pub async fn execute(database: &str, command: Command) -> Result<Snapshot, Strin
                     .await
                     .map_err(|e| e.to_string())?;
             }
+            if is_remote {
+                if let Some(ref vid) = vid_str {
+                    let payload = crate::SyncSnippetPayload {
+                        name: snippet.name.clone(),
+                        command: snippet.command.clone(),
+                        description: snippet.description.clone(),
+                        tags: snippet.tags.clone(),
+                    };
+                    let json = serde_json::to_string(&payload).ok();
+                    let _ = store
+                        .record_pending_mutation(
+                            vid,
+                            &snippet.name,
+                            "snippet",
+                            0,
+                            false,
+                            json.as_deref(),
+                        )
+                        .await;
+                }
+            }
         }
         Command::DeleteSnippet(id) => {
-            store.delete_snippet(id).await.map_err(|e| e.to_string())?;
+            let snippet_name = store.get_snippet(id).await.ok().flatten().map(|s| s.name);
+            let deleted = store.delete_snippet(id).await.map_err(|e| e.to_string())?;
+            if is_remote && deleted {
+                if let (Some(ref vid), Some(sname)) = (&vid_str, snippet_name) {
+                    let _ = store
+                        .record_pending_mutation(vid, &sname, "snippet", 0, true, None)
+                        .await;
+                }
+            }
         }
         Command::SaveWorkspace {
             id,
@@ -280,18 +337,69 @@ pub async fn execute(database: &str, command: Command) -> Result<Snapshot, Strin
                     .await
                     .map_err(|e| e.to_string())?;
             }
+            if is_remote {
+                if let Some(ref vid) = vid_str {
+                    let payload = crate::SyncWorkspacePayload {
+                        name: name.clone(),
+                        description: if description.is_empty() {
+                            None
+                        } else {
+                            Some(description.clone())
+                        },
+                        layout: layout.clone(),
+                        sessions: sessions.clone(),
+                        tags: vec![],
+                    };
+                    let json = serde_json::to_string(&payload).ok();
+                    let _ = store
+                        .record_pending_mutation(vid, &name, "workspace", 0, false, json.as_deref())
+                        .await;
+                }
+            }
         }
         Command::DeleteWorkspace(id) => {
-            store
+            let ws_name = store.get_workspace(id).await.ok().flatten().map(|w| w.name);
+            let deleted = store
                 .delete_workspace(id)
                 .await
                 .map_err(|e| e.to_string())?;
+            if is_remote && deleted {
+                if let (Some(ref vid), Some(wname)) = (&vid_str, ws_name) {
+                    let _ = store
+                        .record_pending_mutation(vid, &wname, "workspace", 0, true, None)
+                        .await;
+                }
+            }
         }
         Command::DuplicateWorkspace { id, name } => {
             store
                 .duplicate_workspace(id, &name)
                 .await
                 .map_err(|e| e.to_string())?;
+            if is_remote {
+                if let Some(ref vid) = vid_str {
+                    if let Ok(Some(ws)) = store.get_workspace_by_name(&name).await {
+                        let payload = crate::SyncWorkspacePayload {
+                            name: ws.name.clone(),
+                            description: ws.description.clone(),
+                            layout: ws.layout.clone(),
+                            sessions: ws.sessions.clone(),
+                            tags: ws.tags.clone(),
+                        };
+                        let json = serde_json::to_string(&payload).ok();
+                        let _ = store
+                            .record_pending_mutation(
+                                vid,
+                                &name,
+                                "workspace",
+                                0,
+                                false,
+                                json.as_deref(),
+                            )
+                            .await;
+                    }
+                }
+            }
         }
         Command::SavePreferences(prefs) => prefs.save(Path::new(database))?,
         Command::ImportSnippets(json) => {
@@ -307,8 +415,8 @@ pub async fn execute(database: &str, command: Command) -> Result<Snapshot, Strin
                 .execute("BEGIN IMMEDIATE", ())
                 .await
                 .map_err(|e| e.to_string())?;
-            for snippet in snippets {
-                if let Err(error) = store.add_snippet(&snippet).await {
+            for snippet in &snippets {
+                if let Err(error) = store.add_snippet(snippet).await {
                     let _ = store.connection.execute("ROLLBACK", ()).await;
                     return Err(error.to_string());
                 }
@@ -318,6 +426,29 @@ pub async fn execute(database: &str, command: Command) -> Result<Snapshot, Strin
                 .execute("COMMIT", ())
                 .await
                 .map_err(|e| e.to_string())?;
+            if is_remote {
+                if let Some(ref vid) = vid_str {
+                    for snippet in snippets {
+                        let payload = crate::SyncSnippetPayload {
+                            name: snippet.name.clone(),
+                            command: snippet.command.clone(),
+                            description: snippet.description.clone(),
+                            tags: snippet.tags.clone(),
+                        };
+                        let json = serde_json::to_string(&payload).ok();
+                        let _ = store
+                            .record_pending_mutation(
+                                vid,
+                                &snippet.name,
+                                "snippet",
+                                0,
+                                false,
+                                json.as_deref(),
+                            )
+                            .await;
+                    }
+                }
+            }
         }
     }
     Ok(Snapshot {

@@ -244,11 +244,16 @@ impl Shellumi {
         let refreshing = matches!(command, Command::Refresh);
         self.desktop.busy = true;
         self.desktop.message = None;
+        let active_vault_id = self.active_vault_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
-            runtime.block_on(shellumi_storage::desktop::execute(&path, command))
+            runtime.block_on(shellumi_storage::desktop::execute_scoped(
+                &path,
+                Some(&active_vault_id),
+                command,
+            ))
         });
         cx.spawn(async move |app, cx| {
             let result = task.await;
@@ -290,6 +295,9 @@ impl Shellumi {
                             app.desktop.editor = None;
                             app.desktop.confirm = None;
                             app.desktop.message = Some("Saved locally.".into());
+                            if app.is_active_vault_remote() {
+                                app.sync_active_vault(cx);
+                            }
                         }
                     }
                     Err(error) => app.desktop.message = Some(error),

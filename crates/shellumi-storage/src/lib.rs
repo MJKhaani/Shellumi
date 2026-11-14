@@ -16,7 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -689,9 +689,15 @@ impl HostStore {
                     description TEXT,
                     tags TEXT NOT NULL DEFAULT '',
                     variables TEXT NOT NULL DEFAULT '[]',
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS snippets_vault_id_idx ON snippets(vault_id)",
                 (),
             )
             .await?;
@@ -735,8 +741,14 @@ impl HostStore {
                     target_host TEXT,
                     target_port INTEGER CHECK(target_port IS NULL OR (target_port BETWEEN 1 AND 65535)),
                     auto_start INTEGER NOT NULL DEFAULT 0,
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
                     FOREIGN KEY (host_id) REFERENCES hosts(id) ON DELETE CASCADE
                 )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS tunnels_vault_id_idx ON tunnels(vault_id)",
                 (),
             )
             .await?;
@@ -777,9 +789,15 @@ impl HostStore {
                     layout TEXT NOT NULL DEFAULT 'single',
                     sessions_json TEXT NOT NULL DEFAULT '[]',
                     tags TEXT NOT NULL DEFAULT '[]',
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS workspaces_vault_id_idx ON workspaces(vault_id)",
                 (),
             )
             .await?;
@@ -1796,6 +1814,119 @@ impl HostStore {
             .await?;
             tx.execute("PRAGMA user_version = 18", ()).await?;
         }
+        if version < 19 {
+            // 1. snippets
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS snippets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(name) > 0),
+                    command TEXT NOT NULL CHECK(length(command) > 0),
+                    description TEXT,
+                    tags TEXT NOT NULL DEFAULT '',
+                    variables TEXT NOT NULL DEFAULT '[]',
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            let mut columns = tx.query("PRAGMA table_info(snippets)", ()).await?;
+            let mut has_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_vault_id {
+                tx.execute(
+                    "ALTER TABLE snippets ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS snippets_vault_id_idx ON snippets(vault_id)",
+                (),
+            )
+            .await?;
+
+            // 2. tunnels
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS tunnels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host_id INTEGER,
+                    name TEXT NOT NULL CHECK(length(name) > 0),
+                    forwarding_type TEXT NOT NULL,
+                    bind_address TEXT,
+                    bind_port INTEGER NOT NULL CHECK(bind_port BETWEEN 1 AND 65535),
+                    target_host TEXT,
+                    target_port INTEGER CHECK(target_port IS NULL OR (target_port BETWEEN 1 AND 65535)),
+                    auto_start INTEGER NOT NULL DEFAULT 0,
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
+                    FOREIGN KEY (host_id) REFERENCES hosts(id) ON DELETE CASCADE
+                )",
+                (),
+            )
+            .await?;
+            let mut columns = tx.query("PRAGMA table_info(tunnels)", ()).await?;
+            let mut has_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_vault_id {
+                tx.execute(
+                    "ALTER TABLE tunnels ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS tunnels_vault_id_idx ON tunnels(vault_id)",
+                (),
+            )
+            .await?;
+
+            // 3. workspaces
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    description TEXT,
+                    layout TEXT NOT NULL DEFAULT 'single',
+                    sessions_json TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+            let mut columns = tx.query("PRAGMA table_info(workspaces)", ()).await?;
+            let mut has_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_vault_id {
+                tx.execute(
+                    "ALTER TABLE workspaces ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS workspaces_vault_id_idx ON workspaces(vault_id)",
+                (),
+            )
+            .await?;
+
+            tx.execute("PRAGMA user_version = 19", ()).await?;
+        }
         tx.commit().await?;
         Ok(Self {
             _database: database,
@@ -1882,6 +2013,38 @@ impl HostStore {
             ));
         }
         Ok(contexts)
+    }
+
+    pub async fn get_vault_context(
+        &self,
+        id: &str,
+    ) -> Result<Option<shellumi_core::VaultContext>, StorageError> {
+        use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
+        let mut rows = self.connection.query(
+            "SELECT id, name, server_connection_id, server_vault_id FROM vault_contexts WHERE id = ?1", (id,),
+        ).await?;
+        if let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let _name: String = row.get(1)?;
+            let server: Option<String> = row.get(2)?;
+            let remote: Option<String> = row.get(3)?;
+            let location = match (server, remote) {
+                (None, None) => VaultLocation::Local,
+                (Some(server), Some(remote)) => VaultLocation::Remote {
+                    server: ServerConnectionId::new(server)
+                        .map_err(StorageError::InvalidVaultIdentity)?,
+                    server_vault_id: VaultId::new(remote)
+                        .map_err(StorageError::InvalidVaultIdentity)?,
+                },
+                _ => return Err(StorageError::Serialization("invalid vault location".into())),
+            };
+            Ok(Some(VaultContext::new(
+                VaultId::new(id).map_err(StorageError::InvalidVaultIdentity)?,
+                location,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2659,8 +2822,8 @@ impl HostStore {
 
         self.connection
             .execute(
-                "INSERT INTO tunnels (host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO tunnels (host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start, vault_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 (
                     host_id,
                     name,
@@ -2670,6 +2833,7 @@ impl HostStore {
                     rule.target_host.as_deref(),
                     target_port,
                     if auto_start { 1i64 } else { 0i64 },
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -2690,7 +2854,7 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE tunnels SET host_id = ?1, name = ?2, forwarding_type = ?3, bind_address = ?4, bind_port = ?5, target_host = ?6, target_port = ?7, auto_start = ?8 WHERE id = ?9",
+                "UPDATE tunnels SET host_id = ?1, name = ?2, forwarding_type = ?3, bind_address = ?4, bind_port = ?5, target_host = ?6, target_port = ?7, auto_start = ?8 WHERE id = ?9 AND vault_id = ?10",
                 (
                     host_id,
                     name,
@@ -2701,6 +2865,7 @@ impl HostStore {
                     target_port,
                     if auto_start { 1i64 } else { 0i64 },
                     id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -2711,8 +2876,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start FROM tunnels ORDER BY id",
-                (),
+                "SELECT id, host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start FROM tunnels WHERE vault_id = ?1 ORDER BY id",
+                (self.host_vault_id.as_str(),),
             )
             .await?;
         Self::parse_tunnel_rows(&mut rows).await
@@ -2725,8 +2890,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start FROM tunnels WHERE host_id = ?1 ORDER BY id",
-                (host_id,),
+                "SELECT id, host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start FROM tunnels WHERE host_id = ?1 AND vault_id = ?2 ORDER BY id",
+                (host_id, self.host_vault_id.as_str()),
             )
             .await?;
         Self::parse_tunnel_rows(&mut rows).await
@@ -2735,9 +2900,39 @@ impl HostStore {
     pub async fn delete_tunnel(&mut self, id: i64) -> Result<bool, StorageError> {
         let rows = self
             .connection
-            .execute("DELETE FROM tunnels WHERE id = ?1", (id,))
+            .execute(
+                "DELETE FROM tunnels WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
+            )
             .await?;
         Ok(rows != 0)
+    }
+
+    pub async fn get_tunnel(&self, id: i64) -> Result<Option<SavedTunnel>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start FROM tunnels WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
+            )
+            .await?;
+        let mut list = Self::parse_tunnel_rows(&mut rows).await?;
+        Ok(list.pop())
+    }
+
+    pub async fn get_tunnel_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SavedTunnel>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, host_id, name, forwarding_type, bind_address, bind_port, target_host, target_port, auto_start FROM tunnels WHERE name = ?1 AND vault_id = ?2",
+                (name, self.host_vault_id.as_str()),
+            )
+            .await?;
+        let mut list = Self::parse_tunnel_rows(&mut rows).await?;
+        Ok(list.pop())
     }
 
     async fn parse_tunnel_rows(rows: &mut turso::Rows) -> Result<Vec<SavedTunnel>, StorageError> {
@@ -2958,13 +3153,14 @@ impl HostStore {
 
         self.connection
             .execute(
-                "INSERT INTO snippets (name, command, description, tags, variables) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO snippets (name, command, description, tags, variables, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (
                     name,
                     command,
                     snippet.description.as_deref(),
                     tags_str.as_str(),
                     vars_json.as_str(),
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -2989,7 +3185,7 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE snippets SET name = ?1, command = ?2, description = ?3, tags = ?4, variables = ?5, updated_at = datetime('now') WHERE id = ?6",
+                "UPDATE snippets SET name = ?1, command = ?2, description = ?3, tags = ?4, variables = ?5, updated_at = datetime('now') WHERE id = ?6 AND vault_id = ?7",
                 (
                     name,
                     command,
@@ -2997,6 +3193,7 @@ impl HostStore {
                     tags_str.as_str(),
                     vars_json.as_str(),
                     id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -3006,13 +3203,16 @@ impl HostStore {
     pub async fn delete_snippet(&mut self, id: i64) -> Result<bool, StorageError> {
         self.connection
             .execute(
-                "UPDATE hosts SET startup_snippet_id = NULL WHERE startup_snippet_id = ?1",
-                (id,),
+                "UPDATE hosts SET startup_snippet_id = NULL WHERE startup_snippet_id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
             )
             .await?;
         let rows = self
             .connection
-            .execute("DELETE FROM snippets WHERE id = ?1", (id,))
+            .execute(
+                "DELETE FROM snippets WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
+            )
             .await?;
         Ok(rows != 0)
     }
@@ -3021,8 +3221,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, command, description, tags, variables, created_at, updated_at FROM snippets WHERE id = ?1",
-                (id,),
+                "SELECT id, name, command, description, tags, variables, created_at, updated_at FROM snippets WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
             )
             .await?;
         if let Some(row) = rows.next().await? {
@@ -3054,12 +3254,27 @@ impl HostStore {
         }
     }
 
+    pub async fn get_snippet_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SavedSnippet>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, command, description, tags, variables, created_at, updated_at FROM snippets WHERE name = ?1 AND vault_id = ?2",
+                (name, self.host_vault_id.as_str()),
+            )
+            .await?;
+        let mut list = Self::parse_snippet_rows(&mut rows).await?;
+        Ok(list.pop())
+    }
+
     pub async fn list_snippets(&self) -> Result<Vec<SavedSnippet>, StorageError> {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, command, description, tags, variables, created_at, updated_at FROM snippets ORDER BY name ASC",
-                (),
+                "SELECT id, name, command, description, tags, variables, created_at, updated_at FROM snippets WHERE vault_id = ?1 ORDER BY name ASC",
+                (self.host_vault_id.as_str(),),
             )
             .await?;
         Self::parse_snippet_rows(&mut rows).await
@@ -3143,13 +3358,14 @@ impl HostStore {
 
         self.connection
             .execute(
-                "INSERT INTO workspaces (name, description, layout, sessions_json, tags) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO workspaces (name, description, layout, sessions_json, tags, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (
                     name_trimmed,
                     description,
                     layout,
                     sessions_json,
                     tags_serialized,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -3176,7 +3392,7 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE workspaces SET name = ?1, description = ?2, layout = ?3, sessions_json = ?4, tags = ?5, updated_at = datetime('now') WHERE id = ?6",
+                "UPDATE workspaces SET name = ?1, description = ?2, layout = ?3, sessions_json = ?4, tags = ?5, updated_at = datetime('now') WHERE id = ?6 AND vault_id = ?7",
                 (
                     name_trimmed,
                     description,
@@ -3184,6 +3400,7 @@ impl HostStore {
                     sessions_json,
                     tags_serialized,
                     id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -3194,8 +3411,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces WHERE id = ?1",
-                (id,),
+                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
             )
             .await?;
         if let Some(row) = rows.next().await? {
@@ -3227,12 +3444,52 @@ impl HostStore {
         }
     }
 
+    pub async fn get_workspace_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SavedWorkspace>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces WHERE name = ?1 AND vault_id = ?2",
+                (name, self.host_vault_id.as_str()),
+            )
+            .await?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let description: Option<String> = row.get(2)?;
+            let layout: String = row.get(3)?;
+            let sessions_raw: String = row.get(4)?;
+            let tags_raw: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
+            let updated_at: String = row.get(7)?;
+
+            let sessions: Vec<WorkspaceSession> =
+                serde_json::from_str(&sessions_raw).unwrap_or_default();
+            let tags = parse_tags(&tags_raw);
+
+            list.push(SavedWorkspace {
+                id,
+                name,
+                description,
+                layout,
+                sessions,
+                tags,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(list.pop())
+    }
+
     pub async fn list_workspaces(&self) -> Result<Vec<SavedWorkspace>, StorageError> {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces ORDER BY id ASC",
-                (),
+                "SELECT id, name, description, layout, sessions_json, tags, created_at, updated_at FROM workspaces WHERE vault_id = ?1 ORDER BY id ASC",
+                (self.host_vault_id.as_str(),),
             )
             .await?;
         let mut list = Vec::new();
@@ -3267,7 +3524,10 @@ impl HostStore {
     pub async fn delete_workspace(&mut self, id: i64) -> Result<bool, StorageError> {
         let rows = self
             .connection
-            .execute("DELETE FROM workspaces WHERE id = ?1", (id,))
+            .execute(
+                "DELETE FROM workspaces WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
+            )
             .await?;
         Ok(rows > 0)
     }
@@ -4907,6 +5167,111 @@ mod tests {
         let legacy_hosts = store.list().await.unwrap();
         assert_eq!(legacy_hosts.len(), 1);
         assert_eq!(legacy_hosts[0].id, id_a);
+    }
+
+    #[tokio::test]
+    async fn vault_snippets_tunnels_workspaces_are_isolated_across_vaults() {
+        use shellumi_core::VaultId;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault-isolation.db");
+        let path = path.to_str().unwrap();
+
+        let mut store = HostStore::open(path).await.unwrap();
+        assert_eq!(store.vault_id().as_str(), LEGACY_LOCAL_VAULT_ID);
+
+        // Add snippet, tunnel, workspace in default local vault
+        let snip_local = Snippet {
+            name: "deploy-local".into(),
+            command: "echo local".into(),
+            description: None,
+            tags: vec!["local".into()],
+            variables: vec![],
+        };
+        let snip_id_local = store.add_snippet(&snip_local).await.unwrap();
+
+        let tunnel_rule_local =
+            PortForwardRule::local(Some("127.0.0.1"), 8080, "localhost", 80).unwrap();
+        let tunnel_id_local = store
+            .add_tunnel("tunnel-local", None, &tunnel_rule_local, false)
+            .await
+            .unwrap();
+
+        let ws_id_local = store
+            .add_workspace("workspace-local", None, "single", &[], &[])
+            .await
+            .unwrap();
+
+        assert_eq!(store.list_snippets().await.unwrap().len(), 1);
+        assert_eq!(store.list_tunnels().await.unwrap().len(), 1);
+        assert_eq!(store.list_workspaces().await.unwrap().len(), 1);
+
+        // Switch to remote vault
+        let remote_vid = VaultId::new("vault-remote").unwrap();
+        store.set_vault_id(remote_vid.clone());
+
+        assert!(store.list_snippets().await.unwrap().is_empty());
+        assert!(store.list_tunnels().await.unwrap().is_empty());
+        assert!(store.list_workspaces().await.unwrap().is_empty());
+
+        // Add entities in remote vault
+        let snip_remote = Snippet {
+            name: "deploy-remote".into(),
+            command: "echo remote".into(),
+            description: None,
+            tags: vec!["remote".into()],
+            variables: vec![],
+        };
+        let snip_id_remote = store.add_snippet(&snip_remote).await.unwrap();
+
+        let tunnel_rule_remote =
+            PortForwardRule::remote(Some("0.0.0.0"), 9090, "remotehost", 443).unwrap();
+        let tunnel_id_remote = store
+            .add_tunnel("tunnel-remote", None, &tunnel_rule_remote, true)
+            .await
+            .unwrap();
+
+        let ws_id_remote = store
+            .add_workspace("workspace-remote", None, "split-horizontal", &[], &[])
+            .await
+            .unwrap();
+
+        assert_eq!(store.list_snippets().await.unwrap().len(), 1);
+        assert_eq!(store.list_snippets().await.unwrap()[0].id, snip_id_remote);
+        assert_eq!(store.list_tunnels().await.unwrap().len(), 1);
+        assert_eq!(store.list_tunnels().await.unwrap()[0].id, tunnel_id_remote);
+        assert_eq!(store.list_workspaces().await.unwrap().len(), 1);
+        assert_eq!(store.list_workspaces().await.unwrap()[0].id, ws_id_remote);
+
+        // Switch back to legacy-local
+        store.set_vault_id(VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap());
+        let local_snippets = store.list_snippets().await.unwrap();
+        assert_eq!(local_snippets.len(), 1);
+        assert_eq!(local_snippets[0].id, snip_id_local);
+        assert_eq!(local_snippets[0].name, "deploy-local");
+
+        let local_tunnels = store.list_tunnels().await.unwrap();
+        assert_eq!(local_tunnels.len(), 1);
+        assert_eq!(local_tunnels[0].id, tunnel_id_local);
+        assert_eq!(local_tunnels[0].name, "tunnel-local");
+
+        let local_workspaces = store.list_workspaces().await.unwrap();
+        assert_eq!(local_workspaces.len(), 1);
+        assert_eq!(local_workspaces[0].id, ws_id_local);
+        assert_eq!(local_workspaces[0].name, "workspace-local");
+
+        // Delete from local vault and verify remote vault is unchanged
+        assert!(store.delete_snippet(snip_id_local).await.unwrap());
+        assert!(store.delete_tunnel(tunnel_id_local).await.unwrap());
+        assert!(store.delete_workspace(ws_id_local).await.unwrap());
+
+        assert!(store.list_snippets().await.unwrap().is_empty());
+        assert!(store.list_tunnels().await.unwrap().is_empty());
+        assert!(store.list_workspaces().await.unwrap().is_empty());
+
+        store.set_vault_id(remote_vid);
+        assert_eq!(store.list_snippets().await.unwrap().len(), 1);
+        assert_eq!(store.list_tunnels().await.unwrap().len(), 1);
+        assert_eq!(store.list_workspaces().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

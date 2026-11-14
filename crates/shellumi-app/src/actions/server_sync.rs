@@ -1,6 +1,7 @@
 //! Server synchronization actions and vault management for Shellumi Server v1.
 use super::*;
 use shellumi_core::server::ShellumiServerClient;
+use shellumi_storage::desktop::Command;
 use shellumi_storage::ServerSyncEngine;
 
 /// Summary metadata for a registered vault context in the application.
@@ -116,13 +117,14 @@ impl Shellumi {
         self.vault_dropdown_open = false;
         self.navigate_page("Hosts", window, cx);
 
+        self.load_hosts(cx);
+        self.desktop_command(Command::Refresh, cx);
+
         if self.is_active_vault_remote() {
             self.sync_status = AppSyncStatus::Syncing;
-            self.load_hosts(cx);
             self.sync_active_vault(cx);
         } else {
             self.sync_status = AppSyncStatus::LocalOnly;
-            self.load_hosts(cx);
         }
         cx.notify();
     }
@@ -235,6 +237,7 @@ impl Shellumi {
                             last_sync_time: now,
                         };
                         app.load_hosts(cx);
+                        app.desktop_command(Command::Refresh, cx);
                     }
                     Err(error) => {
                         app.sync_status = AppSyncStatus::Error(error);

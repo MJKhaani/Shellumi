@@ -32,12 +32,16 @@ impl Shellumi {
         cx.notify();
 
         if let Some(path) = self.database.clone() {
+            let active_vault_id = self.active_vault_id.clone();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                        store.set_vault_id(vid);
+                    }
                     store.list_tunnels().await.map_err(|e| e.to_string())
                 })
             });
@@ -274,6 +278,8 @@ impl Shellumi {
             .as_ref()
             .and_then(|modal| modal.editing_id);
         if let Some(path) = self.database.clone() {
+            let active_vault_id = self.active_vault_id.clone();
+            let is_remote = self.is_active_vault_remote();
             let name_clone = name.clone();
             let rule_clone = rule.clone();
             let task = cx.background_executor().spawn(async move {
@@ -282,18 +288,44 @@ impl Shellumi {
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
                     let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                    if let Some(id) = editing_id {
+                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                        store.set_vault_id(vid);
+                    }
+                    let new_id = if let Some(id) = editing_id {
                         store
                             .update_tunnel(id, &name_clone, host_id, &rule_clone, auto_start)
                             .await
                             .map_err(|e| e.to_string())?;
-                        Ok(id)
+                        id
                     } else {
                         store
                             .add_tunnel(&name_clone, host_id, &rule_clone, auto_start)
                             .await
-                            .map_err(|e| e.to_string())
+                            .map_err(|e| e.to_string())?
+                    };
+                    if is_remote {
+                        let payload = shellumi_storage::SyncTunnelPayload {
+                            name: name_clone.clone(),
+                            forwarding_type: rule_clone.forwarding_type.to_string(),
+                            bind_address: rule_clone.bind_address.clone(),
+                            bind_port: rule_clone.bind_port,
+                            target_host: rule_clone.target_host.clone(),
+                            target_port: rule_clone.target_port,
+                            auto_start,
+                        };
+                        let json = serde_json::to_string(&payload).ok();
+                        let _ = store
+                            .record_pending_mutation(
+                                &active_vault_id,
+                                &name_clone,
+                                "tunnel",
+                                0,
+                                false,
+                                json.as_deref(),
+                            )
+                            .await;
                     }
+                    Ok(new_id)
                 })
             });
 
@@ -327,6 +359,9 @@ impl Shellumi {
                                 modal.status_message =
                                     Some(format!("Saved tunnel '{name}' (ID {new_id})"));
                                 modal.error = None;
+                                if app.is_active_vault_remote() {
+                                    app.sync_active_vault(cx);
+                                }
                             }
                             Err(e) => {
                                 modal.error = Some(e);
@@ -375,16 +410,42 @@ impl Shellumi {
 
     pub(crate) fn delete_tunnel_modal(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
         if let Some(path) = self.database.clone() {
+            let active_vault_id = self.active_vault_id.clone();
+            let is_remote = self.is_active_vault_remote();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
                     let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                    store
+                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                        store.set_vault_id(vid);
+                    }
+                    let tunnel_name = store
+                        .get_tunnel(tunnel_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|t| t.name);
+                    let deleted = store
                         .delete_tunnel(tunnel_id)
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string())?;
+                    if is_remote && deleted {
+                        if let Some(tname) = tunnel_name {
+                            let _ = store
+                                .record_pending_mutation(
+                                    &active_vault_id,
+                                    &tname,
+                                    "tunnel",
+                                    0,
+                                    true,
+                                    None,
+                                )
+                                .await;
+                        }
+                    }
+                    Ok(deleted)
                 })
             });
 
@@ -401,6 +462,9 @@ impl Shellumi {
                                 }
                                 modal.status_message = Some(format!("Tunnel {tunnel_id} deleted."));
                                 modal.error = None;
+                                if app.is_active_vault_remote() {
+                                    app.sync_active_vault(cx);
+                                }
                             }
                             Ok(false) => {
                                 modal.error = Some("Tunnel not found.".into());
