@@ -159,6 +159,21 @@ impl Shellumi {
             }))
             .child("📋 Sync Clipboard");
 
+        let send_files_btn = div()
+            .id(("rd-send-files", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_choose_and_send_files(tab_idx, cx);
+            }))
+            .child("📁 Send Files…");
+
         let scale_fit = div()
             .id(("rd-scale-fit", tab_idx))
             .px_2()
@@ -386,7 +401,8 @@ impl Shellumi {
                             .child(cad_btn)
                             .child(win_btn)
                             .child(alt_tab_btn)
-                            .child(clip_btn),
+                            .child(clip_btn)
+                            .child(send_files_btn),
                     )
                     .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
                     .child(

@@ -23,6 +23,8 @@ pub enum SessionCommand {
     Key(KeyEvent),
     /// Send local clipboard text to the remote host.
     SendClipboard(String),
+    /// Send local files to the remote host via clipboard file transfer.
+    SendFiles(Vec<std::path::PathBuf>),
     /// Request desktop resize (if protocol extension supported).
     RequestResize { width: u32, height: u32 },
     /// Request a full framebuffer refresh.
@@ -48,6 +50,11 @@ pub enum SessionEvent {
     },
     /// Clipboard text received from the remote host.
     ServerClipboard(String),
+    /// File transfer received from the remote host.
+    ServerFilesReceived {
+        files: Vec<String>,
+        target_dir: String,
+    },
     /// Remote terminal bell event.
     Bell,
     /// Connection or protocol error occurred.
@@ -126,6 +133,11 @@ impl SessionWorkerHandle {
         }
     }
 
+    /// Return a clone of the event channel sender.
+    pub fn event_sender(&self) -> Sender<SessionEvent> {
+        self.event_tx.clone()
+    }
+
     /// Await the next command from the UI.
     pub async fn recv_command(&self) -> Result<SessionCommand, String> {
         self.command_rx
@@ -185,6 +197,28 @@ mod tests {
         assert_eq!(
             ev,
             Some(SessionEvent::StateChanged(SessionState::Connected))
+        );
+
+        // UI sends SendFiles command
+        let test_paths = vec![std::path::PathBuf::from("/tmp/test.txt")];
+        ui.try_send_command(SessionCommand::SendFiles(test_paths.clone()))
+            .unwrap();
+        let cmd = worker.try_recv_command().unwrap();
+        assert_eq!(cmd, Some(SessionCommand::SendFiles(test_paths)));
+
+        // Worker sends ServerFilesReceived event
+        let files = vec!["download.txt".to_string()];
+        let target_dir = "/tmp/downloads".to_string();
+        worker
+            .try_send_event(SessionEvent::ServerFilesReceived {
+                files: files.clone(),
+                target_dir: target_dir.clone(),
+            })
+            .unwrap();
+        let ev = ui.try_recv_event().unwrap();
+        assert_eq!(
+            ev,
+            Some(SessionEvent::ServerFilesReceived { files, target_dir })
         );
     }
 }

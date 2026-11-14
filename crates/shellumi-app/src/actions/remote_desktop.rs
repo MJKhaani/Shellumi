@@ -529,8 +529,12 @@ impl Shellumi {
                                             rd.latency_ms = m.latency_ms;
                                         }
                                         shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
-                                            rd.clipboard_text = Some(text);
-                                            rd.last_action_note = Some("Remote clipboard text received".into());
+                                            rd.clipboard_text = Some(text.clone());
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                            rd.last_action_note = Some("Remote clipboard text received and copied to local clipboard".into());
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::ServerFilesReceived { files, target_dir } => {
+                                            rd.last_action_note = Some(format!("Received {} file(s) into {}", files.len(), target_dir));
                                         }
                                         shellumi_remote_desktop::SessionEvent::Bell => {
                                             rd.last_action_note = Some("Terminal bell alert".into());
@@ -560,10 +564,18 @@ impl Shellumi {
     pub(crate) fn remote_desktop_sync_clipboard(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
+                let mut text_to_send = rd.clipboard_text.clone();
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(t) = item.text() {
+                        if !t.is_empty() {
+                            text_to_send = Some(t);
+                        }
+                    }
+                }
                 if let Some(ui_handle) = &rd.ui_handle {
-                    if let Some(clip) = &rd.clipboard_text {
+                    if let Some(text) = text_to_send {
                         let _ = ui_handle.try_send_command(
-                            shellumi_remote_desktop::SessionCommand::SendClipboard(clip.clone()),
+                            shellumi_remote_desktop::SessionCommand::SendClipboard(text),
                         );
                     }
                 }
@@ -577,5 +589,55 @@ impl Shellumi {
                 cx.notify();
             }
         }
+    }
+
+    pub(crate) fn remote_desktop_send_files(
+        &mut self,
+        tab_idx: usize,
+        paths: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let count = paths.len();
+                    if let Err(e) = ui_handle
+                        .try_send_command(shellumi_remote_desktop::SessionCommand::SendFiles(paths))
+                    {
+                        rd.last_action_note = Some(format!("Failed to stage files: {e}"));
+                    } else {
+                        rd.last_action_note =
+                            Some(format!("Staged {count} file(s) for remote transfer"));
+                    }
+                } else {
+                    rd.last_action_note = Some("File transfer requires an active session".into());
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_choose_and_send_files(
+        &mut self,
+        tab_idx: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Select files to send to remote desktop".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if !paths.is_empty() {
+                    let _ = this.update(cx, |app, cx| {
+                        app.remote_desktop_send_files(tab_idx, paths, cx);
+                    });
+                }
+            }
+        })
+        .detach();
     }
 }

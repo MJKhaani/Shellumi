@@ -45,11 +45,22 @@ pub async fn run_rdp_session(
         .await;
 
     let rdp_config = RdpClientConfig::from_session_config(&config);
-    let ironrdp_cfg = rdp_config.to_ironrdp_config()?;
+    let proxy = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let temp_dir = std::env::temp_dir()
+        .join("shellumi-transfers")
+        .to_string_lossy()
+        .to_string();
+    let clipboard_backend = crate::clipboard::ShellumiCliprdrBackend::new(
+        proxy.clone(),
+        worker.event_sender(),
+        temp_dir,
+    );
+    let ironrdp_cfg = rdp_config.to_ironrdp_config_with_backend(Some(clipboard_backend.clone()))?;
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     let client = RdpClient::new(ironrdp_cfg, out_tx);
     let input_sender = client.input_sender();
+    *proxy.lock().unwrap() = Some(input_sender.clone());
 
     // Spawn IronRDP background runner in a dedicated OS thread with current-thread runtime
     // to bypass higher-ranked lifetime Send limitations in ironrdp-client's internal futures.
@@ -109,6 +120,18 @@ pub async fn run_rdp_session(
                             if !config.view_only {
                                 for chunk in build_ctrl_alt_del_sequence() {
                                     let _ = input_sender.send(RdpInputEvent::FastPath(chunk));
+                                }
+                            }
+                        }
+                        SessionCommand::SendClipboard(text) => {
+                            if !config.view_only {
+                                clipboard_backend.set_local_text(text);
+                            }
+                        }
+                        SessionCommand::SendFiles(paths) => {
+                            if !config.view_only {
+                                if let Err(e) = clipboard_backend.stage_files(&paths) {
+                                    tracing::warn!("Failed to stage files for RDP transfer: {e}");
                                 }
                             }
                         }
@@ -202,6 +225,7 @@ pub async fn run_rdp_session(
         }
     }
 
+    *proxy.lock().unwrap() = None;
     let _ = stop_tx.send(());
     let _ = rdp_thread.join();
     let _ = worker

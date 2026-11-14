@@ -3795,6 +3795,8 @@ dependencies = [
  "anyhow",
  "futures-util",
  "ironrdp-cfg",
+ "ironrdp-cliprdr",
+ "ironrdp-cliprdr-native",
  "ironrdp-connector",
  "ironrdp-core",
  "ironrdp-displaycontrol",
@@ -3828,6 +3830,18 @@ dependencies = [
  "ironrdp-pdu",
  "ironrdp-svc",
  "tracing",
+]
+
+[[package]]
+name = "ironrdp-cliprdr-native"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95cc7f249eb8a5c507fba3a5ee2ba57da716d0881c46421eab79e6fab1b51ae5"
+dependencies = [
+ "ironrdp-cliprdr",
+ "ironrdp-core",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -6976,6 +6990,7 @@ dependencies = [
  "ironrdp-graphics",
  "ironrdp-pdu",
  "ironrdp-session",
+ "ironrdp-svc",
  "ironrdp-tls",
  "ironrdp-tokio",
  "rustls",

@@ -115,6 +115,7 @@ See [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md) for f
   - Security by default: enforces `CertificateValidation::Strict`, rejecting unverified TLS peer certificates and presenting a dedicated certificate fingerprint review and pinning workflow (`ShellumiCertificateVerifier` with SHA-256 fingerprinting) for self-signed infrastructure.
   - Authenticates via CredSSP / NLA; translates `ironrdp-client` output events (`Connected`, `DesktopUpdate`, `Image`, `ConnectionFailure`) into `SessionEvent`s.
   - Keystroke translation: converts host keyboard input into RDP scancodes and Unicode events; mouse move/click/wheel mapping; SAS (`Ctrl+Alt+Del`, `Win`) dispatch.
+  - Authentic CLIPRDR virtual channel: cross-platform `ShellumiCliprdrBackend` providing bidirectional UTF-16LE text clipboard synchronization and chunked streaming file transfers (`FileGroupDescriptorW` / `FileContentsRequest` / `FileContentsResponse`) between host filesystem and remote Windows Explorer sessions.
 - **`shellumi-app` UI Canvas & Session Tabs:**
   - Embeds the remote desktop session directly inside GPUI tabs with high-performance canvas blitting.
   - Host Editor upgrades: protocol parameters (resolution presets, color depth, view-only, TLS cert policies).

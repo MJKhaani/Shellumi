@@ -82,8 +82,16 @@ impl RdpClientConfig {
         }
     }
 
-    /// Build a underlying `ironrdp_client::config::Config` from this configuration.
+    /// Build an underlying `ironrdp_client::config::Config` from this configuration.
     pub fn to_ironrdp_config(&self) -> Result<Config, RdpConfigError> {
+        self.to_ironrdp_config_with_backend(None)
+    }
+
+    /// Build an underlying `ironrdp_client::config::Config` with an optional CLIPRDR clipboard backend.
+    pub fn to_ironrdp_config_with_backend(
+        &self,
+        backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
+    ) -> Result<Config, RdpConfigError> {
         if self.host.trim().is_empty() {
             return Err(RdpConfigError::InvalidEndpoint(
                 "Host address cannot be empty".into(),
@@ -114,6 +122,13 @@ impl RdpClientConfig {
 
         if let Some(dom) = &self.domain {
             builder = builder.with_domain(dom.clone());
+        }
+
+        if let Some(be) = backend {
+            builder = builder.with_clipboard(ironrdp_client::config::ClipboardType::Disable);
+            builder = builder.with_static_channel(move |_ps| {
+                Some(ironrdp_cliprdr::Cliprdr::new(Box::new(be.clone())))
+            });
         }
 
         builder

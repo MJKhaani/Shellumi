@@ -2,6 +2,22 @@
 
 ## 0.0.7-alpha
 
+### Bidirectional RDP Text Clipboard & Streaming File Transfer (CLIPRDR)
+- **Authentic MS-RDPECLIP Virtual Channel:** Built `ShellumiCliprdrBackend` in `crates/shellumi-rdp/src/clipboard.rs` implementing `ironrdp_cliprdr::backend::CliprdrBackend`.
+  - Negotiates `USE_LONG_FORMAT_NAMES`, `STREAM_FILECLIP_ENABLED`, `FILECLIP_NO_FILE_PATHS`, `CAN_LOCK_CLIPDATA`, and `HUGE_FILE_SUPPORT_ENABLED`.
+  - Attached directly to IronRDP static virtual channel pipeline via `ConfigBuilder::with_static_channel` and `ironrdp_cliprdr::Cliprdr::new(...)`.
+- **Bidirectional UTF-16LE Text Clipboard:**
+  - Host-to-Remote: Copies text on host, advertises `CF_UNICODETEXT` (format 13), and supplies UTF-16LE encoded bytes with null terminator upon Windows `FormatDataRequest`.
+  - Remote-to-Host: Detects remote `CF_UNICODETEXT` copies, requests data via `SendInitiatePaste`, decodes incoming UTF-16LE, writes directly into the host system clipboard via GPUI (`cx.write_to_clipboard`), and updates session state.
+- **Streaming Bidirectional File Copy & Transfer:**
+  - Host-to-Remote: Stages selected files on the host, constructs `FileDescriptor` list with Windows attributes and file size, advertises `FileGroupDescriptorW` (format `0xC0FE`) and `Preferred DropEffect` (`0xC0FD`), and serves chunked file data over `FileContentsRequest` (`SIZE` and `RANGE` at 64 KB per chunk) into Windows Explorer.
+  - Remote-to-Host: Detects remote file copies, requests descriptor list via `SendInitiatePaste`, streams `FileContentsRequest` chunks into local target directory (`temp_dir`), and delivers `SessionEvent::ServerFilesReceived` to UI.
+- **UI & Command Integration:**
+  - Added `SessionCommand::SendFiles(Vec<PathBuf>)` and `SessionEvent::ServerFilesReceived` to `shellumi-remote-desktop`.
+  - Added `📁 Send Files…` toolbar button and `remote_desktop_choose_and_send_files` dialog handler using native platform file picker (`cx.prompt_for_paths`).
+  - Added automatic system clipboard writing for received remote text and visual status notifications for text and file transfers.
+- **Automated Test Coverage:** Added unit and integration test suite (`crates/shellumi-rdp/tests/clipboard_tests.rs`) validating initialization, text round-trip, chunked range streaming, and remote download.
+
 ### Remote Desktop Security Hardening, Credential Zeroization & Fuzzing (Phase 6)
 - **Credential Memory Zeroization:** Integrated `zeroize` crate across all remote desktop crates (`shellumi-remote-desktop`, `shellumi-vnc`, `shellumi-rdp`, and `shellumi-app`).
   - Implemented `Drop for SessionConfig` and `Drop for RdpClientConfig` explicitly zeroizing password buffers on destruction.

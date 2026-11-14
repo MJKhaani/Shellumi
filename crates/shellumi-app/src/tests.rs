@@ -974,6 +974,54 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
 }
 
 #[test]
+fn verifies_remote_desktop_clipboard_sync_and_file_transfer_commands() {
+    let (ui_handle, worker_handle) = shellumi_remote_desktop::create_session_channels(16, 16);
+
+    // Verify SendClipboard command plumbing
+    ui_handle
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SendClipboard(
+            "Test clipboard contents".into(),
+        ))
+        .unwrap();
+    let cmd = worker_handle.try_recv_command().unwrap();
+    assert_eq!(
+        cmd,
+        Some(shellumi_remote_desktop::SessionCommand::SendClipboard(
+            "Test clipboard contents".into()
+        ))
+    );
+
+    // Verify SendFiles command plumbing
+    let files = vec![std::path::PathBuf::from("/tmp/sample.txt")];
+    ui_handle
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SendFiles(
+            files.clone(),
+        ))
+        .unwrap();
+    let cmd = worker_handle.try_recv_command().unwrap();
+    assert_eq!(
+        cmd,
+        Some(shellumi_remote_desktop::SessionCommand::SendFiles(files))
+    );
+
+    // Verify ServerFilesReceived event plumbing
+    worker_handle
+        .try_send_event(shellumi_remote_desktop::SessionEvent::ServerFilesReceived {
+            files: vec!["received_file.dat".into()],
+            target_dir: "/tmp/transfers".into(),
+        })
+        .unwrap();
+    let ev = ui_handle.try_recv_event().unwrap();
+    assert_eq!(
+        ev,
+        Some(shellumi_remote_desktop::SessionEvent::ServerFilesReceived {
+            files: vec!["received_file.dat".into()],
+            target_dir: "/tmp/transfers".into(),
+        })
+    );
+}
+
+#[test]
 fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
     use super::{
         RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,

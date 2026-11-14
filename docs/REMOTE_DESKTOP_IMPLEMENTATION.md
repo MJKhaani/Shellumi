@@ -206,7 +206,7 @@ Shellumi GPUI Remote Desktop Tab
 2. **RDP Protocol:**
    - **Authentication:** CredSSP / Network Level Authentication (NLA) over TLS is standard. Kerberos authentication requires domain enrollment; NTLMv2 fallback is supported within CredSSP.
    - **TLS Certificate Validation:** `CertificateValidation::Strict` validates certificates against the system CA root store. For self-signed certificates common in lab and private infrastructure, `CertificateValidation::Tofu` records the SHA-256 fingerprint on first use and warns if the fingerprint changes unexpectedly.
-   - **Virtual Channels:** Fast-path graphics output, pointer and keyboard input, Special Administrative Sequences (SAS: Ctrl+Alt+Del, Win key), and basic clipboard text exchange are active. Audio output, microphone redirection, and USB/drive redirection are scheduled for future minor releases.
+   - **Virtual Channels:** Fast-path graphics output, pointer and keyboard input, Special Administrative Sequences (SAS: Ctrl+Alt+Del, Win key), authentic CLIPRDR bidirectional UTF-16LE text clipboard synchronization, and streaming chunked file transfers (`FileGroupDescriptorW` / `FileContentsRequest` / `FileContentsResponse`) are fully functional and integrated into the desktop UI. Audio output, microphone redirection, and USB/drive redirection are scheduled for future minor releases.
 
 ---
 
