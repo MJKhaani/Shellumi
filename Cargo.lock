@@ -5569,10 +5569,13 @@ dependencies = [
  "async-channel 2.5.0",
  "base64",
  "gpui",
+ "image",
  "serde_json",
  "shellumi-core",
+ "shellumi-remote-desktop",
  "shellumi-storage",
  "shellumi-terminal",
+ "smallvec",
  "tempfile",
  "tokio",
  "uuid",
@@ -5603,6 +5606,17 @@ dependencies = [
  "tempfile",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "shellumi-remote-desktop"
+version = "0.0.7-alpha"
+dependencies = [
+ "async-channel 2.5.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

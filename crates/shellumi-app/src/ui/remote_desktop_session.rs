@@ -361,50 +361,7 @@ impl Shellumi {
         }
 
         let viewport = match state.status {
-            RemoteDesktopStatus::Connected => {
-                let canvas_area = div()
-                    .id(("rd-canvas", tab_idx))
-                    .relative()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.remote_desktop_click_canvas(tab_idx, 640, 480, cx);
-                    }));
-
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .bg(rgb(0x0c0f14))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        canvas_area
-                            .w_full()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .child(div().text_2xl().child("📡"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .child("Connected to Remote Desktop Server"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child(
-                                        "Awaiting native framebuffer stream from protocol worker.",
-                                    ),
-                            ),
-                    )
-            }
+            RemoteDesktopStatus::Connected => self.render_remote_desktop_canvas(tab_idx, state, cx),
             RemoteDesktopStatus::NotConnected | RemoteDesktopStatus::Connecting => {
                 let is_connecting = state.status == RemoteDesktopStatus::Connecting;
                 div()

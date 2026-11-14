@@ -80,6 +80,9 @@ impl Shellumi {
             clipboard_text: None,
             error: None,
             last_action_note: None,
+            framebuffer: None,
+            render_image: None,
+            metrics: shellumi_remote_desktop::SessionMetrics::new(),
         };
 
         self.tabs.push(SessionTab {
@@ -137,8 +140,8 @@ impl Shellumi {
     pub(crate) fn remote_desktop_click_canvas(
         &mut self,
         tab_idx: usize,
-        x: u16,
-        y: u16,
+        x: u32,
+        y: u32,
         cx: &mut Context<Self>,
     ) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
@@ -149,7 +152,8 @@ impl Shellumi {
                     return;
                 }
                 // Real RFB pointer event serialization
-                let _click_packet = build_rfb_pointer_event(rfb_constants::BUTTON_LEFT, x, y);
+                let _click_packet =
+                    build_rfb_pointer_event(rfb_constants::BUTTON_LEFT, x as u16, y as u16);
                 if rd.status == RemoteDesktopStatus::Connected {
                     rd.last_action_note = Some(format!("Mouse click at ({x}, {y})"));
                 } else {
@@ -157,6 +161,27 @@ impl Shellumi {
                         "Pointer click at ({x}, {y}) (session not connected)"
                     ));
                 }
+                cx.notify();
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remote_desktop_apply_framebuffer_snapshot(
+        &mut self,
+        tab_idx: usize,
+        snapshot: shellumi_remote_desktop::FramebufferSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.width = snapshot.width;
+                rd.height = snapshot.height;
+                let render_image =
+                    crate::ui::remote_desktop_canvas::create_render_image_from_snapshot(&snapshot);
+                rd.render_image = render_image;
+                rd.framebuffer = Some(snapshot);
+                rd.status = RemoteDesktopStatus::Connected;
                 cx.notify();
             }
         }

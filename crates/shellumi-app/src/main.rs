@@ -728,6 +728,9 @@ struct RemoteDesktopState {
     clipboard_text: Option<String>,
     error: Option<String>,
     last_action_note: Option<String>,
+    framebuffer: Option<shellumi_remote_desktop::FramebufferSnapshot>,
+    render_image: Option<std::sync::Arc<gpui::RenderImage>>,
+    metrics: shellumi_remote_desktop::SessionMetrics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

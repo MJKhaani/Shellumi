@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/shellumi-app", "crates/shellumi-core", "crates/shellumi-storage", "crates/shellumi-cli", "crates/shellumi-terminal"]
+members = [
+    "crates/shellumi-app",
+    "crates/shellumi-core",
+    "crates/shellumi-storage",
+    "crates/shellumi-cli",
+    "crates/shellumi-terminal",
+    "crates/shellumi-remote-desktop",
+]
 resolver = "2"
 exclude = ["vendor/xattr"]
 

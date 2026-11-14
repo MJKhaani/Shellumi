@@ -770,6 +770,9 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         clipboard_text: None,
         error: None,
         last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
     };
 
     // Truthful baseline: initial state must never be fake Connected, metrics must be None
@@ -853,6 +856,9 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         clipboard_text: None,
         error: None,
         last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
     };
 
     assert_eq!(
@@ -873,6 +879,77 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         .as_ref()
         .unwrap()
         .contains("native engine in development"));
+}
+
+#[test]
+fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
+    use super::{
+        RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
+    };
+    use shellumi_remote_desktop::{Framebuffer, Rect};
+
+    // Create a 128x128 framebuffer with test patterns
+    let mut fb = Framebuffer::new(128, 128).unwrap();
+    fb.fill_rect(Rect::new(0, 0, 64, 64), 0, 255, 0, 255)
+        .unwrap(); // Green top-left
+    fb.fill_rect(Rect::new(64, 64, 64, 64), 255, 255, 0, 255)
+        .unwrap(); // Yellow bottom-right
+
+    let snapshot = fb.snapshot();
+    assert_eq!(snapshot.width, 128);
+    assert_eq!(snapshot.height, 128);
+
+    // Convert into GPUI RenderImage via canvas renderer helper
+    let render_image =
+        crate::ui::remote_desktop_canvas::create_render_image_from_snapshot(&snapshot);
+    assert!(render_image.is_some());
+    let img = render_image.as_ref().unwrap();
+    assert_eq!(img.frame_count(), 1);
+
+    // Bind into session state
+    let mut rd = RemoteDesktopState {
+        host_name: "Ubuntu VM".into(),
+        target: "10.0.0.15:5900".into(),
+        protocol: RemoteDesktopProtocol::Vnc,
+        status: RemoteDesktopStatus::NotConnected,
+        status_message: None,
+        width: 1920,
+        height: 1080,
+        view_only: false,
+        scale_mode: RemoteDesktopScaleMode::Fit,
+        color_depth: 24,
+        fps: None,
+        latency_ms: None,
+        clipboard_text: None,
+        error: None,
+        last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
+    };
+
+    // Apply snapshot to state (simulating remote_desktop_apply_framebuffer_snapshot)
+    rd.width = snapshot.width;
+    rd.height = snapshot.height;
+    rd.framebuffer = Some(snapshot);
+    rd.render_image = render_image;
+    rd.status = RemoteDesktopStatus::Connected;
+
+    assert_eq!(rd.status, RemoteDesktopStatus::Connected);
+    assert_eq!(rd.width, 128);
+    assert_eq!(rd.height, 128);
+    assert!(rd.framebuffer.is_some());
+    assert!(rd.render_image.is_some());
+
+    // Verify pixel colors in snapshot
+    assert_eq!(
+        rd.framebuffer.as_ref().unwrap().pixel(10, 10),
+        Some([0, 255, 0, 255])
+    );
+    assert_eq!(
+        rd.framebuffer.as_ref().unwrap().pixel(80, 80),
+        Some([255, 255, 0, 255])
+    );
 }
 
 #[test]

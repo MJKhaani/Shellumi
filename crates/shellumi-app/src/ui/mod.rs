@@ -15,6 +15,7 @@ mod identity_modal;
 mod infra_modal;
 mod invite_team_modal;
 mod mobile_modal;
+pub(crate) mod remote_desktop_canvas;
 mod remote_desktop_session;
 mod session_replay_modal;
 mod shell_integration_modal;
