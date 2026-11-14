@@ -1,0 +1,17 @@
+[package]
+name = "shellumi-vnc"
+version = "0.0.7-alpha"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+shellumi-remote-desktop = { path = "../shellumi-remote-desktop" }
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+async-channel = "2"
+thiserror = "2"
+serde = { version = "1.0", features = ["derive"] }
+byteorder = "1.5"
+
+[dev-dependencies]
+tempfile = "3"

@@ -5575,6 +5575,7 @@ dependencies = [
  "shellumi-remote-desktop",
  "shellumi-storage",
  "shellumi-terminal",
+ "shellumi-vnc",
  "smallvec",
  "tempfile",
  "tokio",
@@ -5642,6 +5643,19 @@ dependencies = [
  "serde",
  "serde_json",
  "vte",
+]
+
+[[package]]
+name = "shellumi-vnc"
+version = "0.0.7-alpha"
+dependencies = [
+ "async-channel 2.5.0",
+ "byteorder",
+ "serde",
+ "shellumi-remote-desktop",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

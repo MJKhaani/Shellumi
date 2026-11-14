@@ -6,6 +6,7 @@ members = [
     "crates/shellumi-cli",
     "crates/shellumi-terminal",
     "crates/shellumi-remote-desktop",
+    "crates/shellumi-vnc",
 ]
 resolver = "2"
 exclude = ["vendor/xattr"]

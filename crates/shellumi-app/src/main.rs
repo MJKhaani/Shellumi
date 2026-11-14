@@ -710,7 +710,7 @@ enum RemoteDesktopScaleMode {
     Fill,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 struct RemoteDesktopState {
     host_name: String,
@@ -730,6 +730,7 @@ struct RemoteDesktopState {
     last_action_note: Option<String>,
     framebuffer: Option<shellumi_remote_desktop::FramebufferSnapshot>,
     render_image: Option<std::sync::Arc<gpui::RenderImage>>,
+    ui_handle: Option<shellumi_remote_desktop::SessionUiHandle>,
     metrics: shellumi_remote_desktop::SessionMetrics,
 }
 

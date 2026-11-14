@@ -772,6 +772,7 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         last_action_note: None,
         framebuffer: None,
         render_image: None,
+        ui_handle: None,
         metrics: shellumi_remote_desktop::SessionMetrics::new(),
     };
 
@@ -858,6 +859,7 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         last_action_note: None,
         framebuffer: None,
         render_image: None,
+        ui_handle: None,
         metrics: shellumi_remote_desktop::SessionMetrics::new(),
     };
 
@@ -925,6 +927,7 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         last_action_note: None,
         framebuffer: None,
         render_image: None,
+        ui_handle: None,
         metrics: shellumi_remote_desktop::SessionMetrics::new(),
     };
 
