@@ -17,6 +17,7 @@ pub mod mobile;
 pub mod palette;
 pub mod protocol;
 pub mod recording;
+pub mod server;
 pub mod sftp;
 pub mod snippet;
 pub mod ssh_config;
@@ -27,6 +28,11 @@ pub mod vault;
 pub mod vault_key;
 pub mod workspace;
 
+pub use server::{
+    CapabilitiesResponse, ChangeFeedResponse, CommitBatchRequest, CommitBatchResponse,
+    HealthResponse, LoginRequest, LoginResponse, MutationAck, MutationItem, ServerError,
+    ServerLimits, ShellumiServerClient, SyncChangeItem, VaultListResponse, VaultResponse,
+};
 pub use vault::{ServerConnectionId, VaultContext, VaultId, VaultIdentityError, VaultLocation};
 pub use vault_key::VaultKey;
 

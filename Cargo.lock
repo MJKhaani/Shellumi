@@ -5592,11 +5592,14 @@ name = "shellumi-core"
 version = "0.0.7-alpha"
 dependencies = [
  "base64",
+ "hex",
  "ring",
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "uuid",
  "zeroize",
 ]
 
