@@ -12,6 +12,8 @@ async-channel = "2"
 thiserror = "2"
 serde = { version = "1.0", features = ["derive"] }
 byteorder = "1.5"
+flate2 = "1.0"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 tempfile = "3"

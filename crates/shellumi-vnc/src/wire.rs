@@ -69,6 +69,90 @@ impl PixelFormat {
             pad: [buf[13], buf[14], buf[15]],
         }
     }
+
+    /// Number of bytes per pixel on the wire for full pixel messages.
+    pub fn bytes_per_pixel(&self) -> usize {
+        ((self.bits_per_pixel as usize) / 8).max(1)
+    }
+
+    /// Number of bytes per pixel for compact pixel messages (e.g. ZRLE / Tight).
+    pub fn bytes_per_cpixel(&self) -> usize {
+        if self.true_colour_flag != 0 && self.bits_per_pixel == 32 && self.depth <= 24 {
+            3
+        } else {
+            self.bytes_per_pixel()
+        }
+    }
+
+    /// Unpack a pixel slice (either full or compact) into standard 32-bit RGBA `[r, g, b, 255]`.
+    pub fn unpack_rgba(&self, bytes: &[u8]) -> [u8; 4] {
+        if self.bits_per_pixel == 32 {
+            if bytes.len() >= 4 {
+                let pixel_val = if self.big_endian_flag != 0 {
+                    BigEndian::read_u32(&bytes[..4])
+                } else {
+                    byteorder::LittleEndian::read_u32(&bytes[..4])
+                };
+                let r = if self.red_max > 0 {
+                    (((pixel_val >> self.red_shift) & (self.red_max as u32)) * 255
+                        / (self.red_max as u32)) as u8
+                } else {
+                    0
+                };
+                let g = if self.green_max > 0 {
+                    (((pixel_val >> self.green_shift) & (self.green_max as u32)) * 255
+                        / (self.green_max as u32)) as u8
+                } else {
+                    0
+                };
+                let b = if self.blue_max > 0 {
+                    (((pixel_val >> self.blue_shift) & (self.blue_max as u32)) * 255
+                        / (self.blue_max as u32)) as u8
+                } else {
+                    0
+                };
+                [r, g, b, 255]
+            } else if bytes.len() >= 3 {
+                // 3-byte compact pixel (CPIXEL)
+                if self.red_shift <= self.blue_shift {
+                    [bytes[0], bytes[1], bytes[2], 255]
+                } else {
+                    [bytes[2], bytes[1], bytes[0], 255]
+                }
+            } else {
+                [0, 0, 0, 255]
+            }
+        } else if self.bits_per_pixel == 16 && bytes.len() >= 2 {
+            let pixel_val = if self.big_endian_flag != 0 {
+                BigEndian::read_u16(&bytes[..2]) as u32
+            } else {
+                byteorder::LittleEndian::read_u16(&bytes[..2]) as u32
+            };
+            let r = if self.red_max > 0 {
+                (((pixel_val >> self.red_shift) & (self.red_max as u32)) * 255
+                    / (self.red_max as u32)) as u8
+            } else {
+                0
+            };
+            let g = if self.green_max > 0 {
+                (((pixel_val >> self.green_shift) & (self.green_max as u32)) * 255
+                    / (self.green_max as u32)) as u8
+            } else {
+                0
+            };
+            let b = if self.blue_max > 0 {
+                (((pixel_val >> self.blue_shift) & (self.blue_max as u32)) * 255
+                    / (self.blue_max as u32)) as u8
+            } else {
+                0
+            };
+            [r, g, b, 255]
+        } else if self.bits_per_pixel == 8 && !bytes.is_empty() {
+            [bytes[0], bytes[0], bytes[0], 255]
+        } else {
+            [0, 0, 0, 255]
+        }
+    }
 }
 
 /// Client message IDs (RFC 6143 Section 7.5).
@@ -223,5 +307,20 @@ mod tests {
         assert_eq!(ptr[1], 1);
         assert_eq!(BigEndian::read_u16(&ptr[2..4]), 300);
         assert_eq!(BigEndian::read_u16(&ptr[4..6]), 400);
+    }
+
+    #[test]
+    fn verifies_pixel_unpacking_and_cpixel() {
+        let pf = PixelFormat::rgba_32();
+        assert_eq!(pf.bytes_per_pixel(), 4);
+        assert_eq!(pf.bytes_per_cpixel(), 3);
+
+        // 4-byte RGBA little endian: [R, G, B, Pad]
+        let rgba4 = [120, 200, 50, 0];
+        assert_eq!(pf.unpack_rgba(&rgba4), [120, 200, 50, 255]);
+
+        // 3-byte CPIXEL: [R, G, B]
+        let cpixel3 = [10, 20, 30];
+        assert_eq!(pf.unpack_rgba(&cpixel3), [10, 20, 30, 255]);
     }
 }

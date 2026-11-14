@@ -1,12 +1,17 @@
 //! Native VNC (RFB 3.3/3.7/3.8) protocol client implementation for Shellumi.
 
 pub mod client;
+pub mod decoder;
 pub mod handshake;
 pub mod rectangles;
 pub mod security;
 pub mod wire;
 
-pub use client::{run_vnc_session, VncClientError};
+pub use client::{run_vnc_session, run_vnc_session_with_stream, VncClientError};
+pub use decoder::{
+    decode_hextile_rectangle, validate_rectangle_bounds, TightDecoder, ZrleDecoder,
+    MAX_CLIPBOARD_BYTES, MAX_COMPRESSED_PAYLOAD_SIZE, MAX_RECTANGLE_DIMENSION,
+};
 pub use handshake::{
     client_and_server_init, negotiate_security, negotiate_version, HandshakeError, RfbVersion,
     ServerInit,
@@ -14,7 +19,7 @@ pub use handshake::{
 pub use rectangles::{
     decode_copy_rect, decode_raw_rectangle, handle_desktop_size, RectangleError, ENCODING_COPYRECT,
     ENCODING_CURSOR, ENCODING_DESKTOP_SIZE, ENCODING_HEXTILE, ENCODING_RAW, ENCODING_RRE,
-    ENCODING_ZRLE,
+    ENCODING_TIGHT, ENCODING_ZRLE,
 };
 pub use security::{vnc_auth_encrypt, SecurityError, SecurityType};
 pub use wire::{

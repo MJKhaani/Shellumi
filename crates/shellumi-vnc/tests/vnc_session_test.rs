@@ -219,3 +219,197 @@ async fn test_vnc_auth_challenge_response_handshake() {
 
     server_task.await.unwrap();
 }
+
+#[tokio::test]
+#[allow(clippy::chunks_exact_to_as_chunks)]
+async fn test_vnc_session_runner_with_advanced_decoders_and_clipboard() {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use shellumi_remote_desktop::{
+        create_session_channels, RemoteProtocol, SessionCommand, SessionConfig, SessionEvent,
+        SessionState,
+    };
+    use shellumi_vnc::client::run_vnc_session_with_stream;
+    use shellumi_vnc::decoder::hextile::HEXTILE_RAW;
+    use shellumi_vnc::decoder::tight::TIGHT_SUBENCODING_FILL;
+    use shellumi_vnc::rectangles::{
+        ENCODING_COPYRECT, ENCODING_DESKTOP_SIZE, ENCODING_HEXTILE, ENCODING_RAW, ENCODING_TIGHT,
+        ENCODING_ZRLE,
+    };
+    use std::io::Write;
+
+    let (client_stream, mut server_stream) = duplex(8192);
+
+    let server_task = tokio::spawn(async move {
+        // 1. Handshake: RFB 3.8
+        server_stream.write_all(b"RFB 003.008\n").await.unwrap();
+        let mut client_ver = [0u8; 12];
+        server_stream.read_exact(&mut client_ver).await.unwrap();
+        assert_eq!(&client_ver, b"RFB 003.008\n");
+
+        // 2. Security: None (1)
+        server_stream.write_all(&[1, 1]).await.unwrap();
+        let sel = server_stream.read_u8().await.unwrap();
+        assert_eq!(sel, 1);
+        server_stream.write_all(&[0, 0, 0, 0]).await.unwrap(); // OK
+
+        // 3. ClientInit
+        let _shared = server_stream.read_u8().await.unwrap();
+
+        // 4. ServerInit: 400x300
+        let mut sinit = vec![0u8; 24];
+        BigEndian::write_u16(&mut sinit[0..2], 400);
+        BigEndian::write_u16(&mut sinit[2..4], 300);
+        let pf = PixelFormat::rgba_32();
+        sinit[4..20].copy_from_slice(&pf.to_bytes());
+        let name = "Test Suite RFB";
+        BigEndian::write_u32(&mut sinit[20..24], name.len() as u32);
+        sinit.extend_from_slice(name.as_bytes());
+        server_stream.write_all(&sinit).await.unwrap();
+
+        // 5. Read SetPixelFormat (20 bytes)
+        let mut set_pf = [0u8; 20];
+        server_stream.read_exact(&mut set_pf).await.unwrap();
+
+        // 6. Read SetEncodings and verify supported advanced encodings
+        let mut set_enc_hdr = [0u8; 4];
+        server_stream.read_exact(&mut set_enc_hdr).await.unwrap();
+        let num_encs = BigEndian::read_u16(&set_enc_hdr[2..4]) as usize;
+        let mut enc_bytes = vec![0u8; num_encs * 4];
+        server_stream.read_exact(&mut enc_bytes).await.unwrap();
+        let announced_encs: Vec<i32> = enc_bytes.chunks_exact(4).map(BigEndian::read_i32).collect();
+
+        assert!(announced_encs.contains(&ENCODING_HEXTILE));
+        assert!(announced_encs.contains(&ENCODING_ZRLE));
+        assert!(announced_encs.contains(&ENCODING_TIGHT));
+        assert!(announced_encs.contains(&ENCODING_COPYRECT));
+        assert!(announced_encs.contains(&ENCODING_RAW));
+        assert!(announced_encs.contains(&ENCODING_DESKTOP_SIZE));
+
+        // 7. Read initial FramebufferUpdateRequest
+        let mut fbur = [0u8; 10];
+        server_stream.read_exact(&mut fbur).await.unwrap();
+
+        // 8. Send FramebufferUpdate with 3 rectangles: Hextile, ZRLE, Tight
+        let mut fb_update = vec![0u8; 4];
+        fb_update[0] = server_msg::FRAMEBUFFER_UPDATE;
+        fb_update[1] = 0;
+        BigEndian::write_u16(&mut fb_update[2..4], 3); // 3 rectangles
+
+        // Rect 1: Hextile at (0, 0, 2, 2)
+        let mut r1_hdr = [0u8; 12];
+        BigEndian::write_u16(&mut r1_hdr[0..2], 0);
+        BigEndian::write_u16(&mut r1_hdr[2..4], 0);
+        BigEndian::write_u16(&mut r1_hdr[4..6], 2);
+        BigEndian::write_u16(&mut r1_hdr[6..8], 2);
+        BigEndian::write_i32(&mut r1_hdr[8..12], ENCODING_HEXTILE);
+        fb_update.extend_from_slice(&r1_hdr);
+        // Hextile raw tile: subencoding 0x01, 4 pixels of Red
+        fb_update.push(HEXTILE_RAW);
+        for _ in 0..4 {
+            fb_update.extend_from_slice(&[255, 0, 0, 0]);
+        }
+
+        // Rect 2: ZRLE at (10, 10, 4, 4)
+        let mut r2_hdr = [0u8; 12];
+        BigEndian::write_u16(&mut r2_hdr[0..2], 10);
+        BigEndian::write_u16(&mut r2_hdr[2..4], 10);
+        BigEndian::write_u16(&mut r2_hdr[4..6], 4);
+        BigEndian::write_u16(&mut r2_hdr[6..8], 4);
+        BigEndian::write_i32(&mut r2_hdr[8..12], ENCODING_ZRLE);
+        fb_update.extend_from_slice(&r2_hdr);
+        // ZRLE solid tile: subencoding 1, CPIXEL = Green [0, 255, 0]
+        let zrle_raw = vec![1, 0, 255, 0];
+        let mut z_enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        z_enc.write_all(&zrle_raw).unwrap();
+        let zrle_comp = z_enc.finish().unwrap();
+        let mut z_len = [0u8; 4];
+        BigEndian::write_u32(&mut z_len, zrle_comp.len() as u32);
+        fb_update.extend_from_slice(&z_len);
+        fb_update.extend_from_slice(&zrle_comp);
+
+        // Rect 3: Tight at (20, 20, 4, 4)
+        let mut r3_hdr = [0u8; 12];
+        BigEndian::write_u16(&mut r3_hdr[0..2], 20);
+        BigEndian::write_u16(&mut r3_hdr[2..4], 20);
+        BigEndian::write_u16(&mut r3_hdr[4..6], 4);
+        BigEndian::write_u16(&mut r3_hdr[6..8], 4);
+        BigEndian::write_i32(&mut r3_hdr[8..12], ENCODING_TIGHT);
+        fb_update.extend_from_slice(&r3_hdr);
+        // Tight fill compression: subencoding 0x08, CPIXEL = Blue [0, 0, 255]
+        fb_update.push(TIGHT_SUBENCODING_FILL);
+        fb_update.extend_from_slice(&[0, 0, 255]);
+
+        server_stream.write_all(&fb_update).await.unwrap();
+
+        // 9. Send ServerCutText
+        let remote_msg = "Remote clipboard payload";
+        let mut cut_msg = vec![server_msg::SERVER_CUT_TEXT, 0, 0, 0];
+        let mut cut_len = [0u8; 4];
+        BigEndian::write_u32(&mut cut_len, remote_msg.len() as u32);
+        cut_msg.extend_from_slice(&cut_len);
+        cut_msg.extend_from_slice(remote_msg.as_bytes());
+        server_stream.write_all(&cut_msg).await.unwrap();
+
+        // 10. Read next incremental FBUR from client
+        let mut inc_fbur = [0u8; 10];
+        server_stream.read_exact(&mut inc_fbur).await.unwrap();
+        assert_eq!(inc_fbur[0], client_msg::FRAMEBUFFER_UPDATE_REQUEST);
+        assert_eq!(inc_fbur[1], 1); // incremental
+
+        // 11. Read ClientCutText from client
+        let mut c_cut_hdr = [0u8; 8];
+        server_stream.read_exact(&mut c_cut_hdr).await.unwrap();
+        assert_eq!(c_cut_hdr[0], client_msg::CLIENT_CUT_TEXT);
+        let c_len = BigEndian::read_u32(&c_cut_hdr[4..8]) as usize;
+        let mut c_text = vec![0u8; c_len];
+        server_stream.read_exact(&mut c_text).await.unwrap();
+        assert_eq!(c_text, b"Client clipboard test");
+    });
+
+    let (ui_handle, worker_handle) = create_session_channels(32, 64);
+    let config = SessionConfig::new("127.0.0.1", 5900, RemoteProtocol::Vnc);
+
+    let fb = Framebuffer::new(100, 100).unwrap();
+
+    let client_task = tokio::spawn(async move {
+        run_vnc_session_with_stream(client_stream, config, worker_handle, fb)
+            .await
+            .unwrap();
+    });
+
+    // Verify UI handle receives Connected event
+    let mut connected = false;
+    let mut clipboard_received = false;
+
+    while let Ok(event) = ui_handle.recv_event().await {
+        match event {
+            SessionEvent::StateChanged(SessionState::Connected) => {
+                connected = true;
+            }
+            SessionEvent::ServerClipboard(text) => {
+                assert_eq!(text, "Remote clipboard payload");
+                clipboard_received = true;
+
+                // Send client clipboard back
+                ui_handle
+                    .try_send_command(SessionCommand::SendClipboard(
+                        "Client clipboard test".into(),
+                    ))
+                    .unwrap();
+
+                // Stop session
+                ui_handle
+                    .try_send_command(SessionCommand::Disconnect)
+                    .unwrap();
+            }
+            _ => {}
+        }
+        if connected && clipboard_received {
+            break;
+        }
+    }
+
+    client_task.await.unwrap();
+    server_task.await.unwrap();
+}

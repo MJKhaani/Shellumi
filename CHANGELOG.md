@@ -2,6 +2,18 @@
 
 ## 0.0.7-alpha
 
+### Native Remote Desktop Engine & VNC Advanced Decoders (Phase 0, 1, 2, 3)
+- Implemented `crates/shellumi-remote-desktop`: 32-bit RGBA `Framebuffer` with row-major memory, dirty rectangle tracking, `MAX_FRAMEBUFFER_DIMENSION = 8192` bounds enforcement, bounded async channels (`SessionCommand` and `SessionEvent`), and true FPS/latency/byte counters.
+- Built native GPUI canvas rendering component (`remote_desktop_canvas.rs`) converting thread-safe `FramebufferSnapshot` into `gpui::RenderImage` with aspect-ratio preserving `Fit`, `Original` (100%), and `Fill` (stretch) scaling modes.
+- Implemented `crates/shellumi-vnc`: Native pure-Rust RFB client protocol engine supporting RFB 3.3, 3.7, and 3.8 version negotiation, standard FIPS 46-3 DES challenge-response VncAuth (RFC 6143 Section 7.2.2), and ServerInit screen geometry parsing.
+- Added advanced rectangle decoders in `crates/shellumi-vnc/src/decoder/`:
+  - `Hextile` (Encoding 5): 16x16 tile decoder handling Raw tiles, BackgroundSpecified, ForegroundSpecified, AnySubrects, and SubrectsColoured with bounds clamping.
+  - `ZRLE` (Encoding 16): Persistent zlib decompressor across RFB updates, 64x64 tiles, Raw, Solid, Packed Palette (1/2/4 bpp), Plain RLE, Palette RLE, and strict decompression bomb limits.
+  - `Tight` (Encoding 7): Pure-Rust JPEG decompression using `image` (no external `turbojpeg` binaries), Fill compression, and Basic zlib compression with 4 persistent streams, palette filter, and gradient prediction.
+  - `Raw` (Encoding 0), `CopyRect` (Encoding 1), and `DesktopSize` (Encoding -223).
+- Implemented bidirectional clipboard text synchronization (`ServerCutText` and `ClientCutText`) with `MAX_CLIPBOARD_BYTES` safety limits and loop suppression to eliminate echo loops.
+- Replaced mock Ubuntu/Windows drawings and hardcoded 60 FPS/14 ms metrics with truthful protocol state indicators and real measured telemetry.
+
 ### Dual-Pane Graphical SFTP File Manager
 - Implemented full 4-scenario SFTP file management: Local-to-Local, Local-to-Remote, Remote-to-Local, and Remote-to-Remote.
 - Native macOS folder MIME icons (`Documents`, `Downloads`, `Desktop`, `Movies`, `Music`, `Pictures`, `Applications`, `Public`, and generic `folder`) integrated into both table file rows and macOS breadcrumb path bar.

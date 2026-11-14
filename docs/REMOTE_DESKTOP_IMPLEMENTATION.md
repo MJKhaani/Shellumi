@@ -123,37 +123,37 @@ Shellumi GPUI Remote Desktop Tab
 ## 5. Phased Implementation Roadmap
 
 ### Phase 0 — Audit, Design, and Truthful Status (PR 1)
-- [ ] Inspect existing protocol types, remote desktop actions, and UI canvas components.
-- [ ] Remove fake `Connected` state, hardcoded `60 FPS` / `14 ms`, artificial desktop drawing, and simulated clipboard success messages.
-- [ ] Replace with honest `Not connected` / `Connecting...` / `Feature in development` UI states.
-- [ ] Pin exact dependencies in `Cargo.lock` (`rfb-encodings = "0.1.7"`, `ironrdp-client = "0.17.0"`).
-- [ ] Verify toolchain requirements (Rust 1.94.1 compatibility across the workspace).
+- [x] Inspect existing protocol types, remote desktop actions, and UI canvas components.
+- [x] Remove fake `Connected` state, hardcoded `60 FPS` / `14 ms`, artificial desktop drawing, and simulated clipboard success messages.
+- [x] Replace with honest `Not connected` / `Connecting...` / `Feature in development` UI states.
+- [x] Pin exact dependencies in `Cargo.lock` (`flate2 = "1.0"`, `image = "0.25"` with pure-Rust JPEG, `tokio`).
+- [x] Verify toolchain requirements (Rust 1.94.1 compatibility across the workspace).
 - **Gate:** Workspace builds with zero warnings; status tests prove no impossible `Connected` states.
 
 ### Phase 1 — Real Session Manager and Framebuffer Architecture (PR 2)
-- [ ] Create `crates/shellumi-remote-desktop` domain crate.
-- [ ] Implement `Framebuffer` with safe 32-bit RGBA storage, dimension bounds, and dirty rectangle tracking.
-- [ ] Implement `SessionCommand` and `SessionEvent` bounded mpsc channel plumbing.
-- [ ] Build concrete GPUI canvas rendering directly from the shared framebuffer buffer (handling HiDPI, letterboxing, and coordinate transformations).
-- [ ] Implement true telemetry collectors: measured render FPS, received byte counters, and decode timing.
+- [x] Create `crates/shellumi-remote-desktop` domain crate.
+- [x] Implement `Framebuffer` with safe 32-bit RGBA storage, dimension bounds, and dirty rectangle tracking.
+- [x] Implement `SessionCommand` and `SessionEvent` bounded mpsc channel plumbing.
+- [x] Build concrete GPUI canvas rendering directly from the shared framebuffer buffer (handling HiDPI, letterboxing, and coordinate transformations).
+- [x] Implement true telemetry collectors: measured render FPS, received byte counters, and decode timing.
 - **Gate:** Deterministic test frames render through the exact same GPUI canvas pipeline as network frames; coordinate mapping tests pass for all scaling modes.
 
 ### Phase 2 — Native VNC Client Engine (PR 3)
-- [ ] Implement async TCP stream with deadlines, DNS resolution, and interruptible I/O.
-- [ ] Implement RFB 3.3/3.7/3.8 handshake, client/server initialization, and desktop name/size parsing.
-- [ ] Implement VNCAuth (DES challenge-response) with password resolution from Keychain references.
-- [ ] Implement `SetPixelFormat`, `SetEncodings`, and incremental `FramebufferUpdateRequest` scheduling.
-- [ ] Implement `Raw`, `CopyRect`, and `DesktopSize` rectangle processing into the framebuffer.
-- [ ] Build live pointer and keyboard transmission using X11 keysyms and button masks.
+- [x] Implement async TCP stream with deadlines, DNS resolution, and interruptible I/O.
+- [x] Implement RFB 3.3/3.7/3.8 handshake, client/server initialization, and desktop name/size parsing.
+- [x] Implement VNCAuth (DES challenge-response) with password resolution from Keychain references.
+- [x] Implement `SetPixelFormat`, `SetEncodings`, and incremental `FramebufferUpdateRequest` scheduling.
+- [x] Implement `Raw`, `CopyRect`, and `DesktopSize` rectangle processing into the framebuffer.
+- [x] Build live pointer and keyboard transmission using X11 keysyms and button masks.
 - **Gate:** Authenticates with real TigerVNC/TightVNC server, renders live remote screen updates, and transmits bidirectional input.
 
 ### Phase 3 — VNC Advanced Decoders and Clipboard (PR 4)
-- [ ] Implement production client decoders in `shellumi-vnc::decoder` utilizing `rfb-encodings`:
-  - Hextile tile decoding.
-  - ZRLE with persistent zlib decompression state.
-  - Tight encoding (without requiring external native `turbojpeg` binaries).
-- [ ] Enforce decompression bomb limits, maximum rectangle bounds, and memory quotas.
-- [ ] Implement bidirectional `ClientCutText` / `ServerCutText` with loop suppression and size caps.
+- [x] Implement production client decoders in `shellumi-vnc::decoder`:
+  - [x] Hextile tile decoding (RFC 6143 Section 7.7.3).
+  - [x] ZRLE with persistent zlib decompression state and decompression bomb protection (RFC 6143 Section 7.7.4).
+  - [x] Tight encoding (Fill, basic palette/gradient, and pure-Rust JPEG decoding via `image` without requiring native `turbojpeg` binaries).
+- [x] Enforce decompression bomb limits, maximum rectangle bounds, and memory quotas.
+- [x] Implement bidirectional `ClientCutText` / `ServerCutText` with loop suppression and size caps.
 - **Gate:** Verified interoperability against independent VNC server implementations across multiple encodings.
 
 ### Phase 4 — Embedded RDP Client with IronRDP (PR 5)

@@ -1,5 +1,9 @@
-//! RFB rectangle processing for Raw, CopyRect, and DesktopSize encodings.
+//! RFB rectangle processing for Raw, CopyRect, Hextile, ZRLE, Tight, and DesktopSize encodings.
 
+use crate::decoder::limits::validate_rectangle_bounds;
+pub use crate::decoder::{
+    decode_hextile_rectangle, validate_rectangle_bounds as check_bounds, TightDecoder, ZrleDecoder,
+};
 use crate::wire::{PixelFormat, RectangleHeader};
 use byteorder::{BigEndian, ByteOrder};
 use shellumi_remote_desktop::{Framebuffer, Rect};
@@ -11,6 +15,7 @@ pub const ENCODING_RAW: i32 = 0;
 pub const ENCODING_COPYRECT: i32 = 1;
 pub const ENCODING_RRE: i32 = 2;
 pub const ENCODING_HEXTILE: i32 = 5;
+pub const ENCODING_TIGHT: i32 = 7;
 pub const ENCODING_ZRLE: i32 = 16;
 pub const ENCODING_DESKTOP_SIZE: i32 = -223;
 pub const ENCODING_CURSOR: i32 = -239;
@@ -20,6 +25,36 @@ pub const ENCODING_CURSOR: i32 = -239;
 pub enum RectangleError {
     #[error("Unsupported encoding: {0}")]
     UnsupportedEncoding(i32),
+
+    #[error("Invalid rectangle dimensions: {width}x{height}")]
+    InvalidDimensions { width: u32, height: u32 },
+
+    #[error("Rectangle out of framebuffer bounds: ({x}, {y}, {width}x{height}) on {fb_width}x{fb_height} fb")]
+    OutOfBounds {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        fb_width: u32,
+        fb_height: u32,
+    },
+
+    #[error("Payload too large: {size} bytes exceeds limit of {limit} bytes")]
+    PayloadTooLarge { size: usize, limit: usize },
+
+    #[error(
+        "Decompression bomb detected: produced {produced} bytes exceeds limit of {limit} bytes"
+    )]
+    DecompressionBombDetected { produced: usize, limit: usize },
+
+    #[error("Decompression failed: {0}")]
+    DecompressionFailed(String),
+
+    #[error("Invalid subencoding: {0}")]
+    InvalidSubencoding(u8),
+
+    #[error("Truncated payload data in rectangle")]
+    TruncatedPayload,
 
     #[error("Framebuffer update failed: {0}")]
     FramebufferError(#[from] shellumi_remote_desktop::FramebufferError),
@@ -36,6 +71,8 @@ pub async fn decode_raw_rectangle<R: AsyncRead + Unpin>(
     server_pf: &PixelFormat,
     fb: &mut Framebuffer,
 ) -> Result<(), RectangleError> {
+    validate_rectangle_bounds(header, fb)?;
+
     let pixel_count = (header.width as usize) * (header.height as usize);
     let bytes_per_pixel = (server_pf.bits_per_pixel as usize) / 8;
     let total_wire_bytes = pixel_count * bytes_per_pixel;
@@ -120,11 +157,24 @@ pub async fn decode_copy_rect<R: AsyncRead + Unpin>(
     header: &RectangleHeader,
     fb: &mut Framebuffer,
 ) -> Result<(), RectangleError> {
+    validate_rectangle_bounds(header, fb)?;
+
     let mut buf = [0u8; 4];
     stream.read_exact(&mut buf).await?;
 
     let src_x = BigEndian::read_u16(&buf[0..2]) as u32;
     let src_y = BigEndian::read_u16(&buf[2..4]) as u32;
+
+    if src_x + (header.width as u32) > fb.width() || src_y + (header.height as u32) > fb.height() {
+        return Err(RectangleError::OutOfBounds {
+            x: src_x,
+            y: src_y,
+            width: header.width as u32,
+            height: header.height as u32,
+            fb_width: fb.width(),
+            fb_height: fb.height(),
+        });
+    }
 
     let dst_rect = Rect::new(
         header.x as u32,

@@ -1,9 +1,10 @@
 //! High-level asynchronous RFB client event loop driving network I/O, frame decoding, and input events.
 
+use crate::decoder::{decode_hextile_rectangle, TightDecoder, ZrleDecoder, MAX_CLIPBOARD_BYTES};
 use crate::handshake::{client_and_server_init, negotiate_security, negotiate_version};
 use crate::rectangles::{
     decode_copy_rect, decode_raw_rectangle, handle_desktop_size, ENCODING_COPYRECT,
-    ENCODING_DESKTOP_SIZE, ENCODING_RAW,
+    ENCODING_DESKTOP_SIZE, ENCODING_HEXTILE, ENCODING_RAW, ENCODING_TIGHT, ENCODING_ZRLE,
 };
 use crate::wire::{
     build_client_cut_text, build_framebuffer_update_request, build_key_event, build_pointer_event,
@@ -41,7 +42,7 @@ pub enum VncClientError {
 pub async fn run_vnc_session(
     config: SessionConfig,
     worker: SessionWorkerHandle,
-    mut framebuffer: Framebuffer,
+    framebuffer: Framebuffer,
 ) -> Result<(), VncClientError> {
     let _ = worker
         .send_event(SessionEvent::StateChanged(SessionState::Connecting))
@@ -52,7 +53,7 @@ pub async fn run_vnc_session(
     let stream_result =
         tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&endpoint)).await;
 
-    let mut stream = match stream_result {
+    let stream = match stream_result {
         Ok(Ok(stream)) => stream,
         Ok(Err(err)) => {
             let err_msg = format!("Failed to connect to {endpoint}: {err}");
@@ -76,6 +77,19 @@ pub async fn run_vnc_session(
         }
     };
 
+    run_vnc_session_with_stream(stream, config, worker, framebuffer).await
+}
+
+/// Run an RFB VNC session over an arbitrary asynchronous stream (e.g. TCP, TLS, or in-memory duplex).
+pub async fn run_vnc_session_with_stream<S>(
+    mut stream: S,
+    config: SessionConfig,
+    worker: SessionWorkerHandle,
+    mut framebuffer: Framebuffer,
+) -> Result<(), VncClientError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // 2. Negotiate protocol version
     let version = match negotiate_version(&mut stream).await {
         Ok(v) => v,
@@ -134,8 +148,15 @@ pub async fn run_vnc_session(
     let set_pf_packet = build_set_pixel_format(&client_pf);
     stream.write_all(&set_pf_packet).await?;
 
-    // 7. Request supported encodings (CopyRect, Raw, DesktopSize)
-    let supported_encodings = [ENCODING_COPYRECT, ENCODING_RAW, ENCODING_DESKTOP_SIZE];
+    // 7. Request supported encodings (CopyRect, Hextile, ZRLE, Tight, Raw, DesktopSize)
+    let supported_encodings = [
+        ENCODING_COPYRECT,
+        ENCODING_HEXTILE,
+        ENCODING_ZRLE,
+        ENCODING_TIGHT,
+        ENCODING_RAW,
+        ENCODING_DESKTOP_SIZE,
+    ];
     let set_enc_packet = build_set_encodings(&supported_encodings);
     stream.write_all(&set_enc_packet).await?;
 
@@ -156,6 +177,10 @@ pub async fn run_vnc_session(
 
     let mut metrics = SessionMetrics::new();
     let mut metrics_interval = tokio::time::interval(Duration::from_millis(1000));
+    let mut zrle_decoder = ZrleDecoder::new();
+    let mut tight_decoder = TightDecoder::new();
+    let mut last_sent_clipboard: Option<String> = None;
+    let mut last_received_clipboard: Option<String> = None;
 
     // 10. Main RFB event loop
     loop {
@@ -175,9 +200,13 @@ pub async fn run_vnc_session(
                             metrics.record_bytes_sent(packet.len() as u64);
                         }
                         SessionCommand::SendClipboard(text) => {
-                            let packet = build_client_cut_text(&text);
-                            let _ = stream.write_all(&packet).await;
-                            metrics.record_bytes_sent(packet.len() as u64);
+                            // Bidirectional loop suppression: do not echo back identical server clipboard
+                            if last_received_clipboard.as_deref() != Some(&text) {
+                                last_sent_clipboard = Some(text.clone());
+                                let packet = build_client_cut_text(&text);
+                                let _ = stream.write_all(&packet).await;
+                                metrics.record_bytes_sent(packet.len() as u64);
+                            }
                         }
                         SessionCommand::Refresh => {
                             let fbur = build_framebuffer_update_request(false, 0, 0, framebuffer.width() as u16, framebuffer.height() as u16);
@@ -237,6 +266,15 @@ pub async fn run_vnc_session(
                                     decode_copy_rect(&mut stream, &header, &mut framebuffer).await?;
                                     metrics.record_bytes_received(4);
                                 }
+                                ENCODING_HEXTILE => {
+                                    decode_hextile_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                }
+                                ENCODING_ZRLE => {
+                                    zrle_decoder.decode_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                }
+                                ENCODING_TIGHT => {
+                                    tight_decoder.decode_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                }
                                 ENCODING_DESKTOP_SIZE => {
                                     handle_desktop_size(&header, &mut framebuffer)?;
                                     let _ = worker.send_event(SessionEvent::RemoteResize {
@@ -245,7 +283,6 @@ pub async fn run_vnc_session(
                                     }).await;
                                 }
                                 unsupported => {
-                                    // Skip unsupported encoding or return error
                                     return Err(VncClientError::Rectangle(
                                         crate::rectangles::RectangleError::UnsupportedEncoding(unsupported),
                                     ));
@@ -283,12 +320,28 @@ pub async fn run_vnc_session(
                         let len = stream.read_u32().await? as usize;
                         metrics.record_bytes_received(7);
 
-                        let mut text_buf = vec![0u8; len];
-                        stream.read_exact(&mut text_buf).await?;
-                        metrics.record_bytes_received(len as u64);
+                        if len > MAX_CLIPBOARD_BYTES {
+                            // Defensive protection: discard oversized payload to prevent OOM
+                            let mut remaining = len;
+                            let mut discard_buf = [0u8; 4096];
+                            while remaining > 0 {
+                                let n = remaining.min(discard_buf.len());
+                                stream.read_exact(&mut discard_buf[..n]).await?;
+                                remaining -= n;
+                            }
+                            metrics.record_bytes_received(len as u64);
+                        } else {
+                            let mut text_buf = vec![0u8; len];
+                            stream.read_exact(&mut text_buf).await?;
+                            metrics.record_bytes_received(len as u64);
 
-                        let text = String::from_utf8_lossy(&text_buf).into_owned();
-                        let _ = worker.send_event(SessionEvent::ServerClipboard(text)).await;
+                            let text = String::from_utf8_lossy(&text_buf).into_owned();
+                            // Loop suppression: only propagate if not an echo of our own sent clipboard
+                            if last_sent_clipboard.as_deref() != Some(&text) {
+                                last_received_clipboard = Some(text.clone());
+                                let _ = worker.send_event(SessionEvent::ServerClipboard(text)).await;
+                            }
+                        }
                     }
                     _other => {
                         // Unknown or unhandled server message

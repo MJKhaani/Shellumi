@@ -5651,6 +5651,8 @@ version = "0.0.7-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "byteorder",
+ "flate2",
+ "image",
  "serde",
  "shellumi-remote-desktop",
  "tempfile",
