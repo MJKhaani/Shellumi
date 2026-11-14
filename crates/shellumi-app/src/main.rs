@@ -624,6 +624,8 @@ struct Shellumi {
     sidebar_collapsed: bool,
     vault_dropdown_open: bool,
     active_vault: String,
+    active_vault_id: String,
+    available_vaults: Vec<actions::VaultContextSummary>,
     sftp_left_pane: SftpPaneView,
     sftp_right_pane: SftpPaneView,
     view_mode: HostViewMode,
@@ -954,6 +956,14 @@ impl Shellumi {
             sidebar_collapsed: false,
             vault_dropdown_open: false,
             active_vault: "Personal".to_string(),
+            active_vault_id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+            available_vaults: vec![actions::VaultContextSummary {
+                id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+                name: "Personal".to_string(),
+                is_remote: false,
+                server_url: None,
+                server_vault_id: None,
+            }],
             sftp_left_pane: {
                 let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 let entries = list_local_directory(&home_dir, false).unwrap_or_default();
@@ -1853,13 +1863,73 @@ impl Shellumi {
                 None
             });
 
+        // Remote Vault Sync Status & "Sync Now" controls
+        let sync_badge = if self.is_active_vault_remote() {
+            let (status_text, status_color, is_syncing) = match &self.sync_status {
+                AppSyncStatus::Syncing => ("Syncing…", rgb(MacTheme::ACCENT_BLUE), true),
+                AppSyncStatus::UpToDate { last_sync_time } => {
+                    if *last_sync_time > 0 {
+                        ("Synced", rgb(MacTheme::TEXT_SECONDARY), false)
+                    } else {
+                        ("Connected", rgb(MacTheme::TEXT_SECONDARY), false)
+                    }
+                }
+                AppSyncStatus::Error(_) => ("Sync Error", rgb(MacTheme::DANGER), false),
+                _ => ("Remote", rgb(MacTheme::TEXT_TERTIARY), false),
+            };
+
+            Some(
+                div()
+                    .id("topbar-sync-controls")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id("topbar-sync-status-badge")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgba(0x2563eb18))
+                            .text_xs()
+                            .text_color(status_color)
+                            .child(if is_syncing { "🔄" } else { "☁️" })
+                            .child(status_text),
+                    )
+                    .child(
+                        div()
+                            .id("topbar-sync-now-btn")
+                            .px_1p5()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .hover(|s| {
+                                s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.sync_active_vault(cx);
+                            }))
+                            .child("↻"),
+                    ),
+            )
+        } else {
+            None
+        };
+
         // 3. Tab bar containing Vault, SFTP and open terminal sessions
-        let mut tabs_row = div()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .child(vault_btn)
-            .child(sftp_tab);
+        let mut tabs_row = div().flex().items_center().gap_1p5().child(vault_btn);
+
+        if let Some(sync_ctrls) = sync_badge {
+            tabs_row = tabs_row.child(sync_ctrls);
+        }
+
+        tabs_row = tabs_row.child(sftp_tab);
 
         for (idx, tab) in self.tabs.iter().enumerate() {
             let is_active = self.active_tab_idx == Some(idx) && self.page.is_none();
@@ -2168,13 +2238,26 @@ impl Shellumi {
                     app.vault_dropdown_open = false;
                     cx.notify();
                 }))
-                .child(
-                    div()
+                .child({
+                    let local_vaults: Vec<_> = self
+                        .available_vaults
+                        .iter()
+                        .filter(|v| !v.is_remote)
+                        .cloned()
+                        .collect();
+                    let remote_vaults: Vec<_> = self
+                        .available_vaults
+                        .iter()
+                        .filter(|v| v.is_remote)
+                        .cloned()
+                        .collect();
+
+                    let mut menu = div()
                         .id("vault-dropdown-menu")
                         .absolute()
                         .top(px(46.0))
                         .left(px(84.0))
-                        .w(px(220.0))
+                        .w(px(240.0))
                         .rounded_lg()
                         .bg(rgb(MacTheme::SURFACE))
                         .border_1()
@@ -2195,38 +2278,110 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::TEXT_TERTIARY))
                                 .font_weight(FontWeight::BOLD)
                                 .child("LOCAL VAULTS"),
-                        )
-                        .child(
+                        );
+
+                    for v in local_vaults {
+                        let is_active = v.id == self.active_vault_id;
+                        let v_id = v.id.clone();
+                        let v_name = v.name.clone();
+                        menu = menu.child(
                             div()
-                                .id("vault-opt-personal")
+                                .id(gpui::SharedString::from(format!("vault-opt-{}", v.id)))
                                 .flex()
                                 .items_center()
                                 .justify_between()
                                 .px_2p5()
-                                .py_2()
+                                .py_1p5()
                                 .rounded_md()
                                 .text_xs()
                                 .cursor_pointer()
-                                .bg(if self.active_vault == "Personal" {
+                                .bg(if is_active {
                                     rgb(MacTheme::SURFACE_ACTIVE)
                                 } else {
                                     rgba(0x00000000)
                                 })
                                 .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.active_vault = "Personal".to_string();
-                                    app.vault_dropdown_open = false;
-                                    app.navigate_page("Hosts", window, cx);
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.switch_vault(v_id.clone(), v_name.clone(), window, cx);
                                 }))
-                                .child("Personal")
-                                .child(if self.active_vault == "Personal" {
-                                    "✓"
-                                } else {
-                                    ""
-                                }),
-                        )
-                        .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child("💻")
+                                        .child(v.name),
+                                )
+                                .child(if is_active { "✓" } else { "" }),
+                        );
+                    }
+
+                    if !remote_vaults.is_empty() {
+                        menu = menu
+                            .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)).my_1())
+                            .child(
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("REMOTE SERVER VAULTS"),
+                            );
+
+                        for v in remote_vaults {
+                            let is_active = v.id == self.active_vault_id;
+                            let v_id = v.id.clone();
+                            let v_name = v.name.clone();
+                            let url_hint = v.server_url.clone().unwrap_or_default();
+                            menu = menu.child(
+                                div()
+                                    .id(gpui::SharedString::from(format!("vault-opt-{}", v.id)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_2p5()
+                                    .py_1p5()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .bg(if is_active {
+                                        rgb(MacTheme::SURFACE_ACTIVE)
+                                    } else {
+                                        rgba(0x00000000)
+                                    })
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.switch_vault(v_id.clone(), v_name.clone(), window, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child("☁️")
+                                                    .child(v.name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                                    .child(url_hint),
+                                            ),
+                                    )
+                                    .child(if is_active { "✓" } else { "" }),
+                            );
+                        }
+                    }
+
+                    menu.child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)).my_1())
                         .child(
                             div()
                                 .id("vault-opt-create")
@@ -2257,8 +2412,8 @@ impl Shellumi {
                                     app.open_team_modal(cx);
                                 }))
                                 .child("👥 Manage Team Vaults…"),
-                        ),
-                ),
+                        )
+                }),
         )
     }
 }

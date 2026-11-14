@@ -186,20 +186,22 @@ impl Shellumi {
                         .map_err(|e| e.to_string())?;
 
                     let local_vault_id = VaultId::new(vault_id_str).map_err(|e| e.to_string())?;
-                    let context = VaultContext::new(local_vault_id, VaultLocation::Local);
+                    let context = VaultContext::new(local_vault_id.clone(), VaultLocation::Local);
                     store
                         .register_vault_context(&vault_name, &context)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<_, String>(vault_name)
+                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string()))
                 });
 
                 cx.spawn(async move |app, cx| {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
-                        Ok(created_name) => {
+                        Ok((created_name, vault_id)) => {
                             app.active_vault = created_name;
+                            app.active_vault_id = vault_id;
                             app.create_vault_modal = None;
+                            app.load_vault_list(cx);
                             app.load_hosts(cx);
                             cx.notify();
                         }
@@ -362,16 +364,21 @@ impl Shellumi {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                    Ok::<_, String>(vault_name)
+                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string()))
                 });
 
                 cx.spawn(async move |app, cx| {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
-                        Ok(created_name) => {
+                        Ok((created_name, vault_id)) => {
                             app.active_vault = created_name;
+                            app.active_vault_id = vault_id;
                             app.create_vault_modal = None;
+                            app.load_vault_list(cx);
                             app.load_hosts(cx);
+                            if app.is_active_vault_remote() {
+                                app.sync_active_vault(cx);
+                            }
                             cx.notify();
                         }
                         Err(e) => {

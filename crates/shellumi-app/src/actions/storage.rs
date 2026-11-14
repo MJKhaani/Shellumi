@@ -45,6 +45,7 @@ impl Shellumi {
                         app.workspaces = workspaces;
                         app.identities = identities;
                         app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
+                        app.load_vault_list(cx);
                     }
                     Err(error) => app.hosts = HostState::Error(error),
                 }

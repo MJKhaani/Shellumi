@@ -241,6 +241,8 @@ impl Shellumi {
         };
         self.saving = true;
         self.form_error = None;
+        let active_vault_id = self.active_vault_id.clone();
+        let is_remote = self.is_active_vault_remote();
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -250,6 +252,9 @@ impl Shellumi {
                 let mut store = HostStore::open(&path)
                     .await
                     .map_err(|error| error.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 match id {
                     Some(id) => {
                         if !store
@@ -288,6 +293,32 @@ impl Shellumi {
                             .map_err(|error| error.to_string())?;
                     }
                 }
+                if is_remote {
+                    let payload = shellumi_storage::SyncHostPayload {
+                        name: name.clone(),
+                        hostname: destination.host().to_string(),
+                        username: destination.username().to_string(),
+                        port: destination.port().into(),
+                        group_name: group.clone(),
+                        tags: tags.clone(),
+                        jump_host: jump_host.clone(),
+                        startup_snippet_id,
+                        protocol: proto.to_string(),
+                        protocol_config: proto_config.clone(),
+                        identity_id,
+                    };
+                    let json = serde_json::to_string(&payload).ok();
+                    let _ = store
+                        .record_pending_mutation(
+                            &active_vault_id,
+                            &name,
+                            "host",
+                            0,
+                            false,
+                            json.as_deref(),
+                        )
+                        .await;
+                }
                 Ok(())
             })
         });
@@ -304,6 +335,9 @@ impl Shellumi {
                         app.sync_scheduler.notify_local_mutation(now);
                         app.form = None;
                         app.load_hosts(cx);
+                        if app.is_active_vault_remote() {
+                            app.sync_active_vault(cx);
+                        }
                     }
                     Err(error) => app.form_error = Some(error),
                 }
@@ -317,6 +351,8 @@ impl Shellumi {
         let Some(path) = self.database.clone() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
+        let is_remote = self.is_active_vault_remote();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -325,7 +361,26 @@ impl Shellumi {
                 let mut store = HostStore::open(&path)
                     .await
                     .map_err(|error| error.to_string())?;
-                store.delete(id).await.map_err(|error| error.to_string())
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
+                let host_name = store.get_host(id).await.ok().flatten().map(|h| h.name);
+                let deleted = store.delete(id).await.map_err(|error| error.to_string())?;
+                if is_remote && deleted {
+                    if let Some(hname) = host_name {
+                        let _ = store
+                            .record_pending_mutation(
+                                &active_vault_id,
+                                &hname,
+                                "host",
+                                0,
+                                true,
+                                None,
+                            )
+                            .await;
+                    }
+                }
+                Ok::<_, String>(deleted)
             })
         });
         cx.spawn(async move |app, cx| {
@@ -338,6 +393,9 @@ impl Shellumi {
                         .as_secs();
                     app.sync_scheduler.notify_local_mutation(now);
                     app.load_hosts(cx);
+                    if app.is_active_vault_remote() {
+                        app.sync_active_vault(cx);
+                    }
                 }
             });
         })
@@ -351,6 +409,7 @@ impl Shellumi {
         let Some(path) = self.database.clone() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
         self.hosts = HostState::Loading;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
@@ -359,7 +418,10 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 store.list().await.map_err(|e| e.to_string())
             })
         });

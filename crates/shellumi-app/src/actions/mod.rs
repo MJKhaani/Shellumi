@@ -13,6 +13,7 @@ mod mobile;
 mod palette;
 mod recordings;
 mod remote_desktop;
+mod server_sync;
 mod shell_integration;
 mod shortcuts;
 mod snippets;
@@ -24,3 +25,5 @@ mod terminal_input;
 mod tunnels;
 mod vault_creation;
 mod workspaces;
+
+pub(crate) use server_sync::VaultContextSummary;

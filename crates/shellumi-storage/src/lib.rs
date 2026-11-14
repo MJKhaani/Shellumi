@@ -1805,6 +1805,16 @@ impl HostStore {
         })
     }
 
+    /// Sets the active scoped vault ID for this store instance.
+    pub fn set_vault_id(&mut self, vault_id: shellumi_core::VaultId) {
+        self.host_vault_id = vault_id;
+    }
+
+    /// Returns the currently scoped vault ID.
+    pub fn vault_id(&self) -> &shellumi_core::VaultId {
+        &self.host_vault_id
+    }
+
     /// Register an identity only; this does not configure or authenticate a server.
     pub async fn register_vault_server(
         &mut self,
@@ -4861,6 +4871,42 @@ mod tests {
         assert_eq!(reopened.list().await.unwrap()[0].id, company_id);
         let legacy = HostStore::open(path).await.unwrap();
         assert_eq!(legacy.list().await.unwrap()[0].id, legacy_id);
+    }
+
+    #[tokio::test]
+    async fn host_store_set_vault_id_switches_scope() {
+        use shellumi_core::VaultId;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-switch.db");
+        let path = path.to_str().unwrap();
+
+        let mut store = HostStore::open(path).await.unwrap();
+        assert_eq!(store.vault_id().as_str(), LEGACY_LOCAL_VAULT_ID);
+
+        let dest_a = SshDestination::new("host-a.com", "user", 22).unwrap();
+        let id_a = store
+            .add("Host A", &dest_a, None, &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 1);
+
+        let vault_b = VaultId::new("vault-b").unwrap();
+        store.set_vault_id(vault_b.clone());
+        assert_eq!(store.vault_id().as_str(), "vault-b");
+        assert!(store.list().await.unwrap().is_empty());
+
+        let dest_b = SshDestination::new("host-b.com", "admin", 2222).unwrap();
+        let id_b = store
+            .add("Host B", &dest_b, None, &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 1);
+        assert_eq!(store.list().await.unwrap()[0].id, id_b);
+
+        store.set_vault_id(VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap());
+        let legacy_hosts = store.list().await.unwrap();
+        assert_eq!(legacy_hosts.len(), 1);
+        assert_eq!(legacy_hosts[0].id, id_a);
     }
 
     #[tokio::test]
