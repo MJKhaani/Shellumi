@@ -2,6 +2,13 @@
 
 ## 0.0.7-alpha
 
+### Remote Desktop UI Polish, Quick Connect & Workspace Persistence (Phase 5)
+- **Host Editor Upgrade:** Added protocol-specific parameters for VNC (resolution presets 1080p/1440p/4K/720p, custom width/height inputs, color depth 24/32-bit, view-only mode) and RDP (Windows Domain input, resolution presets/custom, color depth, view-only mode, and Strict CA vs TOFU pinned SHA-256 certificate policy).
+- **Interactive Quick Connect:** Extended Quick Connect to parse graphical targets (`vnc://[user@]host[:port]` and `rdp://[user@]host[:port]`). Prompts interactively on-canvas for credentials on demand without persisting secrets in URLs, command-line arguments, or unencrypted storage.
+- **Toolbar Polish & Controls:** Added Fullscreen toggle (`window.toggle_fullscreen()`), Scaling mode switcher (`Fit`, `100%`, `Fill`), SAS key buttons (`Ctrl+Alt+Del`, `Win`, `Alt+Tab`), view-only toggle, and reconnect button.
+- **Live Measured Telemetry Inspector:** Built collapsible HUD overlay displaying real-time FPS, round-trip latency, network bytes received/sent, decoded frames, rolling decode duration, geometry, and security policy directly from live protocol events.
+- **Workspace Persistence:** Added `WorkspaceSessionKind::Vnc` and `WorkspaceSessionKind::Rdp` to `shellumi-core` and workspace layouts. Persists remote desktop sessions across app restarts and restores graphical desktop tabs on workspace restore.
+
 ### Embedded RDP Protocol Engine with IronRDP (Phase 4)
 - Implemented `crates/shellumi-rdp`: Embedded native Microsoft Remote Desktop Protocol (RDP) client integration powered by pure-Rust `ironrdp-client` (v0.1.0) and associated subcrates (`ironrdp-pdu`, `ironrdp-connector`, `ironrdp-session`, `ironrdp-graphics`).
 - Strict TLS Peer-Certificate Verification by Default: Implemented `ShellumiCertificateVerifier` enforcing `CertificateValidationPolicy::Strict` against system root trust stores, SHA-256 fingerprint computation and pinning for self-signed certificates, and TOFU (Trust-On-First-Use) verification with protection against mismatched fingerprints.

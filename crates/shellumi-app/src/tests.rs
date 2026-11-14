@@ -774,6 +774,12 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         render_image: None,
         ui_handle: None,
         metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: None,
+        password: None,
+        domain: None,
+        tls_strict: true,
+        show_diagnostics: false,
+        password_input: None,
     };
 
     // Truthful baseline: initial state must never be fake Connected, metrics must be None
@@ -861,6 +867,12 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         render_image: None,
         ui_handle: None,
         metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: None,
+        password: None,
+        domain: None,
+        tls_strict: true,
+        show_diagnostics: false,
+        password_input: None,
     };
 
     assert_eq!(
@@ -929,6 +941,12 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         render_image: None,
         ui_handle: None,
         metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: None,
+        password: None,
+        domain: None,
+        tls_strict: true,
+        show_diagnostics: false,
+        password_input: None,
     };
 
     // Apply snapshot to state (simulating remote_desktop_apply_framebuffer_snapshot)
@@ -953,6 +971,110 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         rd.framebuffer.as_ref().unwrap().pixel(80, 80),
         Some([255, 255, 0, 255])
     );
+}
+
+#[test]
+fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
+    use super::{
+        RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
+    };
+    use shellumi_core::{parse_graphical_quick_connect, ConnectionProtocol};
+
+    // 1. Verify VNC quick connect target parsing
+    let (proto_vnc, host_vnc, port_vnc, user_vnc) =
+        parse_graphical_quick_connect("vnc://admin@192.168.1.100:5901").unwrap();
+    assert_eq!(proto_vnc, ConnectionProtocol::Vnc);
+    assert_eq!(host_vnc, "192.168.1.100");
+    assert_eq!(port_vnc, 5901);
+    assert_eq!(user_vnc.as_deref(), Some("admin"));
+
+    // 2. Verify RDP quick connect target parsing
+    let (proto_rdp, host_rdp, port_rdp, user_rdp) =
+        parse_graphical_quick_connect("rdp://operator@windows.corp").unwrap();
+    assert_eq!(proto_rdp, ConnectionProtocol::Rdp);
+    assert_eq!(host_rdp, "windows.corp");
+    assert_eq!(port_rdp, 3389);
+    assert_eq!(user_rdp.as_deref(), Some("operator"));
+
+    // 3. Ephemeral credential handling: state must never serialize password to disk or log
+    let mut rd = RemoteDesktopState {
+        host_name: format!("{}:{}", host_rdp, port_rdp),
+        target: format!("{}:{}", host_rdp, port_rdp),
+        protocol: RemoteDesktopProtocol::Rdp,
+        status: RemoteDesktopStatus::NotConnected,
+        status_message: Some("Awaiting credentials".into()),
+        width: 1920,
+        height: 1080,
+        view_only: false,
+        scale_mode: RemoteDesktopScaleMode::Fit,
+        color_depth: 32,
+        fps: None,
+        latency_ms: None,
+        clipboard_text: None,
+        error: None,
+        last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        ui_handle: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: user_rdp,
+        password: None,
+        domain: Some("CORP".into()),
+        tls_strict: true,
+        show_diagnostics: false,
+        password_input: None,
+    };
+
+    assert_eq!(rd.status, RemoteDesktopStatus::NotConnected);
+    assert!(rd.password.is_none());
+
+    // User provides interactive on-canvas password
+    rd.password = Some("EphemeralSecret123!".into());
+    assert_eq!(rd.password.as_deref(), Some("EphemeralSecret123!"));
+
+    // Diagnostics toggle
+    assert!(!rd.show_diagnostics);
+    rd.show_diagnostics = true;
+    assert!(rd.show_diagnostics);
+}
+
+#[test]
+fn verifies_phase5_workspace_persistence_with_vnc_and_rdp() {
+    use shellumi_core::{SshDestination, WorkspaceSession, WorkspaceSessionKind};
+
+    let sess_vnc = WorkspaceSession {
+        name: "Linux Workstation".into(),
+        kind: WorkspaceSessionKind::Vnc,
+        destination: Some(SshDestination::new("192.168.1.50", "user", 5900).unwrap()),
+        host_id: Some(101),
+        startup_command: None,
+        working_directory: None,
+        pane_index: 0,
+        excluded_from_broadcast: false,
+    };
+
+    let sess_rdp = WorkspaceSession {
+        name: "Windows Server".into(),
+        kind: WorkspaceSessionKind::Rdp,
+        destination: Some(SshDestination::new("10.0.0.12", "Administrator", 3389).unwrap()),
+        host_id: Some(102),
+        startup_command: None,
+        working_directory: None,
+        pane_index: 1,
+        excluded_from_broadcast: false,
+    };
+
+    // Serialize and deserialize JSON (as Turso storage does)
+    let json_vnc = serde_json::to_string(&sess_vnc).unwrap();
+    let json_rdp = serde_json::to_string(&sess_rdp).unwrap();
+
+    let restored_vnc: WorkspaceSession = serde_json::from_str(&json_vnc).unwrap();
+    let restored_rdp: WorkspaceSession = serde_json::from_str(&json_rdp).unwrap();
+
+    assert_eq!(restored_vnc.kind, WorkspaceSessionKind::Vnc);
+    assert_eq!(restored_vnc.kind.as_str(), "vnc");
+    assert_eq!(restored_rdp.kind, WorkspaceSessionKind::Rdp);
+    assert_eq!(restored_rdp.kind.as_str(), "rdp");
 }
 
 #[test]

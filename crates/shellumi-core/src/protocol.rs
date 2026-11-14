@@ -719,6 +719,18 @@ impl SerialConfig {
     }
 }
 
+fn default_1920() -> u16 {
+    1920
+}
+
+fn default_1080() -> u16 {
+    1080
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration parameters for VNC (Virtual Network Computing / RFB) connections.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VncConfig {
@@ -730,6 +742,10 @@ pub struct VncConfig {
     pub color_depth: u8,
     pub quality: u8,
     pub enable_clipboard: bool,
+    #[serde(default = "default_1920")]
+    pub width: u16,
+    #[serde(default = "default_1080")]
+    pub height: u16,
 }
 
 impl Default for VncConfig {
@@ -743,6 +759,8 @@ impl Default for VncConfig {
             color_depth: 24,
             quality: 8,
             enable_clipboard: true,
+            width: 1920,
+            height: 1080,
         }
     }
 }
@@ -766,6 +784,8 @@ impl VncConfig {
             color_depth: 24,
             quality: 8,
             enable_clipboard: true,
+            width: 1920,
+            height: 1080,
         })
     }
 
@@ -794,6 +814,10 @@ pub struct RdpConfig {
     pub enable_audio: bool,
     pub enable_clipboard: bool,
     pub enable_font_smoothing: bool,
+    #[serde(default = "default_true")]
+    pub tls_strict: bool,
+    #[serde(default)]
+    pub view_only: bool,
 }
 
 impl Default for RdpConfig {
@@ -810,6 +834,8 @@ impl Default for RdpConfig {
             enable_audio: false,
             enable_clipboard: true,
             enable_font_smoothing: true,
+            tls_strict: true,
+            view_only: false,
         }
     }
 }
@@ -836,6 +862,8 @@ impl RdpConfig {
             enable_audio: false,
             enable_clipboard: true,
             enable_font_smoothing: true,
+            tls_strict: true,
+            view_only: false,
         })
     }
 

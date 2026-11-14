@@ -62,8 +62,16 @@ impl Shellumi {
                     SessionKind::Ssh | SessionKind::Mosh | SessionKind::Telnet => {
                         WorkspaceSessionKind::Ssh
                     }
-                    SessionKind::Serial | SessionKind::Local | SessionKind::RemoteDesktop => {
-                        WorkspaceSessionKind::Local
+                    SessionKind::Serial | SessionKind::Local => WorkspaceSessionKind::Local,
+                    SessionKind::RemoteDesktop => {
+                        if let Some(rd) = &tab.remote_desktop_state {
+                            match rd.protocol {
+                                RemoteDesktopProtocol::Vnc => WorkspaceSessionKind::Vnc,
+                                RemoteDesktopProtocol::Rdp => WorkspaceSessionKind::Rdp,
+                            }
+                        } else {
+                            WorkspaceSessionKind::Local
+                        }
                     }
                     SessionKind::Sftp => WorkspaceSessionKind::Sftp,
                 };
@@ -71,10 +79,22 @@ impl Shellumi {
                     HostState::Loaded(hosts) => hosts.iter().find(|host| host.name == pane.name),
                     _ => None,
                 };
+                let destination = host.map(|host| host.destination.clone()).or_else(|| {
+                    if let Some(rd) = &tab.remote_desktop_state {
+                        let (h, p) = rd
+                            .target
+                            .split_once(':')
+                            .and_then(|(h, p)| p.parse::<u16>().ok().map(|port| (h, port)))
+                            .unwrap_or((rd.target.as_str(), 5900));
+                        SshDestination::new(h, rd.username.as_deref().unwrap_or(""), p).ok()
+                    } else {
+                        None
+                    }
+                });
                 WorkspaceSession {
                     name: pane.name.clone(),
                     kind,
-                    destination: host.map(|host| host.destination.clone()),
+                    destination,
                     host_id: host.map(|host| host.id),
                     startup_command: None,
                     working_directory: None,
@@ -159,6 +179,12 @@ impl Shellumi {
                         commands.push(TerminalCommand::default_shell());
                         continue;
                     }
+                    if session.kind == WorkspaceSessionKind::Vnc
+                        || session.kind == WorkspaceSessionKind::Rdp
+                    {
+                        commands.push(TerminalCommand::new(""));
+                        continue;
+                    }
                     let plan = if let Some(id) = session.host_id {
                         shellumi_storage::desktop::resolve_connection(&database, id).await?
                     } else {
@@ -233,6 +259,7 @@ impl Shellumi {
         };
 
         let mut events_to_bind = Vec::new();
+        let mut first_rd_state = None;
 
         self.broadcast_manager = BroadcastManager::new(session_specs.len());
 
@@ -240,19 +267,139 @@ impl Shellumi {
             let pane_id = self.next_tab_id.wrapping_add(1);
             self.next_tab_id = pane_id;
 
+            let rd_proto = match sess.kind {
+                WorkspaceSessionKind::Vnc => Some(RemoteDesktopProtocol::Vnc),
+                WorkspaceSessionKind::Rdp => Some(RemoteDesktopProtocol::Rdp),
+                _ => None,
+            };
+
             let kind = match sess.kind {
                 WorkspaceSessionKind::Local => SessionKind::Local,
                 WorkspaceSessionKind::Ssh => SessionKind::Ssh,
                 WorkspaceSessionKind::Sftp => SessionKind::Sftp,
-            };
-            let cmd = if sess.kind == WorkspaceSessionKind::Local {
-                TerminalCommand::default_shell()
-            } else {
-                commands[idx].clone()
+                WorkspaceSessionKind::Vnc | WorkspaceSessionKind::Rdp => SessionKind::RemoteDesktop,
             };
 
-            let session = Session::start(cmd);
-            let events = session.events.clone();
+            let session = if sess.kind == WorkspaceSessionKind::Local {
+                Some(Session::start(TerminalCommand::default_shell()))
+            } else if sess.kind == WorkspaceSessionKind::Ssh
+                || sess.kind == WorkspaceSessionKind::Sftp
+            {
+                Some(Session::start(commands[idx].clone()))
+            } else {
+                None
+            };
+            let events = session.as_ref().map(|s| s.events.clone());
+
+            if let Some(proto) = rd_proto {
+                let matched_host = match &self.hosts {
+                    HostState::Loaded(hosts) => hosts.iter().find(|h| {
+                        sess.host_id.map(|id| h.id == id).unwrap_or(false)
+                            || sess
+                                .destination
+                                .as_ref()
+                                .map(|d| &h.destination == d)
+                                .unwrap_or(false)
+                            || h.name == sess.name
+                    }),
+                    _ => None,
+                };
+
+                let (target, width, height, color_depth, view_only, username, domain, tls_strict) =
+                    if let Some(host) = matched_host {
+                        match proto {
+                            RemoteDesktopProtocol::Vnc => {
+                                let cfg = host.vnc_config().unwrap_or_default();
+                                (
+                                    format!("{}:{}", cfg.host, cfg.port),
+                                    cfg.width as u32,
+                                    cfg.height as u32,
+                                    cfg.color_depth,
+                                    cfg.view_only,
+                                    None,
+                                    None,
+                                    true,
+                                )
+                            }
+                            RemoteDesktopProtocol::Rdp => {
+                                let cfg = host.rdp_config().unwrap_or_default();
+                                (
+                                    format!("{}:{}", cfg.host, cfg.port),
+                                    cfg.screen_width as u32,
+                                    cfg.screen_height as u32,
+                                    cfg.color_depth,
+                                    cfg.view_only,
+                                    cfg.username.or_else(|| {
+                                        if host.destination.username().is_empty() {
+                                            None
+                                        } else {
+                                            Some(host.destination.username().to_string())
+                                        }
+                                    }),
+                                    cfg.domain,
+                                    cfg.tls_strict,
+                                )
+                            }
+                        }
+                    } else if let Some(dest) = &sess.destination {
+                        (
+                            format!("{}:{}", dest.host(), dest.port().get()),
+                            1920,
+                            1080,
+                            32,
+                            false,
+                            if dest.username().is_empty() {
+                                None
+                            } else {
+                                Some(dest.username().to_string())
+                            },
+                            None,
+                            true,
+                        )
+                    } else {
+                        (sess.name.clone(), 1920, 1080, 32, false, None, None, true)
+                    };
+
+                let password_input = cx.new(|cx| TextInput::new(cx, "", "Password…").masked());
+                let rd = RemoteDesktopState {
+                    host_name: sess.name.clone(),
+                    target,
+                    protocol: proto,
+                    status: RemoteDesktopStatus::NotConnected,
+                    status_message: Some(format!(
+                        "Restored session to {} via {}",
+                        sess.name,
+                        match proto {
+                            RemoteDesktopProtocol::Vnc => "RFB / VNC",
+                            RemoteDesktopProtocol::Rdp => "RDP",
+                        }
+                    )),
+                    width,
+                    height,
+                    view_only,
+                    scale_mode: RemoteDesktopScaleMode::Fit,
+                    color_depth,
+                    fps: None,
+                    latency_ms: None,
+                    clipboard_text: None,
+                    error: None,
+                    last_action_note: None,
+                    framebuffer: None,
+                    render_image: None,
+                    ui_handle: None,
+                    metrics: shellumi_remote_desktop::SessionMetrics::new(),
+                    username,
+                    password: None,
+                    domain,
+                    tls_strict,
+                    show_diagnostics: false,
+                    password_input: Some(password_input),
+                };
+                if first_rd_state.is_none() {
+                    first_rd_state = Some(rd);
+                }
+            }
+
             let search_input = cx.new(|cx| TextInput::new(cx, "", "Search output…"));
             let pane = TerminalPane {
                 id: pane_id,
@@ -264,7 +411,7 @@ impl Shellumi {
                     terminal.set_scrollback_limit(self.desktop.preferences.scrollback_lines);
                     terminal
                 },
-                session: Some(session),
+                session,
                 message: None,
                 search_open: false,
                 search_input,
@@ -277,7 +424,9 @@ impl Shellumi {
                 self.broadcast_manager.exclude_pane(idx);
             }
             panes.push(pane);
-            events_to_bind.push((pane_id, events));
+            if let Some(events) = events {
+                events_to_bind.push((pane_id, events));
+            }
         }
 
         let split = match WorkspaceLayout::parse(&ws.layout).unwrap_or(WorkspaceLayout::Single) {
@@ -295,7 +444,7 @@ impl Shellumi {
             active_pane_idx: 0,
             split,
             sftp_state: None,
-            remote_desktop_state: None,
+            remote_desktop_state: first_rd_state,
             multiplayer: None,
         };
 

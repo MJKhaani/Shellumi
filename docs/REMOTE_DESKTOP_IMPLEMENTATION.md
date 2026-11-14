@@ -167,10 +167,10 @@ Shellumi GPUI Remote Desktop Tab
 - **Gate:** Authenticates against live Windows 10/11 Pro and Windows Server machines with NLA enabled; renders live desktop frames and handles input without any external viewer executable.
 
 ### Phase 5 — UI Polish, Persistence, and Workspace Integration (PR 6)
-- [ ] Upgrade host editor with protocol-specific parameters (resolution, cert policy, encoding preferences, view-only mode).
-- [ ] Wire interactive Quick Connect password prompt without persisting secrets in URLs or shell arguments.
-- [ ] Wire toolbar actions: Reconnect, Fullscreen, Scaling Mode (Fit/100%/Fill), SAS key buttons (Ctrl+Alt+Del, Win, Alt+Tab), view-only toggle.
-- [ ] Workspace persistence: save non-secret preferences and reconnect on restore.
+- [x] Upgrade host editor with protocol-specific parameters (resolution, cert policy, encoding preferences, view-only mode).
+- [x] Wire interactive Quick Connect password prompt without persisting secrets in URLs or shell arguments.
+- [x] Wire toolbar actions: Reconnect, Fullscreen, Scaling Mode (Fit/100%/Fill), SAS key buttons (Ctrl+Alt+Del, Win, Alt+Tab), view-only toggle.
+- [x] Workspace persistence: save non-secret preferences and reconnect on restore.
 - **Gate:** Full UI acceptance test covering tab navigation, workspace save/restore, and credential isolation.
 
 ### Phase 6 — Security Hardening, Fuzzing, and Release (PR 7)

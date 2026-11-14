@@ -732,6 +732,12 @@ struct RemoteDesktopState {
     render_image: Option<std::sync::Arc<gpui::RenderImage>>,
     ui_handle: Option<shellumi_remote_desktop::SessionUiHandle>,
     metrics: shellumi_remote_desktop::SessionMetrics,
+    username: Option<String>,
+    password: Option<String>,
+    domain: Option<String>,
+    tls_strict: bool,
+    show_diagnostics: bool,
+    password_input: Option<Entity<TextInput>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -819,6 +825,12 @@ struct HostForm {
     startup_snippet: Entity<TextInput>,
     protocol: ConnectionProtocol,
     protocol_config: Option<String>,
+    rd_domain: Entity<TextInput>,
+    rd_width: Entity<TextInput>,
+    rd_height: Entity<TextInput>,
+    rd_color_depth: u8,
+    rd_view_only: bool,
+    rd_tls_strict: bool,
 }
 
 fn format_endpoint(username: &str, hostname: &str, port: u16) -> String {

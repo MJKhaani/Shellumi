@@ -48,6 +48,34 @@ impl Shellumi {
                 None,
             ),
         };
+
+        let (rd_domain, rd_width, rd_height, rd_color_depth, rd_view_only, rd_tls_strict) =
+            match host {
+                Some(h) if h.is_vnc() => {
+                    let cfg = h.vnc_config().unwrap_or_default();
+                    (
+                        String::new(),
+                        cfg.width.to_string(),
+                        cfg.height.to_string(),
+                        cfg.color_depth,
+                        cfg.view_only,
+                        true,
+                    )
+                }
+                Some(h) if h.is_rdp() => {
+                    let cfg = h.rdp_config().unwrap_or_default();
+                    (
+                        cfg.domain.unwrap_or_default(),
+                        cfg.screen_width.to_string(),
+                        cfg.screen_height.to_string(),
+                        cfg.color_depth,
+                        cfg.view_only,
+                        cfg.tls_strict,
+                    )
+                }
+                _ => (String::new(), "1920".into(), "1080".into(), 32, false, true),
+            };
+
         self.form = Some(HostForm {
             active_category: HostEditorCategory::General,
             identity_id: host.and_then(|host| host.identity_id),
@@ -65,6 +93,12 @@ impl Shellumi {
                 .new(|cx| TextInput::new(cx, &startup_snip, "Startup snippet ID (optional)")),
             protocol,
             protocol_config,
+            rd_domain: cx.new(|cx| TextInput::new(cx, &rd_domain, "Domain (optional)")),
+            rd_width: cx.new(|cx| TextInput::new(cx, &rd_width, "1920")),
+            rd_height: cx.new(|cx| TextInput::new(cx, &rd_height, "1080")),
+            rd_color_depth,
+            rd_view_only,
+            rd_tls_strict,
         });
         self.form_error = None;
         cx.notify();
@@ -137,6 +171,44 @@ impl Shellumi {
                 }
                 _ => {}
             }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_host_rd_resolution(
+        &mut self,
+        width: u16,
+        height: u16,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(form) = &mut self.form {
+            form.rd_width.update(cx, |input, cx| {
+                input.set_value(&width.to_string(), cx);
+            });
+            form.rd_height.update(cx, |input, cx| {
+                input.set_value(&height.to_string(), cx);
+            });
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_host_rd_color_depth(&mut self, depth: u8, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            form.rd_color_depth = depth;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_host_rd_view_only(&mut self, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            form.rd_view_only = !form.rd_view_only;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_host_rd_tls_strict(&mut self, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            form.rd_tls_strict = !form.rd_tls_strict;
             cx.notify();
         }
     }
@@ -233,7 +305,59 @@ impl Shellumi {
             return;
         }
         let proto = form.protocol;
-        let proto_config = form.protocol_config.clone();
+        let proto_config = match proto {
+            ConnectionProtocol::Vnc => {
+                let mut cfg = form
+                    .protocol_config
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str::<shellumi_core::VncConfig>(c).ok())
+                    .unwrap_or_else(|| {
+                        shellumi_core::VncConfig::new(destination.host(), destination.port().get())
+                            .unwrap_or_default()
+                    });
+                cfg.host = destination.host().to_string();
+                cfg.port = destination.port().get();
+                cfg.view_only = form.rd_view_only;
+                cfg.color_depth = form.rd_color_depth;
+                if let Ok(w) = form.rd_width.read(cx).value().trim().parse::<u16>() {
+                    cfg.width = w;
+                }
+                if let Ok(h) = form.rd_height.read(cx).value().trim().parse::<u16>() {
+                    cfg.height = h;
+                }
+                serde_json::to_string(&cfg).ok()
+            }
+            ConnectionProtocol::Rdp => {
+                let mut cfg = form
+                    .protocol_config
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str::<shellumi_core::RdpConfig>(c).ok())
+                    .unwrap_or_else(|| {
+                        shellumi_core::RdpConfig::new(destination.host(), destination.port().get())
+                            .unwrap_or_default()
+                    });
+                cfg.host = destination.host().to_string();
+                cfg.port = destination.port().get();
+                cfg.username = if destination.username().is_empty() {
+                    None
+                } else {
+                    Some(destination.username().to_string())
+                };
+                let dom = form.rd_domain.read(cx).value().trim().to_string();
+                cfg.domain = if dom.is_empty() { None } else { Some(dom) };
+                if let Ok(w) = form.rd_width.read(cx).value().trim().parse::<u16>() {
+                    cfg.screen_width = w;
+                }
+                if let Ok(h) = form.rd_height.read(cx).value().trim().parse::<u16>() {
+                    cfg.screen_height = h;
+                }
+                cfg.color_depth = form.rd_color_depth;
+                cfg.view_only = form.rd_view_only;
+                cfg.tls_strict = form.rd_tls_strict;
+                serde_json::to_string(&cfg).ok()
+            }
+            _ => form.protocol_config.clone(),
+        };
         let id = form.id;
         let identity_id = form.identity_id;
         let Some(path) = self.database.clone() else {

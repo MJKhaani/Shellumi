@@ -303,6 +303,56 @@ pub fn parse_quick_connect_target(target: &str) -> Result<SshDestination, Destin
     SshDestination::new(host, username, port)
 }
 
+/// Parse a graphical remote desktop quick-connect target string.
+///
+/// Supported formats:
+/// - `vnc://[user@]host[:port]` (default port 5900)
+/// - `rdp://[user@]host[:port]` (default port 3389)
+pub fn parse_graphical_quick_connect(
+    target: &str,
+) -> Option<(ConnectionProtocol, String, u16, Option<String>)> {
+    let target = target.trim();
+    let (protocol, rest) = if let Some(rest) = target.strip_prefix("vnc://") {
+        (ConnectionProtocol::Vnc, rest)
+    } else {
+        let rest = target.strip_prefix("rdp://")?;
+        (ConnectionProtocol::Rdp, rest)
+    };
+
+    let default_port = match protocol {
+        ConnectionProtocol::Vnc => 5900,
+        ConnectionProtocol::Rdp => 3389,
+        _ => return None,
+    };
+
+    let (username, host_part) = if let Some((user, host)) = rest.split_once('@') {
+        (Some(user.to_string()), host)
+    } else {
+        (None, rest)
+    };
+
+    let (host, port) = if let Some(stripped) = host_part.strip_prefix('[') {
+        let (ipv6, rest) = stripped.split_once(']')?;
+        let port = if let Some(port_str) = rest.strip_prefix(':') {
+            port_str.parse::<u16>().ok()?
+        } else {
+            default_port
+        };
+        (ipv6.to_string(), port)
+    } else if let Some((h, p)) = host_part.split_once(':') {
+        let port = p.parse::<u16>().ok()?;
+        (h.to_string(), port)
+    } else {
+        (host_part.to_string(), default_port)
+    };
+
+    if host.is_empty() {
+        return None;
+    }
+
+    Some((protocol, host, port, username))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +377,45 @@ mod tests {
         assert!(destination
             .openssh_arguments_with_jump(Some("jump;bad"))
             .is_err());
+    }
+
+    #[test]
+    fn parses_graphical_quick_connect_targets() {
+        // VNC default port
+        let (proto, host, port, user) =
+            parse_graphical_quick_connect("vnc://192.168.1.50").unwrap();
+        assert_eq!(proto, ConnectionProtocol::Vnc);
+        assert_eq!(host, "192.168.1.50");
+        assert_eq!(port, 5900);
+        assert_eq!(user, None);
+
+        // VNC custom port and user
+        let (proto, host, port, user) =
+            parse_graphical_quick_connect("vnc://operator@desktop.local:5902").unwrap();
+        assert_eq!(proto, ConnectionProtocol::Vnc);
+        assert_eq!(host, "desktop.local");
+        assert_eq!(port, 5902);
+        assert_eq!(user.as_deref(), Some("operator"));
+
+        // RDP default port
+        let (proto, host, port, user) =
+            parse_graphical_quick_connect("rdp://Administrator@10.0.0.5").unwrap();
+        assert_eq!(proto, ConnectionProtocol::Rdp);
+        assert_eq!(host, "10.0.0.5");
+        assert_eq!(port, 3389);
+        assert_eq!(user.as_deref(), Some("Administrator"));
+
+        // RDP custom port and IPv6
+        let (proto, host, port, user) = parse_graphical_quick_connect("rdp://[::1]:13389").unwrap();
+        assert_eq!(proto, ConnectionProtocol::Rdp);
+        assert_eq!(host, "::1");
+        assert_eq!(port, 13389);
+        assert_eq!(user, None);
+
+        // Invalid targets
+        assert!(parse_graphical_quick_connect("ssh://host").is_none());
+        assert!(parse_graphical_quick_connect("vnc://").is_none());
+        assert!(parse_graphical_quick_connect("rdp://:invalid").is_none());
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub enum WorkspaceSessionKind {
     Ssh,
     Local,
     Sftp,
+    Vnc,
+    Rdp,
 }
 
 impl WorkspaceSessionKind {
@@ -50,6 +52,8 @@ impl WorkspaceSessionKind {
             Self::Ssh => "ssh",
             Self::Local => "local",
             Self::Sftp => "sftp",
+            Self::Vnc => "vnc",
+            Self::Rdp => "rdp",
         }
     }
 
@@ -58,6 +62,8 @@ impl WorkspaceSessionKind {
             "ssh" => Some(Self::Ssh),
             "local" => Some(Self::Local),
             "sftp" => Some(Self::Sftp),
+            "vnc" => Some(Self::Vnc),
+            "rdp" => Some(Self::Rdp),
             _ => None,
         }
     }
@@ -435,6 +441,14 @@ mod tests {
         assert_eq!(
             WorkspaceSessionKind::parse("sftp"),
             Some(WorkspaceSessionKind::Sftp)
+        );
+        assert_eq!(
+            WorkspaceSessionKind::parse("vnc"),
+            Some(WorkspaceSessionKind::Vnc)
+        );
+        assert_eq!(
+            WorkspaceSessionKind::parse("rdp"),
+            Some(WorkspaceSessionKind::Rdp)
         );
         assert_eq!(WorkspaceSessionKind::parse("ftp"), None);
     }

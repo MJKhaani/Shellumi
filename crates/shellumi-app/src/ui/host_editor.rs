@@ -226,18 +226,251 @@ impl Shellumi {
                         ));
                     gen_div
                 }
-                HostEditorCategory::Connection => div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
+                HostEditorCategory::Connection => {
+                    let mut conn_div = div().flex().flex_col().gap_3().child(
                         div()
                             .flex()
                             .gap_3()
                             .child(host_form_field(hostname_label, form.hostname.clone()))
                             .child(host_form_field(port_label, form.port.clone())),
-                    )
-                    .child(host_form_field("Username", form.username.clone())),
+                    );
+
+                    if form.protocol != ConnectionProtocol::Vnc {
+                        conn_div =
+                            conn_div.child(host_form_field("Username", form.username.clone()));
+                    }
+
+                    if form.protocol == ConnectionProtocol::Rdp {
+                        conn_div = conn_div.child(host_form_field(
+                            "Windows Domain (optional)",
+                            form.rd_domain.clone(),
+                        ));
+                    }
+
+                    if form.protocol == ConnectionProtocol::Vnc
+                        || form.protocol == ConnectionProtocol::Rdp
+                    {
+                        // Resolution section
+                        let presets = [
+                            (1920, 1080, "1080p (FHD)"),
+                            (2560, 1440, "1440p (2K)"),
+                            (3840, 2160, "4K (UHD)"),
+                            (1280, 720, "720p (HD)"),
+                        ];
+                        let mut preset_row = div().flex().flex_row().gap_2();
+                        for (w, h, label) in presets {
+                            preset_row = preset_row.child(
+                                div()
+                                    .id(gpui::SharedString::from(format!("res-preset-{}x{}", w, h)))
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::INPUT_BG))
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .hover(|s| {
+                                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    })
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.set_host_rd_resolution(w, h, cx);
+                                    }))
+                                    .child(label),
+                            );
+                        }
+
+                        conn_div = conn_div.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child("Desktop Resolution"),
+                                )
+                                .child(preset_row)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_3()
+                                        .mt_1()
+                                        .child(host_form_field("Width (px)", form.rd_width.clone()))
+                                        .child(host_form_field(
+                                            "Height (px)",
+                                            form.rd_height.clone(),
+                                        )),
+                                ),
+                        );
+
+                        // Color Depth selector
+                        let color_depths = [(24, "24-bit True Color"), (32, "32-bit Deep Color")];
+                        let mut depth_row = div().flex().flex_row().gap_2();
+                        for (depth, label) in color_depths {
+                            let is_sel = form.rd_color_depth == depth;
+                            depth_row = depth_row.child(
+                                div()
+                                    .id(gpui::SharedString::from(format!("depth-{}", depth)))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(if is_sel {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    })
+                                    .text_color(if is_sel {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(MacTheme::TEXT_SECONDARY)
+                                    })
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.set_host_rd_color_depth(depth, cx);
+                                    }))
+                                    .child(label),
+                            );
+                        }
+                        conn_div = conn_div.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child("Color Depth"),
+                                )
+                                .child(depth_row),
+                        );
+
+                        // View-Only Mode toggle
+                        conn_div = conn_div.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .p_2p5()
+                                .rounded_md()
+                                .bg(rgb(MacTheme::INPUT_BG))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                .child("View-Only Mode"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child(
+                                                    "Observe the remote screen without sending mouse or keyboard input.",
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("toggle-view-only")
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(if form.rd_view_only {
+                                            rgb(0x4a3200)
+                                        } else {
+                                            rgb(MacTheme::SURFACE_ACTIVE)
+                                        })
+                                        .text_color(if form.rd_view_only {
+                                            rgb(0xf5a623)
+                                        } else {
+                                            rgb(MacTheme::TEXT_SECONDARY)
+                                        })
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.toggle_host_rd_view_only(cx);
+                                        }))
+                                        .child(if form.rd_view_only {
+                                            "ON (View-Only)"
+                                        } else {
+                                            "OFF (Interactive)"
+                                        }),
+                                ),
+                        );
+
+                        if form.protocol == ConnectionProtocol::Rdp {
+                            // TLS Security Policy: Strict vs TOFU
+                            conn_div = conn_div.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .p_2p5()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::INPUT_BG))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                    .child("TLS Certificate Policy"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                    .child(
+                                                        "Strict validates system root CAs & hostname. TOFU pins peer certificate SHA-256.",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("toggle-rd-tls")
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(if form.rd_tls_strict {
+                                                rgb(0x0e3b2e)
+                                            } else {
+                                                rgb(0x3e2b10)
+                                            })
+                                            .text_color(if form.rd_tls_strict {
+                                                rgb(0x3dd68c)
+                                            } else {
+                                                rgb(0xf5a623)
+                                            })
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.toggle_host_rd_tls_strict(cx);
+                                            }))
+                                            .child(if form.rd_tls_strict {
+                                                "Strict (System CA)"
+                                            } else {
+                                                "TOFU (Pin SHA-256)"
+                                            }),
+                                    ),
+                            );
+                        }
+                    }
+
+                    conn_div
+                }
                 HostEditorCategory::Authentication => {
                     let mut auth_div = div().flex().flex_col().gap_3();
                     if form.protocol == ConnectionProtocol::Ssh {

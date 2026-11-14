@@ -480,9 +480,16 @@ impl Shellumi {
                         .iter()
                         .filter(|host| editor.host_ids.contains(&host.id))
                     {
+                        let kind = if host.is_vnc() {
+                            WorkspaceSessionKind::Vnc
+                        } else if host.is_rdp() {
+                            WorkspaceSessionKind::Rdp
+                        } else {
+                            WorkspaceSessionKind::Ssh
+                        };
                         sessions.push(WorkspaceSession {
                             name: host.name.clone(),
-                            kind: WorkspaceSessionKind::Ssh,
+                            kind,
                             destination: Some(host.destination.clone()),
                             host_id: Some(host.id),
                             startup_command: None,

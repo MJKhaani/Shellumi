@@ -1245,29 +1245,28 @@ impl Render for Shellumi {
                     panes_container = panes_container.child(pane_el);
                 }
 
-                let mut result = if is_sftp_dual_pane {
-                    let sftp_state = tab.sftp_state.as_ref().unwrap();
-                    let row = div().flex().flex_1().min_h_0();
-                    root.child(
-                        row.child(
+                let mut result =
+                    if is_sftp_dual_pane {
+                        let sftp_state = tab.sftp_state.as_ref().unwrap();
+                        let row = div().flex().flex_1().min_h_0();
+                        root.child(row.child(
                             body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
-                        ),
-                    )
-                } else if let Some(rd_state) = &tab.remote_desktop_state {
-                    let mut row = div().flex().flex_1().min_h_0();
-                    if self.sidebar_visible {
-                        row = row.child(self.workspace_sidebar("Remote Desktop", cx));
-                    }
-                    root.child(row.child(
-                        body.child(self.render_remote_desktop_session(active_idx, rd_state, cx)),
-                    ))
-                } else {
-                    let mut row = div().flex().flex_1().min_h_0();
-                    if self.sidebar_visible {
-                        row = row.child(self.workspace_sidebar("Terminal", cx));
-                    }
-                    root.child(row.child(body.child(panes_container)))
-                };
+                        ))
+                    } else if let Some(rd_state) = &tab.remote_desktop_state {
+                        let mut row = div().flex().flex_1().min_h_0();
+                        if self.sidebar_visible {
+                            row = row.child(self.workspace_sidebar("Remote Desktop", cx));
+                        }
+                        root.child(row.child(body.child(
+                            self.render_remote_desktop_session(active_idx, rd_state, window, cx),
+                        )))
+                    } else {
+                        let mut row = div().flex().flex_1().min_h_0();
+                        if self.sidebar_visible {
+                            row = row.child(self.workspace_sidebar("Terminal", cx));
+                        }
+                        root.child(row.child(body.child(panes_container)))
+                    };
                 if let Some(modal) = &self.conflict_modal {
                     result = result.child(self.render_conflict_modal(modal, cx));
                 }

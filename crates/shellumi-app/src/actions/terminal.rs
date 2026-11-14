@@ -7,6 +7,23 @@ impl Shellumi {
         if target.is_empty() {
             return;
         }
+
+        if let Some((proto, host, port, username)) =
+            shellumi_core::parse_graphical_quick_connect(&target)
+        {
+            self.quick_connect_error = None;
+            self.quick_connect_input.update(cx, |input, cx| {
+                input.set_value("", cx);
+            });
+            let rd_proto = match proto {
+                ConnectionProtocol::Vnc => RemoteDesktopProtocol::Vnc,
+                ConnectionProtocol::Rdp => RemoteDesktopProtocol::Rdp,
+                _ => return,
+            };
+            self.launch_quick_connect_remote_desktop(rd_proto, &host, port, username, window, cx);
+            return;
+        }
+
         match shellumi_core::parse_quick_connect_target(&target) {
             Ok(destination) => {
                 self.quick_connect_error = None;

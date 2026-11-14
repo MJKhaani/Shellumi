@@ -1,11 +1,24 @@
 //! Remote desktop session rendering.
 use super::*;
 
+fn format_network_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 impl Shellumi {
     pub(crate) fn render_remote_desktop_session(
         &self,
         tab_idx: usize,
         state: &RemoteDesktopState,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let is_vnc = state.protocol == RemoteDesktopProtocol::Vnc;
@@ -237,6 +250,58 @@ impl Shellumi {
                 "🖱️ Interactive"
             });
 
+        let is_fs = window.is_fullscreen();
+        let fs_btn = div()
+            .id(("rd-fullscreen", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(if is_fs {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            })
+            .text_xs()
+            .text_color(if is_fs {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_PRIMARY)
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |_app, _, window, cx| {
+                window.toggle_fullscreen();
+                cx.notify();
+            }))
+            .child(if is_fs {
+                "⤓ Exit Fullscreen"
+            } else {
+                "⛶ Fullscreen"
+            });
+
+        let diag_btn = div()
+            .id(("rd-diagnostics", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(if state.show_diagnostics {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            })
+            .text_xs()
+            .text_color(if state.show_diagnostics {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_PRIMARY)
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_toggle_diagnostics(tab_idx, cx);
+            }))
+            .child("📊 Telemetry");
+
         let disc_btn = if is_connected || state.status == RemoteDesktopStatus::Connecting {
             div()
                 .id(("rd-disconnect", tab_idx))
@@ -333,6 +398,8 @@ impl Shellumi {
                             .child(scale_fill),
                     )
                     .child(view_only_btn)
+                    .child(diag_btn)
+                    .child(fs_btn)
                     .child(disc_btn),
             );
 
@@ -359,6 +426,131 @@ impl Shellumi {
                         .child(val.to_string()),
                 )
         }
+
+        let diagnostics_overlay = if state.show_diagnostics {
+            Some(
+                div()
+                    .absolute()
+                    .top_3()
+                    .right_3()
+                    .w(px(340.0))
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgba(0x161922f0))
+                    .border_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("📊 Live Protocol Diagnostics"),
+                            )
+                            .child(
+                                div()
+                                    .id(("close-diag", tab_idx))
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.remote_desktop_toggle_diagnostics(tab_idx, cx);
+                                    }))
+                                    .child("✕"),
+                            ),
+                    )
+                    .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(spec_row(
+                                "Protocol Engine",
+                                if is_vnc {
+                                    "Native RFB 3.8"
+                                } else {
+                                    "IronRDP 10.x"
+                                },
+                            ))
+                            .child(spec_row("Endpoint", &state.target))
+                            .child(spec_row(
+                                "Live Frame Rate",
+                                &state
+                                    .fps
+                                    .map(|f| format!("{f} FPS"))
+                                    .unwrap_or_else(|| "Unmeasured (awaiting frames)".into()),
+                            ))
+                            .child(spec_row(
+                                "RTT Latency",
+                                &state
+                                    .latency_ms
+                                    .map(|l| format!("{l} ms"))
+                                    .unwrap_or_else(|| "Unmeasured".into()),
+                            ))
+                            .child(spec_row(
+                                "Data Received",
+                                &format_network_bytes(state.metrics.bytes_received()),
+                            ))
+                            .child(spec_row(
+                                "Data Sent",
+                                &format_network_bytes(state.metrics.bytes_sent()),
+                            ))
+                            .child(spec_row(
+                                "Frames Decoded",
+                                &state.metrics.frames_decoded().to_string(),
+                            ))
+                            .child(spec_row(
+                                "Decode Duration",
+                                &state
+                                    .metrics
+                                    .avg_decode_ms()
+                                    .map(|d| format!("{d:.2} ms"))
+                                    .unwrap_or_else(|| "—".into()),
+                            ))
+                            .child(spec_row(
+                                "Geometry",
+                                &format!(
+                                    "{}×{} @ {}bpp",
+                                    state.width, state.height, state.color_depth
+                                ),
+                            ))
+                            .child(spec_row(
+                                "Security Policy",
+                                if state.tls_strict {
+                                    "Strict TLS (Verified)"
+                                } else {
+                                    "TOFU (Pinned Fingerprint)"
+                                },
+                            ))
+                            .child(spec_row(
+                                "Control Mode",
+                                if state.view_only {
+                                    "View-Only"
+                                } else {
+                                    "Interactive"
+                                },
+                            )),
+                    ),
+            )
+        } else {
+            None
+        };
 
         let viewport = match state.status {
             RemoteDesktopStatus::Connected => self.render_remote_desktop_canvas(tab_idx, state, cx),
@@ -460,6 +652,56 @@ impl Shellumi {
                                             .child(spec_row("Interaction Mode", if state.view_only { "View-Only (Observe)" } else { "Interactive" }))
                                             .child(spec_row("Telemetry Latency", &state.latency_ms.map(|l| format!("{l} ms")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into())))
                                             .child(spec_row("Telemetry FPS", &state.fps.map(|f| format!("{f} FPS")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into()))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .p_3()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                                    .border_1()
+                                    .border_color(rgb(MacTheme::BORDER))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                            .child("Authentication Credentials"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .children(state.username.as_ref().map(|user| {
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                    .child(format!(
+                                                        "Account: {user}{}",
+                                                        state.domain.as_ref().map(|d| format!(" (Domain: {d})")).unwrap_or_default()
+                                                    ))
+                                            }))
+                                            .children(state.password_input.as_ref().map(|input| {
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                            .child(if is_vnc {
+                                                                "VNC Password (optional if server requires no auth)"
+                                                            } else {
+                                                                "Password (held in memory for this session only)"
+                                                            }),
+                                                    )
+                                                    .child(input.clone())
+                                            })),
                                     ),
                             )
                             .child(
@@ -594,6 +836,13 @@ impl Shellumi {
             }
         };
 
+        let content_container = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(viewport)
+            .children(diagnostics_overlay);
+
         div()
             .flex_1()
             .min_h_0()
@@ -601,6 +850,6 @@ impl Shellumi {
             .flex_col()
             .bg(rgb(MacTheme::CONTENT_BG))
             .child(toolbar)
-            .child(viewport)
+            .child(content_container)
     }
 }
