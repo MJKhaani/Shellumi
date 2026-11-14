@@ -10,6 +10,26 @@ crates/shellumi-cli       CLI host management tool & OpenSSH connection launcher
 crates/shellumi-app       GPUI desktop window with interactive host management
 ```
 
+## Operating modes and server boundary
+
+The target architecture offers two modes selected per vault, allowing local and remote vaults to coexist in one application instance. Offline local mode uses the local database and may optionally synchronize encrypted personal data directly with Google Drive. Online self-hosted mode connects to [Shellumi Server](https://github.com/MJKhaani/Shellumi-Server) for encrypted synchronization, shared vaults, membership and live terminal collaboration. The local database remains available offline, and reconnecting must reconcile changes safely. Neither mode requires a Shellumi-operated service; Drive and the self-hosted server are independent providers.
+
+The current app implements an initial Google Drive client and local collaboration models. It does not yet implement the Shellumi Server protocol, account/device enrollment, server-backed vaults or collaboration transport. The server's [compatibility specification](https://github.com/MJKhaani/Shellumi-Server/blob/main/docs/COMPATIBILITY.md) is a target contract, not verified app interoperability. Server integration must establish protocol negotiation, secure token and device-key management, compatible encryption and associated data, signed conditional commits, cursor persistence, conflict handling, and safe migration before exposing these capabilities as working.
+
+## Target vault and window isolation
+
+Vault creation selects **local** or **remote**. A local vault can optionally use direct encrypted Google Drive sync. A remote vault is associated with a specific self-hosted server connection and server-side vault identity; personal or shared access is governed by that server. Multiple servers and multiple vaults per server must coexist. Persist server identity, account, vault identity, and sync cursors separately; use vault-scoped keys and credential references. Do not treat a server URL or a display name alone as a globally unique vault identity.
+
+Each window owns an explicit vault context, displays the vault and server identity, and can operate concurrently with windows bound to other vaults. Storage queries, credential resolution, host/session launch, background sync, notifications, collaboration, and import/export must receive that context rather than rely on a process-wide current vault. Scope hosts, groups, identities, credentials, snippets, workspaces, tunnels, histories, and related state to their vault. Explicitly authorized cross-vault operations must identify both source and destination. Server disconnection, token expiry, or window closure must not change unrelated contexts. Offline remote changes require safe reconciliation and server authorization on reconnect; cached access and revocation behavior must be specified and tested.
+
+These are target boundaries, not claims about the current data model. Migration must preserve existing records in a local vault without uploading them; backups and restores must preserve vault identity and isolation. Tests must cover overlapping identifiers across vaults and servers, secret isolation, simultaneous windows, independent failures, cross-vault actions, offline recovery, and migration.
+
+## Default vault directory and key protection (target)
+
+The first-launch default local vault contains its own user data and a directory of other vault identities and connection metadata. The directory is part of default-vault synchronization; it excludes other vault contents, access tokens and device-private keys. A second device discovers local vaults but needs a separate transfer or sync for their contents. It retrieves a remote vault through its own enrollment and authorization. Remote vaults keep separate encrypted local caches and pending changes, with conflict-safe reconciliation on reconnect and explicit offline revocation limitations.
+
+Each vault uses a random encryption key protected by the OS credential store for automatic local unlock. A user-chosen recovery passphrase wraps that key using a versioned KDF and authenticated encryption for synchronization and cross-device recovery. No plaintext key or passphrase is synchronized. If OS secure storage is unavailable, require a passphrase-backed path or report a blocker; never silently store plaintext. Vault data encryption, encrypted directory synchronization, first-launch provisioning and recovery remain unimplemented; existing storage is not encrypted at rest. Migration must preserve existing data and be crash-safe before switching the active storage.
+
 ## Component responsibilities
 
 ### `shellumi-core`

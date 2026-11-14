@@ -4,6 +4,27 @@ The current milestone is **v0.0.7-alpha**. Requirements remain in
 [PROJECT.md](../PROJECT.md); the [feature matrix](FEATURE_MATRIX.md) and
 [GUI status](GUI_STATUS.md) describe implementation evidence and limitations.
 
+## Operating modes and integration progress
+
+Each vault will be either local, with optional direct Google Drive personal sync, or remote, using a self-hosted [Shellumi Server](https://github.com/MJKhaani/Shellumi-Server) for sync, vault sharing and collaboration. Local use and Drive do not depend on the server. The app currently has initial Drive integration and local collaboration models; a server client and end-to-end interoperability have not been implemented or verified.
+
+Users must be able to create local and remote vaults, connect remote vaults to multiple independent servers, and open concurrent windows bound to different vaults within one app instance. Vault data, credentials, server sessions and sync state must remain isolated. Core has validated vault and server connection identifiers and a vault context distinguishing local from server-bound remote vaults. Schema v15 adds a persistent context registry and a default local registry entry while preserving existing data. Schema v16 assigns existing hosts to the default local vault and introduces a restricted vault-scoped host store. Schema v17 assigns identity records to vaults and a restricted local-vault API checks new keychain references against the vault. Identity names are still globally unique, and app credential resolution and existing secrets are not yet migrated to the wrapper. Other records remain unscoped; this does not establish complete vault isolation or implement server or window integration.
+
+The default local vault is the user's normal vault and the synchronized directory of other vaults. The directory contains discovery and connection metadata, never the contents of those other vaults or device-bound secrets. Other local vaults need their own content synchronization; remote vaults have separate encrypted offline caches and reconcile on reconnect. This design is not yet implemented: the current database is not encrypted, the registry is not in Drive sync, and remote caches are unavailable.
+
+Security foundation: core now provides random vault keys and passphrase-wrapped, vault-bound recovery envelopes. This primitive is not wired to app storage, the OS keychain, or sync. Next, generate and provision a random key for each vault, protect it with the OS credential store for local auto-unlock, and provide a user-chosen recovery passphrase wrapping that key for cross-device recovery. Use a versioned KDF and authenticated encryption; synchronize ciphertext and wrapped keys only. Address unavailable keychains, recovery-key loss, offline revocation, crash-safe migration and explicit opt-in before release.
+
+The server compatibility matrix is a protocol target rather than proof that this app supports it. Complete the following increments before presenting online mode as available:
+
+1. Define vault and server-connection identity and isolation; migrate existing data into a local vault without uploading it. Scope storage, credentials, queries, sessions, backup/restore, and background work to a vault, and test overlapping IDs and explicit cross-vault actions.
+2. Implement independent vault-bound windows in one instance, visible vault/server context, window lifecycle, and isolation tests with simultaneous company vaults.
+3. Define and test the v1 wire and cryptographic contract, including envelope format, associated data, supported suites and migration from existing local/Drive data. Preserve a recoverable local backup and keep providers independent.
+4. Add opt-in server configuration, capability negotiation, authentication and refresh, secure credential storage, and device key registration and revocation.
+5. Implement personal vault sync with stable identifiers, signed conditional commits, idempotency, paginated changes, persisted cursors, tombstones, offline changes, conflict handling and recovery.
+6. Add team vault membership, invitations, role enforcement, device-wrapped keys and key rotation, with explicit authorization and revocation.
+7. Integrate encrypted terminal collaboration with enrollment, streaming or polling, writer fencing, immediate revocation and termination.
+8. Verify against at least two real self-hosted servers and two clients, including concurrent windows and credential isolation: enrollment, convergence, concurrent edits, deletion, reconnect, migration and recovery, sharing/revocation, and collaboration. Validate security and cross-platform behavior before calling the mode complete.
+
 ## Alpha milestone
 
 The following work is included in the alpha source:
@@ -83,8 +104,8 @@ The following work is included in the alpha source:
    must not sync with a shared/default vault key.
 5. **Optional infrastructure integrations:** implement authenticated AWS/GCP/DigitalOcean
    cloud discovery APIs to complement the offline inventory parsing.
-6. **Network collaboration:** implement authenticated session transport and
-   enrollment before exposing remote sharing/control as available.
+6. **Self-hosted server integration:** implement the staged server contract, sync,
+   sharing and collaboration work above before exposing online mode as available.
 7. **Longer-term scope:** additional protocol acceptance, theme/language options,
    mobile feasibility and remaining requirements from the project specification.
 

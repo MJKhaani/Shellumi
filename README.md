@@ -22,7 +22,13 @@
 
 ---
 
-Shellumi is a modern, native alternative to Termius designed from the ground up for developers, sysadmins, and infrastructure engineers. It requires **no mandatory cloud accounts, no subscriptions, no telemetry, and no cloud locks**. Your servers, credentials, and data remain strictly local, private, and under your control.
+Shellumi is a modern, native alternative to Termius designed from the ground up for developers, sysadmins, and infrastructure engineers. It requires **no mandatory cloud accounts, no subscriptions, no telemetry, and no cloud locks**. Your data remains under your control; optional synchronization uses your own Google Drive account or, once implemented, your self-hosted Shellumi Server.
+
+Shellumi is designed for two modes: **offline local**, with optional encrypted personal synchronization directly through Google Drive; and **online self-hosted**, using [Shellumi Server](https://github.com/MJKhaani/Shellumi-Server) for synchronization, vault sharing, and collaboration. Server integration is planned and is not yet available in this app. Google Drive integration is initial and still requires real-account acceptance testing. See the [feature matrix](docs/FEATURE_MATRIX.md) for current status.
+
+The planned vault model lets users create **local** vaults or **remote** vaults linked to self-hosted servers. Multiple remote vaults may use different servers, and multiple windows in one app instance can each work in a different vault, keeping company data and credentials separate. These vault isolation and multi-window capabilities are not yet implemented or verified.
+
+The planned default local vault will hold the user's own data and an encrypted, synchronized directory of other vaults, without their contents. Remote vaults are planned to keep separate encrypted offline caches. Vault encryption, directory synchronization and remote caches are not yet implemented; current local metadata storage is not encrypted at rest.
 
 **Current milestone: `v0.0.7-alpha`.** This release delivers a fully redesigned interface, complete dual-pane graphical SFTP file manager with recursive directory transfers and macOS folder MIME iconography, uniform pinned action bars, slide-over group inspectors, and advanced host filtering.
 
@@ -183,16 +189,15 @@ cargo run --locked -p shellumi-cli -- ./hosts.db bench --category all
 
 ## Verification & Automated Test Suite
 
-Every commit to Shellumi must satisfy strict verification standards:
-- **323 automated unit and integration tests** passing across all workspace crates.
-- Strict **zero-warning policy** with `cargo clippy --workspace --all-targets -- -D warnings`.
-- Code formatting enforced via `cargo fmt --all`.
+Run focused tests locally for every affected feature and its integration points. For example:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --locked --offline --workspace --all-targets -- -D warnings
-cargo test --locked --offline --workspace
+cargo test --offline -p shellumi-core sftp::tests::codec
+cargo test --offline -p shellumi-app tests::sftp
+cargo test --offline -p shellumi-core sync::tests::http
 ```
+
+Choose additional test groups when a change crosses feature or crate boundaries. Run `cargo fmt --all -- --check` and the relevant Clippy checks locally. The [workspace verification workflow](.github/workflows/ci.yml) runs formatting, workspace Clippy, and the full workspace test suite on pushes and pull requests. The opt-in OpenSSH acceptance tests still require a suitable local OpenSSH setup.
 
 ---
 

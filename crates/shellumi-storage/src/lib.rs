@@ -11,7 +11,10 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 17;
+
+/// Registry identity reserved for the existing, unscoped local data.
+pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -32,6 +35,9 @@ pub enum StorageError {
     InvalidRecording(String),
     InvalidIdentity(shellumi_core::IdentityError),
     InvalidCredential(shellumi_core::CredentialError),
+    InvalidVaultIdentity(shellumi_core::VaultIdentityError),
+    UnknownLocalVault,
+    InvalidIdentityReference,
     Serialization(String),
     InvalidSync(shellumi_core::SyncError),
     SnapshotNotFound(String),
@@ -62,6 +68,9 @@ impl fmt::Display for StorageError {
             Self::InvalidRecording(msg) => write!(f, "invalid session recording: {msg}"),
             Self::InvalidIdentity(error) => write!(f, "invalid identity: {error}"),
             Self::InvalidCredential(error) => write!(f, "credential store error: {error}"),
+            Self::InvalidVaultIdentity(error) => write!(f, "invalid vault identity: {error}"),
+            Self::UnknownLocalVault => f.write_str("local vault is not registered"),
+            Self::InvalidIdentityReference => f.write_str("identity does not belong to this vault"),
             Self::Serialization(error) => write!(f, "serialization error: {error}"),
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
             Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
@@ -440,6 +449,130 @@ pub struct ImportVaultSummary {
 pub struct HostStore {
     _database: Database,
     connection: Connection,
+    host_vault_id: shellumi_core::VaultId,
+}
+
+/// Restricted host-only access; this does not isolate identities, groups, or secrets.
+pub struct VaultHostStore(HostStore);
+
+impl VaultHostStore {
+    pub async fn open(path: &str, vault_id: &shellumi_core::VaultId) -> Result<Self, StorageError> {
+        let mut store = HostStore::open(path).await?;
+        let mut rows = store
+            .connection
+            .query(
+                "SELECT id FROM vault_contexts WHERE id = ?1 AND server_connection_id IS NULL",
+                (vault_id.as_str(),),
+            )
+            .await?;
+        let exists = rows.next().await?.is_some();
+        drop(rows);
+        if !exists {
+            return Err(StorageError::UnknownLocalVault);
+        }
+        store.host_vault_id = vault_id.clone();
+        Ok(Self(store))
+    }
+
+    pub async fn add(
+        &mut self,
+        name: &str,
+        destination: &SshDestination,
+    ) -> Result<i64, StorageError> {
+        self.0.add(name, destination, None, &[], None, None).await
+    }
+
+    pub async fn list(&self) -> Result<Vec<SavedHost>, StorageError> {
+        self.0.list().await
+    }
+
+    pub async fn get(&self, id: i64) -> Result<Option<SavedHost>, StorageError> {
+        self.0.get_host(id).await
+    }
+
+    pub async fn update(
+        &mut self,
+        id: i64,
+        name: &str,
+        destination: &SshDestination,
+    ) -> Result<bool, StorageError> {
+        self.0
+            .update(id, name, destination, None, &[], None, None)
+            .await
+    }
+
+    pub async fn delete(&mut self, id: i64) -> Result<bool, StorageError> {
+        self.0.delete(id).await
+    }
+
+    /// Only vault-scoped keychain references are accepted for new identities.
+    pub async fn create_identity(
+        &mut self,
+        identity: &shellumi_core::NewIdentity,
+        backend: &dyn shellumi_core::CredentialStore,
+    ) -> Result<i64, StorageError> {
+        self.validate_identity_refs(identity, backend)?;
+        self.0.create_identity(identity).await
+    }
+
+    pub async fn update_identity(
+        &mut self,
+        id: i64,
+        identity: &shellumi_core::NewIdentity,
+        backend: &dyn shellumi_core::CredentialStore,
+    ) -> Result<bool, StorageError> {
+        self.validate_identity_refs(identity, backend)?;
+        self.0.update_identity(id, identity).await
+    }
+
+    fn validate_identity_refs(
+        &self,
+        identity: &shellumi_core::NewIdentity,
+        backend: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(), StorageError> {
+        let credentials = shellumi_core::VaultCredentialStore::new(backend, &self.0.host_vault_id);
+        for reference in [
+            &identity.password_secret_ref,
+            &identity.passphrase_secret_ref,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            credentials.validate_reference(reference)?;
+        }
+        Ok(())
+    }
+
+    pub async fn get_identity(&self, id: i64) -> Result<Option<SavedIdentity>, StorageError> {
+        self.0.get_identity(id).await
+    }
+
+    pub async fn list_identities(&self) -> Result<Vec<SavedIdentity>, StorageError> {
+        self.0.list_identities().await
+    }
+
+    pub async fn delete_identity(&mut self, id: i64) -> Result<bool, StorageError> {
+        self.0.delete_identity(id).await
+    }
+
+    pub async fn resolve_identity_password(
+        &self,
+        id: i64,
+        backend: &dyn shellumi_core::CredentialStore,
+    ) -> Result<Option<shellumi_core::SecretString>, StorageError> {
+        let identity = self
+            .get_identity(id)
+            .await?
+            .ok_or(StorageError::InvalidIdentityReference)?;
+        match identity.password_secret_ref {
+            Some(reference) => Ok(shellumi_core::VaultCredentialStore::new(
+                backend,
+                &self.0.host_vault_id,
+            )
+            .resolve(&reference)?),
+            None => Ok(None),
+        }
+    }
 }
 
 fn validated_name(name: &str) -> Result<&str, StorageError> {
@@ -1483,11 +1616,150 @@ impl HostStore {
             }
             tx.execute("PRAGMA user_version = 14", ()).await?;
         }
+        if version < 15 {
+            tx.execute(
+                "CREATE TABLE vault_server_connections (
+                    id TEXT PRIMARY KEY NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE vault_contexts (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                    server_connection_id TEXT REFERENCES vault_server_connections(id),
+                    server_vault_id TEXT,
+                    CHECK((server_connection_id IS NULL AND server_vault_id IS NULL) OR
+                          (server_connection_id IS NOT NULL AND server_vault_id IS NOT NULL)),
+                    UNIQUE(server_connection_id, server_vault_id)
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO vault_contexts (id, name) VALUES (?1, ?2)",
+                (LEGACY_LOCAL_VAULT_ID, "Local"),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 15", ()).await?;
+        }
+        if version < 16 {
+            let mut columns = tx.query("PRAGMA table_info(hosts)", ()).await?;
+            let mut has_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_vault_id {
+                tx.execute(
+                    "ALTER TABLE hosts ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS hosts_vault_id_idx ON hosts(vault_id)",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 16", ()).await?;
+        }
+        if version < 17 {
+            let mut columns = tx.query("PRAGMA table_info(identities)", ()).await?;
+            let mut has_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_vault_id {
+                tx.execute("ALTER TABLE identities ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'", ()).await?;
+            }
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS identities_vault_id_idx ON identities(vault_id)",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 17", ()).await?;
+        }
         tx.commit().await?;
         Ok(Self {
             _database: database,
             connection,
+            host_vault_id: shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID)
+                .map_err(StorageError::InvalidVaultIdentity)?,
         })
+    }
+
+    /// Register an identity only; this does not configure or authenticate a server.
+    pub async fn register_vault_server(
+        &mut self,
+        server: &shellumi_core::ServerConnectionId,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO vault_server_connections (id) VALUES (?1)",
+                (server.as_str(),),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Store a context in the registry. Existing data is not yet vault-scoped.
+    pub async fn register_vault_context(
+        &mut self,
+        name: &str,
+        context: &shellumi_core::VaultContext,
+    ) -> Result<(), StorageError> {
+        let name = validated_name(name)?;
+        let (server, remote) = match context.location() {
+            shellumi_core::VaultLocation::Local => (None, None),
+            shellumi_core::VaultLocation::Remote {
+                server,
+                server_vault_id,
+            } => (Some(server.as_str()), Some(server_vault_id.as_str())),
+        };
+        self.connection.execute(
+            "INSERT INTO vault_contexts (id, name, server_connection_id, server_vault_id) VALUES (?1, ?2, ?3, ?4)",
+            (context.id().as_str(), name, server, remote),
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn list_vault_contexts(
+        &self,
+    ) -> Result<Vec<(String, shellumi_core::VaultContext)>, StorageError> {
+        use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
+        let mut rows = self.connection.query(
+            "SELECT id, name, server_connection_id, server_vault_id FROM vault_contexts ORDER BY name, id", (),
+        ).await?;
+        let mut contexts = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let server: Option<String> = row.get(2)?;
+            let remote: Option<String> = row.get(3)?;
+            let location = match (server, remote) {
+                (None, None) => VaultLocation::Local,
+                (Some(server), Some(remote)) => VaultLocation::Remote {
+                    server: ServerConnectionId::new(server)
+                        .map_err(StorageError::InvalidVaultIdentity)?,
+                    server_vault_id: VaultId::new(remote)
+                        .map_err(StorageError::InvalidVaultIdentity)?,
+                },
+                _ => return Err(StorageError::Serialization("invalid vault location".into())),
+            };
+            contexts.push((
+                name,
+                VaultContext::new(
+                    VaultId::new(id).map_err(StorageError::InvalidVaultIdentity)?,
+                    location,
+                ),
+            ));
+        }
+        Ok(contexts)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1503,6 +1775,11 @@ impl HostStore {
         protocol_config: Option<&str>,
         identity_id: Option<i64>,
     ) -> Result<i64, StorageError> {
+        if let Some(id) = identity_id {
+            if self.get_identity(id).await?.is_none() {
+                return Err(StorageError::InvalidIdentityReference);
+            }
+        }
         let name = validated_name(name)?;
         let group = validated_group(group_name)?;
         let tags_serialized = validated_tags(tags)?;
@@ -1515,7 +1792,7 @@ impl HostStore {
 
         self.connection
             .execute(
-                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 (
                     name,
                     destination.host(),
@@ -1528,6 +1805,7 @@ impl HostStore {
                     proto,
                     protocol_config,
                     identity_id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -1597,6 +1875,11 @@ impl HostStore {
         protocol_config: Option<&str>,
         identity_id: Option<i64>,
     ) -> Result<bool, StorageError> {
+        if let Some(identity_id) = identity_id {
+            if self.get_identity(identity_id).await?.is_none() {
+                return Err(StorageError::InvalidIdentityReference);
+            }
+        }
         let name = validated_name(name)?;
         let group = validated_group(group_name)?;
         let tags_serialized = validated_tags(tags)?;
@@ -1610,7 +1893,7 @@ impl HostStore {
         Ok(self
             .connection
             .execute(
-                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10, identity_id = ?11 WHERE id = ?12",
+                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10, identity_id = ?11 WHERE id = ?12 AND vault_id = ?13",
                 (
                     name,
                     destination.host(),
@@ -1624,6 +1907,7 @@ impl HostStore {
                     protocol_config,
                     identity_id,
                     id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?
@@ -1688,8 +1972,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id FROM hosts ORDER BY id",
-                (),
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id FROM hosts WHERE vault_id = ?1 ORDER BY id",
+                (self.host_vault_id.as_str(),),
             )
             .await?;
         let mut hosts = Vec::new();
@@ -1734,8 +2018,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id FROM hosts WHERE id = ?1",
-                (id,),
+                "SELECT id, name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id FROM hosts WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
             )
             .await?;
         if let Some(row) = rows.next().await? {
@@ -1948,7 +2232,7 @@ impl HostStore {
 
         self.connection
             .execute(
-                "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     name,
                     username,
@@ -1959,6 +2243,7 @@ impl HostStore {
                     identity.certificate_path.as_deref(),
                     tags_json,
                     identity.comment.as_deref(),
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -1969,8 +2254,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE id = ?1",
-                (id,),
+                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
             )
             .await?;
         if let Some(row) = rows.next().await? {
@@ -1987,8 +2272,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE name = ?1",
-                (name.trim(),),
+                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE name = ?1 AND vault_id = ?2",
+                (name.trim(), self.host_vault_id.as_str()),
             )
             .await?;
         if let Some(row) = rows.next().await? {
@@ -2002,8 +2287,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities ORDER BY name",
-                (),
+                "SELECT id, name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, created_at, updated_at FROM identities WHERE vault_id = ?1 ORDER BY name",
+                (self.host_vault_id.as_str(),),
             )
             .await?;
         let mut list = Vec::new();
@@ -2039,7 +2324,7 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE identities SET name = ?1, username = ?2, auth_method = ?3, password_secret_ref = ?4, key_path = ?5, passphrase_secret_ref = ?6, certificate_path = ?7, tags = ?8, comment = ?9, updated_at = datetime('now') WHERE id = ?10",
+                "UPDATE identities SET name = ?1, username = ?2, auth_method = ?3, password_secret_ref = ?4, key_path = ?5, passphrase_secret_ref = ?6, certificate_path = ?7, tags = ?8, comment = ?9, updated_at = datetime('now') WHERE id = ?10 AND vault_id = ?11",
                 (
                     name,
                     username,
@@ -2051,6 +2336,7 @@ impl HostStore {
                     tags_json,
                     identity.comment.as_deref(),
                     id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -2060,7 +2346,10 @@ impl HostStore {
     pub async fn delete_identity(&mut self, id: i64) -> Result<bool, StorageError> {
         let rows = self
             .connection
-            .execute("DELETE FROM identities WHERE id = ?1", (id,))
+            .execute(
+                "DELETE FROM identities WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
+            )
             .await?;
         Ok(rows != 0)
     }
@@ -2228,7 +2517,10 @@ impl HostStore {
     pub async fn delete(&mut self, id: i64) -> Result<bool, StorageError> {
         Ok(self
             .connection
-            .execute("DELETE FROM hosts WHERE id = ?1", (id,))
+            .execute(
+                "DELETE FROM hosts WHERE id = ?1 AND vault_id = ?2",
+                (id, self.host_vault_id.as_str()),
+            )
             .await?
             != 0)
     }
@@ -4312,6 +4604,269 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn vault_identity_access_rejects_other_vaults_and_unscoped_secrets() {
+        use shellumi_core::{
+            AuthMethod, EphemeralCredentialStore, NewIdentity, VaultContext, VaultCredentialStore,
+            VaultId, VaultLocation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identities.db");
+        let path = path.to_str().unwrap();
+        let backend = EphemeralCredentialStore::new();
+        let mut legacy = HostStore::open(path).await.unwrap();
+        let legacy_identity =
+            NewIdentity::new("Old identity", "alice", AuthMethod::Password).unwrap();
+        let legacy_id = legacy.create_identity(&legacy_identity).await.unwrap();
+        let id_a = VaultId::new("a").unwrap();
+        let id_b = VaultId::new("b").unwrap();
+        for id in [&id_a, &id_b] {
+            legacy
+                .register_vault_context(
+                    id.as_str(),
+                    &VaultContext::new(id.clone(), VaultLocation::Local),
+                )
+                .await
+                .unwrap();
+        }
+        let mut a = VaultHostStore::open(path, &id_a).await.unwrap();
+        let mut b = VaultHostStore::open(path, &id_b).await.unwrap();
+        let credentials = VaultCredentialStore::new(&backend, &id_a);
+        let reference = credentials.store("login", "company-secret").unwrap();
+        let mut identity =
+            NewIdentity::new("Company A identity", "alice", AuthMethod::Password).unwrap();
+        identity.password_secret_ref = Some(reference);
+        let identity_id = a.create_identity(&identity, &backend).await.unwrap();
+        assert!(b.create_identity(&identity, &backend).await.is_err());
+        assert!(b.get_identity(identity_id).await.unwrap().is_none());
+        assert!(b.get_identity(legacy_id).await.unwrap().is_none());
+        assert!(!b
+            .update_identity(
+                identity_id,
+                &NewIdentity::new("other", "alice", AuthMethod::Password).unwrap(),
+                &backend
+            )
+            .await
+            .unwrap());
+        assert!(!b.delete_identity(identity_id).await.unwrap());
+        assert!(b
+            .resolve_identity_password(identity_id, &backend)
+            .await
+            .is_err());
+        assert_eq!(
+            a.resolve_identity_password(identity_id, &backend)
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "company-secret"
+        );
+        assert!(legacy.get_identity(identity_id).await.unwrap().is_none());
+        assert_eq!(legacy.list_identities().await.unwrap().len(), 1);
+        drop(a);
+        let a = VaultHostStore::open(path, &id_a).await.unwrap();
+        assert_eq!(a.list_identities().await.unwrap()[0].id, identity_id);
+    }
+
+    #[tokio::test]
+    async fn migrates_v16_identities_without_losing_secret_references() {
+        use shellumi_core::{AuthMethod, NewIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v16.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        let mut identity =
+            NewIdentity::new("Legacy identity", "alice", AuthMethod::Password).unwrap();
+        identity.password_secret_ref = Some("keychain://legacy/reference".into());
+        let id = store.create_identity(&identity).await.unwrap();
+        store
+            .connection
+            .execute("DROP INDEX identities_vault_id_idx", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("ALTER TABLE identities DROP COLUMN vault_id", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("PRAGMA user_version = 16", ())
+            .await
+            .unwrap();
+        drop(store);
+        let store = HostStore::open(path).await.unwrap();
+        let saved = store.get_identity(id).await.unwrap().unwrap();
+        assert_eq!(saved.password_secret_ref, identity.password_secret_ref);
+        let mut rows = store
+            .connection
+            .query("SELECT vault_id FROM identities WHERE id = ?1", (id,))
+            .await
+            .unwrap();
+        let vault: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(vault, LEGACY_LOCAL_VAULT_ID);
+    }
+
+    #[tokio::test]
+    async fn vault_hosts_are_isolated_and_existing_hosts_remain_local() {
+        use shellumi_core::{VaultContext, VaultId, VaultLocation};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts-isolation.db");
+        let path = path.to_str().unwrap();
+        let mut legacy = HostStore::open(path).await.unwrap();
+        let destination = SshDestination::new("example.org", "alice", 22).unwrap();
+        let legacy_id = legacy
+            .add("Legacy", &destination, None, &[], None, None)
+            .await
+            .unwrap();
+        let company = VaultId::new("company-a").unwrap();
+        legacy
+            .register_vault_context(
+                "Company",
+                &VaultContext::new(company.clone(), VaultLocation::Local),
+            )
+            .await
+            .unwrap();
+        let missing = VaultId::new("missing").unwrap();
+        assert!(matches!(
+            VaultHostStore::open(path, &missing).await,
+            Err(StorageError::UnknownLocalVault)
+        ));
+        let mut scoped = VaultHostStore::open(path, &company).await.unwrap();
+        assert!(scoped.list().await.unwrap().is_empty());
+        assert!(scoped.get(legacy_id).await.unwrap().is_none());
+        assert!(!scoped
+            .update(legacy_id, "Changed", &destination)
+            .await
+            .unwrap());
+        assert!(!scoped.delete(legacy_id).await.unwrap());
+        let company_id = scoped.add("Company", &destination).await.unwrap();
+        assert!(legacy.get_host(company_id).await.unwrap().is_none());
+        assert!(!legacy.delete(company_id).await.unwrap());
+        assert_eq!(legacy.list().await.unwrap().len(), 1);
+        drop(scoped);
+        drop(legacy);
+        let reopened = VaultHostStore::open(path, &company).await.unwrap();
+        assert_eq!(reopened.list().await.unwrap()[0].id, company_id);
+        let legacy = HostStore::open(path).await.unwrap();
+        assert_eq!(legacy.list().await.unwrap()[0].id, legacy_id);
+    }
+
+    #[tokio::test]
+    async fn migrates_v15_host_rows_to_default_local_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v15.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        let destination = SshDestination::new("legacy.example", "user", 22).unwrap();
+        store
+            .add("Legacy", &destination, None, &[], None, None)
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("DROP INDEX hosts_vault_id_idx", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("ALTER TABLE hosts DROP COLUMN vault_id", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("PRAGMA user_version = 15", ())
+            .await
+            .unwrap();
+        drop(store);
+        let reopened = HostStore::open(path).await.unwrap();
+        assert_eq!(reopened.list().await.unwrap()[0].destination, destination);
+        let mut rows = reopened
+            .connection
+            .query("SELECT vault_id FROM hosts", ())
+            .await
+            .unwrap();
+        let vault_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(vault_id, LEGACY_LOCAL_VAULT_ID);
+    }
+
+    #[tokio::test]
+    async fn vault_registry_migrates_legacy_data_and_persists_server_scopes() {
+        use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault-registry.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        let destination = SshDestination::new("example.org", "alice", 22).unwrap();
+        store
+            .add("Existing", &destination, None, &[], None, None)
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("DROP TABLE vault_contexts", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("DROP TABLE vault_server_connections", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("PRAGMA user_version = 14", ())
+            .await
+            .unwrap();
+        drop(store);
+
+        let mut store = HostStore::open(path).await.unwrap();
+        assert_eq!(store.list().await.unwrap()[0].destination, destination);
+        let initial = store.list_vault_contexts().await.unwrap();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].1.id().as_str(), LEGACY_LOCAL_VAULT_ID);
+        assert_eq!(initial[0].1.location(), &VaultLocation::Local);
+
+        let a = ServerConnectionId::new("server-a").unwrap();
+        let b = ServerConnectionId::new("server-b").unwrap();
+        store.register_vault_server(&a).await.unwrap();
+        store.register_vault_server(&b).await.unwrap();
+        let make = |id: &str, server: ServerConnectionId| {
+            VaultContext::new(
+                VaultId::new(id).unwrap(),
+                VaultLocation::Remote {
+                    server,
+                    server_vault_id: VaultId::new("same-remote-id").unwrap(),
+                },
+            )
+        };
+        let first = make("company-a", a.clone());
+        let second = make("company-b", b);
+        store
+            .register_vault_context("Company A", &first)
+            .await
+            .unwrap();
+        store
+            .register_vault_context("Company B", &second)
+            .await
+            .unwrap();
+        assert!(store
+            .register_vault_context("Duplicate", &make("other", a))
+            .await
+            .is_err());
+        let missing = make("missing", ServerConnectionId::new("unknown").unwrap());
+        assert!(store
+            .register_vault_context("Missing", &missing)
+            .await
+            .is_err());
+        drop(store);
+        let store = HostStore::open(path).await.unwrap();
+        let contexts = store.list_vault_contexts().await.unwrap();
+        assert_eq!(contexts.len(), 3);
+        assert!(contexts.iter().any(|(_, context)| context == &first));
+        assert!(contexts.iter().any(|(_, context)| context == &second));
+        assert_eq!(store.list().await.unwrap()[0].destination, destination);
+    }
+
+    #[tokio::test]
     async fn persists_across_reopen_and_rejects_future_schema() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts.db");
@@ -6041,6 +6596,16 @@ mod tests {
             let store = HostStore::open(path_str).await.unwrap();
             store
                 .connection
+                .execute("DROP TABLE vault_contexts", ())
+                .await
+                .unwrap();
+            store
+                .connection
+                .execute("DROP TABLE vault_server_connections", ())
+                .await
+                .unwrap();
+            store
+                .connection
                 .execute("PRAGMA user_version = 12", ())
                 .await
                 .unwrap();
@@ -6051,7 +6616,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Reopen database; should auto-migrate to version 14
+        // Reopen database; should auto-migrate to the current version
         let mut store = HostStore::open(path_str).await.unwrap();
         let mut rows = store
             .connection
@@ -6059,7 +6624,7 @@ mod tests {
             .await
             .unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Add a host
         let dest = SshDestination::new("10.0.0.50", "admin", 22).unwrap();
@@ -6173,6 +6738,16 @@ mod tests {
             let store = HostStore::open(path_str).await.unwrap();
             store
                 .connection
+                .execute("DROP TABLE vault_contexts", ())
+                .await
+                .unwrap();
+            store
+                .connection
+                .execute("DROP TABLE vault_server_connections", ())
+                .await
+                .unwrap();
+            store
+                .connection
                 .execute("PRAGMA user_version = 13", ())
                 .await
                 .unwrap();
@@ -6183,7 +6758,7 @@ mod tests {
                 .unwrap();
         }
 
-        // 2. Reopen database; should auto-migrate to version 14
+        // 2. Reopen database; should auto-migrate to the current version
         let mut store = HostStore::open(path_str).await.unwrap();
         let mut rows = store
             .connection
@@ -6191,7 +6766,7 @@ mod tests {
             .await
             .unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // 3. Create identities
         let mut new_id1 = shellumi_core::NewIdentity::new(

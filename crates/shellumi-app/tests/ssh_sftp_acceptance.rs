@@ -261,7 +261,17 @@ fn saved_identity_sftp_roundtrip_reconnect_and_host_trust() {
     assert!(std::fs::read(&downloaded).unwrap().is_empty());
     drop(client);
     let mut client = SftpClient::connect(&plan.destination, &options).unwrap();
-    client.remove_file(text(&remote)).unwrap();
+    let renamed = remote_dir.join("renamed file.bin");
+    client.rename(text(&remote), text(&renamed)).unwrap();
+    assert!(!remote.exists());
+    assert!(renamed.exists());
+    client.set_permissions(text(&renamed), 0o640).unwrap();
+    assert_eq!(
+        client.stat(text(&renamed)).unwrap().permissions.unwrap() & 0o777,
+        0o640
+    );
+    client.remove_file(text(&renamed)).unwrap();
+    assert!(!renamed.exists());
     client.rmdir(text(&remote_dir)).unwrap();
     drop(client);
     trust(wrong_key.with_extension("pub"));

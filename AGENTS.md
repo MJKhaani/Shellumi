@@ -58,10 +58,7 @@ Every increment must have automated test coverage:
 3. **CLI:** Process execution, argument parsing, error reporting.
 4. **UI Components:** Data conversions and unit-testable helpers.
 
-Run the test suite:
-```sh
-cargo test --offline --workspace
-```
+Run the smallest test group covering each changed section locally, including relevant cross-crate integration tests. Use `cargo test --offline -p <crate> <test-name-or-module>`; expand the scope when changes cross module boundaries. GitHub Actions runs the full workspace suite.
 
 ---
 

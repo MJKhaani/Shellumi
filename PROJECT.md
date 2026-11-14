@@ -1,6 +1,6 @@
 # SHELLUMI — MASTER DEVELOPMENT AGENT PROMPT
 
-> Current milestone: **v0.0.1-alpha**. This document defines the target scope.
+> Current milestone: **v0.0.7-alpha**. This document defines the target scope.
 > See [current feature status](docs/FEATURE_MATRIX.md),
 > [GUI implementation](docs/GUI_STATUS.md), and [roadmap](docs/ROADMAP.md)
 > for completed work, verification and remaining limitations.
@@ -23,10 +23,42 @@ Shellumi is intended to be a comprehensive, free, open-source alternative to Ter
 - **Source model:** Fully open source
 - **Primary platforms:** Windows, macOS, Linux
 - **Future platforms:** Android, iOS, iPadOS
-- **Sync provider:** Google Drive
+- **Operating modes:** Offline local with optional direct Google Drive sync; online with an optional self-hosted Shellumi Server
 - **Architecture:** Local-first, modular, asynchronous, security-first
 - **Business model:** No paid subscriptions or feature restrictions
 - **Primary audience:** System administrators, DevOps engineers, SREs, developers, cybersecurity professionals, and homelab users
+
+### Operating modes and integration status
+
+Shellumi supports two intended operating modes, selected per vault rather than globally. Local and remote vaults may coexist in one app instance:
+
+1. **Offline local:** The app operates without an account or Shellumi Server. Users may optionally synchronize their personal data between devices directly through Google Drive, using client-side encryption. Drive synchronization is independent of Shellumi Server.
+2. **Online self-hosted:** Users opt in to a [Shellumi Server](https://github.com/MJKhaani/Shellumi-Server) deployment for synchronization, shared vaults, invitations, roles, audit capabilities, and live terminal collaboration. Server-backed features require a reachable server and appropriate authentication and authorization. Local functionality remains available when disconnected; synchronization must safely reconcile changes after reconnection.
+
+### Default vault, discovery, and protection
+
+On first launch, create one default local vault for normal user data and an encrypted directory describing the user's other vaults. The directory contains only information needed to identify, display, and reconnect to each vault, such as its stable identity, type and server connection details; it never contains another vault's hosts, identities, secrets, or cached contents. Default-vault synchronization includes its own data and this directory. Each additional local vault requires its own synchronization or transfer for its content; an authorized device retrieves remote vault contents from its server. Device-bound credentials, tokens, and private device keys are not copied in the directory.
+
+Each remote vault maintains an independently protected local cache, allowing permitted offline use and recording local changes for conflict-safe reconciliation when connectivity returns. Define authorization, revocation, device enrollment, key availability and conflict behavior explicitly; a cached copy cannot observe revocation while offline. Each local or remote vault retains its own encryption keys and isolation boundaries.
+
+Protect each vault at rest with a cryptographically random vault key. Store the device's key in the OS credential store and unlock automatically for the signed-in user when available. Offer an explicit recovery passphrase for cross-device recovery and sync: use a strong, versioned password KDF to wrap the vault key with authenticated encryption, and synchronize only the wrapped key. Never sync a plaintext vault key or recovery passphrase. Allow optional stronger unlock policies, including passphrase or biometric confirmation where supported. Protect sync metadata and vault contents, explain recovery-key loss, and make migration crash-safe and recoverable without silently uploading data. If secure key storage is unavailable, request a user-supplied passphrase or clearly block encrypted storage rather than silently falling back to plaintext.
+
+The current database is not encrypted at rest, the directory is not synchronized, and secure key provisioning, encryption, recovery and remote offline caching are not yet implemented. Do not present the planned protection as active until verified.
+
+### Vaults, server connections, and windows
+
+When creating a vault, the user must choose one of two types:
+
+- **Local vault:** Data belongs to a local vault and remains usable offline. The user may opt that vault into encrypted personal synchronization directly through Google Drive; it does not become a remote vault.
+- **Remote vault:** Data belongs to a vault on a selected self-hosted Shellumi Server, with local state for offline use and safe reconciliation. A remote vault is bound to its server connection and server vault identity, and may be personal or shared according to server permissions.
+
+A single app instance must support multiple local and remote vaults, including remote vaults on different Shellumi Server deployments and multiple vaults on the same deployment. Server accounts, authentication, encryption keys, sync state, and failures must be scoped to the relevant connection and vault; a failure or logout in one must not disrupt unrelated vaults.
+
+Users must be able to open multiple windows simultaneously and bind each window to a different vault without restarting the application. Each window visibly identifies its vault and, for remote vaults, its server and connection state. Changing a window's vault must not change another window's context. Sessions and actions retain their originating vault context; closing a window must not terminate unrelated windows or sessions.
+
+Hosts, groups, credentials and identities, snippets, workspaces, tunnels, histories, sync and collaboration state must be scoped to the active vault. Queries, background tasks, secret lookup, import/export, search, notifications and session dispatch must carry explicit vault context so company data cannot silently mix. Cross-vault copy, move, sharing, or credential reuse requires an explicit user action, source and destination, authorization, and clear confirmation when sensitive data is involved; never silently reuse credentials across vaults. Migration of existing data must preserve it in a clearly identified local vault and not silently upload it.
+
+Per-vault isolation, simultaneous vault-bound windows, and server integration are targets, not completed app capabilities. The current app has an initial Google Drive integration and local collaboration models, but no Shellumi Server provider, server authentication, network vault sharing, or live collaboration transport. The server's compatibility document describes a protocol and migration target; compatibility requires implementation and end-to-end verification in the app.
 
 ### Core mission
 
@@ -1054,7 +1086,7 @@ Therefore implement two separate concepts:
 
 **Personal sync:** Private application data in the user's own Drive.
 
-**Shared vaults:** A separately designed encrypted sharing mechanism using explicitly authorized shared Drive resources or another opt-in interoperable storage mechanism.
+**Shared vaults:** Server-backed encrypted sharing through the optional self-hosted Shellumi Server, with authorized devices, recipient-wrapped keys, roles, and revocation.
 
 Do not assume personal app-data files can be shared.
 
@@ -1121,7 +1153,7 @@ Required capabilities:
 
 Google Drive synchronization alone is not a real-time terminal transport.
 
-Design an independent real-time communication mechanism, such as a peer-to-peer transport with a small optional self-hosted signaling/relay service.
+Integrate the self-hosted Shellumi Server collaboration protocol for authenticated, end-to-end encrypted real-time communication, including participant enrollment and writer-control revocation.
 
 All optional server-side components must be open source and documented.
 
@@ -1889,7 +1921,7 @@ Implement the project in incremental, verifiable stages.
 - Shared vault architecture.
 - Secure data sharing.
 - Role management.
-- Optional collaboration service.
+- Self-hosted Shellumi Server integration for authenticated synchronization, shared vaults, and collaboration.
 - Multiplayer terminal.
 - Shared logs.
 

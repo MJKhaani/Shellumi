@@ -459,6 +459,70 @@ pub struct KeychainDaemonStatus {
 
 pub const DEFAULT_KEYCHAIN_SERVICE: &str = "org.shellumi.app";
 
+/// Credential namespace for a vault. This wrapper checks ownership of references;
+/// it does not restrict callers that have direct access to the underlying store.
+pub struct VaultCredentialStore<'a> {
+    store: &'a dyn CredentialStore,
+    account_prefix: String,
+}
+
+fn sha256_hex(value: &str) -> String {
+    use std::fmt::Write;
+    let digest = ring::digest::digest(&ring::digest::SHA256, value.as_bytes());
+    let mut encoded = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+impl<'a> VaultCredentialStore<'a> {
+    pub fn new(store: &'a dyn CredentialStore, vault: &crate::vault::VaultId) -> Self {
+        Self {
+            store,
+            account_prefix: format!("vault-v1-{}-", sha256_hex(vault.as_str())),
+        }
+    }
+
+    /// Store under a vault-specific account and return a reference for persistence.
+    pub fn store(&self, name: &str, secret: &str) -> Result<String, CredentialError> {
+        let name = validate_identifier(name, "secret name")?;
+        let account = format!("{}{}", self.account_prefix, sha256_hex(name));
+        store_secret_to_ref(self.store, DEFAULT_KEYCHAIN_SERVICE, &account, secret)
+    }
+
+    fn account_for_ref(&self, reference: &str) -> Result<String, CredentialError> {
+        let (service, account) = parse_keychain_ref(reference)?;
+        let suffix = account.strip_prefix(&self.account_prefix);
+        if service != DEFAULT_KEYCHAIN_SERVICE
+            || !suffix.is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(CredentialError::InvalidIdentifier(
+                "reference belongs to another vault or is malformed",
+            ));
+        }
+        Ok(account)
+    }
+
+    pub fn validate_reference(&self, reference: &str) -> Result<(), CredentialError> {
+        self.account_for_ref(reference).map(|_| ())
+    }
+
+    pub fn resolve(&self, reference: &str) -> Result<Option<SecretString>, CredentialError> {
+        let account = self.account_for_ref(reference)?;
+        self.store.get_secret(DEFAULT_KEYCHAIN_SERVICE, &account)
+    }
+
+    pub fn delete(&self, reference: &str) -> Result<bool, CredentialError> {
+        let account = self.account_for_ref(reference)?;
+        self.store.delete_secret(DEFAULT_KEYCHAIN_SERVICE, &account)
+    }
+}
+
 /// Formats a canonical keychain URI reference (`keychain://<service>/<account>`).
 pub fn format_keychain_ref(service: &str, account: &str) -> String {
     format!("keychain://{service}/{account}")
@@ -1324,6 +1388,34 @@ mod tests {
         // 4. Delete via helper
         assert!(delete_secret_by_ref(&store, &ref_uri).unwrap());
         assert_eq!(resolve_secret_from_ref(&store, &ref_uri).unwrap(), None);
+    }
+
+    #[test]
+    fn vault_credentials_reject_cross_vault_and_unscoped_references() {
+        let backend = EphemeralCredentialStore::new();
+        let id_a = crate::vault::VaultId::new("company-a").unwrap();
+        let id_b = crate::vault::VaultId::new("company-b").unwrap();
+        let a = VaultCredentialStore::new(&backend, &id_a);
+        let b = VaultCredentialStore::new(&backend, &id_b);
+        let first = a.store("production", "first-secret").unwrap();
+        let second = b.store("production", "second-secret").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            a.resolve(&first).unwrap().unwrap().expose_secret(),
+            "first-secret"
+        );
+        assert_eq!(
+            b.resolve(&second).unwrap().unwrap().expose_secret(),
+            "second-secret"
+        );
+        assert!(a.resolve(&second).is_err());
+        assert!(a.delete(&second).is_err());
+        assert!(a.resolve("env://SHELLUMI_TEST").is_err());
+        assert!(a.resolve("keychain://org.shellumi.app/legacy").is_err());
+        assert!(a.store("  ", "secret").is_err());
+        assert!(a.delete(&first).unwrap());
+        assert!(a.resolve(&first).unwrap().is_none());
+        assert!(b.resolve(&second).unwrap().is_some());
     }
 
     #[test]

@@ -23,7 +23,12 @@ pub mod ssh_config;
 pub mod startup;
 pub mod sync;
 pub mod tunnel;
+pub mod vault;
+pub mod vault_key;
 pub mod workspace;
+
+pub use vault::{ServerConnectionId, VaultContext, VaultId, VaultIdentityError, VaultLocation};
+pub use vault_key::VaultKey;
 
 pub use autocomplete::{
     generate_bash_hook, generate_fish_hook, generate_zsh_hook, AutocompleteContext,
@@ -48,7 +53,8 @@ pub use credential::{
     format_keychain_ref, parse_keychain_ref, probe_keychain_daemon, resolve_secret_from_ref,
     store_secret_to_ref, CredentialError, CredentialStore, CredentialType, DaemonWithFallbackStore,
     EncryptedFileCredentialStore, EphemeralCredentialStore, KeychainDaemonStatus,
-    LinuxSecretServiceStore, SecretString, WindowsCredentialManagerStore, DEFAULT_KEYCHAIN_SERVICE,
+    LinuxSecretServiceStore, SecretString, VaultCredentialStore, WindowsCredentialManagerStore,
+    DEFAULT_KEYCHAIN_SERVICE,
 };
 pub use csv::{export_csv, parse_csv};
 pub use diagnostics::{
