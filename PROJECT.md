@@ -275,6 +275,29 @@ Provide a unified connection architecture supporting multiple protocols.
 - Provide device reconnect handling.
 - Support serial session logging.
 
+### VNC (Virtual Network Computing)
+
+- Native embedded RFB (RFC 6143) v3.3/3.7/3.8 client implementation.
+- Utilize `rustvnc/rfb-encodings` for pixel format definitions, encoding IDs, and compression helpers.
+- Production client-side decoders for Raw, CopyRect, DesktopSize, Hextile, ZRLE (with persistent zlib stream state), and Tight.
+- Support VNCAuth (DES challenge-response) with credentials securely referenced from Keychain.
+- Clear security warnings for unencrypted transport; support VeNCrypt/TLS where available.
+- Bidirectional text clipboard synchronization (`ClientCutText` / `ServerCutText`) with size limits and loop suppression.
+- Render directly into GPUI framebuffer with dirty rectangle blitting; strictly avoid external viewer binaries.
+- See detailed architecture in [`docs/REMOTE_DESKTOP_IMPLEMENTATION.md`](docs/REMOTE_DESKTOP_IMPLEMENTATION.md).
+
+### RDP (Remote Desktop Protocol)
+
+- Embedded RDP client engine wrapping `ironrdp-client` (from `Devolutions/IronRDP`).
+- Microsoft Open Specifications compliance (MS-RDPBCGR, MS-RDPEDISP, MS-RDPECLIP).
+- CredSSP / NLA authentication supporting domain and local user credentials.
+- Strict TLS peer-certificate validation by default; dedicated interactive review and pinning for self-signed certificates.
+- Render 32-bit RGBA frames directly into the GPUI canvas with dynamic desktop resizing.
+- Keyboard scancode / Unicode mapping, mouse events, and SAS (Ctrl+Alt+Del) command forwarding.
+- Virtual channel support: bidirectional text clipboard via CLIPRDR.
+- Strictly independent packaging: no reliance on `mstsc`, `xfreerdp`, or third-party viewers.
+- See detailed architecture in [`docs/REMOTE_DESKTOP_IMPLEMENTATION.md`](docs/REMOTE_DESKTOP_IMPLEMENTATION.md).
+
 ### Protocol architecture
 
 All protocols must use a common session abstraction where appropriate, while preserving protocol-specific capabilities.
@@ -1910,11 +1933,14 @@ Implement the project in incremental, verifiable stages.
 - Mosh.
 - Telnet.
 - Serial.
+- Native VNC Client (RFB v3.8, `rustvnc/rfb-encodings` + production decoders, native GPUI framebuffer).
+- Embedded RDP Client (MS-RDPBCGR via `ironrdp-client`, NLA, strict TLS, native GPUI framebuffer).
+- See full phased specification in [`docs/REMOTE_DESKTOP_IMPLEMENTATION.md`](docs/REMOTE_DESKTOP_IMPLEMENTATION.md).
 - Advanced authentication.
 - Hardware security keys.
 - Advanced terminal compatibility.
 
-**Deliverable:** Broad protocol coverage.
+**Deliverable:** Broad protocol coverage with native graphical remote desktop capabilities.
 
 ## Phase 8 — Collaboration
 

@@ -54,8 +54,8 @@ The following work is included in the alpha source:
   database persistence (schema v14), host/group GUI identity selection and inheritance,
   SSH/SFTP/workspace/tunnel launch policy, reference-only askpass, and Keychain display.
 - Redesigned Termius-matched 4-scenario SFTP file manager (Local-Local, Local-Remote, Remote-Local, Remote-Remote) with interactive breadcrumb path navigation (< and >), detailed columns (Name, permissions, date modified, size, kind), file/folder multi-selection with batch transfers, full context menu (Copy to target directory, Rename, Delete, Refresh, New Folder, Edit Permissions), and complete icon pack integration.
-- Protocol coverage expansion with VNC (RFB v3.8 protocol codec and frame decoders) and RDP (TPKT/X.224 negotiation request and MS-RDPBCGR connection codecs).
-- Embedded graphical Remote Desktop client session tab with live metrics (latency, FPS, resolution, color depth), interactive canvas with mouse/click/keystroke forwarding, scaling switcher (Fit/100%/Fill), view-only toggle, SAS shortcuts (Ctrl+Alt+Del, Win, Alt+Tab), and clipboard synchronization.
+- Protocol coverage expansion with domain models and initial negotiation helpers: VNC (RFB v3.8 protocol codec and packet models) and RDP (TPKT/X.224 negotiation request and MS-RDPBCGR connection codecs).
+- Graphical Remote Desktop client session tab UI layout with toolbar controls, scaling switcher (Fit/100%/Fill), view-only toggle, SAS shortcuts (Ctrl+Alt+Del, Win, Alt+Tab), and clipboard synchronization UI (live native network engines and real framebuffer rendering under active implementation; see [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md)).
 - Live graphical remote SFTP transport engine over SSH subsystem (`ssh -s sftp`)
   with RFC SFTP v3 wire codec, dual-pane remote browsing, file upload/download, and transfer queue.
 - Initial Google Drive HTTP transport (`SystemHttpTransport`) for zero-knowledge
@@ -106,7 +106,19 @@ The following work is included in the alpha source:
    cloud discovery APIs to complement the offline inventory parsing.
 6. **Self-hosted server integration:** implement the staged server contract, sync,
    sharing and collaboration work above before exposing online mode as available.
-7. **Longer-term scope:** additional protocol acceptance, theme/language options,
+7. **Native Remote Desktop (RDP & VNC) production integration:** Replace prototype
+   simulated remote desktop states with fully functional, independently packaged native
+   Rust RDP (`ironrdp-client`) and VNC (`rustvnc/rfb-encodings` + client decoders) engines
+   rendered inside the native GPUI application without third-party viewer binaries.
+   Follow the phased deliverables in [`docs/REMOTE_DESKTOP_IMPLEMENTATION.md`](REMOTE_DESKTOP_IMPLEMENTATION.md):
+   - **PR 1:** Truthful status; remove simulated `Connected` state and hardcoded metrics; pin crate versions.
+   - **PR 2:** `shellumi-remote-desktop` session architecture, safe 32-bit RGBA framebuffer, and dirty rect GPUI rendering.
+   - **PR 3:** Native VNC engine (`shellumi-vnc`) with RFB 3.8, VNCAuth, Raw/CopyRect/DesktopSize, live mouse/keysyms.
+   - **PR 4:** VNC client decoders (Hextile, ZRLE, Tight) and bidirectional text clipboard with size caps.
+   - **PR 5:** Embedded RDP (`shellumi-rdp` wrapping `ironrdp-client`), strict TLS validation, NLA, scancodes, CLIPRDR.
+   - **PR 6:** Host settings, keychain binding, interactive prompts, workspace persistence, and toolbar actions.
+   - **PR 7:** Fuzzing, decompression bomb bounds, security hardening, and real-server acceptance testing.
+8. **Longer-term scope:** additional protocol acceptance, theme/language options,
    mobile feasibility and remaining requirements from the project specification.
 
 Packaging definitions, domain models, state-machine tests and prototype screens

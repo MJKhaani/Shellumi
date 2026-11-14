@@ -95,6 +95,31 @@ Each vault uses a random encryption key protected by the OS credential store for
 - **Asciicast v2 Session Recording Engine:** Implements `shellumi-terminal::recording` (`SessionRecording`, `AsciicastHeader`, `CastEvent`, `CastEventType`, `SessionRecorder`) capturing real-time terminal output, input, and resize events into standard asciicast v2 format (`.cast`), with millisecond timestamp tracking and duration calculations (`recording_duration(&self)` on `Terminal`).
 - **Cross-Platform PTY:** Spawns native pseudo-terminals (`portable-pty`) on macOS, Linux, and Windows, supporting shell auto-detection, custom commands, arguments, working directories, environment variables, resizing, and child process lifecycle.
 
+### Remote Desktop Subsystem (Active Production Integration)
+See [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md) for full architectural specifications.
+- **`shellumi-remote-desktop` (Target Common Layer):**
+  - Defines UI-independent session state machines (`SessionStatus`: `Idle`, `Resolving`, `Connecting`, `Negotiating`, `Authenticating`, `Active`, `Reconnecting`, `Disconnecting`, `Closed`, `Failed`), commands (`SessionCommand`), events (`SessionEvent`), and error taxonomies.
+  - Implements an owned, thread-safe 32-bit RGBA `Framebuffer` with dirty-rectangle accumulation and safe snapshot semantics.
+  - Telemetry collection: calculates real measured frame rate (FPS), bytes transferred, decode timing, and active round-trip ping.
+  - Coordinate and input transformers: maps local GPUI cursor coordinates to remote desktop coordinates across `Fit`, `100%`, and `Fill` scaling modes.
+- **`shellumi-vnc` (Target VNC Engine):**
+  - Native asynchronous RFB 3.3/3.7/3.8 client over Tokio TCP streams with deadline enforcement and IPv4/IPv6 support.
+  - Handshake and security negotiation: supports VNCAuth (DES challenge-response), None (opt-in with cleartext warnings), and VeNCrypt/TLS.
+  - Uses `rustvnc/rfb-encodings` for pixel format definitions and encoding representations, paired with a custom production client decoder module (`shellumi-vnc::decoder`) supporting Raw, CopyRect, DesktopSize, Hextile, ZRLE (with persistent zlib state), and Tight.
+  - Bidirectional text clipboard synchronization (`ClientCutText` / `ServerCutText`) with size limits, loop suppression, and permission gating.
+- **`shellumi-rdp` (Target RDP Engine):**
+  - Reusable client adapter wrapping `ironrdp-client`.
+  - Maps Shellumi host identity and credentials to `ironrdp-client::ConfigBuilder`.
+  - Security by default: enforces `CertificateValidation::Strict`, rejecting unverified TLS peer certificates and presenting a dedicated certificate fingerprint review and pinning workflow for self-signed infrastructure.
+  - Authenticates via CredSSP / NLA; translates `ironrdp-client` output events (`Connected`, `DesktopUpdate`, `Image`, `ConnectionFailure`) into `SessionEvent`s.
+  - Keystroke translation: converts host keyboard input into RDP scancodes and Unicode events; mouse move/click/wheel mapping; SAS (Ctrl+Alt+Del) dispatch.
+  - Virtual channel integration: text clipboard via CLIPRDR with size bounds.
+- **`shellumi-app` UI Canvas & Session Tabs:**
+  - Embeds the remote desktop session directly inside GPUI tabs.
+  - Renders dirty rectangle updates directly from the shared framebuffer without freezing the main thread.
+  - Toolbar controls for scaling (Fit/100%/Fill), view-only toggle, SAS shortcuts, and disconnect/reconnect.
+  - Strictly avoids calling external viewer executables (`mstsc`, `xfreerdp`, `vncviewer`, `open`, etc.).
+
 ### `shellumi-storage`
 - Uses the embedded, in-process Turso Database engine (`turso` crate).
 - Stores host metadata only; credentials must never be written to this database.

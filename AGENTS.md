@@ -11,12 +11,15 @@ Shellumi is a free, open-source (MIT), local-first desktop SSH client and remote
 ### Workspace Structure
 
 ```text
-crates/shellumi-core/      UI-independent domain models and destination validation
-crates/shellumi-terminal/  VT/ANSI terminal emulator engine & cross-platform PTY manager
-crates/shellumi-storage/   Local async Turso database operations and migrations
-crates/shellumi-cli/       CLI host management and connection dispatching
-crates/shellumi-app/       GPUI 0.2.2 desktop user interface
-docs/                      Architecture, roadmap, threat model, feature matrix
+crates/shellumi-core/            UI-independent domain models and destination validation
+crates/shellumi-terminal/        VT/ANSI terminal emulator engine & cross-platform PTY manager
+crates/shellumi-storage/         Local async Turso database operations and migrations
+crates/shellumi-cli/             CLI host management and connection dispatching
+crates/shellumi-app/             GPUI 0.2.2 desktop user interface
+crates/shellumi-remote-desktop/  (In progress) Shared session abstractions, framebuffer & events
+crates/shellumi-vnc/             (In progress) Native RFB transport & client decoders
+crates/shellumi-rdp/             (In progress) Embedded IronRDP client integration
+docs/                            Architecture, roadmap, threat model, feature matrix
 ```
 
 ---
@@ -28,13 +31,14 @@ docs/                      Architecture, roadmap, threat model, feature matrix
    - GUI code in `shellumi-app` must not contain SSH protocol implementations or database logic.
    - Core domain models and protocols must never depend on GPUI or UI crates.
    - Database operations must run on background tasks (`cx.background_executor()`) and never block the main UI thread.
-3. **No Mock Implementations:** Never disguise a mock or stub as a finished implementation. If a capability is not yet implemented, document it clearly and leave the blocker visible.
+3. **No Mock Implementations:** Never disguise a mock or stub as a finished implementation. If a capability is not yet implemented, document it clearly and leave the blocker visible. Never mark a simulated, mocked, or placeholder feature as complete.
 4. **Security by Default:**
    - Never disable or bypass SSH host-key verification.
    - Never store passwords, private keys, or tokens in plaintext files, logs, or unencrypted storage.
    - Never pass arbitrary unvalidated strings to a shell.
 5. **No Telemetry or Mandatory Accounts:** The application must remain fully functional offline and locally without an account.
 6. **Verify Before Reporting:** Never claim a test passed or a feature works without compiling and running the test suite.
+7. **Authentic Remote Desktop & Protocol State:** Remote Desktop (RDP and VNC) must use native Rust protocol engines with real network I/O, authentication, and live framebuffer rendering. Never fabricate metrics (e.g. hardcoded 60 FPS or 14 ms latency), fake `Connected` states, simulated desktop canvases, or synthetic input/clipboard events. All UI telemetry must derive from live, measured protocol events.
 
 ---
 

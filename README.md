@@ -82,7 +82,7 @@ A capture of the running macOS desktop application:
 
 ### 🌐 Protocols & Remote Desktop
 - **Multi-Protocol Engine:** Support for SSH, SFTP, Mosh, Telnet, Serial lines, and embedded Remote Desktop.
-- **Embedded Remote Desktop (VNC & RDP):** Embedded RFB v3.8 and MS-RDPBCGR connection codecs, live metrics (latency, FPS, resolution, bpp), scaling switcher (Fit/100%/Fill), view-only mode, and SAS shortcuts.
+- **Embedded Remote Desktop (VNC & RDP):** RFB v3.8 and MS-RDPBCGR protocol support, scaling switcher (Fit/100%/Fill), view-only mode, SAS key shortcuts, and native Rust client engine integration (see [Remote Desktop Implementation Plan](docs/REMOTE_DESKTOP_IMPLEMENTATION.md)).
 - **SSH Port Forwarding:** Persistent local, remote, and dynamic tunnel configurations with one-click launch.
 
 ### 🔒 Encrypted Backups & Cloud Sync
