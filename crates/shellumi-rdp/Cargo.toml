@@ -1,0 +1,29 @@
+[package]
+name = "shellumi-rdp"
+version = "0.0.7-alpha"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+shellumi-remote-desktop = { path = "../shellumi-remote-desktop" }
+ironrdp-client = { version = "0.1.0", default-features = false, features = ["rustls"] }
+ironrdp-connector = "0.10.0"
+ironrdp-pdu = "0.9.0"
+ironrdp-session = "0.11.0"
+ironrdp-graphics = "0.9.0"
+ironrdp-cliprdr = "0.7.0"
+ironrdp-core = "0.2.1"
+ironrdp-tokio = "0.10.0"
+ironrdp-tls = "0.2.2"
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pki-types = "1"
+rustls-native-certs = "0.8"
+x509-cert = { version = "0.2.5", default-features = false }
+sha2 = "0.10"
+async-channel = "2"
+smallvec = "1"
+thiserror = "2"
+tracing = "0.1"

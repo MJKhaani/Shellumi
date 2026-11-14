@@ -1,6 +1,6 @@
 //! Bidirectional channel communication between UI and protocol worker tasks.
 
-use crate::framebuffer::Rect;
+use crate::framebuffer::{FramebufferSnapshot, Rect};
 use crate::input::{KeyEvent, PointerEvent, WheelEvent};
 use crate::metrics::SessionMetricsSnapshot;
 use crate::security::SecurityWarning;
@@ -27,6 +27,8 @@ pub enum SessionCommand {
     RequestResize { width: u32, height: u32 },
     /// Request a full framebuffer refresh.
     Refresh,
+    /// Send Secure Attention Sequence (Ctrl+Alt+Del).
+    CtrlAltDel,
 }
 
 /// Events emitted by the protocol background worker to the UI / main thread.
@@ -39,7 +41,11 @@ pub enum SessionEvent {
     /// Framebuffer rectangle updates applied.
     Damage { rects: Vec<Rect>, sequence: u64 },
     /// New complete display frame is ready in the shared framebuffer.
-    FrameReady { sequence: u64 },
+    FrameReady {
+        sequence: u64,
+        #[serde(skip)]
+        snapshot: Option<FramebufferSnapshot>,
+    },
     /// Clipboard text received from the remote host.
     ServerClipboard(String),
     /// Remote terminal bell event.

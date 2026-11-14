@@ -118,16 +118,22 @@ impl Shellumi {
                 let _up_packet = build_rfb_key_event(false, keysym);
 
                 if let Some(ui_handle) = &rd.ui_handle {
-                    let _ =
-                        ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Key(
-                            shellumi_remote_desktop::KeyEvent {
-                                keysym,
-                                scancode: 0,
-                                pressed: true,
-                                modifiers: shellumi_remote_desktop::KeyModifiers::default(),
-                                text: None,
-                            },
-                        ));
+                    if key_desc == "Ctrl+Alt+Del" {
+                        let _ = ui_handle
+                            .try_send_command(shellumi_remote_desktop::SessionCommand::CtrlAltDel);
+                    } else {
+                        let _ = ui_handle.try_send_command(
+                            shellumi_remote_desktop::SessionCommand::Key(
+                                shellumi_remote_desktop::KeyEvent {
+                                    keysym,
+                                    scancode: 0,
+                                    pressed: true,
+                                    modifiers: shellumi_remote_desktop::KeyModifiers::default(),
+                                    text: None,
+                                },
+                            ),
+                        );
+                    }
                 }
 
                 if rd.status == RemoteDesktopStatus::Connected {
@@ -266,120 +272,160 @@ impl Shellumi {
     pub(crate) fn remote_desktop_reconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
-                if rd.protocol == RemoteDesktopProtocol::Vnc {
-                    let (host, port) = {
-                        let parts: Vec<&str> = rd.target.split(':').collect();
-                        let h = parts.first().copied().unwrap_or("127.0.0.1").to_string();
-                        let p: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(5900);
-                        (h, p)
-                    };
+                let default_port = match rd.protocol {
+                    RemoteDesktopProtocol::Vnc => 5900,
+                    RemoteDesktopProtocol::Rdp => 3389,
+                };
+                let (host, port) = {
+                    let parts: Vec<&str> = rd.target.split(':').collect();
+                    let h = parts.first().copied().unwrap_or("127.0.0.1").to_string();
+                    let p: u16 = parts
+                        .get(1)
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(default_port);
+                    (h, p)
+                };
 
-                    let (ui_handle, worker_handle) =
-                        shellumi_remote_desktop::create_session_channels(64, 256);
-                    rd.ui_handle = Some(ui_handle.clone());
-                    rd.status = RemoteDesktopStatus::Connecting;
-                    rd.status_message = Some(format!("Connecting to {host}:{port} via RFB 3.8…"));
-                    rd.last_action_note = Some("Connection initiated".into());
-                    cx.notify();
+                let (ui_handle, worker_handle) =
+                    shellumi_remote_desktop::create_session_channels(64, 256);
+                rd.ui_handle = Some(ui_handle.clone());
+                rd.status = RemoteDesktopStatus::Connecting;
+                rd.status_message = Some(format!(
+                    "Connecting to {host}:{port} via {}…",
+                    match rd.protocol {
+                        RemoteDesktopProtocol::Vnc => "RFB 3.8",
+                        RemoteDesktopProtocol::Rdp => "MS-RDPBCGR / RDP",
+                    }
+                ));
+                rd.last_action_note = Some("Connection initiated".into());
+                cx.notify();
 
-                    let scale_mode = match rd.scale_mode {
-                        RemoteDesktopScaleMode::Fit => shellumi_remote_desktop::ScaleMode::Fit,
-                        RemoteDesktopScaleMode::Original => {
-                            shellumi_remote_desktop::ScaleMode::Original
-                        }
-                        RemoteDesktopScaleMode::Fill => shellumi_remote_desktop::ScaleMode::Fill,
-                    };
+                let scale_mode = match rd.scale_mode {
+                    RemoteDesktopScaleMode::Fit => shellumi_remote_desktop::ScaleMode::Fit,
+                    RemoteDesktopScaleMode::Original => {
+                        shellumi_remote_desktop::ScaleMode::Original
+                    }
+                    RemoteDesktopScaleMode::Fill => shellumi_remote_desktop::ScaleMode::Fill,
+                };
 
-                    let session_cfg = shellumi_remote_desktop::SessionConfig {
-                        host,
-                        port,
-                        protocol: shellumi_remote_desktop::RemoteProtocol::Vnc,
-                        width: rd.width,
-                        height: rd.height,
-                        color_depth: rd.color_depth,
-                        view_only: rd.view_only,
-                        scale_mode,
-                        username: None,
-                        password: None,
-                        domain: None,
-                        tls_strict: true,
-                    };
+                let proto = match rd.protocol {
+                    RemoteDesktopProtocol::Vnc => shellumi_remote_desktop::RemoteProtocol::Vnc,
+                    RemoteDesktopProtocol::Rdp => shellumi_remote_desktop::RemoteProtocol::Rdp,
+                };
 
-                    let fb = shellumi_remote_desktop::Framebuffer::new(rd.width, rd.height)
-                        .unwrap_or_else(|_| {
-                            shellumi_remote_desktop::Framebuffer::new(800, 600).unwrap()
-                        });
+                let session_cfg = shellumi_remote_desktop::SessionConfig {
+                    host,
+                    port,
+                    protocol: proto,
+                    width: rd.width,
+                    height: rd.height,
+                    color_depth: rd.color_depth,
+                    view_only: rd.view_only,
+                    scale_mode,
+                    username: None,
+                    password: None,
+                    domain: None,
+                    tls_strict: true,
+                };
 
-                    cx.background_executor()
-                        .spawn(async move {
-                            let _ =
-                                shellumi_vnc::run_vnc_session(session_cfg, worker_handle, fb).await;
-                        })
-                        .detach();
+                let fb = shellumi_remote_desktop::Framebuffer::new(rd.width, rd.height)
+                    .unwrap_or_else(|_| {
+                        shellumi_remote_desktop::Framebuffer::new(800, 600).unwrap()
+                    });
 
-                    cx.spawn(async move |this, cx| {
-                        while let Ok(event) = ui_handle.recv_event().await {
-                            let res = this.update(cx, |app, cx| {
-                                if let Some(tab) = app.tabs.get_mut(tab_idx) {
-                                    if let Some(rd) = &mut tab.remote_desktop_state {
-                                        match event {
-                                            shellumi_remote_desktop::SessionEvent::StateChanged(s) => match s {
-                                                shellumi_remote_desktop::SessionState::Connecting => {
-                                                    rd.status = RemoteDesktopStatus::Connecting;
-                                                    rd.status_message = Some("Connecting to VNC server…".into());
-                                                }
-                                                shellumi_remote_desktop::SessionState::Connected => {
-                                                    rd.status = RemoteDesktopStatus::Connected;
-                                                    rd.status_message = Some("Connected to VNC server".into());
-                                                }
-                                                shellumi_remote_desktop::SessionState::Disconnected => {
-                                                    rd.status = RemoteDesktopStatus::Disconnected;
-                                                    rd.status_message = Some("Disconnected from VNC server".into());
-                                                }
-                                                shellumi_remote_desktop::SessionState::Error(err) => {
-                                                    rd.status = RemoteDesktopStatus::Error;
-                                                    rd.error = Some(err.clone());
-                                                    rd.status_message = Some(format!("Error: {err}"));
-                                                }
-                                                _ => {}
-                                            },
-                                            shellumi_remote_desktop::SessionEvent::RemoteResize { width, height } => {
-                                                rd.width = width;
-                                                rd.height = height;
-                                            }
-                                            shellumi_remote_desktop::SessionEvent::Metrics(m) => {
-                                                rd.fps = m.fps;
-                                                rd.latency_ms = m.latency_ms;
-                                            }
-                                            shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
-                                                rd.clipboard_text = Some(text);
-                                                rd.last_action_note = Some("Remote clipboard text received".into());
-                                            }
-                                            shellumi_remote_desktop::SessionEvent::Bell => {
-                                                rd.last_action_note = Some("Terminal bell alert".into());
-                                            }
-                                            shellumi_remote_desktop::SessionEvent::Error(err) => {
-                                                rd.error = Some(err);
-                                            }
-                                            _ => {}
-                                        }
-                                        cx.notify();
-                                    }
-                                }
-                            });
-                            if res.is_err() {
-                                break;
+                let protocol = rd.protocol;
+                cx.background_executor()
+                    .spawn(async move {
+                        match protocol {
+                            RemoteDesktopProtocol::Vnc => {
+                                let _ =
+                                    shellumi_vnc::run_vnc_session(session_cfg, worker_handle, fb)
+                                        .await;
+                            }
+                            RemoteDesktopProtocol::Rdp => {
+                                let _ =
+                                    shellumi_rdp::run_rdp_session(session_cfg, worker_handle, fb)
+                                        .await;
                             }
                         }
                     })
                     .detach();
-                } else {
-                    rd.status = RemoteDesktopStatus::Connecting;
-                    rd.status_message =
-                        Some("Connecting... (native protocol worker in development)".into());
-                    rd.last_action_note = Some("Connection initiated".into());
-                    cx.notify();
-                }
+
+                let proto_name = match rd.protocol {
+                    RemoteDesktopProtocol::Vnc => "VNC",
+                    RemoteDesktopProtocol::Rdp => "RDP",
+                };
+
+                cx.spawn(async move |this, cx| {
+                    while let Ok(event) = ui_handle.recv_event().await {
+                        let res = this.update(cx, |app, cx| {
+                            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                                if let Some(rd) = &mut tab.remote_desktop_state {
+                                    match event {
+                                        shellumi_remote_desktop::SessionEvent::StateChanged(s) => match s {
+                                            shellumi_remote_desktop::SessionState::Connecting => {
+                                                rd.status = RemoteDesktopStatus::Connecting;
+                                                rd.status_message = Some(format!("Connecting to {proto_name} server…"));
+                                            }
+                                            shellumi_remote_desktop::SessionState::Connected => {
+                                                rd.status = RemoteDesktopStatus::Connected;
+                                                rd.status_message = Some(format!("Connected to {proto_name} server"));
+                                            }
+                                            shellumi_remote_desktop::SessionState::Disconnected => {
+                                                rd.status = RemoteDesktopStatus::Disconnected;
+                                                rd.status_message = Some(format!("Disconnected from {proto_name} server"));
+                                            }
+                                            shellumi_remote_desktop::SessionState::Error(err) => {
+                                                rd.status = RemoteDesktopStatus::Error;
+                                                rd.error = Some(err.clone());
+                                                rd.status_message = Some(format!("Error: {err}"));
+                                            }
+                                            _ => {}
+                                        },
+                                        shellumi_remote_desktop::SessionEvent::RemoteResize { width, height } => {
+                                            rd.width = width;
+                                            rd.height = height;
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::FrameReady { sequence: _, snapshot } => {
+                                            if let Some(snap) = snapshot {
+                                                rd.width = snap.width;
+                                                rd.height = snap.height;
+                                                let render_image =
+                                                    crate::ui::remote_desktop_canvas::create_render_image_from_snapshot(&snap);
+                                                rd.render_image = render_image;
+                                                rd.framebuffer = Some(snap);
+                                            }
+                                            rd.status = RemoteDesktopStatus::Connected;
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::Metrics(m) => {
+                                            rd.fps = m.fps;
+                                            rd.latency_ms = m.latency_ms;
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
+                                            rd.clipboard_text = Some(text);
+                                            rd.last_action_note = Some("Remote clipboard text received".into());
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::Bell => {
+                                            rd.last_action_note = Some("Terminal bell alert".into());
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::SecurityWarning(warning) => {
+                                            rd.status_message = Some(format!("Security: {}", warning.message()));
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::Error(err) => {
+                                            rd.error = Some(err);
+                                        }
+                                        _ => {}
+                                    }
+                                    cx.notify();
+                                }
+                            }
+                        });
+                        if res.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
             }
         }
     }

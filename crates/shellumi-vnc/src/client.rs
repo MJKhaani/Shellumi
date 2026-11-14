@@ -172,6 +172,7 @@ where
     let _ = worker
         .send_event(SessionEvent::FrameReady {
             sequence: framebuffer.sequence(),
+            snapshot: Some(framebuffer.snapshot()),
         })
         .await;
 
@@ -298,7 +299,10 @@ where
                             rects: dirty,
                             sequence: framebuffer.sequence(),
                         }).await;
-                        let _ = worker.send_event(SessionEvent::FrameReady { sequence: framebuffer.sequence() }).await;
+                        let _ = worker.send_event(SessionEvent::FrameReady {
+                            sequence: framebuffer.sequence(),
+                            snapshot: Some(framebuffer.snapshot()),
+                        }).await;
 
                         // Request next incremental update
                         let inc_fbur = build_framebuffer_update_request(

@@ -2,6 +2,14 @@
 
 ## 0.0.7-alpha
 
+### Embedded RDP Protocol Engine with IronRDP (Phase 4)
+- Implemented `crates/shellumi-rdp`: Embedded native Microsoft Remote Desktop Protocol (RDP) client integration powered by pure-Rust `ironrdp-client` (v0.1.0) and associated subcrates (`ironrdp-pdu`, `ironrdp-connector`, `ironrdp-session`, `ironrdp-graphics`).
+- Strict TLS Peer-Certificate Verification by Default: Implemented `ShellumiCertificateVerifier` enforcing `CertificateValidationPolicy::Strict` against system root trust stores, SHA-256 fingerprint computation and pinning for self-signed certificates, and TOFU (Trust-On-First-Use) verification with protection against mismatched fingerprints.
+- NLA & CredSSP Authentication: Configured CredSSP and Network Level Authentication (NLA) with automatic logon and domain routing.
+- Input & Scancode Translation: Implemented bidirectional mouse pointer movement and button mask translations (`PointerFlags::MOVE`, `LEFT_BUTTON`, `RIGHT_BUTTON`, `MIDDLE_BUTTON`), vertical wheel delta mapping with negative direction flags, X11 keysym to hardware scancode mapping with Unicode fallback, and SAS (`Ctrl+Alt+Del`, `Win`) FastPath PDU sequence generation.
+- Decoded 32-bit RGBA Bitmaps: Converted incoming `RdpOutputEvent::Image` buffers into 32-bit RGBA `Framebuffer` updates with dirty rectangle damage tracking and frame ready notifications.
+- Integrated RDP background session task into `shellumi-app` actions and wired toolbar SAS button.
+
 ### Native Remote Desktop Engine & VNC Advanced Decoders (Phase 0, 1, 2, 3)
 - Implemented `crates/shellumi-remote-desktop`: 32-bit RGBA `Framebuffer` with row-major memory, dirty rectangle tracking, `MAX_FRAMEBUFFER_DIMENSION = 8192` bounds enforcement, bounded async channels (`SessionCommand` and `SessionEvent`), and true FPS/latency/byte counters.
 - Built native GPUI canvas rendering component (`remote_desktop_canvas.rs`) converting thread-safe `FramebufferSnapshot` into `gpui::RenderImage` with aspect-ratio preserving `Fit`, `Original` (100%), and `Fill` (stretch) scaling modes.

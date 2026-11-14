@@ -157,13 +157,13 @@ Shellumi GPUI Remote Desktop Tab
 - **Gate:** Verified interoperability against independent VNC server implementations across multiple encodings.
 
 ### Phase 4 — Embedded RDP Client with IronRDP (PR 5)
-- [ ] Create `crates/shellumi-rdp` wrapping `ironrdp-client`.
-- [ ] Map `RdpConfig` and Keychain credentials into `ironrdp-client::ConfigBuilder`.
-- [ ] Enforce `CertificateValidation::Strict` by default; implement interactive certificate inspection and fingerprint pinning for self-signed certificates.
-- [ ] Wire CredSSP / NLA authentication.
-- [ ] Translate `ironrdp-client` output events (`Connected`, `DesktopUpdate`, `Image`, `ConnectionFailure`) into `SessionEvent`s.
-- [ ] Map host keyboard keystrokes to RDP scancodes and mouse inputs to pointer messages.
-- [ ] Implement CLIPRDR text clipboard virtual channel.
+- [x] Create `crates/shellumi-rdp` wrapping `ironrdp-client`.
+- [x] Map `RdpConfig` and Keychain credentials into `ironrdp-client::ConfigBuilder`.
+- [x] Enforce `CertificateValidation::Strict` by default; implement interactive certificate inspection and fingerprint pinning for self-signed certificates (`ShellumiCertificateVerifier` with SHA-256 fingerprinting).
+- [x] Wire CredSSP / NLA authentication with TLS upgrade pipeline.
+- [x] Translate `ironrdp-client` output events (`Image`, `ConnectionFailure`, `Terminated`) into `SessionEvent`s with real 32-bit RGBA `Framebuffer` updates and dirty region tracking.
+- [x] Map host keyboard keystrokes to RDP scancodes, mouse inputs to pointer messages, and SAS sequence (`Ctrl+Alt+Del`, `Win`).
+- [x] Integrate RDP background session task into `shellumi-app` with live canvas rendering and metrics reporting.
 - **Gate:** Authenticates against live Windows 10/11 Pro and Windows Server machines with NLA enabled; renders live desktop frames and handles input without any external viewer executable.
 
 ### Phase 5 — UI Polish, Persistence, and Workspace Integration (PR 6)

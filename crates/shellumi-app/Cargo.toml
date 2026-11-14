@@ -13,6 +13,7 @@ shellumi-core = { path = "../shellumi-core" }
 shellumi-terminal = { path = "../shellumi-terminal" }
 shellumi-remote-desktop = { path = "../shellumi-remote-desktop" }
 shellumi-vnc = { path = "../shellumi-vnc" }
+shellumi-rdp = { path = "../shellumi-rdp" }
 image = { version = "0.25", default-features = false }
 smallvec = "1"
 async-channel = "2"
