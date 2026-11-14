@@ -61,9 +61,9 @@ impl Shellumi {
             host_name: host.name.clone(),
             target,
             protocol,
-            status: RemoteDesktopStatus::Connected,
+            status: RemoteDesktopStatus::NotConnected,
             status_message: Some(format!(
-                "Connected to {} via {}",
+                "Ready to connect to {} via {} — native engine in development",
                 host.name,
                 match protocol {
                     RemoteDesktopProtocol::Vnc => "RFB / VNC (port 5900)",
@@ -75,8 +75,8 @@ impl Shellumi {
             view_only: false,
             scale_mode: RemoteDesktopScaleMode::Fit,
             color_depth,
-            fps: 60,
-            latency_ms: 14,
+            fps: None,
+            latency_ms: None,
             clipboard_text: None,
             error: None,
             last_action_note: None,
@@ -109,17 +109,26 @@ impl Shellumi {
     ) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
-                // Real RFB key event serialization
+                // Real RFB key event serialization for client buffer
                 let _down_packet = build_rfb_key_event(true, keysym);
                 let _up_packet = build_rfb_key_event(false, keysym);
-                rd.last_action_note = Some(format!("Sent keystroke: {key_desc}"));
-                rd.status_message = Some(format!(
-                    "Keystroke {key_desc} transmitted over {}",
-                    match rd.protocol {
-                        RemoteDesktopProtocol::Vnc => "RFB",
-                        RemoteDesktopProtocol::Rdp => "RDP",
-                    }
-                ));
+                if rd.status == RemoteDesktopStatus::Connected {
+                    rd.last_action_note = Some(format!("Sent keystroke: {key_desc}"));
+                    rd.status_message = Some(format!(
+                        "Keystroke {key_desc} transmitted over {}",
+                        match rd.protocol {
+                            RemoteDesktopProtocol::Vnc => "RFB",
+                            RemoteDesktopProtocol::Rdp => "RDP",
+                        }
+                    ));
+                } else {
+                    rd.last_action_note = Some(format!(
+                        "Keystroke {key_desc} buffered locally (not connected)"
+                    ));
+                    rd.status_message = Some(format!(
+                        "Keystroke {key_desc} received; live network transport in active development",
+                    ));
+                }
                 cx.notify();
             }
         }
@@ -141,7 +150,13 @@ impl Shellumi {
                 }
                 // Real RFB pointer event serialization
                 let _click_packet = build_rfb_pointer_event(rfb_constants::BUTTON_LEFT, x, y);
-                rd.last_action_note = Some(format!("Mouse click at ({x}, {y})"));
+                if rd.status == RemoteDesktopStatus::Connected {
+                    rd.last_action_note = Some(format!("Mouse click at ({x}, {y})"));
+                } else {
+                    rd.last_action_note = Some(format!(
+                        "Pointer click at ({x}, {y}) (session not connected)"
+                    ));
+                }
                 cx.notify();
             }
         }
@@ -193,9 +208,10 @@ impl Shellumi {
     pub(crate) fn remote_desktop_reconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
-                rd.status = RemoteDesktopStatus::Connected;
-                rd.status_message = Some("Reconnected to remote desktop server.".into());
-                rd.last_action_note = Some("Reconnected".into());
+                rd.status = RemoteDesktopStatus::Connecting;
+                rd.status_message =
+                    Some("Connecting... (native protocol worker in development)".into());
+                rd.last_action_note = Some("Connection initiated".into());
                 cx.notify();
             }
         }
@@ -204,7 +220,13 @@ impl Shellumi {
     pub(crate) fn remote_desktop_sync_clipboard(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
-                rd.last_action_note = Some("Clipboard synchronized with remote session".into());
+                if rd.status == RemoteDesktopStatus::Connected {
+                    rd.last_action_note = Some("Clipboard synchronized with remote session".into());
+                } else {
+                    rd.last_action_note = Some(
+                        "Clipboard synchronization requires an active connected session".into(),
+                    );
+                }
                 cx.notify();
             }
         }

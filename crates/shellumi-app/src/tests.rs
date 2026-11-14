@@ -758,21 +758,30 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         host_name: "Ubuntu Workstation".into(),
         target: "192.168.1.50:5900".into(),
         protocol: RemoteDesktopProtocol::Vnc,
-        status: RemoteDesktopStatus::Connected,
-        status_message: Some("Connected via RFB".into()),
+        status: RemoteDesktopStatus::NotConnected,
+        status_message: Some("Ready to connect via RFB".into()),
         width: 1920,
         height: 1080,
         view_only: false,
         scale_mode: RemoteDesktopScaleMode::Fit,
         color_depth: 24,
-        fps: 60,
-        latency_ms: 12,
+        fps: None,
+        latency_ms: None,
         clipboard_text: None,
         error: None,
         last_action_note: None,
     };
 
-    assert_eq!(rd.status, RemoteDesktopStatus::Connected);
+    // Truthful baseline: initial state must never be fake Connected, metrics must be None
+    assert_eq!(rd.status, RemoteDesktopStatus::NotConnected);
+    assert!(
+        rd.fps.is_none(),
+        "FPS must be unmeasured before real frames"
+    );
+    assert!(
+        rd.latency_ms.is_none(),
+        "Latency must be unmeasured before real ping"
+    );
     assert_eq!(rd.scale_mode, RemoteDesktopScaleMode::Fit);
     assert!(!rd.view_only);
 
@@ -788,9 +797,82 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
     rd.status = RemoteDesktopStatus::Disconnected;
     assert_eq!(rd.status, RemoteDesktopStatus::Disconnected);
 
-    // Reconnect
+    // Reconnecting transitions to Connecting (never immediate fake Connected)
+    rd.status = RemoteDesktopStatus::Connecting;
+    assert_eq!(rd.status, RemoteDesktopStatus::Connecting);
+
+    // Only genuine protocol events may set Connected and metrics
     rd.status = RemoteDesktopStatus::Connected;
+    rd.fps = Some(30);
+    rd.latency_ms = Some(18);
     assert_eq!(rd.status, RemoteDesktopStatus::Connected);
+    assert_eq!(rd.fps, Some(30));
+    assert_eq!(rd.latency_ms, Some(18));
+}
+
+#[test]
+fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
+    use super::{RemoteDesktopProtocol, RemoteDesktopStatus};
+    use shellumi_core::SshDestination;
+    use shellumi_storage::SavedHost;
+
+    // Simulate host launch parameter resolution
+    let host = SavedHost {
+        id: 42,
+        name: "Dev Bastion".into(),
+        destination: SshDestination::new("bastion.example.internal", "developer", 22).unwrap(),
+        group_name: None,
+        tags: vec![],
+        jump_host: None,
+        startup_snippet_id: None,
+        protocol: "vnc".into(),
+        protocol_config: None,
+        identity_id: None,
+    };
+
+    let target = format!("{}:5900", host.destination.host());
+    let protocol = RemoteDesktopProtocol::Vnc;
+
+    // Build the exact initial launch state as shellumi-app launch_remote_desktop produces
+    let rd = super::RemoteDesktopState {
+        host_name: host.name.clone(),
+        target: target.clone(),
+        protocol,
+        status: RemoteDesktopStatus::NotConnected,
+        status_message: Some(format!(
+            "Ready to connect to {} via {} — native engine in development",
+            host.name, "RFB / VNC (port 5900)"
+        )),
+        width: 1920,
+        height: 1080,
+        view_only: false,
+        scale_mode: super::RemoteDesktopScaleMode::Fit,
+        color_depth: 24,
+        fps: None,
+        latency_ms: None,
+        clipboard_text: None,
+        error: None,
+        last_action_note: None,
+    };
+
+    assert_eq!(
+        rd.status,
+        RemoteDesktopStatus::NotConnected,
+        "New remote desktop session must start in NotConnected state"
+    );
+    assert_eq!(
+        rd.fps, None,
+        "FPS metric must be None prior to real protocol frame arrival"
+    );
+    assert_eq!(
+        rd.latency_ms, None,
+        "Latency metric must be None prior to real protocol ping measurement"
+    );
+    assert!(rd
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("native engine in development"));
 }
 
 #[test]

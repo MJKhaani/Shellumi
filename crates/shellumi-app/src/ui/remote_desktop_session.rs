@@ -25,6 +25,45 @@ impl Shellumi {
             .text_color(if is_vnc { rgb(0xbb86fc) } else { rgb(0x3de0d8) })
             .child(if is_vnc { "🖥️ VNC" } else { "🪟 RDP" });
 
+        let (status_bg, status_color, status_text) = match state.status {
+            RemoteDesktopStatus::Connected => {
+                let lat_str = state
+                    .latency_ms
+                    .map(|l| format!("{l}ms"))
+                    .unwrap_or_else(|| "— ms".into());
+                let fps_str = state
+                    .fps
+                    .map(|f| format!("{f} FPS"))
+                    .unwrap_or_else(|| "— FPS".into());
+                (
+                    rgb(0x0e3b2e),
+                    rgb(0x3dd68c),
+                    format!(
+                        "● Connected · {lat_str} · {fps_str} · {}x{} · {}bpp",
+                        state.width, state.height, state.color_depth
+                    ),
+                )
+            }
+            RemoteDesktopStatus::Connecting => (
+                rgb(0x1a2e3b),
+                rgb(MacTheme::ACCENT_BLUE),
+                "◌ Connecting…".to_string(),
+            ),
+            RemoteDesktopStatus::NotConnected => (
+                rgb(0x282338),
+                rgb(0xbb86fc),
+                "○ Not connected (native engine in development)".to_string(),
+            ),
+            RemoteDesktopStatus::Disconnected => {
+                (rgb(0x3e1717), rgb(0xeb5757), "○ Disconnected".to_string())
+            }
+            RemoteDesktopStatus::Error => (
+                rgb(0x3e1717),
+                rgb(MacTheme::DANGER),
+                format!("⚠ Error: {}", state.error.as_deref().unwrap_or("Failed")),
+            ),
+        };
+
         let status_pill = div()
             .flex()
             .items_center()
@@ -33,24 +72,9 @@ impl Shellumi {
             .py_1()
             .rounded_md()
             .text_xs()
-            .bg(if is_connected {
-                rgb(0x0e3b2e)
-            } else {
-                rgb(0x3e1717)
-            })
-            .text_color(if is_connected {
-                rgb(0x3dd68c)
-            } else {
-                rgb(0xeb5757)
-            })
-            .child(if is_connected {
-                format!(
-                    "● Connected · {}ms · {} FPS · {}x{} · {}bpp",
-                    state.latency_ms, state.fps, state.width, state.height, state.color_depth
-                )
-            } else {
-                "○ Disconnected".to_string()
-            });
+            .bg(status_bg)
+            .text_color(status_color)
+            .child(status_text);
 
         let cad_btn = div()
             .id(("rd-cad", tab_idx))
@@ -213,7 +237,7 @@ impl Shellumi {
                 "🖱️ Interactive"
             });
 
-        let disc_btn = if is_connected {
+        let disc_btn = if is_connected || state.status == RemoteDesktopStatus::Connecting {
             div()
                 .id(("rd-disconnect", tab_idx))
                 .px_2p5()
@@ -241,7 +265,11 @@ impl Shellumi {
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.remote_desktop_reconnect(tab_idx, cx);
                 }))
-                .child("🔄 Reconnect")
+                .child(if state.status == RemoteDesktopStatus::NotConnected {
+                    "▶ Connect"
+                } else {
+                    "🔄 Reconnect"
+                })
         };
 
         let action_note = state.last_action_note.as_ref().map(|note| {
@@ -308,429 +336,305 @@ impl Shellumi {
                     .child(disc_btn),
             );
 
-        let viewport = if is_connected {
-            let canvas_area = div()
-                .id(("rd-canvas", tab_idx))
-                .relative()
-                .cursor_pointer()
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.remote_desktop_click_canvas(tab_idx, 640, 480, cx);
-                }));
+        fn spec_row(label: &'static str, val: &str) -> gpui::Div {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .py_1()
+                .px_2p5()
+                .rounded_sm()
+                .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .child(val.to_string()),
+                )
+        }
 
-            let desktop_ui = if is_vnc {
+        let viewport = match state.status {
+            RemoteDesktopStatus::Connected => {
+                let canvas_area = div()
+                    .id(("rd-canvas", tab_idx))
+                    .relative()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.remote_desktop_click_canvas(tab_idx, 640, 480, cx);
+                    }));
+
                 div()
-                    .w_full()
-                    .h_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .bg(rgb(0x0c0f14))
                     .flex()
-                    .flex_col()
-                    .bg(rgb(0x1e152a))
+                    .items_center()
+                    .justify_center()
                     .child(
-                        div()
-                            .h(px(28.0))
-                            .px_3()
+                        canvas_area
+                            .w_full()
+                            .h_full()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .bg(rgb(0x0a0710))
-                            .text_xs()
-                            .text_color(rgb(0xdfdbe5))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(div().font_weight(FontWeight::BOLD).child("Activities"))
-                                    .child("Terminal")
-                                    .child("Files"),
-                            )
-                            .child(div().font_weight(FontWeight::MEDIUM).child("Tue Nov 10 20:30"))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child("📶")
-                                    .child("🔊")
-                                    .child("🔋 100%")
-                                    .child("⏻"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .p_6()
-                            .flex()
+                            .flex_col()
                             .items_center()
                             .justify_center()
+                            .gap_3()
+                            .child(div().text_2xl().child("📡"))
                             .child(
                                 div()
-                                    .w(px(680.0))
-                                    .h(px(380.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0x110d19))
-                                    .border_1()
-                                    .border_color(rgb(0x3e2b54))
-                                    .shadow_md()
-                                    .flex()
-                                    .flex_col()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Connected to Remote Desktop Server"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                     .child(
-                                        div()
-                                            .h(px(32.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .bg(rgb(0x1c1328))
-                                            .rounded_t_lg()
-                                            .border_b_1()
-                                            .border_color(rgb(0x2d1f40))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .child(
-                                                        div()
-                                                            .w(px(10.0))
-                                                            .h(px(10.0))
-                                                            .rounded_full()
-                                                            .bg(rgb(0xe95420)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .w(px(10.0))
-                                                            .h(px(10.0))
-                                                            .rounded_full()
-                                                            .bg(rgb(0x77216f)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .w(px(10.0))
-                                                            .h(px(10.0))
-                                                            .rounded_full()
-                                                            .bg(rgb(0x5e2750)),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(0xdfdbe5))
-                                                    .child(format!(
-                                                        "user@{}: ~ (Remote VNC)",
-                                                        state.host_name
-                                                    )),
-                                            )
-                                            .child(div().w(px(30.0))),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .p_4()
-                                            .font_family(".AppleSystemUIFontMonospaced")
-                                            .text_xs()
-                                            .text_color(rgb(0x4af626))
-                                            .child(format!(
-                                                "Linux {} 6.8.0-generic #42-Ubuntu SMP x86_64",
-                                                state.host_name
-                                            ))
-                                            .child(div().h_2())
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0xffffff))
-                                                    .child("user@server:~$ htop --sort-key PERCENT_CPU"),
-                                            )
-                                            .child(div().h_1())
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x389bf2))
-                                                    .child("  CPU[|||||||||||||||||||||         42.8%]   Tasks: 182, 4 running"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0xbb86fc))
-                                                    .child("  Mem[|||||||||||||||||||||||||    5.28G/16.0G]  Uptime: 24 days, 11:42"),
-                                            )
-                                            .child(div().h_2())
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0xe0e0e0))
-                                                    .child("  PID USER      PRI  NI  VIRT   RES   SHR S CPU% MEM%   TIME+  COMMAND"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x3dd68c))
-                                                    .child(" 1420 user       20   0 1824M  340M  112M S 18.2  2.1 48:12.33 /usr/bin/gnome-shell"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x3dd68c))
-                                                    .child(" 2941 root       20   0  982M  128M   48M S 12.4  0.8 19:40.11 /usr/bin/dockerd"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x3dd68c))
-                                                    .child(" 4108 user       20   0  412M   84M   32M S  8.1  0.5 05:22.90 /usr/bin/vncserver"),
-                                            ),
+                                        "Awaiting native framebuffer stream from protocol worker.",
                                     ),
                             ),
                     )
-            } else {
+            }
+            RemoteDesktopStatus::NotConnected | RemoteDesktopStatus::Connecting => {
+                let is_connecting = state.status == RemoteDesktopStatus::Connecting;
                 div()
-                    .w_full()
-                    .h_full()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
-                    .flex_col()
-                    .bg(rgb(0x0f2027))
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(0x0c0f14))
+                    .p_6()
                     .child(
                         div()
-                            .flex_1()
+                            .w(px(560.0))
                             .p_6()
+                            .rounded_xl()
+                            .bg(rgb(MacTheme::SURFACE))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .shadow_lg()
                             .flex()
-                            .items_center()
-                            .justify_center()
+                            .flex_col()
+                            .gap_4()
                             .child(
                                 div()
-                                    .w(px(720.0))
-                                    .h(px(400.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0x0c0c0c))
-                                    .border_1()
-                                    .border_color(rgb(0x2b3846))
-                                    .shadow_md()
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
+                                    .justify_between()
                                     .child(
                                         div()
-                                            .h(px(32.0))
-                                            .px_3()
                                             .flex()
                                             .items_center()
-                                            .justify_between()
-                                            .bg(rgb(0x19232d))
-                                            .rounded_t_lg()
+                                            .gap_3()
+                                            .child(div().text_2xl().child(if is_vnc { "🖥️" } else { "🪟" }))
                                             .child(
                                                 div()
                                                     .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child("⚡")
+                                                    .flex_col()
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                            .child(format!(
+                                                                "{} ({})",
+                                                                state.host_name,
+                                                                if is_vnc { "VNC / RFB" } else { "RDP Session" }
+                                                            )),
+                                                    )
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0xffffff))
-                                                            .child(format!(
-                                                                "Administrator: Windows PowerShell — {}",
-                                                                state.host_name
-                                                            )),
+                                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                            .child(state.target.clone()),
                                                     ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_3()
-                                                    .text_xs()
-                                                    .text_color(rgb(0xcccccc))
-                                                    .child("─")
-                                                    .child("□")
-                                                    .child("✕"),
                                             ),
                                     )
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .p_4()
-                                            .font_family(".AppleSystemUIFontMonospaced")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
                                             .text_xs()
-                                            .text_color(rgb(0xcccccc))
-                                            .child("Windows PowerShell")
-                                            .child(
-                                                "Copyright (C) Microsoft Corporation. All rights reserved.",
-                                            )
-                                            .child(div().h_2())
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0xffffff))
-                                                    .child("PS C:\\Users\\Administrator> Get-Service | Where-Object Status -eq 'Running' | Select-Object -First 5"),
-                                            )
-                                            .child(div().h_1())
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x3de0d8))
-                                                    .child("Status   Name               DisplayName"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x3de0d8))
-                                                    .child("------   ----               -----------"),
-                                            )
-                                            .child("Running  AudioSrv           Windows Audio")
-                                            .child("Running  Dhcp               DHCP Client")
-                                            .child("Running  EventLog           Windows Event Log")
-                                            .child("Running  LanmanServer       Server")
-                                            .child("Running  TermService        Remote Desktop Services")
-                                            .child(div().h_2())
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0xffffff))
-                                                    .child("PS C:\\Users\\Administrator> █"),
-                                            ),
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .bg(if is_connecting { rgb(0x1a2e3b) } else { rgb(0x282338) })
+                                            .text_color(if is_connecting { rgb(MacTheme::ACCENT_BLUE) } else { rgb(0xbb86fc) })
+                                            .child(if is_connecting { "◌ Connecting…" } else { "○ Not Connected" }),
                                     ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .h(px(40.0))
-                            .px_4()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .bg(rgb(0x141b22))
-                            .border_t_1()
-                            .border_color(rgb(0x232c37))
+                            )
+                            .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
                             .child(
                                 div()
-                                    .flex_1()
                                     .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_3()
+                                    .flex_col()
+                                    .gap_2()
                                     .child(
                                         div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded_sm()
-                                            .bg(rgb(0x0078d4))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child("⊞"),
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                            .child("Session Technical Specification"),
                                     )
                                     .child(
                                         div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded_sm()
-                                            .bg(rgb(0x1e2732))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1p5()
+                                            .child(spec_row("Protocol", if is_vnc { "RFB 3.8 (VNC)" } else { "RDP 10.x (IronRDP)" }))
+                                            .child(spec_row("Target Endpoint", &state.target))
+                                            .child(spec_row("Display Geometry", &format!("{}×{} pixels", state.width, state.height)))
+                                            .child(spec_row("Color Depth", &format!("{} bpp", state.color_depth)))
+                                            .child(spec_row("Scaling Mode", match state.scale_mode {
+                                                RemoteDesktopScaleMode::Fit => "Fit Window",
+                                                RemoteDesktopScaleMode::Original => "1:1 Original",
+                                                RemoteDesktopScaleMode::Fill => "Fill / Stretch",
+                                            }))
+                                            .child(spec_row("Interaction Mode", if state.view_only { "View-Only (Observe)" } else { "Interactive" }))
+                                            .child(spec_row("Telemetry Latency", &state.latency_ms.map(|l| format!("{l} ms")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into())))
+                                            .child(spec_row("Telemetry FPS", &state.fps.map(|f| format!("{f} FPS")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into()))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .p_3()
+                                    .rounded_md()
+                                    .bg(rgb(0x1e1b2e))
+                                    .border_1()
+                                    .border_color(rgb(0x352e4d))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
                                             .flex()
                                             .items_center()
-                                            .justify_center()
-                                            .child("🔍"),
+                                            .gap_1p5()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0xbb86fc))
+                                            .child("⚡ Native Engine Architecture"),
                                     )
                                     .child(
                                         div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded_sm()
-                                            .bg(rgb(0x1e2732))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child("🗔"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded_sm()
-                                            .bg(rgb(0x1e2732))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child("📁"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded_sm()
-                                            .bg(rgb(0x1e2732))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child("⚡"),
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .child(
+                                                "Per AGENTS.md Rule 7, synthetic frames, mock desktops, and fake metrics have been removed. \
+                                                 Phase 1–6 native protocol engine integration is in active execution (crates/shellumi-remote-desktop, \
+                                                 shellumi-vnc, and shellumi-rdp)."
+                                            ),
                                     ),
                             )
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap_3()
-                                    .text_xs()
-                                    .text_color(rgb(0xcccccc))
-                                    .child("ENG")
-                                    .child("🔊")
-                                    .child("🌐")
-                                    .child("20:30"),
+                                    .justify_end()
+                                    .gap_2()
+                                    .mt_2()
+                                    .child(
+                                        div()
+                                            .id(("rd-connect-center", tab_idx))
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.remote_desktop_reconnect(tab_idx, cx);
+                                            }))
+                                            .child(if is_connecting { "◌ Connecting…" } else { "▶ Connect Session" }),
+                                    ),
                             ),
                     )
-            };
-
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .bg(rgb(0x0c0f14))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(canvas_area.w_full().h_full().child(desktop_ui))
-        } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(0x0c0f14))
-                .child(
-                    div()
-                        .w(px(420.0))
-                        .p_6()
-                        .rounded_lg()
-                        .bg(rgb(MacTheme::SURFACE))
-                        .border_1()
-                        .border_color(rgb(MacTheme::BORDER))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap_3()
-                        .child(div().text_2xl().child(if is_vnc { "🖥️" } else { "🪟" }))
-                        .child(
-                            div()
-                                .text_base()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                .child("Remote Desktop Disconnected"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child(format!(
-                                    "Session to {} ({}) has ended.",
-                                    state.host_name, state.target
-                                )),
-                        )
-                        .child(
-                            div()
-                                .id(("rd-reconnect-center", tab_idx))
-                                .mt_2()
-                                .px_4()
-                                .py_2()
-                                .rounded_md()
-                                .bg(rgb(MacTheme::ACCENT_BLUE))
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xffffff))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.remote_desktop_reconnect(tab_idx, cx);
-                                }))
-                                .child("🔄 Reconnect Session"),
-                        ),
-                )
+            }
+            RemoteDesktopStatus::Disconnected | RemoteDesktopStatus::Error => {
+                let is_err = state.status == RemoteDesktopStatus::Error;
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(0x0c0f14))
+                    .child(
+                        div()
+                            .w(px(460.0))
+                            .p_6()
+                            .rounded_xl()
+                            .bg(rgb(MacTheme::SURFACE))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .shadow_lg()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_3()
+                            .child(div().text_2xl().child(if is_err { "⚠" } else { "○" }))
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if is_err {
+                                        rgb(MacTheme::DANGER)
+                                    } else {
+                                        rgb(MacTheme::TEXT_PRIMARY)
+                                    })
+                                    .child(if is_err {
+                                        "Connection Error"
+                                    } else {
+                                        "Session Disconnected"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child(if let Some(err) = &state.error {
+                                        format!(
+                                            "Failed to connect to {} ({}): {err}",
+                                            state.host_name, state.target
+                                        )
+                                    } else {
+                                        format!(
+                                            "Session to {} ({}) has ended.",
+                                            state.host_name, state.target
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("rd-reconnect-center", tab_idx))
+                                    .mt_2()
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.remote_desktop_reconnect(tab_idx, cx);
+                                    }))
+                                    .child("🔄 Reconnect Session"),
+                            ),
+                    )
+            }
         };
 
         div()

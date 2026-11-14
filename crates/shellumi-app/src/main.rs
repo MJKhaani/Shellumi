@@ -696,6 +696,7 @@ enum RemoteDesktopProtocol {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 enum RemoteDesktopStatus {
+    NotConnected,
     Connecting,
     Connected,
     Disconnected,
@@ -722,8 +723,8 @@ struct RemoteDesktopState {
     view_only: bool,
     scale_mode: RemoteDesktopScaleMode,
     color_depth: u8,
-    fps: u32,
-    latency_ms: u32,
+    fps: Option<u32>,
+    latency_ms: Option<u32>,
     clipboard_text: Option<String>,
     error: Option<String>,
     last_action_note: Option<String>,
