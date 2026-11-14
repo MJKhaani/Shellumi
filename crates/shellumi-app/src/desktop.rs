@@ -1081,6 +1081,9 @@ impl Shellumi {
                 root = root.child(self.render_tunnel_modal(modal, cx));
             }
         }
+        if let Some(modal) = &self.create_vault_modal {
+            root = root.child(self.render_create_vault_modal(modal, cx));
+        }
         if let Some(modal) = &self.invite_modal {
             root = root.child(self.render_invite_team_modal(modal, cx));
         }

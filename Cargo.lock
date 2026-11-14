@@ -5567,6 +5567,7 @@ name = "shellumi-app"
 version = "0.0.7-alpha"
 dependencies = [
  "async-channel 2.5.0",
+ "base64",
  "gpui",
  "serde_json",
  "shellumi-core",
@@ -5574,6 +5575,7 @@ dependencies = [
  "shellumi-terminal",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5607,12 +5609,14 @@ dependencies = [
 name = "shellumi-storage"
 version = "0.0.7-alpha"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "shellumi-core",
  "tempfile",
  "tokio",
  "turso",
+ "uuid",
 ]
 
 [[package]]

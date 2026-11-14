@@ -10,6 +10,8 @@ turso = { version = "=0.9.0-pre.2", default-features = false }
 shellumi-core = { path = "../shellumi-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -4,6 +4,7 @@ use super::*;
 mod batch_modal;
 mod command_palette;
 mod conflict_modal;
+mod create_vault_modal;
 mod diagnostics_modal;
 mod group_context_menu;
 mod group_details_inspector;

@@ -1238,6 +1238,9 @@ impl Shellumi {
         if let Some(modal) = &self.tunnel_modal {
             result = result.child(self.render_tunnel_modal(modal, cx));
         }
+        if let Some(modal) = &self.create_vault_modal {
+            result = result.child(self.render_create_vault_modal(modal, cx));
+        }
         if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
             result = result.child(dropdown);
         }

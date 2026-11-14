@@ -1,5 +1,10 @@
 //! Local Turso storage. Credentials are never stored in this database.
 pub mod desktop;
+pub mod server_sync;
+pub use server_sync::{
+    PendingMutationRecord, ServerSyncEngine, ServerSyncReport, VaultServerConnectionRecord,
+    VaultSyncStateRecord,
+};
 use shellumi_core::{
     resolve_effective_tags, validate_jump_host, AuditAction, CollaborationError, DestinationError,
     ForwardingType, GroupError, HostGroup, LogBookmark, LogComment, PortForwardRule,
@@ -11,7 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -1683,6 +1688,113 @@ impl HostStore {
             )
             .await?;
             tx.execute("PRAGMA user_version = 17", ()).await?;
+        }
+        if version < 18 {
+            let mut columns = tx
+                .query("PRAGMA table_info(vault_server_connections)", ())
+                .await?;
+            let mut has_base_url = false;
+            let mut has_auth_token = false;
+            let mut has_refresh_token = false;
+            let mut has_device_id = false;
+            let mut has_device_signing_key = false;
+            let mut has_created_at = false;
+            let mut has_updated_at = false;
+            while let Some(row) = columns.next().await? {
+                let col_name: String = row.get(1)?;
+                has_base_url |= col_name == "base_url";
+                has_auth_token |= col_name == "auth_token";
+                has_refresh_token |= col_name == "refresh_token";
+                has_device_id |= col_name == "device_id";
+                has_device_signing_key |= col_name == "device_signing_key";
+                has_created_at |= col_name == "created_at";
+                has_updated_at |= col_name == "updated_at";
+            }
+            drop(columns);
+
+            if !has_base_url {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN base_url TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_auth_token {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN auth_token TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_refresh_token {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN refresh_token TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_device_id {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN device_id TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_device_signing_key {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN device_signing_key TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_created_at {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN created_at INTEGER",
+                    (),
+                )
+                .await?;
+            }
+            if !has_updated_at {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN updated_at INTEGER",
+                    (),
+                )
+                .await?;
+            }
+
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS vault_sync_state (
+                    vault_id TEXT PRIMARY KEY NOT NULL,
+                    server_sequence INTEGER NOT NULL DEFAULT 0,
+                    last_cursor TEXT,
+                    last_synced_at INTEGER,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    error_message TEXT
+                )",
+                (),
+            )
+            .await?;
+
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS vault_mutations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id TEXT NOT NULL,
+                    object_id TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    expected_revision INTEGER NOT NULL DEFAULT 0,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    payload_json TEXT,
+                    created_at INTEGER NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS vault_mutations_vault_idx ON vault_mutations(vault_id)",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 18", ()).await?;
         }
         tx.commit().await?;
         Ok(Self {

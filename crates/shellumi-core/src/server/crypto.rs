@@ -191,3 +191,19 @@ pub fn generate_device_ed25519_keypair() -> Result<(Ed25519KeyPair, String), Cry
     let public_key_b64 = BASE64_STANDARD.encode(key_pair.public_key().as_ref());
     Ok((key_pair, public_key_b64))
 }
+
+/// Generates a new random Ed25519 signing keypair returning PKCS#8 bytes and base64 public key.
+pub fn generate_device_ed25519_keypair_pkcs8() -> Result<(Vec<u8>, String), CryptoError> {
+    let rng = SystemRandom::new();
+    let pkcs8_bytes =
+        Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let public_key_b64 = BASE64_STANDARD.encode(key_pair.public_key().as_ref());
+    Ok((pkcs8_bytes.as_ref().to_vec(), public_key_b64))
+}
+
+/// Reconstructs an Ed25519 keypair from PKCS#8 bytes.
+pub fn keypair_from_pkcs8(bytes: &[u8]) -> Result<Ed25519KeyPair, CryptoError> {
+    Ed25519KeyPair::from_pkcs8(bytes).map_err(|e| CryptoError::KeyGen(e.to_string()))
+}

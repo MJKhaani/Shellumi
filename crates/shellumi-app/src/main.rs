@@ -433,6 +433,27 @@ struct DiagnosticsModalState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CreateVaultModalTab {
+    RemoteServer,
+    Local,
+}
+
+pub(crate) struct CreateVaultModalState {
+    pub(crate) active_tab: CreateVaultModalTab,
+    pub(crate) server_url_input: Entity<TextInput>,
+    pub(crate) username_input: Entity<TextInput>,
+    pub(crate) password_input: Entity<TextInput>,
+    pub(crate) device_name_input: Entity<TextInput>,
+    pub(crate) vault_name_input: Entity<TextInput>,
+    pub(crate) vault_passphrase_input: Entity<TextInput>,
+    pub(crate) local_vault_desc_input: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) status_message: Option<String>,
+    pub(crate) is_testing: bool,
+    pub(crate) is_submitting: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MobileViewportPreset {
     IPhone15Pro,
     IPadPro11,
@@ -598,6 +619,7 @@ struct Shellumi {
     shell_integration_modal: Option<ShellIntegrationModalState>,
     session_replay_modal: Option<SessionReplayModalState>,
     tunnel_modal: Option<TunnelModalState>,
+    create_vault_modal: Option<CreateVaultModalState>,
     sidebar_visible: bool,
     sidebar_collapsed: bool,
     vault_dropdown_open: bool,
@@ -927,6 +949,7 @@ impl Shellumi {
             shell_integration_modal: None,
             session_replay_modal: None,
             tunnel_modal: None,
+            create_vault_modal: None,
             sidebar_visible: true,
             sidebar_collapsed: false,
             vault_dropdown_open: false,
@@ -2206,7 +2229,7 @@ impl Shellumi {
                         .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
                         .child(
                             div()
-                                .id("vault-opt-manage")
+                                .id("vault-opt-create")
                                 .px_2p5()
                                 .py_2()
                                 .rounded_md()
@@ -2215,10 +2238,25 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::ACCENT_BLUE))
                                 .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                 .on_click(cx.listener(|app, _, _, cx| {
+                                    app.open_create_vault_modal(cx);
+                                }))
+                                .child("+ Connect Remote Server Vault…"),
+                        )
+                        .child(
+                            div()
+                                .id("vault-opt-manage")
+                                .px_2p5()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .on_click(cx.listener(|app, _, _, cx| {
                                     app.vault_dropdown_open = false;
                                     app.open_team_modal(cx);
                                 }))
-                                .child("+ Manage Vaults…"),
+                                .child("👥 Manage Team Vaults…"),
                         ),
                 ),
         )

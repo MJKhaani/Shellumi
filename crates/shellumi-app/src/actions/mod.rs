@@ -22,4 +22,5 @@ mod team;
 mod terminal;
 mod terminal_input;
 mod tunnels;
+mod vault_creation;
 mod workspaces;
