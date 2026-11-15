@@ -95,14 +95,15 @@ impl RdpClientConfig {
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
     ) -> Result<Config, RdpConfigError> {
-        self.to_ironrdp_config_with_backends(backend, None, None)
+        self.to_ironrdp_config_with_backends(backend, None, None, None)
     }
 
-    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard and sound backends.
+    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard, sound, and display control backends.
     pub fn to_ironrdp_config_with_backends(
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
         sound_control: Option<crate::sound::ShellumiRdpsndControl>,
+        display_control: Option<crate::display::DisplayControlState>,
         worker_tx: Option<async_channel::Sender<shellumi_remote_desktop::SessionEvent>>,
     ) -> Result<Config, RdpConfigError> {
         if self.host.trim().is_empty() {
@@ -146,13 +147,29 @@ impl RdpClientConfig {
         }
 
         if self.enable_audio {
-            if let (Some(ctrl), Some(tx)) = (sound_control, worker_tx) {
+            if let (Some(ctrl), Some(tx)) = (sound_control, worker_tx.as_ref()) {
+                let ctrl_clone = ctrl.clone();
+                let tx_clone = tx.clone();
                 builder = builder.with_static_channel(move |_ps| {
                     Some(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
-                        crate::sound::ShellumiRdpsndHandler::new(ctrl.clone(), tx.clone()),
+                        crate::sound::ShellumiRdpsndHandler::new(
+                            ctrl_clone.clone(),
+                            tx_clone.clone(),
+                        ),
                     )))
                 });
             }
+        }
+
+        if let (Some(dc_state), Some(tx)) = (display_control, worker_tx.as_ref()) {
+            let dc_state_clone = dc_state.clone();
+            let tx_clone = tx.clone();
+            builder = builder.with_dvc(move |_ps| {
+                Some(crate::display::create_display_control_client(
+                    dc_state_clone.clone(),
+                    tx_clone.clone(),
+                ))
+            });
         }
 
         builder

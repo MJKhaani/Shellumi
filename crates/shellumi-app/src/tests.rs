@@ -788,6 +788,8 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        display_control_ready: false,
+        max_monitor_area: None,
     };
 
     // Truthful baseline: initial state must never be fake Connected, metrics must be None
@@ -889,6 +891,8 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        display_control_ready: false,
+        max_monitor_area: None,
     };
 
     assert_eq!(
@@ -971,6 +975,8 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        display_control_ready: false,
+        max_monitor_area: None,
     };
 
     // Apply snapshot to state (simulating remote_desktop_apply_framebuffer_snapshot)
@@ -1142,6 +1148,8 @@ fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        display_control_ready: false,
+        max_monitor_area: None,
     };
 
     assert_eq!(rd.status, RemoteDesktopStatus::NotConnected);
@@ -1769,4 +1777,100 @@ fn verifies_keyboard_shortcut_actions_and_keystroke_parsing() {
     let ch = cmd_tab_3.key.chars().next().unwrap();
     assert!(('1'..='9').contains(&ch));
     assert_eq!((ch as usize) - ('1' as usize), 2);
+}
+
+#[test]
+fn verifies_remote_desktop_display_control_state_and_resizing() {
+    use super::{
+        RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
+    };
+    use shellumi_remote_desktop::{SessionCommand, SessionEvent};
+
+    let mut rd = RemoteDesktopState {
+        host_name: "Windows Server 2022".into(),
+        target: "10.0.0.88:3389".into(),
+        protocol: RemoteDesktopProtocol::Rdp,
+        status: RemoteDesktopStatus::Connected,
+        status_message: Some("Connected".into()),
+        width: 1920,
+        height: 1080,
+        view_only: false,
+        scale_mode: RemoteDesktopScaleMode::Fit,
+        color_depth: 32,
+        fps: Some(60),
+        latency_ms: Some(12),
+        clipboard_text: None,
+        error: None,
+        last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        ui_handle: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: Some("Administrator".into()),
+        password: None,
+        domain: None,
+        tls_strict: true,
+        show_diagnostics: false,
+        password_input: None,
+        enable_audio: true,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: false,
+        audio_format: None,
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 0,
+        display_control_ready: false,
+        max_monitor_area: None,
+    };
+
+    // Initial state before capability PDU
+    assert!(!rd.display_control_ready);
+    assert!(rd.max_monitor_area.is_none());
+
+    // Simulate receiving DisplayControlCaps
+    let event = SessionEvent::DisplayControlCaps {
+        max_monitors: 16,
+        max_area: 33177600, // e.g. 4 * 4K
+    };
+    match event {
+        SessionEvent::DisplayControlCaps {
+            max_monitors: _,
+            max_area,
+        } => {
+            rd.display_control_ready = true;
+            rd.max_monitor_area = Some(max_area);
+            rd.last_action_note = Some("Dynamic display resizing (MS-RDPEDISP) ready".into());
+        }
+        _ => panic!("Expected DisplayControlCaps"),
+    }
+    assert!(rd.display_control_ready);
+    assert_eq!(rd.max_monitor_area, Some(33177600));
+
+    // Simulate RemoteResize event
+    let resize_event = SessionEvent::RemoteResize {
+        width: 2560,
+        height: 1440,
+    };
+    match resize_event {
+        SessionEvent::RemoteResize { width, height } => {
+            rd.width = width;
+            rd.height = height;
+        }
+        _ => panic!("Expected RemoteResize"),
+    }
+    assert_eq!(rd.width, 2560);
+    assert_eq!(rd.height, 1440);
+
+    // Verify SessionCommand::RequestResize construction
+    let cmd = SessionCommand::RequestResize {
+        width: 3840,
+        height: 2160,
+    };
+    if let SessionCommand::RequestResize { width, height } = cmd {
+        assert_eq!(width, 3840);
+        assert_eq!(height, 2160);
+    } else {
+        panic!("Expected RequestResize command");
+    }
 }

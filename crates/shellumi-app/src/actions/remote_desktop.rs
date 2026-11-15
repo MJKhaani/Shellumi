@@ -126,6 +126,8 @@ impl Shellumi {
             audio_sample_rate: 44100,
             audio_channels: 2,
             audio_bytes_received: 0,
+            display_control_ready: false,
+            max_monitor_area: None,
         };
 
         self.tabs.push(SessionTab {
@@ -221,6 +223,8 @@ impl Shellumi {
             audio_sample_rate: 44100,
             audio_channels: 2,
             audio_bytes_received: 0,
+            display_control_ready: false,
+            max_monitor_area: None,
         };
 
         self.tabs.push(SessionTab {
@@ -590,6 +594,16 @@ impl Shellumi {
                                             rd.audio_channels = channels;
                                             rd.audio_bytes_received = bytes_received;
                                         }
+                                        shellumi_remote_desktop::SessionEvent::DisplayControlCaps {
+                                            max_monitors: _,
+                                            max_area,
+                                        } => {
+                                            rd.display_control_ready = true;
+                                            rd.max_monitor_area = Some(max_area);
+                                            rd.last_action_note = Some(
+                                                "Dynamic display resizing (MS-RDPEDISP) ready".into(),
+                                            );
+                                        }
                                         shellumi_remote_desktop::SessionEvent::Error(err) => {
                                             rd.error = Some(err);
                                         }
@@ -725,6 +739,31 @@ impl Shellumi {
                     );
                 }
                 rd.last_action_note = Some(format!("Volume set to {vol}%"));
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_request_resize(
+        &mut self,
+        tab_idx: usize,
+        width: u32,
+        height: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::RequestResize { width, height },
+                    );
+                    rd.last_action_note =
+                        Some(format!("Requested resolution resize to {width}×{height}"));
+                } else {
+                    rd.width = width;
+                    rd.height = height;
+                    rd.last_action_note = Some(format!("Local resolution set to {width}×{height}"));
+                }
                 cx.notify();
             }
         }

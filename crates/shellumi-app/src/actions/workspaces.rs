@@ -405,6 +405,8 @@ impl Shellumi {
                     audio_sample_rate: 44100,
                     audio_channels: 2,
                     audio_bytes_received: 0,
+                    display_control_ready: false,
+                    max_monitor_area: None,
                 };
                 if first_rd_state.is_none() {
                     first_rd_state = Some(rd);

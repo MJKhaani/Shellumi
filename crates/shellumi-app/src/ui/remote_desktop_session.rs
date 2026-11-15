@@ -324,6 +324,119 @@ impl Shellumi {
             }))
             .child("Fill");
 
+        let res_1080p = div()
+            .id(("rd-res-1080p", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_l_sm()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.width == 1920 && state.height == 1080 {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.width == 1920 && state.height == 1080 {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_request_resize(tab_idx, 1920, 1080, cx);
+            }))
+            .child("1080p");
+
+        let res_1440p = div()
+            .id(("rd-res-1440p", tab_idx))
+            .px_2()
+            .py_1()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.width == 2560 && state.height == 1440 {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.width == 2560 && state.height == 1440 {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_request_resize(tab_idx, 2560, 1440, cx);
+            }))
+            .child("1440p");
+
+        let res_4k = div()
+            .id(("rd-res-4k", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_r_sm()
+            .text_xs()
+            .cursor_pointer()
+            .bg(if state.width == 3840 && state.height == 2160 {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE)
+            })
+            .text_color(if state.width == 3840 && state.height == 2160 {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_request_resize(tab_idx, 3840, 2160, cx);
+            }))
+            .child("4K");
+
+        let res_match_viewport = div()
+            .id(("rd-res-viewport", tab_idx))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_xs()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, window, cx| {
+                let vp = window.viewport_size();
+                let w = (vp.width.to_f64() as u32).saturating_sub(16).max(640);
+                let h = (vp.height.to_f64() as u32).saturating_sub(60).max(480);
+                let w_even = w & !1;
+                app.remote_desktop_request_resize(tab_idx, w_even, h, cx);
+            }))
+            .child("⤢ Match Viewport");
+
+        let res_indicator = if state.display_control_ready {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x103d3d))
+                .text_xs()
+                .text_color(rgb(0x3de0d8))
+                .child(format!("⚡ {}×{} (Dynamic)", state.width, state.height))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(MacTheme::SURFACE))
+                .text_xs()
+                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                .child(format!("🖥️ {}×{}", state.width, state.height))
+        };
+
         let view_only_btn = div()
             .id(("rd-viewonly", tab_idx))
             .px_2()
@@ -499,6 +612,23 @@ impl Shellumi {
                             .child(scale_fit)
                             .child(scale_orig)
                             .child(scale_fill),
+                    )
+                    .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(res_indicator)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(res_1080p)
+                                    .child(res_1440p)
+                                    .child(res_4k),
+                            )
+                            .child(res_match_viewport),
                     )
                     .child(view_only_btn)
                     .child(diag_btn)
@@ -679,6 +809,23 @@ impl Shellumi {
                             .child(spec_row(
                                 "Audio Data Recv",
                                 &format_network_bytes(state.audio_bytes_received),
+                            ))
+                            .child(spec_row(
+                                "Display Resizing (MS-RDPEDISP)",
+                                if state.display_control_ready {
+                                    "Active (Dynamic Layout Negotiated)"
+                                } else if is_vnc {
+                                    "Not Supported (VNC Protocol)"
+                                } else {
+                                    "Negotiating / Fixed Resolution"
+                                },
+                            ))
+                            .child(spec_row(
+                                "Max Desktop Area",
+                                &state
+                                    .max_monitor_area
+                                    .map(|a| format!("{a} px²"))
+                                    .unwrap_or_else(|| "Standard (Single Monitor)".into()),
                             )),
                     ),
             )

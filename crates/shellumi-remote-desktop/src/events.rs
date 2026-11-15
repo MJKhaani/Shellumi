@@ -69,6 +69,8 @@ pub enum SessionEvent {
         channels: u16,
         bytes_received: u64,
     },
+    /// Display control capabilities negotiated via MS-RDPEDISP extension.
+    DisplayControlCaps { max_monitors: u32, max_area: u64 },
     /// Remote terminal bell event.
     Bell,
     /// Connection or protocol error occurred.
@@ -261,5 +263,13 @@ mod tests {
         };
         worker.try_send_event(audio_status.clone()).unwrap();
         assert_eq!(ui.try_recv_event().unwrap(), Some(audio_status));
+
+        // Worker sends DisplayControlCaps event
+        let caps = SessionEvent::DisplayControlCaps {
+            max_monitors: 16,
+            max_area: 67108864,
+        };
+        worker.try_send_event(caps.clone()).unwrap();
+        assert_eq!(ui.try_recv_event().unwrap(), Some(caps));
     }
 }

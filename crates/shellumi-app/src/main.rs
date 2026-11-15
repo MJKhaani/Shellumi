@@ -746,6 +746,8 @@ struct RemoteDesktopState {
     audio_sample_rate: u32,
     audio_channels: u16,
     audio_bytes_received: u64,
+    display_control_ready: bool,
+    max_monitor_area: Option<u64>,
 }
 
 impl Drop for RemoteDesktopState {

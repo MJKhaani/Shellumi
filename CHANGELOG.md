@@ -2,6 +2,16 @@
 
 ## 0.0.7-alpha
 
+### Dynamic Display Resolution Resizing over MS-RDPEDISP
+- **Authentic MS-RDPEDISP Virtual Channel:** Integrated Microsoft Remote Desktop Display Update Virtual Channel Extension (`MS-RDPEDISP`) in pure Rust using `ironrdp-displaycontrol` and `ironrdp-dvc`.
+- **Real-Time Client-to-Server Resolution Updates:** Dynamically re-negotiates monitor layout (`DisplayControlMonitorLayout`) on the fly when switching resolutions or resizing the viewport, without disconnecting the session, interrupting network traffic, or restarting remote applications.
+- **Specification-Compliant Display Constraints:** Implemented `adjust_display_size` strictly enforcing MS-RDPEDISP § 2.2.2.2.1 constraints (width and height clamped to 200..=8192 pixels, and odd widths automatically adjusted to even values).
+- **UI & Telemetry Controls:**
+  - Added resolution preset switcher (`1080p`, `1440p`, `4K`, `720p`) and dynamic status badge (`⚡ 1920×1080 (Dynamic)`) in the remote desktop toolbar.
+  - Added "⤢ Match Viewport" button computing window and canvas boundaries to dynamically resize the remote desktop to the exact Shellumi viewport dimensions.
+  - Added live display capability rows (`Display Resizing (MS-RDPEDISP)` and `Max Desktop Area`) in the telemetry HUD diagnostics overlay.
+- **Automated Verification:** Added unit and integration test suite (`crates/shellumi-rdp/tests/display_tests.rs`) covering dimension clamping, even-width enforcement, capabilities PDU negotiation, and `RequestResize` / `DisplayControlCaps` event propagation.
+
 ### Remote Desktop Sound Redirection over RDPSND (MS-RDPEA)
 - **Authentic RDPSND Virtual Channel:** Integrated Microsoft Remote Desktop Audio Output Virtual Channel Extension (`MS-RDPEA`) in pure Rust using `ironrdp-rdpsnd` and `ironrdp-rdpsnd-native`.
 - **Live Native Audio Playback:** Implemented `ShellumiRdpsndHandler` wrapping `cpal::RdpsndBackend` to route decoded 16-bit 44.1 kHz / 48 kHz stereo PCM audio directly to the host default output sound device (CoreAudio on macOS, ALSA on Linux, WASAPI on Windows).

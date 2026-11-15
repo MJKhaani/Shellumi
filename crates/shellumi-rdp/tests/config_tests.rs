@@ -123,8 +123,13 @@ fn test_to_ironrdp_config_with_sound_backend() {
 
     let (event_tx, _event_rx) = async_channel::bounded(32);
     let sound_control = shellumi_rdp::sound::ShellumiRdpsndControl::new(false, 90);
+    let display_control = shellumi_rdp::display::DisplayControlState::new();
 
-    let iron_cfg =
-        config.to_ironrdp_config_with_backends(None, Some(sound_control), Some(event_tx));
+    let iron_cfg = config.to_ironrdp_config_with_backends(
+        None,
+        Some(sound_control),
+        Some(display_control),
+        Some(event_tx),
+    );
     assert!(iron_cfg.is_ok());
 }
