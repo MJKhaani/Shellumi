@@ -7304,6 +7304,7 @@ name = "shellumi-rdp"
 version = "0.0.7-alpha"
 dependencies = [
  "async-channel 2.5.0",
+ "cpal",
  "ironrdp-client",
  "ironrdp-cliprdr",
  "ironrdp-connector",

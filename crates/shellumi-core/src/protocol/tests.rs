@@ -230,6 +230,7 @@ fn verifies_vnc_and_rdp_configurations() {
     let mut rdp = RdpConfig::new("win-server.ad", 3389).unwrap();
     rdp.username = Some("Administrator".into());
     rdp.domain = Some("CORP".into());
+    rdp.enable_microphone = true;
     assert_eq!(rdp.host, "win-server.ad");
     assert_eq!(rdp.port, 3389);
     assert_eq!(rdp.screen_width, 1920);
@@ -242,6 +243,7 @@ fn verifies_vnc_and_rdp_configurations() {
     assert!(args.contains(&"/d:CORP".to_string()));
     assert!(args.contains(&"/size:1920x1080".to_string()));
     assert!(args.contains(&"+clipboard".to_string()));
+    assert!(args.contains(&"/microphone".to_string()));
 }
 
 #[test]

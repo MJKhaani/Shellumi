@@ -57,6 +57,7 @@ pub async fn run_rdp_session(
     );
     let sound_control = crate::sound::ShellumiRdpsndControl::new(false, 100);
     let display_control = crate::display::DisplayControlState::new();
+    let microphone_control = crate::microphone::MicrophoneControlState::new(false, 100);
     let shared_folder_path = rdp_config
         .shared_folder
         .clone()
@@ -72,6 +73,7 @@ pub async fn run_rdp_session(
         Some(sound_control.clone()),
         Some(display_control.clone()),
         Some(drive_control.clone()),
+        Some(microphone_control.clone()),
         Some(worker.event_sender().clone()),
     )?;
 
@@ -79,6 +81,7 @@ pub async fn run_rdp_session(
     let client = RdpClient::new(ironrdp_cfg, out_tx);
     let input_sender = client.input_sender();
     *proxy.lock().unwrap() = Some(input_sender.clone());
+    microphone_control.set_input_sender(input_sender.clone());
 
     // Spawn IronRDP background runner in a dedicated OS thread with current-thread runtime
     // to bypass higher-ranked lifetime Send limitations in ironrdp-client's internal futures.
@@ -165,6 +168,14 @@ pub async fn run_rdp_session(
                                 .send_event(sound_control.status_snapshot("PCM", 44100, 2))
                                 .await;
                         }
+                        SessionCommand::SetMicrophoneMute(muted) => {
+                            microphone_control.set_muted(muted);
+                            let _ = worker.send_event(microphone_control.status_snapshot()).await;
+                        }
+                        SessionCommand::SetMicrophoneVolume(volume) => {
+                            microphone_control.set_volume(volume);
+                            let _ = worker.send_event(microphone_control.status_snapshot()).await;
+                        }
                         SessionCommand::RequestResize { width, height } => {
                             let (adj_w, adj_h) = crate::display::adjust_display_size(width, height);
                             tracing::debug!(
@@ -198,6 +209,7 @@ pub async fn run_rdp_session(
                         }
                         SessionCommand::Disconnect => {
                             sound_control.set_active(false);
+                            microphone_control.set_recording(false);
                             let _ = input_sender.send(RdpInputEvent::Close);
                             break;
                         }
@@ -239,6 +251,7 @@ pub async fn run_rdp_session(
                                         operations_count: drive_control.operations_count(),
                                     })
                                     .await;
+                                let _ = worker.send_event(microphone_control.status_snapshot()).await;
                             }
 
                             if framebuffer.width() != w || framebuffer.height() != h {

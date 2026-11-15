@@ -88,6 +88,10 @@ fn default_enable_audio() -> bool {
     true
 }
 
+fn default_enable_microphone() -> bool {
+    true
+}
+
 /// Session parameters configured by the user before launching a connection.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
@@ -105,6 +109,8 @@ pub struct SessionConfig {
     pub tls_strict: bool,
     #[serde(default = "default_enable_audio")]
     pub enable_audio: bool,
+    #[serde(default = "default_enable_microphone")]
+    pub enable_microphone: bool,
     #[serde(default)]
     pub shared_folder: Option<PathBuf>,
 }
@@ -125,6 +131,7 @@ impl std::fmt::Debug for SessionConfig {
             .field("domain", &self.domain)
             .field("tls_strict", &self.tls_strict)
             .field("enable_audio", &self.enable_audio)
+            .field("enable_microphone", &self.enable_microphone)
             .field("shared_folder", &self.shared_folder)
             .finish()
     }
@@ -155,6 +162,7 @@ impl SessionConfig {
             domain: None,
             tls_strict: true,
             enable_audio: true,
+            enable_microphone: true,
             shared_folder: None,
         }
     }

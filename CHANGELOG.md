@@ -2,6 +2,22 @@
 
 ## 0.0.7-alpha
 
+### Microphone and Audio Input Redirection over MS-RDPEAI
+- **Authentic MS-RDPEAI Virtual Channel:** Integrated Microsoft Remote Desktop Audio Input Redirection Virtual Channel Extension (`[MS-RDPEAI]`) in pure Rust using `ironrdp-dvc` on the `"AUDIO_INPUT"` Dynamic Virtual Channel (DVC).
+- **Native Hardware Audio Capture via `cpal`:**
+  - Implemented real-time audio capture from default host input device (CoreAudio on macOS, ALSA on Linux, WASAPI on Windows) running on dedicated capture threads.
+  - Dynamically scales captured 16-bit signed PCM audio samples across little-endian byte buffers with overflow-safe clamping and gain boost (0..=200%).
+  - Immediate muting zeroes out sample buffers while keeping the virtual channel streaming stream active without server desynchronization.
+- **Protocol PDUs & Format Negotiation:**
+  - Implemented `AudioFormatEntry` representing standard `WAVEFORMATEX` headers, offering 16-bit linear PCM at 44.1 kHz and 48 kHz in stereo and mono.
+  - Implemented `RdpeaiPdu` serialization and parsing conforming to MS-RDPEAI (§ 2.2.1 - § 2.2.3): Version (`MSG_SNDIN_VERSION` = 0x01), Formats (`MSG_SNDIN_FORMATS` = 0x02), Open / Open Reply (`MSG_SNDIN_OPEN` = 0x03, `MSG_SNDIN_OPEN_REPLY` = 0x04), Data (`MSG_SNDIN_DATA` = 0x06), and Format Change (`MSG_SNDIN_FORMATCHANGE` = 0x07).
+  - Implemented `ShellumiRdpeaiClient` implementing `ironrdp_dvc::DvcProcessor` attached via `ironrdp_dvc::DvcClientProcessor::register`.
+- **UI & Telemetry Controls:**
+  - Added microphone toggle button (`🎙️ Mic / 🎙️❌ Mic Muted / 🎙️ Mic (active)`) and input gain controls (`🎙️ -` `100%` `+ 🎙️`) in the remote desktop session toolbar.
+  - Added live MS-RDPEAI telemetry rows (`Microphone (MS-RDPEAI)`, `Microphone Input Format`, and `Microphone Data Sent`) to the Live Protocol Diagnostics HUD.
+  - Added `Microphone (MS-RDPEAI)` technical specification row in the session connecting and loading card.
+- **Automated Verification:** Added test suite (`crates/shellumi-rdp/tests/microphone_tests.rs`) covering PCM format encoding/decoding, PDU wire serialization, server message parsing, `MicrophoneControlState` gain scaling/muting, client lifecycle handshake, and deterministic test audio chunk injection. Added UI state tests in `crates/shellumi-app/src/tests.rs`.
+
 ### Local Drive and Directory Redirection over RDPDR (MS-RDPEFS)
 - **Authentic MS-RDPEFS / RDPDR Virtual Channel:** Integrated Microsoft Remote Desktop File System Virtual Channel Extension (`MS-RDPEFS` / `RDPDR`) in pure Rust using `ironrdp-rdpdr` (0.7.0) and `ironrdp-rdpdr-native` (0.7.0).
 - **Native Host Filesystem Bridge:** Implemented `ShellumiRdpdrBackend` in `crates/shellumi-rdp/src/drive.rs` wrapping `NixRdpdrBackend` to mount local host directories (e.g. `~/Downloads` or custom user folders) as network drives into remote Windows Explorer sessions (`\\tsclient\<drive_name>` or `<drive_name> on Shellumi`).

@@ -31,6 +31,7 @@ pub struct RdpClientConfig {
     pub cert_policy: CertificateValidationPolicy,
     pub view_only: bool,
     pub enable_audio: bool,
+    pub enable_microphone: bool,
     pub shared_folder: Option<PathBuf>,
 }
 
@@ -47,6 +48,7 @@ impl std::fmt::Debug for RdpClientConfig {
             .field("cert_policy", &self.cert_policy)
             .field("view_only", &self.view_only)
             .field("enable_audio", &self.enable_audio)
+            .field("enable_microphone", &self.enable_microphone)
             .field("shared_folder", &self.shared_folder)
             .finish()
     }
@@ -86,6 +88,7 @@ impl RdpClientConfig {
             },
             view_only: config.view_only,
             enable_audio: config.enable_audio,
+            enable_microphone: config.enable_microphone,
             shared_folder: config.shared_folder.clone(),
         }
     }
@@ -100,16 +103,17 @@ impl RdpClientConfig {
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
     ) -> Result<Config, RdpConfigError> {
-        self.to_ironrdp_config_with_backends(backend, None, None, None, None)
+        self.to_ironrdp_config_with_backends(backend, None, None, None, None, None)
     }
 
-    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard, sound, display control, and drive redirection backends.
+    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard, sound, display control, drive redirection, and microphone backends.
     pub fn to_ironrdp_config_with_backends(
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
         sound_control: Option<crate::sound::ShellumiRdpsndControl>,
         display_control: Option<crate::display::DisplayControlState>,
         drive_control: Option<crate::drive::DriveControlState>,
+        microphone_control: Option<crate::microphone::MicrophoneControlState>,
         worker_tx: Option<async_channel::Sender<shellumi_remote_desktop::SessionEvent>>,
     ) -> Result<Config, RdpConfigError> {
         if self.host.trim().is_empty() {
@@ -187,6 +191,19 @@ impl RdpClientConfig {
                     tx_clone.clone(),
                 ))
             });
+        }
+
+        if self.enable_microphone {
+            if let (Some(mic_ctrl), Some(tx)) = (microphone_control, worker_tx.as_ref()) {
+                let mic_ctrl_clone = mic_ctrl.clone();
+                let tx_clone = tx.clone();
+                builder = builder.with_dvc(move |_ps| {
+                    Some(crate::microphone::ShellumiRdpeaiClient::new(
+                        mic_ctrl_clone.clone(),
+                        tx_clone.clone(),
+                    ))
+                });
+            }
         }
 
         builder

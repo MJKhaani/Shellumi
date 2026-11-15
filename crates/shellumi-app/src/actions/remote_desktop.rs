@@ -40,6 +40,7 @@ impl Shellumi {
             domain,
             tls_strict,
             enable_audio,
+            enable_microphone,
         ) = match protocol {
             RemoteDesktopProtocol::Vnc => {
                 let vnc_cfg = host.vnc_config().unwrap_or_else(|| {
@@ -55,6 +56,7 @@ impl Shellumi {
                     None,
                     None,
                     true,
+                    false,
                     false,
                 )
             }
@@ -80,6 +82,7 @@ impl Shellumi {
                     rdp_cfg.domain.clone(),
                     rdp_cfg.tls_strict,
                     rdp_cfg.enable_audio,
+                    rdp_cfg.enable_microphone,
                 )
             }
         };
@@ -126,6 +129,15 @@ impl Shellumi {
             audio_sample_rate: 44100,
             audio_channels: 2,
             audio_bytes_received: 0,
+            enable_microphone,
+            mic_muted: false,
+            mic_volume: 100,
+            mic_active: false,
+            mic_format: None,
+            mic_sample_rate: 44100,
+            mic_channels: 2,
+            mic_bytes_sent: 0,
+            mic_packets_sent: 0,
             display_control_ready: false,
             max_monitor_area: None,
             shared_folder: None,
@@ -229,6 +241,18 @@ impl Shellumi {
             audio_sample_rate: 44100,
             audio_channels: 2,
             audio_bytes_received: 0,
+            enable_microphone: match protocol {
+                RemoteDesktopProtocol::Vnc => false,
+                RemoteDesktopProtocol::Rdp => true,
+            },
+            mic_muted: false,
+            mic_volume: 100,
+            mic_active: false,
+            mic_format: None,
+            mic_sample_rate: 44100,
+            mic_channels: 2,
+            mic_bytes_sent: 0,
+            mic_packets_sent: 0,
             display_control_ready: false,
             max_monitor_area: None,
             shared_folder: None,
@@ -500,6 +524,7 @@ impl Shellumi {
                     domain: rd.domain.clone(),
                     tls_strict: rd.tls_strict,
                     enable_audio: rd.enable_audio,
+                    enable_microphone: rd.enable_microphone,
                     shared_folder: rd.shared_folder.clone(),
                 };
 
@@ -606,6 +631,25 @@ impl Shellumi {
                                             rd.audio_sample_rate = sample_rate;
                                             rd.audio_channels = channels;
                                             rd.audio_bytes_received = bytes_received;
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::MicrophoneStatus {
+                                            active,
+                                            muted,
+                                            volume,
+                                            format,
+                                            sample_rate,
+                                            channels,
+                                            bytes_sent,
+                                            packets_sent,
+                                        } => {
+                                            rd.mic_active = active;
+                                            rd.mic_muted = muted;
+                                            rd.mic_volume = volume;
+                                            rd.mic_format = Some(format);
+                                            rd.mic_sample_rate = sample_rate;
+                                            rd.mic_channels = channels;
+                                            rd.mic_bytes_sent = bytes_sent;
+                                            rd.mic_packets_sent = packets_sent;
                                         }
                                         shellumi_remote_desktop::SessionEvent::DisplayControlCaps {
                                             max_monitors: _,
@@ -773,6 +817,51 @@ impl Shellumi {
                     );
                 }
                 rd.last_action_note = Some(format!("Volume set to {vol}%"));
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_toggle_mic_mute(
+        &mut self,
+        tab_idx: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                let new_muted = !rd.mic_muted;
+                rd.mic_muted = new_muted;
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::SetMicrophoneMute(new_muted),
+                    );
+                }
+                rd.last_action_note = Some(if new_muted {
+                    "Microphone muted".into()
+                } else {
+                    "Microphone unmuted".into()
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_set_mic_volume(
+        &mut self,
+        tab_idx: usize,
+        volume: u16,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                let vol = volume.min(200);
+                rd.mic_volume = vol;
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::SetMicrophoneVolume(vol),
+                    );
+                }
+                rd.last_action_note = Some(format!("Microphone gain set to {vol}%"));
                 cx.notify();
             }
         }

@@ -37,6 +37,10 @@ pub enum SessionCommand {
     SetAudioVolume(u16),
     /// Configure or change shared drive folder path.
     ConfigureDrive(Option<std::path::PathBuf>),
+    /// Mute or unmute remote desktop microphone capture.
+    SetMicrophoneMute(bool),
+    /// Set remote desktop microphone capture volume/gain (0 - 100 percentage).
+    SetMicrophoneVolume(u16),
 }
 
 /// Events emitted by the protocol background worker to the UI / main thread.
@@ -81,6 +85,17 @@ pub enum SessionEvent {
         bytes_read: u64,
         bytes_written: u64,
         operations_count: u64,
+    },
+    /// Remote microphone input status and telemetry update (MS-RDPEAI).
+    MicrophoneStatus {
+        active: bool,
+        muted: bool,
+        volume: u16,
+        format: String,
+        sample_rate: u32,
+        channels: u16,
+        bytes_sent: u64,
+        packets_sent: u64,
     },
     /// Remote terminal bell event.
     Bell,

@@ -68,6 +68,7 @@ fn test_to_ironrdp_config_invalid_endpoint() {
         cert_policy: CertificateValidationPolicy::Strict,
         view_only: false,
         enable_audio: true,
+        enable_microphone: true,
         shared_folder: None,
     };
 
@@ -94,6 +95,7 @@ fn test_rdp_client_config_zeroizes_password_and_redacts_debug() {
         cert_policy: CertificateValidationPolicy::Strict,
         view_only: false,
         enable_audio: true,
+        enable_microphone: true,
         shared_folder: None,
     };
 
@@ -121,6 +123,7 @@ fn test_to_ironrdp_config_with_sound_backend() {
         cert_policy: CertificateValidationPolicy::Strict,
         view_only: false,
         enable_audio: true,
+        enable_microphone: true,
         shared_folder: None,
     };
 
@@ -132,12 +135,14 @@ fn test_to_ironrdp_config_with_sound_backend() {
         "Shared",
         std::env::temp_dir(),
     );
+    let microphone_control = shellumi_rdp::microphone::MicrophoneControlState::new(false, 90);
 
     let iron_cfg = config.to_ironrdp_config_with_backends(
         None,
         Some(sound_control),
         Some(display_control),
         Some(drive_control),
+        Some(microphone_control),
         Some(event_tx),
     );
     assert!(iron_cfg.is_ok());

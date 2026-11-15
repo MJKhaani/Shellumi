@@ -259,6 +259,104 @@ impl Shellumi {
             .child(vol_label)
             .child(vol_up_btn);
 
+        let (mic_icon, mic_label, mic_color) = if !state.enable_microphone {
+            ("🎙️", "Mic Off", rgb(MacTheme::TEXT_TERTIARY))
+        } else if state.mic_muted {
+            ("🎙️❌", "Mic Muted", rgb(0xeb5757))
+        } else if state.mic_active {
+            ("🎙️", "Mic (active)", rgb(0x3dd68c))
+        } else {
+            ("🎙️", "Mic", rgb(MacTheme::TEXT_PRIMARY))
+        };
+
+        let mic_mute_btn = if state.protocol == RemoteDesktopProtocol::Rdp {
+            Some(
+                div()
+                    .id(("rd-mic-mute", tab_idx))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                    .text_xs()
+                    .text_color(mic_color)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.remote_desktop_toggle_mic_mute(tab_idx, cx);
+                    }))
+                    .child(format!("{mic_icon} {mic_label}")),
+            )
+        } else {
+            None
+        };
+
+        let mic_volume_ctrl =
+            if state.protocol == RemoteDesktopProtocol::Rdp && state.enable_microphone {
+                let mic_down_btn = div()
+                    .id(("rd-mic-down", tab_idx))
+                    .px_1p5()
+                    .py_1()
+                    .rounded_l_sm()
+                    .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let current = app
+                            .tabs
+                            .get(tab_idx)
+                            .and_then(|t| t.remote_desktop_state.as_ref())
+                            .map(|s| s.mic_volume)
+                            .unwrap_or(100);
+                        app.remote_desktop_set_mic_volume(tab_idx, current.saturating_sub(10), cx);
+                    }))
+                    .child("🎙️ -");
+
+                let mic_vol_label = div()
+                    .px_1p5()
+                    .py_1()
+                    .bg(rgb(MacTheme::SURFACE))
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    .child(format!("{}%", state.mic_volume));
+
+                let mic_up_btn = div()
+                    .id(("rd-mic-up", tab_idx))
+                    .px_1p5()
+                    .py_1()
+                    .rounded_r_sm()
+                    .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let current = app
+                            .tabs
+                            .get(tab_idx)
+                            .and_then(|t| t.remote_desktop_state.as_ref())
+                            .map(|s| s.mic_volume)
+                            .unwrap_or(100);
+                        app.remote_desktop_set_mic_volume(tab_idx, (current + 10).min(200), cx);
+                    }))
+                    .child("+ 🎙️");
+
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(mic_down_btn)
+                        .child(mic_vol_label)
+                        .child(mic_up_btn),
+                )
+            } else {
+                None
+            };
+
         let scale_fit = div()
             .id(("rd-scale-fit", tab_idx))
             .px_2()
@@ -645,7 +743,9 @@ impl Shellumi {
                             .child(send_files_btn)
                             .children(drive_btn)
                             .child(mute_btn)
-                            .child(volume_ctrl),
+                            .child(volume_ctrl)
+                            .children(mic_mute_btn)
+                            .children(mic_volume_ctrl),
                     )
                     .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
                     .child(
@@ -898,6 +998,43 @@ impl Shellumi {
                                     format_network_bytes(state.drive_bytes_written),
                                     state.drive_operations_count
                                 ),
+                            ))
+                            .child(spec_row(
+                                "Microphone (MS-RDPEAI)",
+                                if is_vnc {
+                                    "Not Supported (VNC Protocol)"
+                                } else if !state.enable_microphone {
+                                    "Disabled"
+                                } else if state.mic_muted {
+                                    "Muted (Input Silenced)"
+                                } else if state.mic_active {
+                                    "Active (Recording via AUDIO_INPUT)"
+                                } else {
+                                    "Ready (Awaiting Stream)"
+                                },
+                            ))
+                            .child(spec_row(
+                                "Microphone Input Format",
+                                &if state.enable_microphone {
+                                    let fmt = state.mic_format.as_deref().unwrap_or("PCM 16-bit");
+                                    format!(
+                                        "{} {}Hz {}ch (Gain: {}%)",
+                                        fmt,
+                                        state.mic_sample_rate,
+                                        state.mic_channels,
+                                        state.mic_volume
+                                    )
+                                } else {
+                                    "—".into()
+                                },
+                            ))
+                            .child(spec_row(
+                                "Microphone Data Sent",
+                                &format!(
+                                    "{} ({} packets)",
+                                    format_network_bytes(state.mic_bytes_sent),
+                                    state.mic_packets_sent
+                                ),
                             )),
                     ),
             )
@@ -1003,6 +1140,7 @@ impl Shellumi {
                                                 RemoteDesktopScaleMode::Fill => "Fill / Stretch",
                                             }))
                                             .child(spec_row("Interaction Mode", if state.view_only { "View-Only (Observe)" } else { "Interactive" }))
+                                            .child(spec_row("Microphone (MS-RDPEAI)", if is_vnc { "Disabled (VNC)" } else if state.enable_microphone { "Enabled (AUDIO_INPUT DVC)" } else { "Disabled" }))
                                             .child(spec_row("Shared Drive (RDPDR)", if is_vnc { "Disabled (VNC)" } else { "Enabled (\\tsclient)" }))
                                             .child(spec_row("Telemetry Latency", &state.latency_ms.map(|l| format!("{l} ms")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into())))
                                             .child(spec_row("Telemetry FPS", &state.fps.map(|f| format!("{f} FPS")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into()))),

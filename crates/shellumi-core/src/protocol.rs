@@ -812,6 +812,8 @@ pub struct RdpConfig {
     pub screen_height: u16,
     pub color_depth: u8,
     pub enable_audio: bool,
+    #[serde(default)]
+    pub enable_microphone: bool,
     pub enable_clipboard: bool,
     pub enable_font_smoothing: bool,
     #[serde(default = "default_true")]
@@ -832,6 +834,7 @@ impl Default for RdpConfig {
             screen_height: 1080,
             color_depth: 32,
             enable_audio: false,
+            enable_microphone: false,
             enable_clipboard: true,
             enable_font_smoothing: true,
             tls_strict: true,
@@ -860,6 +863,7 @@ impl RdpConfig {
             screen_height: 1080,
             color_depth: 32,
             enable_audio: false,
+            enable_microphone: false,
             enable_clipboard: true,
             enable_font_smoothing: true,
             tls_strict: true,
@@ -904,6 +908,9 @@ impl RdpConfig {
         }
         if self.enable_audio {
             args.push("/sound".to_string());
+        }
+        if self.enable_microphone {
+            args.push("/microphone".to_string());
         }
         args
     }

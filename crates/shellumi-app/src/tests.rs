@@ -788,6 +788,15 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        enable_microphone: false,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
         display_control_ready: false,
         max_monitor_area: None,
         shared_folder: None,
@@ -897,6 +906,15 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        enable_microphone: false,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
         display_control_ready: false,
         max_monitor_area: None,
         shared_folder: None,
@@ -987,6 +1005,15 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        enable_microphone: false,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
         display_control_ready: false,
         max_monitor_area: None,
         shared_folder: None,
@@ -1166,6 +1193,15 @@ fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        enable_microphone: false,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
         display_control_ready: false,
         max_monitor_area: None,
         shared_folder: None,
@@ -1844,6 +1880,15 @@ fn verifies_remote_desktop_display_control_state_and_resizing() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        enable_microphone: false,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
         display_control_ready: false,
         max_monitor_area: None,
         shared_folder: None,
@@ -1946,6 +1991,15 @@ fn test_remote_desktop_drive_redirection_state_and_events() {
         audio_sample_rate: 44100,
         audio_channels: 2,
         audio_bytes_received: 0,
+        enable_microphone: false,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
         display_control_ready: false,
         max_monitor_area: None,
         shared_folder: None,
@@ -2019,5 +2073,140 @@ fn test_remote_desktop_drive_redirection_state_and_events() {
         assert_eq!(path, std::path::PathBuf::from("/Users/test/Shared"));
     } else {
         panic!("Expected ConfigureDrive command");
+    }
+}
+
+#[test]
+fn test_remote_desktop_microphone_redirection_state_and_events() {
+    use super::{
+        RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
+    };
+    use shellumi_remote_desktop::{SessionCommand, SessionEvent};
+
+    let mut rd = RemoteDesktopState {
+        host_name: "Windows RDS Farm".into(),
+        target: "rds.corp.internal:3389".into(),
+        protocol: RemoteDesktopProtocol::Rdp,
+        status: RemoteDesktopStatus::Connected,
+        status_message: Some("Connected via IronRDP MS-RDPBCGR".into()),
+        width: 1920,
+        height: 1080,
+        view_only: false,
+        scale_mode: RemoteDesktopScaleMode::Fit,
+        color_depth: 32,
+        fps: Some(60),
+        latency_ms: Some(15),
+        clipboard_text: None,
+        error: None,
+        last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        ui_handle: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: Some("DomainUser".into()),
+        password: None,
+        domain: Some("CORP".into()),
+        tls_strict: true,
+        show_diagnostics: true,
+        password_input: None,
+        enable_audio: true,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: true,
+        audio_format: Some("PCM 44100Hz 2ch".into()),
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 10240,
+        enable_microphone: true,
+        mic_muted: false,
+        mic_volume: 100,
+        mic_active: false,
+        mic_format: None,
+        mic_sample_rate: 44100,
+        mic_channels: 2,
+        mic_bytes_sent: 0,
+        mic_packets_sent: 0,
+        display_control_ready: true,
+        max_monitor_area: Some(1920 * 1080),
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
+    };
+
+    // 1. Initial microphone state
+    assert!(rd.enable_microphone);
+    assert!(!rd.mic_muted);
+    assert_eq!(rd.mic_volume, 100);
+    assert!(!rd.mic_active);
+    assert_eq!(rd.mic_format, None);
+    assert_eq!(rd.mic_bytes_sent, 0);
+    assert_eq!(rd.mic_packets_sent, 0);
+
+    // 2. Simulate SessionEvent::MicrophoneStatus transition when AUDIO_INPUT opens
+    let mic_event = SessionEvent::MicrophoneStatus {
+        active: true,
+        muted: false,
+        volume: 90,
+        format: "16-bit PCM 44100Hz 2ch".to_string(),
+        sample_rate: 44100,
+        channels: 2,
+        bytes_sent: 4096,
+        packets_sent: 4,
+    };
+
+    match mic_event {
+        SessionEvent::MicrophoneStatus {
+            active,
+            muted,
+            volume,
+            format,
+            sample_rate,
+            channels,
+            bytes_sent,
+            packets_sent,
+        } => {
+            rd.mic_active = active;
+            rd.mic_muted = muted;
+            rd.mic_volume = volume;
+            rd.mic_format = Some(format);
+            rd.mic_sample_rate = sample_rate;
+            rd.mic_channels = channels;
+            rd.mic_bytes_sent = bytes_sent;
+            rd.mic_packets_sent = packets_sent;
+        }
+        _ => panic!("Unexpected event"),
+    }
+
+    assert!(rd.mic_active);
+    assert!(!rd.mic_muted);
+    assert_eq!(rd.mic_volume, 90);
+    assert_eq!(rd.mic_format.as_deref(), Some("16-bit PCM 44100Hz 2ch"));
+    assert_eq!(rd.mic_sample_rate, 44100);
+    assert_eq!(rd.mic_channels, 2);
+    assert_eq!(rd.mic_bytes_sent, 4096);
+    assert_eq!(rd.mic_packets_sent, 4);
+
+    // 3. Test volume adjustment and muting
+    rd.mic_muted = true;
+    rd.mic_volume = 120; // 120% microphone gain boost
+    assert!(rd.mic_muted);
+    assert_eq!(rd.mic_volume, 120);
+
+    // 4. Verify SessionCommand variants for microphone control
+    let mute_cmd = SessionCommand::SetMicrophoneMute(true);
+    if let SessionCommand::SetMicrophoneMute(muted) = mute_cmd {
+        assert!(muted);
+    } else {
+        panic!("Expected SetMicrophoneMute command");
+    }
+
+    let vol_cmd = SessionCommand::SetMicrophoneVolume(120);
+    if let SessionCommand::SetMicrophoneVolume(vol) = vol_cmd {
+        assert_eq!(vol, 120);
+    } else {
+        panic!("Expected SetMicrophoneVolume command");
     }
 }
