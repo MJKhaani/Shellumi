@@ -128,6 +128,12 @@ impl Shellumi {
             audio_bytes_received: 0,
             display_control_ready: false,
             max_monitor_area: None,
+            shared_folder: None,
+            drive_name: None,
+            drive_mounted: false,
+            drive_bytes_read: 0,
+            drive_bytes_written: 0,
+            drive_operations_count: 0,
         };
 
         self.tabs.push(SessionTab {
@@ -225,6 +231,12 @@ impl Shellumi {
             audio_bytes_received: 0,
             display_control_ready: false,
             max_monitor_area: None,
+            shared_folder: None,
+            drive_name: None,
+            drive_mounted: false,
+            drive_bytes_read: 0,
+            drive_bytes_written: 0,
+            drive_operations_count: 0,
         };
 
         self.tabs.push(SessionTab {
@@ -488,6 +500,7 @@ impl Shellumi {
                     domain: rd.domain.clone(),
                     tls_strict: rd.tls_strict,
                     enable_audio: rd.enable_audio,
+                    shared_folder: rd.shared_folder.clone(),
                 };
 
                 let fb = shellumi_remote_desktop::Framebuffer::new(rd.width, rd.height)
@@ -603,6 +616,27 @@ impl Shellumi {
                                             rd.last_action_note = Some(
                                                 "Dynamic display resizing (MS-RDPEDISP) ready".into(),
                                             );
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::DriveStatus {
+                                            drive_name,
+                                            local_path,
+                                            mounted,
+                                            bytes_read,
+                                            bytes_written,
+                                            operations_count,
+                                        } => {
+                                            rd.drive_name = Some(drive_name.clone());
+                                            rd.shared_folder = Some(std::path::PathBuf::from(local_path.clone()));
+                                            rd.drive_mounted = mounted;
+                                            rd.drive_bytes_read = bytes_read;
+                                            rd.drive_bytes_written = bytes_written;
+                                            rd.drive_operations_count = operations_count;
+                                            if mounted {
+                                                rd.last_action_note = Some(format!(
+                                                    "Shared drive \"{}\" mounted ({})",
+                                                    drive_name, local_path
+                                                ));
+                                            }
                                         }
                                         shellumi_remote_desktop::SessionEvent::Error(err) => {
                                             rd.error = Some(err);
@@ -763,6 +797,36 @@ impl Shellumi {
                     rd.width = width;
                     rd.height = height;
                     rd.last_action_note = Some(format!("Local resolution set to {width}×{height}"));
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_choose_shared_folder(
+        &mut self,
+        tab_idx: usize,
+        folder_path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                let drive_name = folder_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Shared")
+                    .to_string();
+                rd.shared_folder = Some(folder_path.clone());
+                rd.drive_name = Some(drive_name.clone());
+                rd.last_action_note = Some(format!(
+                    "Redirecting shared folder: {}",
+                    folder_path.display()
+                ));
+
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::ConfigureDrive(Some(folder_path)),
+                    );
                 }
                 cx.notify();
             }

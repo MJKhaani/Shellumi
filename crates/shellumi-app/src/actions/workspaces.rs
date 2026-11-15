@@ -407,6 +407,12 @@ impl Shellumi {
                     audio_bytes_received: 0,
                     display_control_ready: false,
                     max_monitor_area: None,
+                    shared_folder: None,
+                    drive_name: None,
+                    drive_mounted: false,
+                    drive_bytes_read: 0,
+                    drive_bytes_written: 0,
+                    drive_operations_count: 0,
                 };
                 if first_rd_state.is_none() {
                     first_rd_state = Some(rd);

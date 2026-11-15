@@ -115,7 +115,7 @@ The following work is included in the alpha source:
    - **PR 2:** `shellumi-remote-desktop` session architecture, safe 32-bit RGBA framebuffer, and dirty rect GPUI rendering.
    - **PR 3:** Native VNC engine (`shellumi-vnc`) with RFB 3.8, VNCAuth, Raw/CopyRect/DesktopSize, live mouse/keysyms.
    - **PR 4:** VNC client decoders (Hextile, ZRLE, Tight) and bidirectional text clipboard with size caps.
-   - **PR 5:** Embedded RDP (`shellumi-rdp` wrapping `ironrdp-client`), strict TLS validation, NLA, scancodes, authentic CLIPRDR bidirectional text clipboard and streaming file transfer.
+   - **PR 5:** Embedded RDP (`shellumi-rdp` wrapping `ironrdp-client`), strict TLS validation, NLA, scancodes, authentic CLIPRDR bidirectional text clipboard and streaming file transfer, authentic RDPSND audio redirection, MS-RDPEDISP dynamic resolution resizing, and authentic RDPDR local drive and directory redirection.
    - **PR 6:** Host settings, keychain binding, interactive prompts, workspace persistence, and toolbar actions.
    - **PR 7:** Fuzzing, decompression bomb bounds, security hardening, and real-server acceptance testing.
 8. **Longer-term scope:** additional protocol acceptance, theme/language options,

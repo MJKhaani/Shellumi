@@ -4,6 +4,7 @@ pub mod client;
 pub mod clipboard;
 pub mod config;
 pub mod display;
+pub mod drive;
 pub mod input;
 pub mod security;
 pub mod sound;
@@ -12,6 +13,10 @@ pub use client::{run_rdp_session, RdpError};
 pub use clipboard::{RemoteFile, ShellumiCliprdrBackend, StagedFile, DEFAULT_FILE_CHUNK_SIZE};
 pub use config::RdpClientConfig;
 pub use display::{adjust_display_size, create_display_control_client, DisplayControlState};
+pub use drive::{
+    create_rdpdr_channel, default_shared_folder, derive_drive_name, DriveControlState,
+    RedirectedDrive, ShellumiRdpdrBackend, DEFAULT_DRIVE_DEVICE_ID,
+};
 pub use input::{
     build_alt_tab_sequence, build_ctrl_alt_del_sequence, build_win_key_sequence,
     translate_key_event, translate_pointer_event, translate_wheel_event,

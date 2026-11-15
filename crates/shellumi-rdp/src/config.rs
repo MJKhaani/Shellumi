@@ -1,5 +1,7 @@
 //! Configuration mapping from Shellumi session configuration to IronRDP configuration.
 
+use std::path::PathBuf;
+
 use ironrdp_client::config::{Config, ConfigBuilder, Destination};
 use shellumi_remote_desktop::security::CertificateValidationPolicy;
 use shellumi_remote_desktop::{SessionConfig, MAX_FRAMEBUFFER_DIMENSION};
@@ -29,6 +31,7 @@ pub struct RdpClientConfig {
     pub cert_policy: CertificateValidationPolicy,
     pub view_only: bool,
     pub enable_audio: bool,
+    pub shared_folder: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for RdpClientConfig {
@@ -44,6 +47,7 @@ impl std::fmt::Debug for RdpClientConfig {
             .field("cert_policy", &self.cert_policy)
             .field("view_only", &self.view_only)
             .field("enable_audio", &self.enable_audio)
+            .field("shared_folder", &self.shared_folder)
             .finish()
     }
 }
@@ -82,6 +86,7 @@ impl RdpClientConfig {
             },
             view_only: config.view_only,
             enable_audio: config.enable_audio,
+            shared_folder: config.shared_folder.clone(),
         }
     }
 
@@ -95,15 +100,16 @@ impl RdpClientConfig {
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
     ) -> Result<Config, RdpConfigError> {
-        self.to_ironrdp_config_with_backends(backend, None, None, None)
+        self.to_ironrdp_config_with_backends(backend, None, None, None, None)
     }
 
-    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard, sound, and display control backends.
+    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard, sound, display control, and drive redirection backends.
     pub fn to_ironrdp_config_with_backends(
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
         sound_control: Option<crate::sound::ShellumiRdpsndControl>,
         display_control: Option<crate::display::DisplayControlState>,
+        drive_control: Option<crate::drive::DriveControlState>,
         worker_tx: Option<async_channel::Sender<shellumi_remote_desktop::SessionEvent>>,
     ) -> Result<Config, RdpConfigError> {
         if self.host.trim().is_empty() {
@@ -167,6 +173,17 @@ impl RdpClientConfig {
             builder = builder.with_dvc(move |_ps| {
                 Some(crate::display::create_display_control_client(
                     dc_state_clone.clone(),
+                    tx_clone.clone(),
+                ))
+            });
+        }
+
+        if let Some(drive_state) = drive_control {
+            let drive_state_clone = drive_state.clone();
+            let tx_clone = worker_tx.clone();
+            builder = builder.with_static_channel(move |_ps| {
+                Some(crate::drive::create_rdpdr_channel(
+                    drive_state_clone.clone(),
                     tx_clone.clone(),
                 ))
             });

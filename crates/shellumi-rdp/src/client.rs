@@ -57,10 +57,21 @@ pub async fn run_rdp_session(
     );
     let sound_control = crate::sound::ShellumiRdpsndControl::new(false, 100);
     let display_control = crate::display::DisplayControlState::new();
+    let shared_folder_path = rdp_config
+        .shared_folder
+        .clone()
+        .unwrap_or_else(crate::drive::default_shared_folder);
+    let drive_name = crate::drive::derive_drive_name(&shared_folder_path);
+    let drive_control = crate::drive::DriveControlState::new(
+        crate::drive::DEFAULT_DRIVE_DEVICE_ID,
+        drive_name,
+        shared_folder_path,
+    );
     let ironrdp_cfg = rdp_config.to_ironrdp_config_with_backends(
         Some(clipboard_backend.clone()),
         Some(sound_control.clone()),
         Some(display_control.clone()),
+        Some(drive_control.clone()),
         Some(worker.event_sender().clone()),
     )?;
 
@@ -170,6 +181,21 @@ pub async fn run_rdp_session(
                                 physical_size: None,
                             });
                         }
+                        SessionCommand::ConfigureDrive(opt_path) => {
+                            let target_path = opt_path.unwrap_or_else(crate::drive::default_shared_folder);
+                            let d_name = crate::drive::derive_drive_name(&target_path);
+                            drive_control.update_folder(d_name.clone(), target_path.clone());
+                            let _ = worker
+                                .send_event(SessionEvent::DriveStatus {
+                                    drive_name: d_name,
+                                    local_path: target_path.to_string_lossy().to_string(),
+                                    mounted: drive_control.is_mounted(),
+                                    bytes_read: drive_control.bytes_read(),
+                                    bytes_written: drive_control.bytes_written(),
+                                    operations_count: drive_control.operations_count(),
+                                })
+                                .await;
+                        }
                         SessionCommand::Disconnect => {
                             sound_control.set_active(false);
                             let _ = input_sender.send(RdpInputEvent::Close);
@@ -203,6 +229,16 @@ pub async fn run_rdp_session(
                                 connected = true;
                                 let _ = worker.send_event(SessionEvent::StateChanged(SessionState::Connected)).await;
                                 let _ = worker.send_event(SessionEvent::RemoteResize { width: w, height: h }).await;
+                                let _ = worker
+                                    .send_event(SessionEvent::DriveStatus {
+                                        drive_name: drive_control.drive_name(),
+                                        local_path: drive_control.local_path().to_string_lossy().to_string(),
+                                        mounted: drive_control.is_mounted(),
+                                        bytes_read: drive_control.bytes_read(),
+                                        bytes_written: drive_control.bytes_written(),
+                                        operations_count: drive_control.operations_count(),
+                                    })
+                                    .await;
                             }
 
                             if framebuffer.width() != w || framebuffer.height() != h {

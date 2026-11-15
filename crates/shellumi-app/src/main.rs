@@ -748,6 +748,12 @@ struct RemoteDesktopState {
     audio_bytes_received: u64,
     display_control_ready: bool,
     max_monitor_area: Option<u64>,
+    shared_folder: Option<std::path::PathBuf>,
+    drive_name: Option<String>,
+    drive_mounted: bool,
+    drive_bytes_read: u64,
+    drive_bytes_written: u64,
+    drive_operations_count: u64,
 }
 
 impl Drop for RemoteDesktopState {

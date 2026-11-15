@@ -85,6 +85,9 @@ crates/
       events.rs                   # RdpOutputEvent to SessionEvent translator
       keyboard.rs                 # Host keystrokes to RDP scancodes / Unicode events
       clipboard.rs                # CLIPRDR virtual channel text clipboard integration
+      sound.rs                    # RDPSND virtual channel audio redirection
+      display.rs                  # MS-RDPEDISP dynamic resolution resizing
+      drive.rs                    # RDPDR local drive and directory redirection
   shellumi-app/
     src/
       actions/remote_desktop.rs   # Session lifecycle dispatch (connect, disconnect, commands)
@@ -206,7 +209,7 @@ Shellumi GPUI Remote Desktop Tab
 2. **RDP Protocol:**
    - **Authentication:** CredSSP / Network Level Authentication (NLA) over TLS is standard. Kerberos authentication requires domain enrollment; NTLMv2 fallback is supported within CredSSP.
    - **TLS Certificate Validation:** `CertificateValidation::Strict` validates certificates against the system CA root store. For self-signed certificates common in lab and private infrastructure, `CertificateValidation::Tofu` records the SHA-256 fingerprint on first use and warns if the fingerprint changes unexpectedly.
-   - **Virtual Channels:** Fast-path graphics output, pointer and keyboard input, Special Administrative Sequences (SAS: Ctrl+Alt+Del, Win key), authentic CLIPRDR bidirectional UTF-16LE text clipboard synchronization, streaming chunked file transfers (`FileGroupDescriptorW` / `FileContentsRequest` / `FileContentsResponse`), authentic RDPSND audio redirection (`MS-RDPEA`) streaming 16-bit 44.1/48 kHz stereo PCM audio to host audio hardware with live volume and mute control, and authentic MS-RDPEDISP dynamic display resolution resizing (`ironrdp-displaycontrol` / `ironrdp-dvc`) allowing client-to-server desktop resolution updates without session reconnection or application restarts (with 1080p, 1440p, 4K, 720p presets, dynamic "Match Viewport" synchronization, and HUD telemetry inspector) are fully functional and integrated into the desktop UI. Microphone redirection and USB/drive redirection are scheduled for future minor releases.
+   - **Virtual Channels:** Fast-path graphics output, pointer and keyboard input, Special Administrative Sequences (SAS: Ctrl+Alt+Del, Win key), authentic CLIPRDR bidirectional UTF-16LE text clipboard synchronization, streaming chunked file transfers (`FileGroupDescriptorW` / `FileContentsRequest` / `FileContentsResponse`), authentic RDPSND audio redirection (`MS-RDPEA`) streaming 16-bit 44.1/48 kHz stereo PCM audio to host audio hardware with live volume and mute control, authentic MS-RDPEDISP dynamic display resolution resizing (`ironrdp-displaycontrol` / `ironrdp-dvc`) allowing client-to-server desktop resolution updates without session reconnection or application restarts (with 1080p, 1440p, 4K, 720p presets, dynamic "Match Viewport" synchronization, and HUD telemetry inspector), and authentic MS-RDPEFS / RDPDR local drive and directory redirection (`ironrdp-rdpdr` / `ironrdp-rdpdr-native`) mounting local directories under `\\tsclient\<drive_name>` with read/write I/O telemetry and dynamic folder switching are fully functional and integrated into the desktop UI. Microphone redirection and USB redirection are scheduled for future minor releases.
 
 ---
 

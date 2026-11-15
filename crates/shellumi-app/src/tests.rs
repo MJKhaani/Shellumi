@@ -790,6 +790,12 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         audio_bytes_received: 0,
         display_control_ready: false,
         max_monitor_area: None,
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
     };
 
     // Truthful baseline: initial state must never be fake Connected, metrics must be None
@@ -893,6 +899,12 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         audio_bytes_received: 0,
         display_control_ready: false,
         max_monitor_area: None,
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
     };
 
     assert_eq!(
@@ -977,6 +989,12 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         audio_bytes_received: 0,
         display_control_ready: false,
         max_monitor_area: None,
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
     };
 
     // Apply snapshot to state (simulating remote_desktop_apply_framebuffer_snapshot)
@@ -1150,6 +1168,12 @@ fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
         audio_bytes_received: 0,
         display_control_ready: false,
         max_monitor_area: None,
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
     };
 
     assert_eq!(rd.status, RemoteDesktopStatus::NotConnected);
@@ -1822,6 +1846,12 @@ fn verifies_remote_desktop_display_control_state_and_resizing() {
         audio_bytes_received: 0,
         display_control_ready: false,
         max_monitor_area: None,
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
     };
 
     // Initial state before capability PDU
@@ -1872,5 +1902,122 @@ fn verifies_remote_desktop_display_control_state_and_resizing() {
         assert_eq!(height, 2160);
     } else {
         panic!("Expected RequestResize command");
+    }
+}
+
+#[test]
+fn test_remote_desktop_drive_redirection_state_and_events() {
+    use super::{
+        RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
+    };
+    use shellumi_remote_desktop::{SessionCommand, SessionEvent};
+
+    let mut rd = RemoteDesktopState {
+        host_name: "win-fileserver".into(),
+        target: "192.168.1.100:3389".into(),
+        protocol: RemoteDesktopProtocol::Rdp,
+        status: RemoteDesktopStatus::Connected,
+        status_message: None,
+        width: 1920,
+        height: 1080,
+        view_only: false,
+        scale_mode: RemoteDesktopScaleMode::Fit,
+        color_depth: 32,
+        fps: None,
+        latency_ms: None,
+        clipboard_text: None,
+        error: None,
+        last_action_note: None,
+        framebuffer: None,
+        render_image: None,
+        ui_handle: None,
+        metrics: shellumi_remote_desktop::SessionMetrics::new(),
+        username: Some("Administrator".into()),
+        password: None,
+        domain: None,
+        tls_strict: true,
+        show_diagnostics: false,
+        password_input: None,
+        enable_audio: true,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: false,
+        audio_format: None,
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 0,
+        display_control_ready: false,
+        max_monitor_area: None,
+        shared_folder: None,
+        drive_name: None,
+        drive_mounted: false,
+        drive_bytes_read: 0,
+        drive_bytes_written: 0,
+        drive_operations_count: 0,
+    };
+
+    // Initial state: drive is not mounted and counters are 0
+    assert!(!rd.drive_mounted);
+    assert!(rd.shared_folder.is_none());
+    assert!(rd.drive_name.is_none());
+    assert_eq!(rd.drive_bytes_read, 0);
+    assert_eq!(rd.drive_bytes_written, 0);
+    assert_eq!(rd.drive_operations_count, 0);
+
+    // Simulate receiving DriveStatus event from protocol background worker
+    let event = SessionEvent::DriveStatus {
+        drive_name: "Downloads".into(),
+        local_path: "/Users/test/Downloads".into(),
+        mounted: true,
+        bytes_read: 4096,
+        bytes_written: 8192,
+        operations_count: 12,
+    };
+
+    match event {
+        SessionEvent::DriveStatus {
+            drive_name,
+            local_path,
+            mounted,
+            bytes_read,
+            bytes_written,
+            operations_count,
+        } => {
+            rd.drive_name = Some(drive_name.clone());
+            rd.shared_folder = Some(std::path::PathBuf::from(local_path.clone()));
+            rd.drive_mounted = mounted;
+            rd.drive_bytes_read = bytes_read;
+            rd.drive_bytes_written = bytes_written;
+            rd.drive_operations_count = operations_count;
+            if mounted {
+                rd.last_action_note = Some(format!(
+                    "Shared drive \"{}\" mounted ({})",
+                    drive_name, local_path
+                ));
+            }
+        }
+        _ => panic!("Expected DriveStatus event"),
+    }
+
+    assert!(rd.drive_mounted);
+    assert_eq!(rd.drive_name, Some("Downloads".into()));
+    assert_eq!(
+        rd.shared_folder,
+        Some(std::path::PathBuf::from("/Users/test/Downloads"))
+    );
+    assert_eq!(rd.drive_bytes_read, 4096);
+    assert_eq!(rd.drive_bytes_written, 8192);
+    assert_eq!(rd.drive_operations_count, 12);
+    assert_eq!(
+        rd.last_action_note,
+        Some("Shared drive \"Downloads\" mounted (/Users/test/Downloads)".into())
+    );
+
+    // Verify SessionCommand::ConfigureDrive
+    let cmd = SessionCommand::ConfigureDrive(Some(std::path::PathBuf::from("/Users/test/Shared")));
+    if let SessionCommand::ConfigureDrive(Some(path)) = cmd {
+        assert_eq!(path, std::path::PathBuf::from("/Users/test/Shared"));
+    } else {
+        panic!("Expected ConfigureDrive command");
     }
 }

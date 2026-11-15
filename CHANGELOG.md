@@ -2,6 +2,19 @@
 
 ## 0.0.7-alpha
 
+### Local Drive and Directory Redirection over RDPDR (MS-RDPEFS)
+- **Authentic MS-RDPEFS / RDPDR Virtual Channel:** Integrated Microsoft Remote Desktop File System Virtual Channel Extension (`MS-RDPEFS` / `RDPDR`) in pure Rust using `ironrdp-rdpdr` (0.7.0) and `ironrdp-rdpdr-native` (0.7.0).
+- **Native Host Filesystem Bridge:** Implemented `ShellumiRdpdrBackend` in `crates/shellumi-rdp/src/drive.rs` wrapping `NixRdpdrBackend` to mount local host directories (e.g. `~/Downloads` or custom user folders) as network drives into remote Windows Explorer sessions (`\\tsclient\<drive_name>` or `<drive_name> on Shellumi`).
+- **Telemetry & Dynamic Directory Swapping:**
+  - Real-time I/O request interception tracking exact bytes read, bytes written, and operations count.
+  - Server announcement interception (`NtStatus::SUCCESS`) confirming Windows remote mount status.
+  - Supports dynamic local folder swapping during active sessions via `SessionCommand::ConfigureDrive`.
+- **UI & Telemetry Controls:**
+  - Added `📁 Drive: <folder>` indicator and configuration button in the remote desktop session toolbar.
+  - Added folder selection action `remote_desktop_choose_shared_folder` via GPUI file dialog (`cx.prompt_for_paths`).
+  - Added live RDPDR telemetry metrics (`Shared Drive (RDPDR)`, `Shared Folder`, `Drive Transferred`, `Drive Operations`) in the HUD diagnostics inspector.
+- **Automated Verification:** Added unit and integration test suite (`crates/shellumi-rdp/tests/drive_tests.rs`) covering drive naming, device announcements, read/write I/O request tracking, dynamic path reconfiguration, and `Rdpdr` static virtual channel creation.
+
 ### Dynamic Display Resolution Resizing over MS-RDPEDISP
 - **Authentic MS-RDPEDISP Virtual Channel:** Integrated Microsoft Remote Desktop Display Update Virtual Channel Extension (`MS-RDPEDISP`) in pure Rust using `ironrdp-displaycontrol` and `ironrdp-dvc`.
 - **Real-Time Client-to-Server Resolution Updates:** Dynamically re-negotiates monitor layout (`DisplayControlMonitorLayout`) on the fly when switching resolutions or resizing the viewport, without disconnecting the session, interrupting network traffic, or restarting remote applications.

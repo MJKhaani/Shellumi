@@ -33,3 +33,5 @@ smallvec = "1"
 thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
+ironrdp-rdpdr = "0.7.0"
+ironrdp-rdpdr-native = "0.7.0"

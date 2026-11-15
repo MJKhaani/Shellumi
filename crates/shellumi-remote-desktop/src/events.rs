@@ -35,6 +35,8 @@ pub enum SessionCommand {
     SetAudioMute(bool),
     /// Set remote desktop audio volume (0 - 100 percentage).
     SetAudioVolume(u16),
+    /// Configure or change shared drive folder path.
+    ConfigureDrive(Option<std::path::PathBuf>),
 }
 
 /// Events emitted by the protocol background worker to the UI / main thread.
@@ -71,6 +73,15 @@ pub enum SessionEvent {
     },
     /// Display control capabilities negotiated via MS-RDPEDISP extension.
     DisplayControlCaps { max_monitors: u32, max_area: u64 },
+    /// Drive redirection status and telemetry update (RDPDR / MS-RDPEFS).
+    DriveStatus {
+        drive_name: String,
+        local_path: String,
+        mounted: bool,
+        bytes_read: u64,
+        bytes_written: u64,
+        operations_count: u64,
+    },
     /// Remote terminal bell event.
     Bell,
     /// Connection or protocol error occurred.

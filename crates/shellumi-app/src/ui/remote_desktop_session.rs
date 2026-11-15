@@ -437,6 +437,48 @@ impl Shellumi {
                 .child(format!("🖥️ {}×{}", state.width, state.height))
         };
 
+        let drive_btn = if state.protocol == RemoteDesktopProtocol::Rdp {
+            let drive_label = if let Some(name) = &state.drive_name {
+                if state.drive_mounted {
+                    format!("📁 Drive: {name} (Mounted)")
+                } else {
+                    format!("📁 Drive: {name}")
+                }
+            } else if state.drive_mounted {
+                "📁 Drive: Mounted".to_string()
+            } else {
+                "📁 Shared Drive".to_string()
+            };
+
+            Some(
+                div()
+                    .id(("rd-shared-drive", tab_idx))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .cursor_pointer()
+                    .bg(if state.drive_mounted {
+                        rgb(0x133826)
+                    } else {
+                        rgb(MacTheme::SURFACE)
+                    })
+                    .text_color(if state.drive_mounted {
+                        rgb(0x34d399)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let default_dir = shellumi_rdp::default_shared_folder();
+                        app.remote_desktop_choose_shared_folder(tab_idx, default_dir, cx);
+                    }))
+                    .child(drive_label),
+            )
+        } else {
+            None
+        };
+
         let view_only_btn = div()
             .id(("rd-viewonly", tab_idx))
             .px_2()
@@ -601,6 +643,7 @@ impl Shellumi {
                             .child(alt_tab_btn)
                             .child(clip_btn)
                             .child(send_files_btn)
+                            .children(drive_btn)
                             .child(mute_btn)
                             .child(volume_ctrl),
                     )
@@ -826,6 +869,35 @@ impl Shellumi {
                                     .max_monitor_area
                                     .map(|a| format!("{a} px²"))
                                     .unwrap_or_else(|| "Standard (Single Monitor)".into()),
+                            ))
+                            .child(spec_row(
+                                "Drive Redirection (RDPDR)",
+                                if is_vnc {
+                                    "Not Supported (VNC Protocol)"
+                                } else if state.drive_mounted {
+                                    "Mounted (\\tsclient)"
+                                } else if state.shared_folder.is_some() {
+                                    "Announced (Awaiting Server Mount)"
+                                } else {
+                                    "Ready (Default / On Demand)"
+                                },
+                            ))
+                            .child(spec_row(
+                                "Redirected Folder",
+                                &state
+                                    .shared_folder
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "Not mounted".into()),
+                            ))
+                            .child(spec_row(
+                                "Drive I/O (Read / Write)",
+                                &format!(
+                                    "{} / {} ({} ops)",
+                                    format_network_bytes(state.drive_bytes_read),
+                                    format_network_bytes(state.drive_bytes_written),
+                                    state.drive_operations_count
+                                ),
                             )),
                     ),
             )
@@ -931,6 +1003,7 @@ impl Shellumi {
                                                 RemoteDesktopScaleMode::Fill => "Fill / Stretch",
                                             }))
                                             .child(spec_row("Interaction Mode", if state.view_only { "View-Only (Observe)" } else { "Interactive" }))
+                                            .child(spec_row("Shared Drive (RDPDR)", if is_vnc { "Disabled (VNC)" } else { "Enabled (\\tsclient)" }))
                                             .child(spec_row("Telemetry Latency", &state.latency_ms.map(|l| format!("{l} ms")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into())))
                                             .child(spec_row("Telemetry FPS", &state.fps.map(|f| format!("{f} FPS")).unwrap_or_else(|| "Unmeasured (awaiting live frames)".into()))),
                                     ),
