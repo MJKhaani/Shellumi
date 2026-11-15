@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MJKhaani/Shellumi/releases"><img src="https://img.shields.io/badge/release-v0.0.7--alpha-0A84FF.svg" alt="Release v0.0.7-alpha"></a>
+  <a href="https://github.com/MJKhaani/Shellumi/releases"><img src="https://img.shields.io/badge/release-v0.0.8--alpha-0A84FF.svg" alt="Release v0.0.8-alpha"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/Rust-2021-DEA584.svg" alt="Rust 2021">
   <img src="https://img.shields.io/badge/GUI-GPUI%200.2.2-30D158.svg" alt="GPUI 0.2.2">
@@ -30,7 +30,7 @@ The planned vault model lets users create **local** vaults or **remote** vaults 
 
 The planned default local vault will hold the user's own data and an encrypted, synchronized directory of other vaults, without their contents. Remote vaults are planned to keep separate encrypted offline caches. Vault encryption, directory synchronization and remote caches are not yet implemented; current local metadata storage is not encrypted at rest.
 
-**Current milestone: `v0.0.7-alpha`.** This release delivers a fully redesigned interface, complete dual-pane graphical SFTP file manager with recursive directory transfers and macOS folder MIME iconography, uniform pinned action bars, slide-over group inspectors, and advanced host filtering.
+**Current milestone: `v0.0.8-alpha`.** This release delivers a fully native, GPU-accelerated Remote Desktop engine (RDP & VNC) written in pure Rust, complete with dynamic resolution resizing (MS-RDPEDISP), bidirectional clipboard & file streaming (CLIPRDR), high-fidelity audio playback (RDPSND), microphone redirection (MS-RDPEAI), shared directory mounting (RDPDR), network resilience with auto-reconnection, and authentic performance diagnostics HUD. See the [Remote Desktop User Guide](docs/REMOTE_DESKTOP_GUIDE.md) for full documentation.
 
 ---
 
@@ -80,10 +80,15 @@ A capture of the running macOS desktop application:
 - **Session Workspaces:** Save multi-session terminal layouts (single, horizontal, vertical, grid) and reopen them in one click.
 - **Broadcast Input:** Synchronize keystrokes across multiple active terminal panes simultaneously.
 
-### 🌐 Protocols & Remote Desktop
-- **Multi-Protocol Engine:** Support for SSH, SFTP, Mosh, Telnet, Serial lines, and embedded Remote Desktop.
-- **Embedded Remote Desktop (VNC & RDP):** RFB v3.8 and MS-RDPBCGR protocol support, scaling switcher (Fit/100%/Fill), view-only mode, SAS key shortcuts, and native Rust client engine integration (see [Remote Desktop Implementation Plan](docs/REMOTE_DESKTOP_IMPLEMENTATION.md)).
-- **SSH Port Forwarding:** Persistent local, remote, and dynamic tunnel configurations with one-click launch.
+### 🌐 Native Remote Desktop Engine (RDP & VNC)
+- **100% Pure Rust Architecture:** Powered by `IronRDP` and native RFB protocol decoders with zero webviews or external wrappers.
+- **GPU-Accelerated Framebuffers:** Direct rendering into GPUI pixel surfaces delivering smooth, low-latency 60 FPS remote interaction.
+- **Dynamic Display Resizing (MS-RDPEDISP):** Automatic layout and resolution negotiation upon window resize with smooth 150ms debouncing.
+- **Bidirectional Clipboard & File Transfers (CLIPRDR):** Seamless text sync and streaming file copy-paste between local and remote machines.
+- **Sound & Microphone Redirection:** High-fidelity audio playback (RDPSND) and upstream microphone capture (MS-RDPEAI) for remote communications.
+- **Shared Drive Mounting (RDPDR):** Safely expose local directories to remote Windows/Linux sessions as virtual network drives (`\\tsclient`).
+- **Network Resilience & Auto-Reconnect:** Transient drop detection, exponential backoff retries, and instant session rehydration.
+- **Authentic Diagnostics HUD:** Real-time HUD overlay showing live framerate, round-trip time (RTT), throughput, and drop counters. See [Remote Desktop Guide](docs/REMOTE_DESKTOP_GUIDE.md).
 
 ### 🔒 Encrypted Backups & Cloud Sync
 - **Encrypted Local Backups:** Export and restore local vault backups encrypted with AES-256-GCM and Argon2id; transactional rollbacks ensure database integrity on wrong passphrases.
@@ -91,13 +96,14 @@ A capture of the running macOS desktop application:
 
 ---
 
-## What Works in Alpha (`v0.0.7-alpha`)
+## What Works in Alpha (`v0.0.8-alpha`)
 
 | Area | Available Functionality |
 | --- | --- |
 | **Hosts** | Create, edit, delete, search, group hierarchies, slide-over Group Details Inspector, group defaults, tag filtering, sort ordering (A-Z, Z-A, Date), grid/list views, and OpenSSH config import/export. |
 | **SSH** | System OpenSSH sessions in native PTYs, strict host-key verification, agent forwarding disabled by default, jump hosts, and askpass credential resolution. |
 | **Terminal** | Local shells and remote sessions, tabs, split panes, viewport-based PTY resizing, wheel scrollback, search, clipboard paste, ANSI color attributes, and opt-in session recording. |
+| **Remote Desktop** | Native GPU-accelerated RDP & VNC client with real network I/O, TOFU TLS/VeNCrypt certificate verification, dynamic resolution resizing (MS-RDPEDISP), clipboard sync & file transfer (CLIPRDR), audio playback (RDPSND), mic capture (MS-RDPEAI), shared drives (RDPDR), network resilience with auto-reconnection, and authentic HUD telemetry. |
 | **SFTP** | Dual-pane graphical file manager supporting Local-to-Local, Local-to-Remote, Remote-to-Local, and Remote-to-Remote transfers. Platform folder MIME icons, recursive folder copy, status bars with deselect, breadcrumb history, and context menus. |
 | **Snippets** | Multi-line script editing, tags, live search, template variables, parameter binding, deletion confirmation, JSON package import/export, and direct paste/run into terminals. |
 | **Workspaces** | Create, edit, duplicate, delete, and reopen named session layouts (single, vertical, horizontal, grid) with broadcast input across panes. |

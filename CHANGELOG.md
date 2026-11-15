@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.0.8-alpha
+
+### Release Packaging & Documentation Polish (Phase 8)
+- **Crate & Manifest Version Synchronization:**
+  - Synchronized all 8 workspace crates (`shellumi-core`, `shellumi-terminal`, `shellumi-storage`, `shellumi-cli`, `shellumi-app`, `shellumi-remote-desktop`, `shellumi-vnc`, `shellumi-rdp`) and `Cargo.lock` to `0.0.8-alpha`.
+  - Updated macOS packaging configuration: `packaging/macos/Info.plist` (`CFBundleShortVersionString` set to `0.0.8-alpha`, `CFBundleVersion` set to `6`) and `packaging/macos/build-dmg.sh` fallback version set to `0.0.8-alpha`.
+  - Updated Linux Debian packaging: `packaging/linux/build-deb.sh` fallback version set to `0.0.8-alpha` and `packaging/linux/debian/control` version bumped to `0.0.8~alpha` with updated package description reflecting the new native Remote Desktop engine.
+  - Validated GitHub Actions release workflow (`.github/workflows/release.yml`) cross-crate version parity check (`crates/*/Cargo.toml`).
+- **Comprehensive Remote Desktop User & Administrator Guide (`docs/REMOTE_DESKTOP_GUIDE.md`):**
+  - Authored a dedicated, in-depth guide covering the full Remote Desktop subsystem.
+  - Detailed connection workflows and parameter setup for both RDP and VNC.
+  - Documented Trust-On-First-Use (TOFU) TLS and VeNCrypt certificate fingerprint verification, SHA-256 fingerprint pinning, and Man-in-the-Middle alert handling.
+  - Documented display configuration, fixed presets, and dynamic resolution resizing (MS-RDPEDISP) with viewport synchronization and High-DPI / Retina scaling.
+  - Documented bidirectional clipboard synchronization and chunked streaming file copy & paste (CLIPRDR) between host and remote sessions, including directory traversal sanitization.
+  - Documented high-fidelity audio playback (RDPSND) and upstream microphone capture (MS-RDPEAI), including format negotiation (PCM 16-bit 44.1/48 kHz) and HUD volume/gain controls.
+  - Documented shared drive and directory redirection (RDPDR) mounting local folders as network shares (`\\tsclient\<drive_name>`) with sandbox boundaries.
+  - Documented network resilience, drop detection, exponential backoff retries, and canvas state retention.
+  - Documented the live diagnostics HUD overlay and telemetry interpretation.
+- **Repository Documentation Synchronization:**
+  - Updated `README.md` version badges, current milestone description, key feature highlights, and the "What Works in Alpha" capability table.
+  - Updated `PROJECT.md` current milestone header.
+  - Updated `docs/FEATURE_MATRIX.md` milestone header.
+  - Updated `docs/GUI_STATUS.md` milestone header and refreshed Remote Desktop entry to reflect the completed native pure-Rust implementation.
+  - Updated `docs/ROADMAP.md` milestone header and Phase 8 release packaging increment.
+
 ## 0.0.7-alpha
 
 ### Network Resilience & Automatic Reconnection Architecture (Phase 7)

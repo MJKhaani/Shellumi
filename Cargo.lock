@@ -7252,7 +7252,7 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shellumi-app"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
@@ -7274,7 +7274,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-cli"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "serde_json",
  "shellumi-core",
@@ -7285,7 +7285,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-core"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -7301,7 +7301,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-rdp"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "cpal",
@@ -7337,7 +7337,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-remote-desktop"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "serde",
@@ -7349,7 +7349,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-storage"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -7363,7 +7363,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-terminal"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "grid",
  "portable-pty",
@@ -7374,7 +7374,7 @@ dependencies = [
 
 [[package]]
 name = "shellumi-vnc"
-version = "0.0.7-alpha"
+version = "0.0.8-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "byteorder",

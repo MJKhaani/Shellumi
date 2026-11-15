@@ -1,6 +1,6 @@
 # SHELLUMI — MASTER DEVELOPMENT AGENT PROMPT
 
-> Current milestone: **v0.0.7-alpha**. This document defines the target scope.
+> Current milestone: **v0.0.8-alpha**. This document defines the target scope.
 > See [current feature status](docs/FEATURE_MATRIX.md),
 > [GUI implementation](docs/GUI_STATUS.md), and [roadmap](docs/ROADMAP.md)
 > for completed work, verification and remaining limitations.
