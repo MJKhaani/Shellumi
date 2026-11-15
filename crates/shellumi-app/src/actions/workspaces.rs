@@ -2,16 +2,20 @@
 use super::*;
 
 impl Shellumi {
-    fn load_workspaces(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_workspaces(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.database.clone() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 store.list_workspaces().await.map_err(|e| e.to_string())
             })
         });
@@ -116,6 +120,7 @@ impl Shellumi {
         let ws_name = format!("{} Workspace", tab.name);
         let layout_str = layout.as_str().to_string();
         let tags = vec!["workspace".to_string(), layout_str.clone()];
+        let active_vault_id = self.active_vault_id.clone();
 
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -123,6 +128,9 @@ impl Shellumi {
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
                 let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 store
                     .add_workspace(
                         &ws_name,

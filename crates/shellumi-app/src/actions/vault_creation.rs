@@ -191,6 +191,27 @@ impl Shellumi {
                         .register_vault_context(&vault_name, &context)
                         .await
                         .map_err(|e| e.to_string())?;
+
+                    // Provision vault key into OS credential store and generate recovery envelope
+                    let cred_store = shellumi_core::default_credential_store();
+                    let recovery_passphrase =
+                        format!("shellumi-vault-recovery-{}", local_vault_id.as_str());
+                    let (_, recovery_env) = shellumi_core::VaultKeyManager::provision_new_vault(
+                        cred_store.as_ref(),
+                        &local_vault_id,
+                        Some(&recovery_passphrase),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    if let Some(env) = recovery_env {
+                        if let Ok(env_json) = serde_json::to_string(&env) {
+                            store
+                                .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+
                     Ok::<_, String>((vault_name, local_vault_id.as_str().to_string()))
                 });
 
@@ -203,6 +224,8 @@ impl Shellumi {
                             app.create_vault_modal = None;
                             app.load_vault_list(cx);
                             app.load_hosts(cx);
+                            app.load_identities(cx);
+                            app.load_workspaces(cx);
                             cx.notify();
                         }
                         Err(e) => {
@@ -351,6 +374,24 @@ impl Shellumi {
                         .await
                         .map_err(|e| e.to_string())?;
 
+                    // Provision vault key into OS credential store and generate recovery envelope
+                    let cred_store = shellumi_core::default_credential_store();
+                    let (_, recovery_env) = shellumi_core::VaultKeyManager::provision_new_vault(
+                        cred_store.as_ref(),
+                        &local_vault_id,
+                        Some(&passphrase),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    if let Some(env) = recovery_env {
+                        if let Ok(env_json) = serde_json::to_string(&env) {
+                            store
+                                .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+
                     let sync_state = VaultSyncStateRecord {
                         vault_id: local_vault_id.as_str().to_string(),
                         server_sequence: 0,
@@ -376,6 +417,8 @@ impl Shellumi {
                             app.create_vault_modal = None;
                             app.load_vault_list(cx);
                             app.load_hosts(cx);
+                            app.load_identities(cx);
+                            app.load_workspaces(cx);
                             if app.is_active_vault_remote() {
                                 app.sync_active_vault(cx);
                             }

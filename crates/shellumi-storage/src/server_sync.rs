@@ -399,8 +399,8 @@ impl ServerSyncEngine {
                         store
                             .connection
                             .execute(
-                                "DELETE FROM groups WHERE name = ?1",
-                                (item.object_id.as_str(),),
+                                "DELETE FROM groups WHERE name = ?1 AND vault_id = ?2",
+                                (item.object_id.as_str(), vault_str),
                             )
                             .await?;
                     }
@@ -501,9 +501,9 @@ impl ServerSyncEngine {
                         if let Ok(payload) = decrypt_entity::<SyncGroupPayload>(passphrase, env) {
                             let tags_str = payload.tags.join(",");
                             store.connection.execute(
-                                "INSERT INTO groups (name, default_username, default_port, tags, identity_id)
-                                 VALUES (?1, ?2, ?3, ?4, ?5)
-                                 ON CONFLICT(name) DO UPDATE SET
+                                "INSERT INTO groups (name, default_username, default_port, tags, identity_id, vault_id)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                                 ON CONFLICT(name, vault_id) DO UPDATE SET
                                     default_username = excluded.default_username,
                                     default_port = excluded.default_port,
                                     tags = excluded.tags,
@@ -514,6 +514,7 @@ impl ServerSyncEngine {
                                     payload.default_port.map(|p| p as i64),
                                     tags_str.as_str(),
                                     payload.identity_id,
+                                    vault_str,
                                 ),
                             ).await?;
                         }

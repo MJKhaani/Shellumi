@@ -6,6 +6,7 @@ impl Shellumi {
         let Some(path) = self.database.clone() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
         self.hosts = HostState::Loading;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
@@ -16,9 +17,12 @@ impl Shellumi {
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path)
+                let mut store = HostStore::open(&path)
                     .await
                     .map_err(|error| error.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 let hosts = store.list().await.map_err(|error| error.to_string())?;
                 let snippets = store
                     .list_snippets()
@@ -59,12 +63,16 @@ impl Shellumi {
         let Some(path) = self.database.clone() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
                 let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 // Auto-discover existing OpenSSH keys from ~/.ssh and ensure they exist as saved identities
                 if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
                     let ssh_dir = home.join(".ssh");

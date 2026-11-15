@@ -16,7 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -47,6 +47,8 @@ pub enum StorageError {
     InvalidSync(shellumi_core::SyncError),
     SnapshotNotFound(String),
     MissingSchemaVersion,
+    CrossVault(shellumi_core::CrossVaultError),
+    ItemNotFound(String),
 }
 
 impl fmt::Display for StorageError {
@@ -80,7 +82,15 @@ impl fmt::Display for StorageError {
             Self::InvalidSync(error) => write!(f, "sync error: {error}"),
             Self::SnapshotNotFound(id) => write!(f, "sync snapshot not found: {id}"),
             Self::MissingSchemaVersion => f.write_str("database did not return a schema version"),
+            Self::CrossVault(error) => write!(f, "cross-vault transfer error: {error}"),
+            Self::ItemNotFound(msg) => write!(f, "item not found: {msg}"),
         }
+    }
+}
+
+impl From<shellumi_core::CrossVaultError> for StorageError {
+    fn from(error: shellumi_core::CrossVaultError) -> Self {
+        Self::CrossVault(error)
     }
 }
 
@@ -721,12 +731,19 @@ impl HostStore {
             .await?;
             tx.execute(
                 "CREATE TABLE groups (
-                    name TEXT PRIMARY KEY NOT NULL CHECK(length(name) > 0),
+                    name TEXT NOT NULL CHECK(length(name) > 0),
                     default_username TEXT,
                     default_port INTEGER CHECK(default_port IS NULL OR (default_port BETWEEN 1 AND 65535)),
                     tags TEXT NOT NULL DEFAULT '',
-                    identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL
+                    identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL,
+                    vault_id TEXT NOT NULL DEFAULT 'legacy-local',
+                    PRIMARY KEY (name, vault_id)
                 )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS groups_vault_id_idx ON groups(vault_id)",
                 (),
             )
             .await?;
@@ -1927,6 +1944,106 @@ impl HostStore {
 
             tx.execute("PRAGMA user_version = 19", ()).await?;
         }
+        if version < 20 {
+            // 1. vault_contexts additions
+            let mut columns = tx.query("PRAGMA table_info(vault_contexts)", ()).await?;
+            let mut has_recovery_envelope = false;
+            let mut has_is_locked = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_recovery_envelope |= name == "recovery_envelope";
+                has_is_locked |= name == "is_locked";
+            }
+            drop(columns);
+            if !has_recovery_envelope {
+                tx.execute(
+                    "ALTER TABLE vault_contexts ADD COLUMN recovery_envelope TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_is_locked {
+                tx.execute(
+                    "ALTER TABLE vault_contexts ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0",
+                    (),
+                )
+                .await?;
+            }
+
+            // 2. groups scoped by vault_id with composite primary key (name, vault_id)
+            let mut columns = tx.query("PRAGMA table_info(groups)", ()).await?;
+            let mut has_groups_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_groups_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_groups_vault_id {
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS groups_v20 (
+                        name TEXT NOT NULL CHECK(length(name) > 0),
+                        default_username TEXT,
+                        default_port INTEGER CHECK(default_port IS NULL OR (default_port BETWEEN 1 AND 65535)),
+                        tags TEXT NOT NULL DEFAULT '',
+                        identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL,
+                        vault_id TEXT NOT NULL DEFAULT 'legacy-local',
+                        PRIMARY KEY (name, vault_id)
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO groups_v20 (name, default_username, default_port, tags, identity_id, vault_id)
+                     SELECT name, default_username, default_port, tags, identity_id, 'legacy-local' FROM groups",
+                    (),
+                )
+                .await?;
+                tx.execute("DROP TABLE groups", ()).await?;
+                tx.execute("ALTER TABLE groups_v20 RENAME TO groups", ())
+                    .await?;
+                tx.execute(
+                    "CREATE INDEX IF NOT EXISTS groups_vault_id_idx ON groups(vault_id)",
+                    (),
+                )
+                .await?;
+            }
+
+            // 3. session_recordings scoped by vault_id
+            let mut columns = tx
+                .query("PRAGMA table_info(session_recordings)", ())
+                .await?;
+            let mut has_rec_vault_id = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_rec_vault_id |= name == "vault_id";
+            }
+            drop(columns);
+            if !has_rec_vault_id {
+                tx.execute(
+                    "ALTER TABLE session_recordings ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS session_recordings_vault_id_idx ON session_recordings(vault_id)",
+                (),
+            )
+            .await?;
+
+            // 4. vault_directories table
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS vault_directories (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    encrypted_data TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )",
+                (),
+            )
+            .await?;
+
+            tx.execute("PRAGMA user_version = 20", ()).await?;
+        }
         tx.commit().await?;
         Ok(Self {
             _database: database,
@@ -2045,6 +2162,432 @@ impl HostStore {
         } else {
             Ok(None)
         }
+    }
+
+    /// Saves a recovery envelope for a vault context.
+    pub async fn save_vault_recovery_envelope(
+        &mut self,
+        vault_id: &str,
+        recovery_envelope: &str,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_contexts SET recovery_envelope = ?1 WHERE id = ?2",
+                (recovery_envelope, vault_id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Retrieves a recovery envelope for a vault context.
+    pub async fn get_vault_recovery_envelope(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT recovery_envelope FROM vault_contexts WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let env: Option<String> = row.get(0)?;
+            Ok(env)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Sets the locked status of a vault context.
+    pub async fn set_vault_locked(
+        &mut self,
+        vault_id: &str,
+        locked: bool,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_contexts SET is_locked = ?1 WHERE id = ?2",
+                (if locked { 1i64 } else { 0i64 }, vault_id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Returns whether a vault context is currently marked locked.
+    pub async fn is_vault_locked(&self, vault_id: &str) -> Result<bool, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT is_locked FROM vault_contexts WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let locked: i64 = row.get(0)?;
+            Ok(locked != 0)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Saves an encrypted vault directory envelope.
+    pub async fn save_encrypted_vault_directory(
+        &mut self,
+        id: &str,
+        encrypted_data: &str,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO vault_directories (id, encrypted_data, updated_at)
+                 VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(id) DO UPDATE SET
+                     encrypted_data = excluded.encrypted_data,
+                     updated_at = excluded.updated_at",
+                (id, encrypted_data),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Retrieves an encrypted vault directory envelope.
+    pub async fn get_encrypted_vault_directory(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT encrypted_data FROM vault_directories WHERE id = ?1",
+                (id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let data: String = row.get(0)?;
+            Ok(Some(data))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Copies a host from its source vault to target vault according to the specified policy.
+    pub async fn copy_host_across_vaults(
+        &mut self,
+        host_id: i64,
+        policy: &shellumi_core::CrossVaultTransferPolicy,
+    ) -> Result<i64, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id
+                 FROM hosts WHERE id = ?1 AND vault_id = ?2",
+                (host_id, policy.source_vault.as_str()),
+            )
+            .await?;
+
+        let row = rows.next().await?.ok_or_else(|| {
+            StorageError::ItemNotFound(format!(
+                "host {} not found in vault {}",
+                host_id,
+                policy.source_vault.as_str()
+            ))
+        })?;
+
+        let name: String = row.get(0)?;
+        let hostname: String = row.get(1)?;
+        let username: String = row.get(2)?;
+        let port: i64 = row.get(3)?;
+        let group_name: Option<String> = row.get(4)?;
+        let tags: String = row.get(5)?;
+        let jump_host: Option<String> = row.get(6)?;
+        let _startup_snippet_id: Option<i64> = row.get(7)?;
+        let protocol: String = row.get(8)?;
+        let protocol_config: Option<String> = row.get(9)?;
+        let identity_id: Option<i64> = row.get(10)?;
+        drop(rows);
+
+        let has_attached_credentials = identity_id.is_some();
+        policy.validate(has_attached_credentials)?;
+
+        let target_identity_id = if policy.strip_credential_references || !has_attached_credentials
+        {
+            None
+        } else {
+            if let Some(src_id) = identity_id {
+                let mut id_rows = self
+                    .connection
+                    .query(
+                        "SELECT name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment
+                         FROM identities WHERE id = ?1 AND vault_id = ?2",
+                        (src_id, policy.source_vault.as_str()),
+                    )
+                    .await?;
+                if let Some(id_row) = id_rows.next().await? {
+                    let id_name: String = id_row.get(0)?;
+                    let id_username: String = id_row.get(1)?;
+                    let id_auth: String = id_row.get(2)?;
+                    let id_pw: Option<String> = id_row.get(3)?;
+                    let id_key: Option<String> = id_row.get(4)?;
+                    let id_pass: Option<String> = id_row.get(5)?;
+                    let id_cert: Option<String> = id_row.get(6)?;
+                    let id_tags: String = id_row.get(7)?;
+                    let id_comment: Option<String> = id_row.get(8)?;
+                    drop(id_rows);
+
+                    let mut existing_any = self
+                        .connection
+                        .query(
+                            "SELECT id, vault_id FROM identities WHERE name = ?1",
+                            (id_name.as_str(),),
+                        )
+                        .await?;
+                    if let Some(row) = existing_any.next().await? {
+                        let existing_id: i64 = row.get(0)?;
+                        let existing_vault: String = row.get(1)?;
+                        drop(existing_any);
+                        if existing_vault == policy.target_vault.as_str() {
+                            Some(existing_id)
+                        } else {
+                            // Derive a target-scoped unique name to avoid violating the database unique name constraint
+                            let target_name =
+                                format!("{} ({})", id_name, policy.target_vault.as_str());
+                            let mut target_existing = self
+                                .connection
+                                .query(
+                                    "SELECT id FROM identities WHERE name = ?1",
+                                    (target_name.as_str(),),
+                                )
+                                .await?;
+                            if let Some(target_row) = target_existing.next().await? {
+                                let tid: i64 = target_row.get(0)?;
+                                drop(target_existing);
+                                Some(tid)
+                            } else {
+                                drop(target_existing);
+                                self.connection
+                                    .execute(
+                                        "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id)
+                                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                        (
+                                            target_name,
+                                            id_username,
+                                            id_auth,
+                                            id_pw,
+                                            id_key,
+                                            id_pass,
+                                            id_cert,
+                                            id_tags,
+                                            id_comment,
+                                            policy.target_vault.as_str(),
+                                        ),
+                                    )
+                                    .await?;
+                                Some(self.connection.last_insert_rowid())
+                            }
+                        }
+                    } else {
+                        drop(existing_any);
+                        self.connection
+                            .execute(
+                                "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                (
+                                    id_name,
+                                    id_username,
+                                    id_auth,
+                                    id_pw,
+                                    id_key,
+                                    id_pass,
+                                    id_cert,
+                                    id_tags,
+                                    id_comment,
+                                    policy.target_vault.as_str(),
+                                ),
+                            )
+                            .await?;
+                        Some(self.connection.last_insert_rowid())
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        // Don't carry cross-vault snippet foreign keys
+        let target_snippet_id: Option<i64> = None;
+
+        self.connection
+            .execute(
+                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id, vault_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                (
+                    name,
+                    hostname,
+                    username,
+                    port,
+                    group_name,
+                    tags,
+                    jump_host,
+                    target_snippet_id,
+                    protocol,
+                    protocol_config,
+                    target_identity_id,
+                    policy.target_vault.as_str(),
+                ),
+            )
+            .await?;
+
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Moves a host from its source vault to target vault according to the specified policy.
+    pub async fn move_host_across_vaults(
+        &mut self,
+        host_id: i64,
+        policy: &shellumi_core::CrossVaultTransferPolicy,
+    ) -> Result<i64, StorageError> {
+        let new_id = self.copy_host_across_vaults(host_id, policy).await?;
+        self.connection
+            .execute(
+                "DELETE FROM hosts WHERE id = ?1 AND vault_id = ?2",
+                (host_id, policy.source_vault.as_str()),
+            )
+            .await?;
+        Ok(new_id)
+    }
+
+    /// Copies a snippet from its source vault to target vault according to the specified policy.
+    pub async fn copy_snippet_across_vaults(
+        &mut self,
+        snippet_id: i64,
+        policy: &shellumi_core::CrossVaultTransferPolicy,
+    ) -> Result<i64, StorageError> {
+        policy.validate(false)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT name, command, description, tags, variables FROM snippets WHERE id = ?1 AND vault_id = ?2",
+                (snippet_id, policy.source_vault.as_str()),
+            )
+            .await?;
+
+        let row = rows.next().await?.ok_or_else(|| {
+            StorageError::ItemNotFound(format!(
+                "snippet {} not found in vault {}",
+                snippet_id,
+                policy.source_vault.as_str()
+            ))
+        })?;
+
+        let name: String = row.get(0)?;
+        let command: String = row.get(1)?;
+        let description: Option<String> = row.get(2)?;
+        let tags: String = row.get(3)?;
+        let variables: String = row.get(4)?;
+        drop(rows);
+
+        self.connection
+            .execute(
+                "INSERT INTO snippets (name, command, description, tags, variables, vault_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    name,
+                    command,
+                    description,
+                    tags,
+                    variables,
+                    policy.target_vault.as_str(),
+                ),
+            )
+            .await?;
+
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Moves a snippet from its source vault to target vault according to the specified policy.
+    pub async fn move_snippet_across_vaults(
+        &mut self,
+        snippet_id: i64,
+        policy: &shellumi_core::CrossVaultTransferPolicy,
+    ) -> Result<i64, StorageError> {
+        let new_id = self.copy_snippet_across_vaults(snippet_id, policy).await?;
+        self.connection
+            .execute(
+                "DELETE FROM snippets WHERE id = ?1 AND vault_id = ?2",
+                (snippet_id, policy.source_vault.as_str()),
+            )
+            .await?;
+        Ok(new_id)
+    }
+
+    /// Copies a workspace from its source vault to target vault according to the specified policy.
+    pub async fn copy_workspace_across_vaults(
+        &mut self,
+        workspace_id: i64,
+        policy: &shellumi_core::CrossVaultTransferPolicy,
+    ) -> Result<i64, StorageError> {
+        policy.validate(false)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT name, description, layout, sessions_json, tags FROM workspaces WHERE id = ?1 AND vault_id = ?2",
+                (workspace_id, policy.source_vault.as_str()),
+            )
+            .await?;
+
+        let row = rows.next().await?.ok_or_else(|| {
+            StorageError::ItemNotFound(format!(
+                "workspace {} not found in vault {}",
+                workspace_id,
+                policy.source_vault.as_str()
+            ))
+        })?;
+
+        let name: String = row.get(0)?;
+        let description: Option<String> = row.get(1)?;
+        let layout: String = row.get(2)?;
+        let sessions_json: String = row.get(3)?;
+        let tags: String = row.get(4)?;
+        drop(rows);
+
+        self.connection
+            .execute(
+                "INSERT INTO workspaces (name, description, layout, sessions_json, tags, vault_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    name,
+                    description,
+                    layout,
+                    sessions_json,
+                    tags,
+                    policy.target_vault.as_str(),
+                ),
+            )
+            .await?;
+
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Moves a workspace from its source vault to target vault according to the specified policy.
+    pub async fn move_workspace_across_vaults(
+        &mut self,
+        workspace_id: i64,
+        policy: &shellumi_core::CrossVaultTransferPolicy,
+    ) -> Result<i64, StorageError> {
+        let new_id = self
+            .copy_workspace_across_vaults(workspace_id, policy)
+            .await?;
+        self.connection
+            .execute(
+                "DELETE FROM workspaces WHERE id = ?1 AND vault_id = ?2",
+                (workspace_id, policy.source_vault.as_str()),
+            )
+            .await?;
+        Ok(new_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2391,13 +2934,14 @@ impl HostStore {
         let default_port = group.default_port.map(|p| i64::from(p.get()));
         self.connection
             .execute(
-                "INSERT INTO groups (name, default_username, default_port, tags, identity_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO groups (name, default_username, default_port, tags, identity_id, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (
                     group.name.as_str(),
                     group.default_username.as_deref(),
                     default_port,
                     tags_serialized,
                     group.identity_id,
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -2410,13 +2954,14 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE groups SET default_username = ?1, default_port = ?2, tags = ?3, identity_id = ?4 WHERE name = ?5",
+                "UPDATE groups SET default_username = ?1, default_port = ?2, tags = ?3, identity_id = ?4 WHERE name = ?5 AND vault_id = ?6",
                 (
                     group.default_username.as_deref(),
                     default_port,
                     tags_serialized,
                     group.identity_id,
                     group.name.as_str(),
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -2427,8 +2972,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT name, default_username, default_port, tags, identity_id FROM groups WHERE name = ?1",
-                (name.trim(),),
+                "SELECT name, default_username, default_port, tags, identity_id FROM groups WHERE name = ?1 AND vault_id = ?2",
+                (name.trim(), self.host_vault_id.as_str()),
             )
             .await?;
         if let Some(row) = rows.next().await? {
@@ -2458,8 +3003,8 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT name, default_username, default_port, tags, identity_id FROM groups ORDER BY name",
-                (),
+                "SELECT name, default_username, default_port, tags, identity_id FROM groups WHERE vault_id = ?1 ORDER BY name",
+                (self.host_vault_id.as_str(),),
             )
             .await?;
         let mut groups = Vec::new();
@@ -2488,7 +3033,10 @@ impl HostStore {
     pub async fn delete_group(&mut self, name: &str) -> Result<bool, StorageError> {
         let rows = self
             .connection
-            .execute("DELETE FROM groups WHERE name = ?1", (name.trim(),))
+            .execute(
+                "DELETE FROM groups WHERE name = ?1 AND vault_id = ?2",
+                (name.trim(), self.host_vault_id.as_str()),
+            )
             .await?;
         Ok(rows != 0)
     }
@@ -4825,8 +5373,8 @@ impl HostStore {
         self.connection
             .execute(
                 "INSERT INTO session_recordings (
-                    id, session_id, host_id, title, duration_secs, event_count, byte_size, cast_data, recorded_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, session_id, host_id, title, duration_secs, event_count, byte_size, cast_data, recorded_at, created_at, vault_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     session_id = excluded.session_id,
                     host_id = excluded.host_id,
@@ -4836,7 +5384,8 @@ impl HostStore {
                     byte_size = excluded.byte_size,
                     cast_data = excluded.cast_data,
                     recorded_at = excluded.recorded_at,
-                    created_at = excluded.created_at",
+                    created_at = excluded.created_at,
+                    vault_id = excluded.vault_id",
                 (
                     record.id.as_str(),
                     record.session_id.as_str(),
@@ -4848,6 +5397,7 @@ impl HostStore {
                     record.cast_data.as_str(),
                     record.recorded_at.as_str(),
                     record.created_at.as_str(),
+                    self.host_vault_id.as_str(),
                 ),
             )
             .await?;
@@ -4864,8 +5414,8 @@ impl HostStore {
             .connection
             .query(
                 "SELECT id, session_id, host_id, title, duration_secs, event_count, byte_size, cast_data, recorded_at, created_at
-                 FROM session_recordings WHERE id = ?",
-                (id,),
+                 FROM session_recordings WHERE id = ? AND vault_id = ?",
+                (id, self.host_vault_id.as_str()),
             )
             .await?;
 
@@ -4907,16 +5457,16 @@ impl HostStore {
             self.connection
                 .query(
                     "SELECT id, session_id, host_id, title, duration_secs, event_count, byte_size, recorded_at
-                     FROM session_recordings WHERE host_id = ? ORDER BY recorded_at DESC, id DESC",
-                    (hid,),
+                     FROM session_recordings WHERE host_id = ? AND vault_id = ? ORDER BY recorded_at DESC, id DESC",
+                    (hid, self.host_vault_id.as_str()),
                 )
                 .await?
         } else {
             self.connection
                 .query(
                     "SELECT id, session_id, host_id, title, duration_secs, event_count, byte_size, recorded_at
-                     FROM session_recordings ORDER BY recorded_at DESC, id DESC",
-                    (),
+                     FROM session_recordings WHERE vault_id = ? ORDER BY recorded_at DESC, id DESC",
+                    (self.host_vault_id.as_str(),),
                 )
                 .await?
         };
@@ -4951,7 +5501,10 @@ impl HostStore {
     pub async fn delete_session_recording(&mut self, id: &str) -> Result<bool, StorageError> {
         let changes = self
             .connection
-            .execute("DELETE FROM session_recordings WHERE id = ?", (id,))
+            .execute(
+                "DELETE FROM session_recordings WHERE id = ? AND vault_id = ?",
+                (id, self.host_vault_id.as_str()),
+            )
             .await?;
         Ok(changes > 0)
     }
@@ -4960,7 +5513,10 @@ impl HostStore {
     pub async fn delete_all_session_recordings(&mut self) -> Result<usize, StorageError> {
         let changes = self
             .connection
-            .execute("DELETE FROM session_recordings", ())
+            .execute(
+                "DELETE FROM session_recordings WHERE vault_id = ?",
+                (self.host_vault_id.as_str(),),
+            )
             .await?;
         Ok(changes as usize)
     }
@@ -7466,5 +8022,376 @@ mod tests {
 
         let (pp_svc, pp_acc) = shellumi_core::parse_keychain_ref(pp_ref).unwrap();
         assert_eq!(key_store.get_secret(&pp_svc, &pp_acc).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_schema_20_vault_contexts_recovery_and_lock() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // Check user_version is 20
+        let mut rows = store
+            .connection
+            .query("PRAGMA user_version", ())
+            .await
+            .unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(version, 20);
+
+        // Verify recovery envelope storage
+        assert_eq!(
+            store
+                .get_vault_recovery_envelope(LEGACY_LOCAL_VAULT_ID)
+                .await
+                .unwrap(),
+            None
+        );
+        let sample_envelope = "RECOVERY:AESGCM:SALT123:DATA456:TAG789";
+        assert!(store
+            .save_vault_recovery_envelope(LEGACY_LOCAL_VAULT_ID, sample_envelope)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_vault_recovery_envelope(LEGACY_LOCAL_VAULT_ID)
+                .await
+                .unwrap(),
+            Some(sample_envelope.to_string())
+        );
+
+        // Verify vault lock status toggle
+        assert!(!store.is_vault_locked(LEGACY_LOCAL_VAULT_ID).await.unwrap());
+        assert!(store
+            .set_vault_locked(LEGACY_LOCAL_VAULT_ID, true)
+            .await
+            .unwrap());
+        assert!(store.is_vault_locked(LEGACY_LOCAL_VAULT_ID).await.unwrap());
+        assert!(store
+            .set_vault_locked(LEGACY_LOCAL_VAULT_ID, false)
+            .await
+            .unwrap());
+        assert!(!store.is_vault_locked(LEGACY_LOCAL_VAULT_ID).await.unwrap());
+
+        // Verify encrypted vault directory envelope storage
+        assert_eq!(
+            store
+                .get_encrypted_vault_directory("primary-dir")
+                .await
+                .unwrap(),
+            None
+        );
+        let sample_dir_data = "ENCRYPTED_VAULT_DIRECTORY_PAYLOAD_HERE";
+        store
+            .save_encrypted_vault_directory("primary-dir", sample_dir_data)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_encrypted_vault_directory("primary-dir")
+                .await
+                .unwrap(),
+            Some(sample_dir_data.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schema_20_groups_scoped_by_vault() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // 1. Add group in legacy-local
+        let group_local = HostGroup::new(
+            "Infrastructure",
+            Some("local-user"),
+            Some(22),
+            &["local".into()],
+        )
+        .unwrap();
+        store.add_group(&group_local).await.unwrap();
+        assert_eq!(store.list_groups().await.unwrap().len(), 1);
+
+        // 2. Switch to another vault
+        let v2 = shellumi_core::VaultId::new("vault-staging").unwrap();
+        store.set_vault_id(v2);
+
+        // In vault-staging, groups list should initially be empty
+        assert_eq!(store.list_groups().await.unwrap().len(), 0);
+        assert!(store.get_group("Infrastructure").await.unwrap().is_none());
+
+        // 3. Create group with identical name in vault-staging but different defaults
+        let group_staging = HostGroup::new(
+            "Infrastructure",
+            Some("staging-user"),
+            Some(2222),
+            &["staging".into()],
+        )
+        .unwrap();
+        store.add_group(&group_staging).await.unwrap();
+        assert_eq!(store.list_groups().await.unwrap().len(), 1);
+
+        let retrieved_staging = store.get_group("Infrastructure").await.unwrap().unwrap();
+        assert_eq!(
+            retrieved_staging.default_username.as_deref(),
+            Some("staging-user")
+        );
+        assert_eq!(retrieved_staging.default_port.map(|p| p.get()), Some(2222));
+
+        // 4. Switch back to legacy-local and verify original group is unchanged
+        let v_local = shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        store.set_vault_id(v_local);
+
+        let retrieved_local = store.get_group("Infrastructure").await.unwrap().unwrap();
+        assert_eq!(
+            retrieved_local.default_username.as_deref(),
+            Some("local-user")
+        );
+        assert_eq!(retrieved_local.default_port.map(|p| p.get()), Some(22));
+
+        // 5. Deleting group in staging does not affect legacy-local
+        store.set_vault_id(shellumi_core::VaultId::new("vault-staging").unwrap());
+        assert!(store.delete_group("Infrastructure").await.unwrap());
+        assert_eq!(store.list_groups().await.unwrap().len(), 0);
+
+        store.set_vault_id(shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap());
+        assert_eq!(store.list_groups().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_schema_20_session_recordings_scoped_by_vault() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        let rec_local = SessionRecordingRecord {
+            id: "rec-local-1".to_string(),
+            session_id: "sess-1".to_string(),
+            host_id: None,
+            title: "Local Shell Session".to_string(),
+            duration_secs: 12.0,
+            event_count: 5,
+            byte_size: 120,
+            cast_data: "cast-data-1".to_string(),
+            recorded_at: "2026-11-15T10:00:00Z".to_string(),
+            created_at: "2026-11-15T10:00:00Z".to_string(),
+        };
+        store.save_session_recording(&rec_local).await.unwrap();
+        assert_eq!(store.list_session_recordings(None).await.unwrap().len(), 1);
+        assert!(store
+            .get_session_recording("rec-local-1")
+            .await
+            .unwrap()
+            .is_some());
+
+        // Switch to vault-prod
+        store.set_vault_id(shellumi_core::VaultId::new("vault-prod").unwrap());
+        assert_eq!(store.list_session_recordings(None).await.unwrap().len(), 0);
+        assert!(store
+            .get_session_recording("rec-local-1")
+            .await
+            .unwrap()
+            .is_none());
+
+        let rec_prod = SessionRecordingRecord {
+            id: "rec-prod-1".to_string(),
+            session_id: "sess-2".to_string(),
+            host_id: None,
+            title: "Prod Root Session".to_string(),
+            duration_secs: 42.0,
+            event_count: 20,
+            byte_size: 800,
+            cast_data: "cast-data-prod".to_string(),
+            recorded_at: "2026-11-15T11:00:00Z".to_string(),
+            created_at: "2026-11-15T11:00:00Z".to_string(),
+        };
+        store.save_session_recording(&rec_prod).await.unwrap();
+        assert_eq!(store.list_session_recordings(None).await.unwrap().len(), 1);
+
+        // Delete all in vault-prod leaves legacy-local untouched
+        assert_eq!(store.delete_all_session_recordings().await.unwrap(), 1);
+        assert_eq!(store.list_session_recordings(None).await.unwrap().len(), 0);
+
+        store.set_vault_id(shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap());
+        assert_eq!(store.list_session_recordings(None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cross_vault_transfers_policy_and_isolation() {
+        use shellumi_core::{CrossVaultAction, CrossVaultError, CrossVaultTransferPolicy, VaultId};
+
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        let v_src = VaultId::new("vault-alpha").unwrap();
+        let v_dst = VaultId::new("vault-beta").unwrap();
+
+        // 1. Create identity and host in vault-alpha
+        store.set_vault_id(v_src.clone());
+        let new_id = shellumi_core::NewIdentity::new(
+            "Alpha Key",
+            "root",
+            shellumi_core::AuthMethod::PublicKey {
+                key_name: "alpha_ed25519".into(),
+            },
+        )
+        .unwrap();
+        let id_row = store.create_identity(&new_id).await.unwrap();
+
+        let dest = SshDestination::new("192.168.1.100", "root", 22).unwrap();
+        let host_id = store
+            .add_full(
+                "Bastion Alpha",
+                &dest,
+                None,
+                &["production".into()],
+                None,
+                None,
+                "ssh",
+                None,
+                Some(id_row),
+            )
+            .await
+            .unwrap();
+
+        // 2. Reject transfer to same vault
+        let policy_same =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_src.clone(), CrossVaultAction::Copy)
+                .with_user_authorization(true);
+        assert_eq!(
+            store
+                .copy_host_across_vaults(host_id, &policy_same)
+                .await
+                .unwrap_err()
+                .to_string(),
+            StorageError::CrossVault(CrossVaultError::SameSourceAndTargetVault).to_string()
+        );
+
+        // 3. Reject transfer without user authorization
+        let policy_unauth =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Copy);
+        assert_eq!(
+            store
+                .copy_host_across_vaults(host_id, &policy_unauth)
+                .await
+                .unwrap_err()
+                .to_string(),
+            StorageError::CrossVault(CrossVaultError::MissingAuthorization).to_string()
+        );
+
+        // 4. Reject transfer retaining credentials without confirmation
+        let policy_unconfirmed =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Copy)
+                .with_user_authorization(true)
+                .with_credential_policy(false, false);
+        assert!(matches!(
+            store
+                .copy_host_across_vaults(host_id, &policy_unconfirmed)
+                .await
+                .unwrap_err(),
+            StorageError::CrossVault(CrossVaultError::UnconfirmedCredentialExposure(_))
+        ));
+
+        // 5. Successful copy with credentials stripped (safe default)
+        let policy_safe =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Copy)
+                .with_user_authorization(true)
+                .with_credential_policy(true, false);
+        let new_host_id = store
+            .copy_host_across_vaults(host_id, &policy_safe)
+            .await
+            .unwrap();
+        assert_ne!(host_id, new_host_id);
+
+        // Verify host in destination has identity stripped
+        store.set_vault_id(v_dst.clone());
+        let dst_host = store.get_host(new_host_id).await.unwrap().unwrap();
+        assert_eq!(dst_host.name, "Bastion Alpha");
+        assert_eq!(dst_host.identity_id, None);
+
+        // Source host still exists in source vault
+        store.set_vault_id(v_src.clone());
+        assert!(store.get_host(host_id).await.unwrap().is_some());
+
+        // 6. Successful move with confirmed credentials
+        let policy_move =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Move)
+                .with_user_authorization(true)
+                .with_credential_policy(false, true);
+        let moved_host_id = store
+            .move_host_across_vaults(host_id, &policy_move)
+            .await
+            .unwrap();
+
+        // Host deleted from source vault
+        store.set_vault_id(v_src.clone());
+        assert!(store.get_host(host_id).await.unwrap().is_none());
+
+        // Destination host exists and has cloned identity
+        store.set_vault_id(v_dst.clone());
+        let moved_dst_host = store.get_host(moved_host_id).await.unwrap().unwrap();
+        assert_eq!(moved_dst_host.name, "Bastion Alpha");
+        assert!(moved_dst_host.identity_id.is_some());
+        let cloned_id = store
+            .get_identity(moved_dst_host.identity_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cloned_id.name, "Alpha Key (vault-beta)");
+
+        // 7. Snippets cross-vault copy and move
+        store.set_vault_id(v_src.clone());
+        let snip = Snippet::new("Docker Cleanup", "docker system prune -af", None, &[]).unwrap();
+        let snip_id = store.add_snippet(&snip).await.unwrap();
+
+        let snip_policy =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Copy)
+                .with_user_authorization(true);
+        let new_snip_id = store
+            .copy_snippet_across_vaults(snip_id, &snip_policy)
+            .await
+            .unwrap();
+
+        store.set_vault_id(v_dst.clone());
+        let dst_snip = store.get_snippet(new_snip_id).await.unwrap().unwrap();
+        assert_eq!(dst_snip.name, "Docker Cleanup");
+
+        let snip_move_policy =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Move)
+                .with_user_authorization(true);
+        let moved_snip_id = store
+            .move_snippet_across_vaults(snip_id, &snip_move_policy)
+            .await
+            .unwrap();
+
+        store.set_vault_id(v_src.clone());
+        assert!(store.get_snippet(snip_id).await.unwrap().is_none());
+        store.set_vault_id(v_dst.clone());
+        assert!(store.get_snippet(moved_snip_id).await.unwrap().is_some());
+
+        // 8. Workspace cross-vault copy and move
+        store.set_vault_id(v_src.clone());
+        let ws_id = store
+            .add_workspace("Ops Grid", None, "split-vertical", &[], &["ops".into()])
+            .await
+            .unwrap();
+
+        let ws_policy =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Copy)
+                .with_user_authorization(true);
+        let new_ws_id = store
+            .copy_workspace_across_vaults(ws_id, &ws_policy)
+            .await
+            .unwrap();
+
+        store.set_vault_id(v_dst.clone());
+        let dst_ws = store.get_workspace(new_ws_id).await.unwrap().unwrap();
+        assert_eq!(dst_ws.name, "Ops Grid");
+
+        let ws_move_policy =
+            CrossVaultTransferPolicy::new(v_src.clone(), v_dst.clone(), CrossVaultAction::Move)
+                .with_user_authorization(true);
+        let moved_ws_id = store
+            .move_workspace_across_vaults(ws_id, &ws_move_policy)
+            .await
+            .unwrap();
+
+        store.set_vault_id(v_src.clone());
+        assert!(store.get_workspace(ws_id).await.unwrap().is_none());
+        store.set_vault_id(v_dst.clone());
+        assert!(store.get_workspace(moved_ws_id).await.unwrap().is_some());
     }
 }

@@ -118,6 +118,8 @@ impl Shellumi {
         self.navigate_page("Hosts", window, cx);
 
         self.load_hosts(cx);
+        self.load_identities(cx);
+        self.load_workspaces(cx);
         self.desktop_command(Command::Refresh, cx);
 
         if self.is_active_vault_remote() {

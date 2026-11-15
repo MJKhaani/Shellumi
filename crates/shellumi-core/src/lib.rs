@@ -25,7 +25,10 @@ pub mod startup;
 pub mod sync;
 pub mod tunnel;
 pub mod vault;
+pub mod vault_cipher;
+pub mod vault_directory;
 pub mod vault_key;
+pub mod vault_policy;
 pub mod workspace;
 
 pub use server::{
@@ -34,7 +37,10 @@ pub use server::{
     ServerLimits, ShellumiServerClient, SyncChangeItem, VaultListResponse, VaultResponse,
 };
 pub use vault::{ServerConnectionId, VaultContext, VaultId, VaultIdentityError, VaultLocation};
-pub use vault_key::VaultKey;
+pub use vault_cipher::VaultCipher;
+pub use vault_directory::{VaultDirectory, VaultDirectoryEntry, VaultDirectoryLocation};
+pub use vault_key::{VaultKey, VaultKeyManager, VAULT_KEYCHAIN_SERVICE};
+pub use vault_policy::{CrossVaultAction, CrossVaultError, CrossVaultTransferPolicy};
 
 pub use autocomplete::{
     generate_bash_hook, generate_fish_hook, generate_zsh_hook, AutocompleteContext,
