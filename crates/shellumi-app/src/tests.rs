@@ -780,6 +780,14 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
         tls_strict: true,
         show_diagnostics: false,
         password_input: None,
+        enable_audio: false,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: false,
+        audio_format: None,
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 0,
     };
 
     // Truthful baseline: initial state must never be fake Connected, metrics must be None
@@ -873,6 +881,14 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         tls_strict: true,
         show_diagnostics: false,
         password_input: None,
+        enable_audio: false,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: false,
+        audio_format: None,
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 0,
     };
 
     assert_eq!(
@@ -947,6 +963,14 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
         tls_strict: true,
         show_diagnostics: false,
         password_input: None,
+        enable_audio: false,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: false,
+        audio_format: None,
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 0,
     };
 
     // Apply snapshot to state (simulating remote_desktop_apply_framebuffer_snapshot)
@@ -1022,6 +1046,45 @@ fn verifies_remote_desktop_clipboard_sync_and_file_transfer_commands() {
 }
 
 #[test]
+fn verifies_remote_desktop_audio_redirection_commands_and_telemetry() {
+    let (ui_handle, worker_handle) = shellumi_remote_desktop::create_session_channels(32, 64);
+
+    // Verify SetAudioMute command plumbing
+    ui_handle
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SetAudioMute(true))
+        .unwrap();
+    let cmd = worker_handle.try_recv_command().unwrap();
+    assert_eq!(
+        cmd,
+        Some(shellumi_remote_desktop::SessionCommand::SetAudioMute(true))
+    );
+
+    // Verify SetAudioVolume command plumbing
+    ui_handle
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SetAudioVolume(75))
+        .unwrap();
+    let cmd = worker_handle.try_recv_command().unwrap();
+    assert_eq!(
+        cmd,
+        Some(shellumi_remote_desktop::SessionCommand::SetAudioVolume(75))
+    );
+
+    // Verify AudioStatus event plumbing and fields
+    let audio_event = shellumi_remote_desktop::SessionEvent::AudioStatus {
+        active: true,
+        muted: false,
+        volume: 75,
+        format: "PCM".to_string(),
+        sample_rate: 44100,
+        channels: 2,
+        bytes_received: 8192,
+    };
+    worker_handle.try_send_event(audio_event.clone()).unwrap();
+    let ev = ui_handle.try_recv_event().unwrap();
+    assert_eq!(ev, Some(audio_event));
+}
+
+#[test]
 fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
     use super::{
         RemoteDesktopProtocol, RemoteDesktopScaleMode, RemoteDesktopState, RemoteDesktopStatus,
@@ -1071,6 +1134,14 @@ fn verifies_phase5_graphical_quick_connect_and_ephemeral_credentials() {
         tls_strict: true,
         show_diagnostics: false,
         password_input: None,
+        enable_audio: true,
+        audio_muted: false,
+        audio_volume: 100,
+        audio_active: false,
+        audio_format: None,
+        audio_sample_rate: 44100,
+        audio_channels: 2,
+        audio_bytes_received: 0,
     };
 
     assert_eq!(rd.status, RemoteDesktopStatus::NotConnected);

@@ -2,6 +2,18 @@
 
 ## 0.0.7-alpha
 
+### Remote Desktop Sound Redirection over RDPSND (MS-RDPEA)
+- **Authentic RDPSND Virtual Channel:** Integrated Microsoft Remote Desktop Audio Output Virtual Channel Extension (`MS-RDPEA`) in pure Rust using `ironrdp-rdpsnd` and `ironrdp-rdpsnd-native`.
+- **Live Native Audio Playback:** Implemented `ShellumiRdpsndHandler` wrapping `cpal::RdpsndBackend` to route decoded 16-bit 44.1 kHz / 48 kHz stereo PCM audio directly to the host default output sound device (CoreAudio on macOS, ALSA on Linux, WASAPI on Windows).
+- **Volume Scaling & Muting:**
+  - Added real-time 16-bit PCM volume scaling (`scale_pcm_16bit`) across little-endian sample pairs without integer overflow or clipping.
+  - Interactive muting directly drops audio output without interrupting the virtual channel or desynchronizing `WaveConfirmPdu` replies to the remote Windows server.
+  - Bidirectional volume synchronization: reflects remote server volume adjustments (`VolumePdu`) in UI and transmits local volume commands to the driver.
+- **UI & Telemetry Controls:**
+  - Added `🔊 Audio / 🔇 Muted` toggle button and dedicated volume decrement/increment buttons (`🔉 -` `80%` `+ 🔊`) directly in the remote desktop toolbar.
+  - Added live audio telemetry rows (`Audio Redirection`, `Audio Output`, and `Audio Data Recv`) to the HUD live protocol diagnostics inspector.
+- **Automated Verification:** Added test suite (`crates/shellumi-rdp/tests/sound_tests.rs`) covering format advertisement, wave packet recording, PCM sample scaling, and muting/volume lifecycle.
+
 ### Bidirectional RDP Text Clipboard & Streaming File Transfer (CLIPRDR)
 - **Authentic MS-RDPECLIP Virtual Channel:** Built `ShellumiCliprdrBackend` in `crates/shellumi-rdp/src/clipboard.rs` implementing `ironrdp_cliprdr::backend::CliprdrBackend`.
   - Negotiates `USE_LONG_FORMAT_NAMES`, `STREAM_FILECLIP_ENABLED`, `FILECLIP_NO_FILE_PATHS`, `CAN_LOCK_CLIPDATA`, and `HUGE_FILE_SUPPORT_ENABLED`.

@@ -30,48 +30,59 @@ impl Shellumi {
             current_match_idx: None,
         };
 
-        let (target, width, height, color_depth, view_only, username, domain, tls_strict) =
-            match protocol {
-                RemoteDesktopProtocol::Vnc => {
-                    let vnc_cfg = host.vnc_config().unwrap_or_else(|| {
-                        VncConfig::new(host.destination.host(), host.destination.port().get())
-                            .unwrap_or_default()
-                    });
-                    (
-                        format!("{}:{}", vnc_cfg.host, vnc_cfg.port),
-                        vnc_cfg.width as u32,
-                        vnc_cfg.height as u32,
-                        vnc_cfg.color_depth,
-                        vnc_cfg.view_only,
-                        None,
-                        None,
-                        true,
-                    )
-                }
-                RemoteDesktopProtocol::Rdp => {
-                    let rdp_cfg = host.rdp_config().unwrap_or_else(|| {
-                        RdpConfig::new(host.destination.host(), host.destination.port().get())
-                            .unwrap_or_default()
-                    });
-                    let user = rdp_cfg.username.clone().or_else(|| {
-                        if host.destination.username().is_empty() {
-                            None
-                        } else {
-                            Some(host.destination.username().to_string())
-                        }
-                    });
-                    (
-                        format!("{}:{}", rdp_cfg.host, rdp_cfg.port),
-                        rdp_cfg.screen_width as u32,
-                        rdp_cfg.screen_height as u32,
-                        rdp_cfg.color_depth,
-                        rdp_cfg.view_only,
-                        user,
-                        rdp_cfg.domain.clone(),
-                        rdp_cfg.tls_strict,
-                    )
-                }
-            };
+        let (
+            target,
+            width,
+            height,
+            color_depth,
+            view_only,
+            username,
+            domain,
+            tls_strict,
+            enable_audio,
+        ) = match protocol {
+            RemoteDesktopProtocol::Vnc => {
+                let vnc_cfg = host.vnc_config().unwrap_or_else(|| {
+                    VncConfig::new(host.destination.host(), host.destination.port().get())
+                        .unwrap_or_default()
+                });
+                (
+                    format!("{}:{}", vnc_cfg.host, vnc_cfg.port),
+                    vnc_cfg.width as u32,
+                    vnc_cfg.height as u32,
+                    vnc_cfg.color_depth,
+                    vnc_cfg.view_only,
+                    None,
+                    None,
+                    true,
+                    false,
+                )
+            }
+            RemoteDesktopProtocol::Rdp => {
+                let rdp_cfg = host.rdp_config().unwrap_or_else(|| {
+                    RdpConfig::new(host.destination.host(), host.destination.port().get())
+                        .unwrap_or_default()
+                });
+                let user = rdp_cfg.username.clone().or_else(|| {
+                    if host.destination.username().is_empty() {
+                        None
+                    } else {
+                        Some(host.destination.username().to_string())
+                    }
+                });
+                (
+                    format!("{}:{}", rdp_cfg.host, rdp_cfg.port),
+                    rdp_cfg.screen_width as u32,
+                    rdp_cfg.screen_height as u32,
+                    rdp_cfg.color_depth,
+                    rdp_cfg.view_only,
+                    user,
+                    rdp_cfg.domain.clone(),
+                    rdp_cfg.tls_strict,
+                    rdp_cfg.enable_audio,
+                )
+            }
+        };
 
         let password_input = cx.new(|cx| TextInput::new(cx, "", "Password…").masked());
         let rd_state = RemoteDesktopState {
@@ -107,6 +118,14 @@ impl Shellumi {
             tls_strict,
             show_diagnostics: false,
             password_input: Some(password_input),
+            enable_audio,
+            audio_muted: false,
+            audio_volume: 100,
+            audio_active: false,
+            audio_format: None,
+            audio_sample_rate: 44100,
+            audio_channels: 2,
+            audio_bytes_received: 0,
         };
 
         self.tabs.push(SessionTab {
@@ -191,6 +210,17 @@ impl Shellumi {
             tls_strict: true,
             show_diagnostics: false,
             password_input: Some(password_input),
+            enable_audio: match protocol {
+                RemoteDesktopProtocol::Vnc => false,
+                RemoteDesktopProtocol::Rdp => true,
+            },
+            audio_muted: false,
+            audio_volume: 100,
+            audio_active: false,
+            audio_format: None,
+            audio_sample_rate: 44100,
+            audio_channels: 2,
+            audio_bytes_received: 0,
         };
 
         self.tabs.push(SessionTab {
@@ -453,6 +483,7 @@ impl Shellumi {
                     password: rd.password.clone(),
                     domain: rd.domain.clone(),
                     tls_strict: rd.tls_strict,
+                    enable_audio: rd.enable_audio,
                 };
 
                 let fb = shellumi_remote_desktop::Framebuffer::new(rd.width, rd.height)
@@ -541,6 +572,23 @@ impl Shellumi {
                                         }
                                         shellumi_remote_desktop::SessionEvent::SecurityWarning(warning) => {
                                             rd.status_message = Some(format!("Security: {}", warning.message()));
+                                        }
+                                        shellumi_remote_desktop::SessionEvent::AudioStatus {
+                                            active,
+                                            muted,
+                                            volume,
+                                            format,
+                                            sample_rate,
+                                            channels,
+                                            bytes_received,
+                                        } => {
+                                            rd.audio_active = active;
+                                            rd.audio_muted = muted;
+                                            rd.audio_volume = volume;
+                                            rd.audio_format = Some(format);
+                                            rd.audio_sample_rate = sample_rate;
+                                            rd.audio_channels = channels;
+                                            rd.audio_bytes_received = bytes_received;
                                         }
                                         shellumi_remote_desktop::SessionEvent::Error(err) => {
                                             rd.error = Some(err);
@@ -639,5 +687,46 @@ impl Shellumi {
             }
         })
         .detach();
+    }
+
+    pub(crate) fn remote_desktop_toggle_mute(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                let new_muted = !rd.audio_muted;
+                rd.audio_muted = new_muted;
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::SetAudioMute(new_muted),
+                    );
+                }
+                rd.last_action_note = Some(if new_muted {
+                    "Audio output muted".into()
+                } else {
+                    "Audio output unmuted".into()
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_set_volume(
+        &mut self,
+        tab_idx: usize,
+        volume: u16,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                let vol = volume.min(100);
+                rd.audio_volume = vol;
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::SetAudioVolume(vol),
+                    );
+                }
+                rd.last_action_note = Some(format!("Volume set to {vol}%"));
+                cx.notify();
+            }
+        }
     }
 }

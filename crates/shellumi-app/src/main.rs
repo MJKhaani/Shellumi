@@ -738,6 +738,14 @@ struct RemoteDesktopState {
     tls_strict: bool,
     show_diagnostics: bool,
     password_input: Option<Entity<TextInput>>,
+    enable_audio: bool,
+    audio_muted: bool,
+    audio_volume: u16,
+    audio_active: bool,
+    audio_format: Option<String>,
+    audio_sample_rate: u32,
+    audio_channels: u16,
+    audio_bytes_received: u64,
 }
 
 impl Drop for RemoteDesktopState {

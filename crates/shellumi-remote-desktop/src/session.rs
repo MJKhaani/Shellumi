@@ -83,6 +83,10 @@ impl SessionState {
 
 use zeroize::Zeroize;
 
+fn default_enable_audio() -> bool {
+    true
+}
+
 /// Session parameters configured by the user before launching a connection.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
@@ -98,6 +102,8 @@ pub struct SessionConfig {
     pub password: Option<String>,
     pub domain: Option<String>,
     pub tls_strict: bool,
+    #[serde(default = "default_enable_audio")]
+    pub enable_audio: bool,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -115,6 +121,7 @@ impl std::fmt::Debug for SessionConfig {
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .field("domain", &self.domain)
             .field("tls_strict", &self.tls_strict)
+            .field("enable_audio", &self.enable_audio)
             .finish()
     }
 }
@@ -143,6 +150,7 @@ impl SessionConfig {
             password: None,
             domain: None,
             tls_strict: true,
+            enable_audio: true,
         }
     }
 

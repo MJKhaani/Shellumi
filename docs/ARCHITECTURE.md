@@ -116,6 +116,7 @@ See [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md) for f
   - Authenticates via CredSSP / NLA; translates `ironrdp-client` output events (`Connected`, `DesktopUpdate`, `Image`, `ConnectionFailure`) into `SessionEvent`s.
   - Keystroke translation: converts host keyboard input into RDP scancodes and Unicode events; mouse move/click/wheel mapping; SAS (`Ctrl+Alt+Del`, `Win`) dispatch.
   - Authentic CLIPRDR virtual channel: cross-platform `ShellumiCliprdrBackend` providing bidirectional UTF-16LE text clipboard synchronization and chunked streaming file transfers (`FileGroupDescriptorW` / `FileContentsRequest` / `FileContentsResponse`) between host filesystem and remote Windows Explorer sessions.
+  - Authentic RDPSND virtual channel (`MS-RDPEA`): cross-platform sound redirection streaming 16-bit 44.1/48 kHz stereo PCM audio to local host audio hardware via pure Rust `cpal::RdpsndBackend`, with real-time volume scaling, muting, and audio telemetry reporting.
 - **`shellumi-app` UI Canvas & Session Tabs:**
   - Embeds the remote desktop session directly inside GPUI tabs with high-performance canvas blitting.
   - Host Editor upgrades: protocol parameters (resolution presets, color depth, view-only, TLS cert policies).

@@ -28,6 +28,7 @@ pub struct RdpClientConfig {
     pub height: u16,
     pub cert_policy: CertificateValidationPolicy,
     pub view_only: bool,
+    pub enable_audio: bool,
 }
 
 impl std::fmt::Debug for RdpClientConfig {
@@ -42,6 +43,7 @@ impl std::fmt::Debug for RdpClientConfig {
             .field("height", &self.height)
             .field("cert_policy", &self.cert_policy)
             .field("view_only", &self.view_only)
+            .field("enable_audio", &self.enable_audio)
             .finish()
     }
 }
@@ -79,6 +81,7 @@ impl RdpClientConfig {
                 }
             },
             view_only: config.view_only,
+            enable_audio: config.enable_audio,
         }
     }
 
@@ -91,6 +94,16 @@ impl RdpClientConfig {
     pub fn to_ironrdp_config_with_backend(
         &self,
         backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
+    ) -> Result<Config, RdpConfigError> {
+        self.to_ironrdp_config_with_backends(backend, None, None)
+    }
+
+    /// Build an underlying `ironrdp_client::config::Config` with optional clipboard and sound backends.
+    pub fn to_ironrdp_config_with_backends(
+        &self,
+        backend: Option<crate::clipboard::ShellumiCliprdrBackend>,
+        sound_control: Option<crate::sound::ShellumiRdpsndControl>,
+        worker_tx: Option<async_channel::Sender<shellumi_remote_desktop::SessionEvent>>,
     ) -> Result<Config, RdpConfigError> {
         if self.host.trim().is_empty() {
             return Err(RdpConfigError::InvalidEndpoint(
@@ -116,7 +129,8 @@ impl RdpClientConfig {
             .with_color_depth(32)
             .with_tls(true)
             .with_credssp(true)
-            .with_autologon(self.password.is_some());
+            .with_autologon(self.password.is_some())
+            .with_sound(self.enable_audio);
 
         password.zeroize();
 
@@ -129,6 +143,16 @@ impl RdpClientConfig {
             builder = builder.with_static_channel(move |_ps| {
                 Some(ironrdp_cliprdr::Cliprdr::new(Box::new(be.clone())))
             });
+        }
+
+        if self.enable_audio {
+            if let (Some(ctrl), Some(tx)) = (sound_control, worker_tx) {
+                builder = builder.with_static_channel(move |_ps| {
+                    Some(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
+                        crate::sound::ShellumiRdpsndHandler::new(ctrl.clone(), tx.clone()),
+                    )))
+                });
+            }
         }
 
         builder

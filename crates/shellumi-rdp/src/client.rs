@@ -55,7 +55,12 @@ pub async fn run_rdp_session(
         worker.event_sender(),
         temp_dir,
     );
-    let ironrdp_cfg = rdp_config.to_ironrdp_config_with_backend(Some(clipboard_backend.clone()))?;
+    let sound_control = crate::sound::ShellumiRdpsndControl::new(false, 100);
+    let ironrdp_cfg = rdp_config.to_ironrdp_config_with_backends(
+        Some(clipboard_backend.clone()),
+        Some(sound_control.clone()),
+        Some(worker.event_sender().clone()),
+    )?;
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     let client = RdpClient::new(ironrdp_cfg, out_tx);
@@ -135,7 +140,20 @@ pub async fn run_rdp_session(
                                 }
                             }
                         }
+                        SessionCommand::SetAudioMute(muted) => {
+                            sound_control.set_muted(muted);
+                            let _ = worker
+                                .send_event(sound_control.status_snapshot("PCM", 44100, 2))
+                                .await;
+                        }
+                        SessionCommand::SetAudioVolume(volume) => {
+                            sound_control.set_volume(volume);
+                            let _ = worker
+                                .send_event(sound_control.status_snapshot("PCM", 44100, 2))
+                                .await;
+                        }
                         SessionCommand::Disconnect => {
+                            sound_control.set_active(false);
                             let _ = input_sender.send(RdpInputEvent::Close);
                             break;
                         }

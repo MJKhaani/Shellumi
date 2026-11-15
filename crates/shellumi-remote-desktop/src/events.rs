@@ -31,6 +31,10 @@ pub enum SessionCommand {
     Refresh,
     /// Send Secure Attention Sequence (Ctrl+Alt+Del).
     CtrlAltDel,
+    /// Mute or unmute remote desktop audio output.
+    SetAudioMute(bool),
+    /// Set remote desktop audio volume (0 - 100 percentage).
+    SetAudioVolume(u16),
 }
 
 /// Events emitted by the protocol background worker to the UI / main thread.
@@ -54,6 +58,16 @@ pub enum SessionEvent {
     ServerFilesReceived {
         files: Vec<String>,
         target_dir: String,
+    },
+    /// Remote audio output status and telemetry update.
+    AudioStatus {
+        active: bool,
+        muted: bool,
+        volume: u16,
+        format: String,
+        sample_rate: u32,
+        channels: u16,
+        bytes_received: u64,
     },
     /// Remote terminal bell event.
     Bell,
@@ -220,5 +234,32 @@ mod tests {
             ev,
             Some(SessionEvent::ServerFilesReceived { files, target_dir })
         );
+
+        // UI sends audio mute and volume commands
+        ui.try_send_command(SessionCommand::SetAudioMute(true))
+            .unwrap();
+        assert_eq!(
+            worker.try_recv_command().unwrap(),
+            Some(SessionCommand::SetAudioMute(true))
+        );
+        ui.try_send_command(SessionCommand::SetAudioVolume(80))
+            .unwrap();
+        assert_eq!(
+            worker.try_recv_command().unwrap(),
+            Some(SessionCommand::SetAudioVolume(80))
+        );
+
+        // Worker sends AudioStatus event
+        let audio_status = SessionEvent::AudioStatus {
+            active: true,
+            muted: false,
+            volume: 80,
+            format: "PCM".to_string(),
+            sample_rate: 44100,
+            channels: 2,
+            bytes_received: 1024,
+        };
+        worker.try_send_event(audio_status.clone()).unwrap();
+        assert_eq!(ui.try_recv_event().unwrap(), Some(audio_status));
     }
 }

@@ -7,12 +7,14 @@ publish = false
 
 [dependencies]
 shellumi-remote-desktop = { path = "../shellumi-remote-desktop" }
-ironrdp-client = { version = "0.1.0", default-features = false, features = ["rustls", "clipboard"] }
+ironrdp-client = { version = "0.1.0", default-features = false, features = ["rustls", "clipboard", "sound"] }
 ironrdp-connector = "0.10.0"
 ironrdp-pdu = "0.9.0"
 ironrdp-session = "0.11.0"
 ironrdp-graphics = "0.9.0"
 ironrdp-cliprdr = "0.7.0"
+ironrdp-rdpsnd = "0.9.0"
+ironrdp-rdpsnd-native = "0.7.0"
 ironrdp-svc = "0.8.0"
 ironrdp-core = "0.2.1"
 ironrdp-tokio = "0.10.0"

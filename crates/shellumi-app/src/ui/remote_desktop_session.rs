@@ -174,6 +174,91 @@ impl Shellumi {
             }))
             .child("📁 Send Files…");
 
+        let (audio_icon, audio_label, audio_color) = if !state.enable_audio {
+            ("🔇", "Audio Off", rgb(MacTheme::TEXT_TERTIARY))
+        } else if state.audio_muted {
+            ("🔇", "Muted", rgb(0xeb5757))
+        } else if state.audio_active {
+            ("🔊", "Audio (active)", rgb(0x3dd68c))
+        } else {
+            ("🔊", "Audio", rgb(MacTheme::TEXT_PRIMARY))
+        };
+
+        let mute_btn = div()
+            .id(("rd-audio-mute", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(audio_color)
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.remote_desktop_toggle_mute(tab_idx, cx);
+            }))
+            .child(format!("{audio_icon} {audio_label}"));
+
+        let vol_down_btn = div()
+            .id(("rd-vol-down", tab_idx))
+            .px_1p5()
+            .py_1()
+            .rounded_l_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                let current = app
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|t| t.remote_desktop_state.as_ref())
+                    .map(|s| s.audio_volume)
+                    .unwrap_or(100);
+                app.remote_desktop_set_volume(tab_idx, current.saturating_sub(10), cx);
+            }))
+            .child("🔉 -");
+
+        let vol_label = div()
+            .px_1p5()
+            .py_1()
+            .bg(rgb(MacTheme::SURFACE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .child(format!("{}%", state.audio_volume));
+
+        let vol_up_btn = div()
+            .id(("rd-vol-up", tab_idx))
+            .px_1p5()
+            .py_1()
+            .rounded_r_sm()
+            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+            .text_xs()
+            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                let current = app
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|t| t.remote_desktop_state.as_ref())
+                    .map(|s| s.audio_volume)
+                    .unwrap_or(100);
+                app.remote_desktop_set_volume(tab_idx, (current + 10).min(100), cx);
+            }))
+            .child("+ 🔊");
+
+        let volume_ctrl = div()
+            .flex()
+            .items_center()
+            .child(vol_down_btn)
+            .child(vol_label)
+            .child(vol_up_btn);
+
         let scale_fit = div()
             .id(("rd-scale-fit", tab_idx))
             .px_2()
@@ -402,7 +487,9 @@ impl Shellumi {
                             .child(win_btn)
                             .child(alt_tab_btn)
                             .child(clip_btn)
-                            .child(send_files_btn),
+                            .child(send_files_btn)
+                            .child(mute_btn)
+                            .child(volume_ctrl),
                     )
                     .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
                     .child(
@@ -561,6 +648,37 @@ impl Shellumi {
                                 } else {
                                     "Interactive"
                                 },
+                            ))
+                            .child(spec_row(
+                                "Audio Redirection",
+                                if !state.enable_audio {
+                                    "Disabled"
+                                } else if state.audio_muted {
+                                    "Muted (Output Silenced)"
+                                } else if state.audio_active {
+                                    "Active (Streaming via RDPSND)"
+                                } else {
+                                    "Idle (Awaiting Stream)"
+                                },
+                            ))
+                            .child(spec_row(
+                                "Audio Output",
+                                &if state.enable_audio {
+                                    let fmt = state.audio_format.as_deref().unwrap_or("PCM");
+                                    format!(
+                                        "{} {}Hz {}ch ({}%)",
+                                        fmt,
+                                        state.audio_sample_rate,
+                                        state.audio_channels,
+                                        state.audio_volume
+                                    )
+                                } else {
+                                    "—".into()
+                                },
+                            ))
+                            .child(spec_row(
+                                "Audio Data Recv",
+                                &format_network_bytes(state.audio_bytes_received),
                             )),
                     ),
             )

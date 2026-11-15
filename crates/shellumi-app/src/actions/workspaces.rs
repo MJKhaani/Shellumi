@@ -394,6 +394,17 @@ impl Shellumi {
                     tls_strict,
                     show_diagnostics: false,
                     password_input: Some(password_input),
+                    enable_audio: match proto {
+                        RemoteDesktopProtocol::Vnc => false,
+                        RemoteDesktopProtocol::Rdp => true,
+                    },
+                    audio_muted: false,
+                    audio_volume: 100,
+                    audio_active: false,
+                    audio_format: None,
+                    audio_sample_rate: 44100,
+                    audio_channels: 2,
+                    audio_bytes_received: 0,
                 };
                 if first_rd_state.is_none() {
                     first_rd_state = Some(rd);
