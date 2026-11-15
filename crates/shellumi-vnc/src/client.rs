@@ -35,7 +35,7 @@ pub enum VncClientError {
     Timeout(Duration),
 }
 
-/// Asynchronous VNC client task runner.
+/// Asynchronous VNC client task runner with network resilience and automatic reconnection.
 ///
 /// Drives the RFB session over TCP, blitting incoming rectangles into `framebuffer`
 /// and transmitting outgoing input commands received from `worker`.
@@ -44,40 +44,168 @@ pub async fn run_vnc_session(
     worker: SessionWorkerHandle,
     framebuffer: Framebuffer,
 ) -> Result<(), VncClientError> {
-    let _ = worker
-        .send_event(SessionEvent::StateChanged(SessionState::Connecting))
+    let policy = config.reconnect_policy;
+    let mut attempt = 0;
+
+    loop {
+        let _ = worker
+            .send_event(SessionEvent::StateChanged(SessionState::Connecting))
+            .await;
+
+        // 1. Establish TCP connection with 10-second timeout
+        let endpoint = config.target_endpoint();
+        let stream_result =
+            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&endpoint)).await;
+
+        let stream = match stream_result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                let err_msg = format!("Failed to connect to {endpoint}: {err}");
+                if !policy.enabled || attempt >= policy.max_attempts {
+                    let _ = worker
+                        .send_event(SessionEvent::Error(err_msg.clone()))
+                        .await;
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
+                        .await;
+                    return Err(VncClientError::Network(err));
+                }
+
+                attempt += 1;
+                let delay = policy.compute_delay(attempt);
+                let delay_ms = delay.as_millis() as u64;
+
+                let _ = worker
+                    .send_event(SessionEvent::StateChanged(SessionState::Reconnecting {
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        delay_ms,
+                    }))
+                    .await;
+
+                let mut cancelled = false;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    cmd = worker.recv_command() => {
+                        if let Ok(SessionCommand::Disconnect) = cmd {
+                            cancelled = true;
+                        }
+                    }
+                }
+
+                if cancelled {
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .await;
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(_) => {
+                let err_msg = format!("Connection to {endpoint} timed out after 10 seconds");
+                if !policy.enabled || attempt >= policy.max_attempts {
+                    let _ = worker
+                        .send_event(SessionEvent::Error(err_msg.clone()))
+                        .await;
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
+                        .await;
+                    return Err(VncClientError::Timeout(Duration::from_secs(10)));
+                }
+
+                attempt += 1;
+                let delay = policy.compute_delay(attempt);
+                let delay_ms = delay.as_millis() as u64;
+
+                let _ = worker
+                    .send_event(SessionEvent::StateChanged(SessionState::Reconnecting {
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        delay_ms,
+                    }))
+                    .await;
+
+                let mut cancelled = false;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    cmd = worker.recv_command() => {
+                        if let Ok(SessionCommand::Disconnect) = cmd {
+                            cancelled = true;
+                        }
+                    }
+                }
+
+                if cancelled {
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .await;
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+
+        // Run the connected session
+        let session_res = run_vnc_session_with_stream(
+            stream,
+            config.clone(),
+            worker.clone(),
+            framebuffer.clone(),
+        )
         .await;
 
-    // 1. Establish TCP connection with 10-second timeout
-    let endpoint = config.target_endpoint();
-    let stream_result =
-        tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&endpoint)).await;
+        match session_res {
+            Ok(()) => {
+                // User disconnected cleanly
+                let _ = worker
+                    .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                    .await;
+                return Ok(());
+            }
+            Err(err) => {
+                // If connection was active before the drop, reset attempt count for fresh reconnect attempts
+                if !matches!(err, VncClientError::Handshake(_)) {
+                    attempt = 0;
+                }
 
-    let stream = match stream_result {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(err)) => {
-            let err_msg = format!("Failed to connect to {endpoint}: {err}");
-            let _ = worker
-                .send_event(SessionEvent::Error(err_msg.clone()))
-                .await;
-            let _ = worker
-                .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
-                .await;
-            return Err(VncClientError::Network(err));
-        }
-        Err(_) => {
-            let err_msg = format!("Connection to {endpoint} timed out after 10 seconds");
-            let _ = worker
-                .send_event(SessionEvent::Error(err_msg.clone()))
-                .await;
-            let _ = worker
-                .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
-                .await;
-            return Err(VncClientError::Timeout(Duration::from_secs(10)));
-        }
-    };
+                if !policy.enabled || attempt >= policy.max_attempts {
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .await;
+                    return Err(err);
+                }
 
-    run_vnc_session_with_stream(stream, config, worker, framebuffer).await
+                attempt += 1;
+                let delay = policy.compute_delay(attempt);
+                let delay_ms = delay.as_millis() as u64;
+
+                let _ = worker
+                    .send_event(SessionEvent::StateChanged(SessionState::Reconnecting {
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        delay_ms,
+                    }))
+                    .await;
+
+                let mut cancelled = false;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    cmd = worker.recv_command() => {
+                        if let Ok(SessionCommand::Disconnect) = cmd {
+                            cancelled = true;
+                        }
+                    }
+                }
+
+                if cancelled {
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .await;
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 /// Run an RFB VNC session over an arbitrary asynchronous stream (e.g. TCP, TLS, or in-memory duplex).
@@ -239,7 +367,6 @@ where
                     Err(err) => {
                         let err_msg = format!("Remote host closed connection: {err}");
                         let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                        let _ = worker.send_event(SessionEvent::StateChanged(SessionState::Disconnected)).await;
                         return Err(VncClientError::Network(err));
                     }
                 };

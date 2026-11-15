@@ -34,17 +34,88 @@ pub enum RdpError {
     Timeout(Duration),
 }
 
-/// Run an authentic RDP session using IronRDP client engine.
+/// Run an authentic RDP session using IronRDP client engine with automatic network reconnection.
 pub async fn run_rdp_session(
     config: SessionConfig,
     worker: SessionWorkerHandle,
     mut framebuffer: Framebuffer,
 ) -> Result<(), RdpError> {
+    let policy = config.reconnect_policy;
+    let mut attempt = 0;
+
+    loop {
+        let (attempt_res, was_connected) =
+            run_rdp_session_attempt(&config, &worker, &mut framebuffer).await;
+
+        if was_connected {
+            attempt = 0;
+        }
+
+        match attempt_res {
+            Ok(()) => {
+                // User disconnected cleanly
+                let _ = worker
+                    .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                    .await;
+                return Ok(());
+            }
+            Err(err) => {
+                if !policy.enabled || attempt >= policy.max_attempts {
+                    let err_msg = err.to_string();
+                    let _ = worker
+                        .send_event(SessionEvent::Error(err_msg.clone()))
+                        .await;
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .await;
+                    return Err(err);
+                }
+
+                attempt += 1;
+                let delay = policy.compute_delay(attempt);
+                let delay_ms = delay.as_millis() as u64;
+
+                let _ = worker
+                    .send_event(SessionEvent::StateChanged(SessionState::Reconnecting {
+                        attempt,
+                        max_attempts: policy.max_attempts,
+                        delay_ms,
+                    }))
+                    .await;
+
+                let mut cancelled = false;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    cmd = worker.recv_command() => {
+                        if let Ok(SessionCommand::Disconnect) = cmd {
+                            cancelled = true;
+                        }
+                    }
+                }
+
+                if cancelled {
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .await;
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Execute a single attempt of an RDP session.
+/// Returns `(Result<(), RdpError>, bool /* was_connected */)`.
+async fn run_rdp_session_attempt(
+    config: &SessionConfig,
+    worker: &SessionWorkerHandle,
+    framebuffer: &mut Framebuffer,
+) -> (Result<(), RdpError>, bool) {
     let _ = worker
         .send_event(SessionEvent::StateChanged(SessionState::Connecting))
         .await;
 
-    let rdp_config = RdpClientConfig::from_session_config(&config);
+    let rdp_config = RdpClientConfig::from_session_config(config);
     let proxy = std::sync::Arc::new(std::sync::Mutex::new(None));
     let temp_dir = std::env::temp_dir()
         .join("shellumi-transfers")
@@ -68,14 +139,17 @@ pub async fn run_rdp_session(
         drive_name,
         shared_folder_path,
     );
-    let ironrdp_cfg = rdp_config.to_ironrdp_config_with_backends(
+    let ironrdp_cfg = match rdp_config.to_ironrdp_config_with_backends(
         Some(clipboard_backend.clone()),
         Some(sound_control.clone()),
         Some(display_control.clone()),
         Some(drive_control.clone()),
         Some(microphone_control.clone()),
         Some(worker.event_sender().clone()),
-    )?;
+    ) {
+        Ok(c) => c,
+        Err(e) => return (Err(e.into()), false),
+    };
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     let client = RdpClient::new(ironrdp_cfg, out_tx);
@@ -86,7 +160,7 @@ pub async fn run_rdp_session(
     // Spawn IronRDP background runner in a dedicated OS thread with current-thread runtime
     // to bypass higher-ranked lifetime Send limitations in ironrdp-client's internal futures.
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let rdp_thread = std::thread::Builder::new()
+    let rdp_thread = match std::thread::Builder::new()
         .name("shellumi-rdp-runner".into())
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -106,12 +180,22 @@ pub async fn run_rdp_session(
                     _ = &mut stop_rx => {}
                 }
             });
-        })
-        .map_err(|e| RdpError::Connection(format!("Failed to spawn RDP runner thread: {e}")))?;
+        }) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                Err(RdpError::Connection(format!(
+                    "Failed to spawn RDP runner thread: {e}"
+                ))),
+                false,
+            );
+        }
+    };
 
     let mut metrics = SessionMetrics::new();
     let mut metrics_interval = tokio::time::interval(Duration::from_millis(1000));
     let mut connected = false;
+    let mut failure: Option<RdpError> = None;
 
     loop {
         tokio::select! {
@@ -216,6 +300,8 @@ pub async fn run_rdp_session(
                         _ => {}
                     },
                     Err(_) => {
+                        sound_control.set_active(false);
+                        microphone_control.set_recording(false);
                         let _ = input_sender.send(RdpInputEvent::Close);
                         break;
                     }
@@ -288,17 +374,22 @@ pub async fn run_rdp_session(
                         }
                         RdpOutputEvent::ConnectionFailure(err) => {
                             let err_msg = format!("RDP connection failed: {err}");
-                            let _ = worker.send_event(SessionEvent::Error(err_msg.clone())).await;
-                            let _ = worker.send_event(SessionEvent::StateChanged(SessionState::Error(err_msg.clone()))).await;
-                            return Err(RdpError::Connection(err_msg));
+                            sound_control.set_active(false);
+                            microphone_control.set_recording(false);
+                            let _ = input_sender.send(RdpInputEvent::Close);
+                            failure = Some(RdpError::Connection(err_msg));
+                            break;
                         }
                         RdpOutputEvent::Terminated(res) => {
                             let reason = match res {
                                 Ok(r) => format!("Session terminated gracefully: {r:?}"),
                                 Err(e) => format!("Session terminated with error: {e}"),
                             };
-                            let _ = worker.send_event(SessionEvent::StateChanged(SessionState::Disconnected)).await;
-                            return Err(RdpError::Terminated(reason));
+                            sound_control.set_active(false);
+                            microphone_control.set_recording(false);
+                            let _ = input_sender.send(RdpInputEvent::Close);
+                            failure = Some(RdpError::Terminated(reason));
+                            break;
                         }
                         _ => {}
                     },
@@ -314,9 +405,9 @@ pub async fn run_rdp_session(
     *proxy.lock().unwrap() = None;
     let _ = stop_tx.send(());
     let _ = rdp_thread.join();
-    let _ = worker
-        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
-        .await;
 
-    Ok(())
+    match failure {
+        Some(err) => (Err(err), connected),
+        None => (Ok(()), connected),
+    }
 }

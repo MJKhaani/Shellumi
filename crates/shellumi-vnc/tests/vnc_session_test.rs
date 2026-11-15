@@ -1,7 +1,11 @@
 //! End-to-end integration tests for Shellumi VNC protocol engine against an in-memory RFB server.
 
 use byteorder::{BigEndian, ByteOrder};
-use shellumi_remote_desktop::Framebuffer;
+use shellumi_remote_desktop::{
+    create_session_channels, Framebuffer, ReconnectPolicy, RemoteProtocol, SessionCommand,
+    SessionConfig, SessionEvent, SessionState,
+};
+use shellumi_vnc::client::run_vnc_session;
 use shellumi_vnc::handshake::{
     client_and_server_init, negotiate_security, negotiate_version, RfbVersion,
 };
@@ -412,4 +416,263 @@ async fn test_vnc_session_runner_with_advanced_decoders_and_clipboard() {
 
     client_task.await.unwrap();
     server_task.await.unwrap();
+}
+
+async fn serve_mock_rfb_connection(stream: &mut tokio::net::TcpStream) {
+    // 1. Version
+    stream.write_all(b"RFB 003.008\n").await.unwrap();
+    let mut client_ver = [0u8; 12];
+    stream.read_exact(&mut client_ver).await.unwrap();
+
+    // 2. Security: None
+    stream.write_all(&[1, 1]).await.unwrap();
+    let _ = stream.read_u8().await.unwrap();
+    stream.write_all(&[0, 0, 0, 0]).await.unwrap();
+
+    // 3. ClientInit
+    let _ = stream.read_u8().await.unwrap();
+
+    // 4. ServerInit (800x600)
+    let mut sinit = vec![0u8; 24];
+    BigEndian::write_u16(&mut sinit[0..2], 800);
+    BigEndian::write_u16(&mut sinit[2..4], 600);
+    let pf = PixelFormat::rgba_32();
+    sinit[4..20].copy_from_slice(&pf.to_bytes());
+    let name = "Resilience Server";
+    BigEndian::write_u32(&mut sinit[20..24], name.len() as u32);
+    sinit.extend_from_slice(name.as_bytes());
+    stream.write_all(&sinit).await.unwrap();
+
+    // 5. Read SetPixelFormat
+    let mut set_pf = [0u8; 20];
+    stream.read_exact(&mut set_pf).await.unwrap();
+
+    // 6. Read SetEncodings
+    let mut set_enc_hdr = [0u8; 4];
+    stream.read_exact(&mut set_enc_hdr).await.unwrap();
+    let num_encs = BigEndian::read_u16(&set_enc_hdr[2..4]) as usize;
+    let mut enc_bytes = vec![0u8; num_encs * 4];
+    stream.read_exact(&mut enc_bytes).await.unwrap();
+
+    // 7. Read initial FramebufferUpdateRequest
+    let mut fbur = [0u8; 10];
+    stream.read_exact(&mut fbur).await.unwrap();
+
+    // 8. Send 1 FramebufferUpdate (2x2 red)
+    let mut fb_update = vec![0u8; 4];
+    fb_update[0] = server_msg::FRAMEBUFFER_UPDATE;
+    fb_update[1] = 0;
+    BigEndian::write_u16(&mut fb_update[2..4], 1);
+    let mut rect_hdr = [0u8; 12];
+    BigEndian::write_u16(&mut rect_hdr[0..2], 0);
+    BigEndian::write_u16(&mut rect_hdr[2..4], 0);
+    BigEndian::write_u16(&mut rect_hdr[4..6], 2);
+    BigEndian::write_u16(&mut rect_hdr[6..8], 2);
+    BigEndian::write_i32(&mut rect_hdr[8..12], ENCODING_RAW);
+    fb_update.extend_from_slice(&rect_hdr);
+    for _ in 0..4 {
+        fb_update.extend_from_slice(&[255, 0, 0, 255]);
+    }
+    stream.write_all(&fb_update).await.unwrap();
+    stream.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_vnc_session_auto_reconnects_after_network_drop() {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("Skipping live loopback test: network sandboxed ({e})");
+            return;
+        }
+        Err(e) => panic!("Failed to bind loopback: {e}"),
+    };
+    let port = listener.local_addr().unwrap().port();
+
+    // Verify local loopback connect is permitted in this execution environment
+    if let Err(e) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            eprintln!("Skipping live loopback test: network sandboxed ({e})");
+            return;
+        }
+    }
+
+    let server_task = tokio::spawn(async move {
+        // First connection: accept, handshake, send frame, then drop immediately
+        if let Ok((mut stream1, _)) = listener.accept().await {
+            serve_mock_rfb_connection(&mut stream1).await;
+            // Dropping stream1 simulates socket termination / network reset
+        }
+
+        // Second connection: accept, handshake, and hold until disconnect
+        if let Ok((mut stream2, _)) = listener.accept().await {
+            serve_mock_rfb_connection(&mut stream2).await;
+            // Read until client closes
+            let mut buf = [0u8; 64];
+            while let Ok(n) = stream2.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+    });
+
+    let (ui_handle, worker_handle) = create_session_channels(32, 64);
+    let mut config = SessionConfig::new("127.0.0.1", port, RemoteProtocol::Vnc);
+    config.reconnect_policy = ReconnectPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay_ms: 50,
+        max_delay_ms: 200,
+        backoff_multiplier: 2,
+    };
+
+    let fb = Framebuffer::new(800, 600).unwrap();
+    let client_task = tokio::spawn(async move { run_vnc_session(config, worker_handle, fb).await });
+
+    let mut connect_count = 0;
+    let mut reconnecting_seen = false;
+
+    while let Ok(event) = ui_handle.recv_event().await {
+        match event {
+            SessionEvent::StateChanged(SessionState::Connected) => {
+                connect_count += 1;
+                if connect_count == 2 {
+                    // Reconnected successfully! Now disconnect cleanly
+                    ui_handle
+                        .try_send_command(SessionCommand::Disconnect)
+                        .unwrap();
+                }
+            }
+            SessionEvent::StateChanged(SessionState::Reconnecting { attempt, .. }) => {
+                assert!(attempt >= 1);
+                reconnecting_seen = true;
+            }
+            SessionEvent::StateChanged(SessionState::Disconnected) if connect_count >= 2 => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        connect_count, 2,
+        "Expected session to connect, drop, and reconnect"
+    );
+    assert!(
+        reconnecting_seen,
+        "Expected Reconnecting state event to be emitted"
+    );
+
+    let _ = client_task.await;
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn test_vnc_session_reconnect_cancellation_by_user() {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("Skipping live loopback test: network sandboxed ({e})");
+            return;
+        }
+        Err(e) => panic!("Failed to bind loopback: {e}"),
+    };
+    let port = listener.local_addr().unwrap().port();
+
+    // Verify local loopback connect is permitted in this execution environment
+    if let Err(e) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            eprintln!("Skipping live loopback test: network sandboxed ({e})");
+            return;
+        }
+    }
+
+    let server_task = tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            serve_mock_rfb_connection(&mut stream).await;
+            // Drops stream immediately
+        }
+    });
+
+    let (ui_handle, worker_handle) = create_session_channels(32, 64);
+    let mut config = SessionConfig::new("127.0.0.1", port, RemoteProtocol::Vnc);
+    config.reconnect_policy = ReconnectPolicy {
+        enabled: true,
+        max_attempts: 5,
+        initial_delay_ms: 1000, // 1s backoff gives plenty of time to cancel
+        max_delay_ms: 2000,
+        backoff_multiplier: 2,
+    };
+
+    let fb = Framebuffer::new(800, 600).unwrap();
+    let client_task = tokio::spawn(async move { run_vnc_session(config, worker_handle, fb).await });
+
+    let mut cancelled = false;
+
+    while let Ok(event) = ui_handle.recv_event().await {
+        match event {
+            SessionEvent::StateChanged(SessionState::Reconnecting { .. }) => {
+                // Cancel reconnect immediately
+                ui_handle
+                    .try_send_command(SessionCommand::Disconnect)
+                    .unwrap();
+            }
+            SessionEvent::StateChanged(SessionState::Disconnected) => {
+                cancelled = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(cancelled, "Expected clean disconnect after cancellation");
+    let client_res = client_task.await.unwrap();
+    assert!(
+        client_res.is_ok(),
+        "Session should exit Ok(()) on cancellation"
+    );
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn test_vnc_session_retry_exhaustion_on_unreachable_endpoint() {
+    // Pick an unused local port by binding and immediately dropping the listener
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let (ui_handle, worker_handle) = create_session_channels(32, 64);
+    let mut config = SessionConfig::new("127.0.0.1", port, RemoteProtocol::Vnc);
+    config.reconnect_policy = ReconnectPolicy {
+        enabled: true,
+        max_attempts: 2,
+        initial_delay_ms: 20,
+        max_delay_ms: 50,
+        backoff_multiplier: 1,
+    };
+
+    let fb = Framebuffer::new(800, 600).unwrap();
+    let client_task = tokio::spawn(async move { run_vnc_session(config, worker_handle, fb).await });
+
+    let mut attempts_observed = Vec::new();
+    let mut error_seen = false;
+
+    while let Ok(event) = ui_handle.recv_event().await {
+        match event {
+            SessionEvent::StateChanged(SessionState::Reconnecting { attempt, .. }) => {
+                attempts_observed.push(attempt);
+            }
+            SessionEvent::StateChanged(SessionState::Error(_)) => {
+                error_seen = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(attempts_observed, vec![1, 2]);
+    assert!(error_seen, "Expected Error state after exhausting retries");
+    let res = client_task.await.unwrap();
+    assert!(res.is_err(), "Expected error after retry exhaustion");
 }

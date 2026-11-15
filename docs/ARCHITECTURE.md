@@ -99,6 +99,7 @@ Each vault uses a random encryption key protected by the OS credential store for
 See [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md) for full architectural specifications.
 - **`shellumi-remote-desktop` (Common Domain Layer):**
   - Defines UI-independent session state machines (`SessionState`: `Idle`, `Connecting`, `Connected`, `Reconnecting`, `Disconnecting`, `Disconnected`, `Error`), commands (`SessionCommand`), events (`SessionEvent`), and error taxonomies.
+  - Implements `ReconnectPolicy` providing configurable automatic retry attempts, overflow-safe exponential backoff computation (`compute_delay`), and fail-fast disabled modes for transient network drops.
   - Implements an owned, thread-safe 32-bit RGBA `Framebuffer` with dirty-rectangle accumulation and safe snapshot semantics.
   - Telemetry collection: calculates real measured frame rate (FPS), bytes transferred, decode timing, and active round-trip ping.
   - Coordinate and input transformers: maps local GPUI cursor coordinates to remote desktop coordinates across `Fit`, `100%`, and `Fill` scaling modes.
@@ -109,6 +110,7 @@ See [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md) for f
   - Production client decoders (`shellumi-vnc::decoder`) supporting Raw, CopyRect, DesktopSize, Hextile, ZRLE (with persistent zlib state and decompression bomb protection), and Tight (Fill, palette/gradient, and pure-Rust JPEG).
   - Bidirectional text clipboard synchronization (`ClientCutText` / `ServerCutText`) with 2 MiB size limits and rolling-hash loop suppression.
   - Adversarial robustness: fuzz-tested against decompression bombs, corrupted streams, oversized payloads, and out-of-bounds geometries.
+  - Network resilience: automatic reconnection loop with exponential backoff on unexpected socket drops, attempt count resets on active stream, and non-blocking cancellation handling.
 - **`shellumi-rdp` (Embedded RDP Engine):**
   - Reusable client adapter wrapping `ironrdp-client` without external binaries.
   - Maps Shellumi host identity and credentials to `ironrdp-client::ConfigBuilder`, zeroizing password memory on drop.
@@ -120,11 +122,13 @@ See [Remote Desktop Implementation Plan](REMOTE_DESKTOP_IMPLEMENTATION.md) for f
   - Authentic MS-RDPEDISP virtual channel (`ironrdp-displaycontrol` / `ironrdp-dvc`): dynamic client-to-server desktop resolution resizing and monitor layout updates on the fly without session reconnection or application restarts; provides presets (1080p, 1440p, 4K) and dynamic "Match Viewport" resizing with even-width validation.
   - Authentic MS-RDPEFS / RDPDR virtual channel (`ironrdp-rdpdr` / `ironrdp-rdpdr-native`): native host drive and directory redirection mounting local directories under `\\tsclient\<drive_name>` in remote Windows Explorer sessions; features `ShellumiRdpdrBackend` with real-time I/O request tracking (bytes read/written, operation counts), dynamic folder swapping during active sessions, and toolbar folder configuration.
   - Authentic MS-RDPEAI virtual channel (`AUDIO_INPUT` Dynamic Virtual Channel): cross-platform microphone and audio input redirection capturing local host microphone audio via `cpal` (CoreAudio on macOS, ALSA on Linux, WASAPI on Windows), negotiating 16-bit PCM audio formats (44.1/48 kHz stereo/mono), streaming `RdpeaiPdu::Data` packets to remote Windows sessions, with input gain/volume scaling (0..=200%), live muting, toolbar toggle controls, and live Diagnostics HUD telemetry (transmitted bytes, packet counts, negotiated sample rate and channels).
+  - Network resilience: structured retry loop with clean thread and channel recycling on transient connection failure, exponential backoff, and immediate cancellation on user disconnect.
 - **`shellumi-app` UI Canvas & Session Tabs:**
   - Embeds the remote desktop session directly inside GPUI tabs with high-performance canvas blitting.
+  - Seamless canvas retention: preserves the last valid `FramebufferSnapshot` across connection interruptions with an unobtrusive floating reconnection notification (`⚡ Connection interrupted. Reconnecting (attempt x/y)…`).
   - Host Editor upgrades: protocol parameters (resolution presets, color depth, view-only, TLS cert policies).
   - Quick Connect: interactive password modal without persistent storage or CLI leaks.
-  - Toolbar controls: scaling (Fit/100%/Fill), view-only toggle, SAS shortcuts (`Ctrl+Alt+Del`, `Win`, `Alt+Tab`), fullscreen mode, and live diagnostics HUD telemetry inspector.
+  - Toolbar controls: scaling (Fit/100%/Fill), view-only toggle, SAS shortcuts (`Ctrl+Alt+Del`, `Win`, `Alt+Tab`), fullscreen mode, live reconnection status pill, dynamic `⏹ Cancel Reconnect` button, and live diagnostics HUD telemetry inspector.
   - Workspace persistence: automatically saves and restores active VNC and RDP sessions.
   - Strictly avoids calling external viewer executables (`mstsc`, `xfreerdp`, `vncviewer`, `open`, etc.).
 

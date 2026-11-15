@@ -699,6 +699,7 @@ enum RemoteDesktopStatus {
     NotConnected,
     Connecting,
     Connected,
+    Reconnecting { attempt: u32, max_attempts: u32 },
     Disconnected,
     Error,
 }

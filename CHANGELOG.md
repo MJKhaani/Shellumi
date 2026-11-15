@@ -2,6 +2,29 @@
 
 ## 0.0.7-alpha
 
+### Network Resilience & Automatic Reconnection Architecture (Phase 7)
+- **Configurable Reconnection Policy (`ReconnectPolicy`):**
+  - Added structured reconnect policy with configurable `enabled`, `max_attempts` (default: 5), `initial_delay_ms` (1000ms), `max_delay_ms` (15000ms), and `backoff_multiplier` (2).
+  - Implemented overflow-safe exponential backoff computation (`compute_delay(attempt: u32) -> Duration`) with exponential clamping.
+  - Added `ReconnectPolicy::disabled()` for immediate fail-fast error reporting when auto-reconnect is not desired.
+- **Session Lifecycle State Machine Updates:**
+  - Added `SessionState::Reconnecting { attempt: u32, max_attempts: u32, delay_ms: u64 }` with `is_reconnecting(&self)` helper.
+  - Validated state transitions: legal transitions from `Connected` or `Connecting` into `Reconnecting`, and from `Reconnecting` into `Connecting`, `Disconnected`, or `Error`.
+  - Automatically resets attempt counter to 0 upon reaching an active `Connected` state, giving fresh retry attempts for subsequent transient disconnects.
+- **Resilient Protocol Runners:**
+  - **VNC (`crates/shellumi-vnc`):** Wrapped RFB socket session driver in exponential backoff retry loop; handles socket drop/clean disconnect distinction, backoff sleep, and user cancellation during delay.
+  - **RDP (`crates/shellumi-rdp`):** Structured RDP session runner around `run_rdp_session_attempt` with clean thread and virtual channel resource reclamation, exponential backoff, and retry exhaustion handling.
+- **Desktop UI Integration (`crates/shellumi-app`):**
+  - Added `RemoteDesktopStatus::Reconnecting { attempt: u32, max_attempts: u32 }`.
+  - Session toolbar reflects reconnection progress with an amber status pill (`🔄 Reconnecting (attempt x/y)…`) and dynamic action button (`⏹ Cancel Reconnect`).
+  - Seamless canvas retention: preserves last valid `FramebufferSnapshot` across connection interruptions with an unobtrusive floating amber banner (`⚡ Connection interrupted. Reconnecting (attempt x/y)…`).
+  - Graceful cancellation: clicking `⏹ Cancel Reconnect` immediately aborts active retry timers and cleanly transitions to `Disconnected`.
+- **Comprehensive Real-Server & Loopback Acceptance Testing:**
+  - Added real TCP loopback resilience test suite in `crates/shellumi-vnc/tests/vnc_session_test.rs` validating automatic recovery after unexpected socket drop, reconnect event sequence, frame resumption, retry exhaustion, and user cancellation during retry delay.
+  - Added RDP resilience integration test suite in `crates/shellumi-rdp/tests/resilience_tests.rs` verifying backoff mathematics, exhaustion transition, cancellation during backoff, and disabled policy behavior.
+  - Added UI lifecycle tests in `crates/shellumi-app/src/tests.rs` for `RemoteDesktopStatus::Reconnecting`.
+
+
 ### Microphone and Audio Input Redirection over MS-RDPEAI
 - **Authentic MS-RDPEAI Virtual Channel:** Integrated Microsoft Remote Desktop Audio Input Redirection Virtual Channel Extension (`[MS-RDPEAI]`) in pure Rust using `ironrdp-dvc` on the `"AUDIO_INPUT"` Dynamic Virtual Channel (DVC).
 - **Native Hardware Audio Capture via `cpal`:**

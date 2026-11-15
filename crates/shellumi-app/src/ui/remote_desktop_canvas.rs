@@ -45,6 +45,39 @@ impl Shellumi {
                 RemoteDesktopScaleMode::Fill => ScaleMode::Fill,
             };
 
+            let reconnect_overlay = if let RemoteDesktopStatus::Reconnecting {
+                attempt,
+                max_attempts,
+            } = state.status
+            {
+                Some(
+                    div()
+                        .absolute()
+                        .top(px(16.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgba(0x1a1200dd))
+                        .border_1()
+                        .border_color(rgb(0xf2a900))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xf2a900))
+                                .child(format!(
+                                    "⚡ Connection interrupted. Reconnecting (attempt {attempt}/{max_attempts})…"
+                                )),
+                        ),
+                )
+            } else {
+                None
+            };
+
             let viewport_container = div()
                 .id(("rd-canvas-viewport", tab_idx))
                 .relative()
@@ -88,7 +121,8 @@ impl Shellumi {
                                 .h_full()
                                 .object_fit(object_fit),
                         ),
-                );
+                )
+                .children(reconnect_overlay);
 
             div()
                 .flex_1()

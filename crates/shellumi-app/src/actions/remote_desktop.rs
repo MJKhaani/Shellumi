@@ -526,6 +526,7 @@ impl Shellumi {
                     enable_audio: rd.enable_audio,
                     enable_microphone: rd.enable_microphone,
                     shared_folder: rd.shared_folder.clone(),
+                    reconnect_policy: shellumi_remote_desktop::ReconnectPolicy::default(),
                 };
 
                 let fb = shellumi_remote_desktop::Framebuffer::new(rd.width, rd.height)
@@ -570,6 +571,21 @@ impl Shellumi {
                                             shellumi_remote_desktop::SessionState::Connected => {
                                                 rd.status = RemoteDesktopStatus::Connected;
                                                 rd.status_message = Some(format!("Connected to {proto_name} server"));
+                                            }
+                                            shellumi_remote_desktop::SessionState::Reconnecting {
+                                                attempt,
+                                                max_attempts,
+                                                delay_ms,
+                                            } => {
+                                                rd.status = RemoteDesktopStatus::Reconnecting {
+                                                    attempt,
+                                                    max_attempts,
+                                                };
+                                                let delay_s = (delay_ms as f64) / 1000.0;
+                                                rd.status_message = Some(format!(
+                                                    "Connection interrupted. Reconnecting (attempt {attempt}/{max_attempts} in {delay_s:.1}s)…"
+                                                ));
+                                                rd.last_action_note = Some(format!("Reconnecting ({attempt}/{max_attempts})"));
                                             }
                                             shellumi_remote_desktop::SessionState::Disconnected => {
                                                 rd.status = RemoteDesktopStatus::Disconnected;

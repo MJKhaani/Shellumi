@@ -229,3 +229,36 @@ Shellumi GPUI Remote Desktop Tab
 
 3. **No External Viewers:**
    - The entire graphics pipeline (decoders, decompression, coordinate transforms, canvas rendering) runs in-process in pure Rust within GPUI. No external binaries (`mstsc`, `xfreerdp`, `vncviewer`, etc.) are spawned or required.
+
+---
+
+## 9. Phase 7: Real-Server Acceptance Testing & Network Resilience
+
+### 9.1 Network Resilience Architecture
+
+Transient network interruptions (such as Wi-Fi roaming, DHCP renewals, or remote server daemon restarts) are handled autonomously through a structured exponential backoff reconnection policy:
+
+1. **`ReconnectPolicy` Configuration:**
+   - `enabled: bool` (default: `true`)
+   - `max_attempts: u32` (default: `5`, or `0` when disabled)
+   - `initial_delay_ms: u64` (default: `1000` ms)
+   - `max_delay_ms: u64` (default: `15000` ms ceiling)
+   - `backoff_multiplier: u32` (default: `2`)
+   - Exponential delay computation: `delay = min(initial_delay_ms * multiplier^(attempt - 1), max_delay_ms)`.
+
+2. **Session Lifecycle State Machine:**
+   - Introduces `SessionState::Reconnecting { attempt: u32, max_attempts: u32, delay_ms: u64 }`.
+   - Distinct from clean user disconnect: unexpected socket closures and IO errors trigger automatic retry loops, while explicit `SessionCommand::Disconnect` cleanly terminates the session immediately.
+   - Re-established connections reset the attempt counter (`attempt = 0`), ensuring fresh retry attempts for subsequent independent network drops.
+
+3. **Protocol Runner Implementations:**
+   - **VNC (`shellumi-vnc`):** The outer `run_vnc_session` loop monitors `run_vnc_session_with_stream`. If the socket drops after authentication, it transitions to `SessionState::Reconnecting`, waits for the computed backoff delay (or immediate cancellation if the user disconnects), and reconnects seamlessly.
+   - **RDP (`shellumi-rdp`):** The driver wraps `run_rdp_session_attempt` in an exponential backoff loop. Dynamic virtual channels (CLIPRDR, RDPSND, MS-RDPEDISP, RDPDR, MS-RDPEAI) and runner threads are cleanly recycled on drop and re-initialized upon reconnect.
+
+4. **Desktop UI Integration (`shellumi-app`):**
+   - **Status Pill:** Displays real-time reconnection progress in amber: `🔄 Reconnecting (attempt x/y)…`.
+   - **Cancel Action:** The toolbar disconnect button dynamically transforms into `⏹ Cancel Reconnect`, allowing the user to abort active retry timers at any point.
+   - **Canvas Retention:** Rather than dropping to a black or blank screen during transient drops, the application preserves the last valid `FramebufferSnapshot` on the canvas, overlaying an unobtrusive floating notification (`⚡ Connection interrupted. Reconnecting (attempt x/y)…`).
+
+5. **Loopback & Real-Server Verification:**
+   - Automated loopback TCP server tests verify the entire handshake, initial frame transmission, abrupt socket termination, retry backoff delay, successful second connection, and clean user cancellation without mocked state.

@@ -832,6 +832,19 @@ fn verifies_remote_desktop_state_and_scaling_transitions() {
     rd.status = RemoteDesktopStatus::Disconnected;
     assert_eq!(rd.status, RemoteDesktopStatus::Disconnected);
 
+    // Network resilience: reconnecting state with retry attempts
+    rd.status = RemoteDesktopStatus::Reconnecting {
+        attempt: 1,
+        max_attempts: 5,
+    };
+    assert_eq!(
+        rd.status,
+        RemoteDesktopStatus::Reconnecting {
+            attempt: 1,
+            max_attempts: 5,
+        }
+    );
+
     // Reconnecting transitions to Connecting (never immediate fake Connected)
     rd.status = RemoteDesktopStatus::Connecting;
     assert_eq!(rd.status, RemoteDesktopStatus::Connecting);

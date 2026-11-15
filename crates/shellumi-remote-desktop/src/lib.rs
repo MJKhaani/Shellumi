@@ -21,4 +21,4 @@ pub use input::{
 };
 pub use metrics::{SessionMetrics, SessionMetricsSnapshot};
 pub use security::{format_fingerprint, CertificateValidationPolicy, SecurityWarning};
-pub use session::{RemoteProtocol, SessionConfig, SessionState};
+pub use session::{ReconnectPolicy, RemoteProtocol, SessionConfig, SessionState};

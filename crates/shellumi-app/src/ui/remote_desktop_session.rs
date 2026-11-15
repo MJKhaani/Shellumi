@@ -62,6 +62,14 @@ impl Shellumi {
                 rgb(MacTheme::ACCENT_BLUE),
                 "◌ Connecting…".to_string(),
             ),
+            RemoteDesktopStatus::Reconnecting {
+                attempt,
+                max_attempts,
+            } => (
+                rgb(0x3d2800),
+                rgb(0xf2a900),
+                format!("🔄 Reconnecting ({attempt}/{max_attempts})…"),
+            ),
             RemoteDesktopStatus::NotConnected => (
                 rgb(0x282338),
                 rgb(0xbb86fc),
@@ -655,40 +663,46 @@ impl Shellumi {
             }))
             .child("📊 Telemetry");
 
-        let disc_btn = if is_connected || state.status == RemoteDesktopStatus::Connecting {
-            div()
-                .id(("rd-disconnect", tab_idx))
-                .px_2p5()
-                .py_1()
-                .rounded_sm()
-                .text_xs()
-                .bg(rgb(0x3e1717))
-                .text_color(rgb(MacTheme::DANGER))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(MacTheme::DANGER)).text_color(rgb(0xffffff)))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.remote_desktop_disconnect(tab_idx, cx);
-                }))
-                .child("⏹ Disconnect")
-        } else {
-            div()
-                .id(("rd-reconnect", tab_idx))
-                .px_2p5()
-                .py_1()
-                .rounded_sm()
-                .text_xs()
-                .bg(rgb(MacTheme::ACCENT_BLUE))
-                .text_color(rgb(0xffffff))
-                .cursor_pointer()
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.remote_desktop_reconnect(tab_idx, cx);
-                }))
-                .child(if state.status == RemoteDesktopStatus::NotConnected {
-                    "▶ Connect"
-                } else {
-                    "🔄 Reconnect"
-                })
-        };
+        let is_reconnecting = matches!(state.status, RemoteDesktopStatus::Reconnecting { .. });
+        let disc_btn =
+            if is_connected || state.status == RemoteDesktopStatus::Connecting || is_reconnecting {
+                div()
+                    .id(("rd-disconnect", tab_idx))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .bg(rgb(0x3e1717))
+                    .text_color(rgb(MacTheme::DANGER))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::DANGER)).text_color(rgb(0xffffff)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.remote_desktop_disconnect(tab_idx, cx);
+                    }))
+                    .child(if is_reconnecting {
+                        "⏹ Cancel Reconnect"
+                    } else {
+                        "⏹ Disconnect"
+                    })
+            } else {
+                div()
+                    .id(("rd-reconnect", tab_idx))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .bg(rgb(MacTheme::ACCENT_BLUE))
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.remote_desktop_reconnect(tab_idx, cx);
+                    }))
+                    .child(if state.status == RemoteDesktopStatus::NotConnected {
+                        "▶ Connect"
+                    } else {
+                        "🔄 Reconnect"
+                    })
+            };
 
         let action_note = state.last_action_note.as_ref().map(|note| {
             div()
@@ -1044,8 +1058,32 @@ impl Shellumi {
 
         let viewport = match state.status {
             RemoteDesktopStatus::Connected => self.render_remote_desktop_canvas(tab_idx, state, cx),
-            RemoteDesktopStatus::NotConnected | RemoteDesktopStatus::Connecting => {
-                let is_connecting = state.status == RemoteDesktopStatus::Connecting;
+            RemoteDesktopStatus::Reconnecting { .. } if state.render_image.is_some() => {
+                self.render_remote_desktop_canvas(tab_idx, state, cx)
+            }
+            RemoteDesktopStatus::NotConnected
+            | RemoteDesktopStatus::Connecting
+            | RemoteDesktopStatus::Reconnecting { .. } => {
+                let is_connecting = matches!(
+                    state.status,
+                    RemoteDesktopStatus::Connecting | RemoteDesktopStatus::Reconnecting { .. }
+                );
+                let (status_badge_bg, status_badge_color, status_badge_text) = match state.status {
+                    RemoteDesktopStatus::Connecting => (
+                        rgb(0x1a2e3b),
+                        rgb(MacTheme::ACCENT_BLUE),
+                        "◌ Connecting…".to_string(),
+                    ),
+                    RemoteDesktopStatus::Reconnecting {
+                        attempt,
+                        max_attempts,
+                    } => (
+                        rgb(0x3d2800),
+                        rgb(0xf2a900),
+                        format!("🔄 Reconnecting ({attempt}/{max_attempts})…"),
+                    ),
+                    _ => (rgb(0x282338), rgb(0xbb86fc), "○ Not Connected".to_string()),
+                };
                 div()
                     .flex_1()
                     .min_h_0()
@@ -1107,9 +1145,9 @@ impl Shellumi {
                                             .rounded_md()
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .bg(if is_connecting { rgb(0x1a2e3b) } else { rgb(0x282338) })
-                                            .text_color(if is_connecting { rgb(MacTheme::ACCENT_BLUE) } else { rgb(0xbb86fc) })
-                                            .child(if is_connecting { "◌ Connecting…" } else { "○ Not Connected" }),
+                                            .bg(status_badge_bg)
+                                            .text_color(status_badge_color)
+                                            .child(status_badge_text),
                                     ),
                             )
                             .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
