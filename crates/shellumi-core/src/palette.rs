@@ -15,6 +15,7 @@ pub enum PaletteCategory {
     Infrastructure,
     Diagnostics,
     Mobile,
+    Vault,
 }
 
 impl PaletteCategory {
@@ -32,6 +33,7 @@ impl PaletteCategory {
             Self::Infrastructure => "Infrastructure",
             Self::Diagnostics => "Diagnostics",
             Self::Mobile => "Mobile",
+            Self::Vault => "Vault",
         }
     }
 
@@ -49,6 +51,7 @@ impl PaletteCategory {
             Self::Infrastructure => "☁️",
             Self::Diagnostics => "🩺",
             Self::Mobile => "📱",
+            Self::Vault => "🔒",
         }
     }
 }
@@ -102,6 +105,12 @@ pub enum PaletteAction {
     OpenMobileSimulator,
     OpenShellIntegrationModal,
     OpenSessionRecordings,
+    OpenVaultInNewWindow {
+        vault_id: String,
+        vault_name: String,
+    },
+    LockActiveVault,
+    UnlockActiveVault,
 }
 
 /// A searchable command palette item.

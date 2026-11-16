@@ -132,6 +132,7 @@ impl Shellumi {
                     PaletteCategory::Infrastructure => (rgb(0x0e7490), rgb(0xcffafe)),
                     PaletteCategory::Diagnostics => (rgb(0x0f766e), rgb(0xccfbf1)),
                     PaletteCategory::Mobile => (rgb(0x831843), rgb(0xfce7f3)),
+                    PaletteCategory::Vault => (rgb(0x4c1d95), rgb(0xede9fe)),
                 };
 
                 let action = mat.command.action.clone();
@@ -166,6 +167,9 @@ impl Shellumi {
                     PaletteAction::OpenMobileSimulator => "mobile",
                     PaletteAction::OpenShellIntegrationModal => "terminal",
                     PaletteAction::OpenSessionRecordings => "log",
+                    PaletteAction::OpenVaultInNewWindow { .. }
+                    | PaletteAction::LockActiveVault
+                    | PaletteAction::UnlockActiveVault => "vaults",
                 };
 
                 let cat_icon_name = match cat {
@@ -181,6 +185,7 @@ impl Shellumi {
                     PaletteCategory::Infrastructure => "infrastructure",
                     PaletteCategory::Diagnostics => "diagnostics",
                     PaletteCategory::Mobile => "mobile",
+                    PaletteCategory::Vault => "vaults",
                 };
 
                 let action_icon_el =

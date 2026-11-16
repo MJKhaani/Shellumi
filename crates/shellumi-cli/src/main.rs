@@ -2867,6 +2867,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             if report.local_updated > 0 {
                                 let mut updated_vault = local_vault.clone();
                                 updated_vault.records = merged_records;
+                                updated_vault.encrypted_directory = report.encrypted_directory;
                                 store.import_vault(&passphrase, &updated_vault).await?;
                                 println!(
                                     "Imported {} updated record(s) into local store.",
@@ -2941,6 +2942,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 if report.local_updated > 0 {
                                     let mut updated_vault = local_vault.clone();
                                     updated_vault.records = merged_records;
+                                    updated_vault.encrypted_directory = report.encrypted_directory;
                                     store.import_vault(&passphrase, &updated_vault).await?;
                                 }
                             }

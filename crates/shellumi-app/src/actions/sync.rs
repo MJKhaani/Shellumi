@@ -73,6 +73,23 @@ impl Shellumi {
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
                 let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                // Refresh encrypted vault directory if default vault key is available
+                if let Ok(dir) = store.build_vault_directory().await {
+                    if let Ok(default_vid) =
+                        shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                    {
+                        if let Ok(Some(key)) = shellumi_core::VaultKeyManager::retrieve_key(
+                            &*shellumi_core::default_credential_store(),
+                            &default_vid,
+                        ) {
+                            let mut wstore =
+                                HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                            let _ = wstore
+                                .save_vault_directory_from_model(&default_vid, &key, &dir)
+                                .await;
+                        }
+                    }
+                }
                 let local_vault = store
                     .export_vault(passphrase.expose_secret(), &device_id)
                     .await
@@ -90,15 +107,39 @@ impl Shellumi {
 
                 match cycle_result {
                     SyncCycleResult::AlreadySynchronized => Ok(()),
-                    SyncCycleResult::Success { merged_records, .. } => {
+                    SyncCycleResult::Success {
+                        merged_records,
+                        report,
+                    } => {
                         let mut write_store =
                             HostStore::open(&path).await.map_err(|e| e.to_string())?;
                         let mut merged_vault = SyncVault::new("cloud-vault", 0);
                         merged_vault.records = merged_records;
+                        merged_vault.encrypted_directory = report.encrypted_directory.clone();
                         write_store
                             .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
                             .map_err(|e| e.to_string())?;
+
+                        if let Some(enc_dir) = &report.encrypted_directory {
+                            if let Ok(default_vid) =
+                                shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                            {
+                                let default_key = shellumi_core::VaultKeyManager::retrieve_key(
+                                    &*shellumi_core::default_credential_store(),
+                                    &default_vid,
+                                )
+                                .ok()
+                                .flatten();
+                                let _ = write_store
+                                    .import_encrypted_vault_directory(
+                                        &default_vid,
+                                        default_key.as_ref(),
+                                        enc_dir,
+                                    )
+                                    .await;
+                            }
+                        }
                         Ok(())
                     }
                     SyncCycleResult::Conflicts(_) => {
@@ -174,6 +215,23 @@ impl Shellumi {
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
                 let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                // Refresh encrypted vault directory if default vault key is available
+                if let Ok(dir) = store.build_vault_directory().await {
+                    if let Ok(default_vid) =
+                        shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                    {
+                        if let Ok(Some(key)) = shellumi_core::VaultKeyManager::retrieve_key(
+                            &*shellumi_core::default_credential_store(),
+                            &default_vid,
+                        ) {
+                            let mut wstore =
+                                HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                            let _ = wstore
+                                .save_vault_directory_from_model(&default_vid, &key, &dir)
+                                .await;
+                        }
+                    }
+                }
                 let local_vault = store
                     .export_vault(passphrase.expose_secret(), &device_id)
                     .await
@@ -191,15 +249,40 @@ impl Shellumi {
 
                 match cycle_result {
                     SyncCycleResult::AlreadySynchronized => Ok((None, 0)),
-                    SyncCycleResult::Success { merged_records, .. } => {
+                    SyncCycleResult::Success {
+                        merged_records,
+                        report,
+                    } => {
                         let mut write_store =
                             HostStore::open(&path).await.map_err(|e| e.to_string())?;
                         let mut merged_vault = SyncVault::new("cloud-vault", 0);
                         merged_vault.records = merged_records;
+                        merged_vault.encrypted_directory = report.encrypted_directory.clone();
                         let summary = write_store
                             .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
                             .map_err(|e| e.to_string())?;
+
+                        if let Some(enc_dir) = &report.encrypted_directory {
+                            if let Ok(default_vid) =
+                                shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                            {
+                                let default_key = shellumi_core::VaultKeyManager::retrieve_key(
+                                    &*shellumi_core::default_credential_store(),
+                                    &default_vid,
+                                )
+                                .ok()
+                                .flatten();
+                                let _ = write_store
+                                    .import_encrypted_vault_directory(
+                                        &default_vid,
+                                        default_key.as_ref(),
+                                        enc_dir,
+                                    )
+                                    .await;
+                            }
+                        }
+
                         let count = summary.hosts_imported
                             + summary.groups_imported
                             + summary.tunnels_imported

@@ -22,3 +22,4 @@ mod shell_integration_modal;
 mod snippet_modal;
 mod team_modal;
 mod tunnel_modal;
+mod unlock_vault_modal;

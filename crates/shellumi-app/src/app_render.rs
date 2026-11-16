@@ -108,6 +108,13 @@ impl Render for Shellumi {
             .on_action(cx.listener(|app, _: &NewHost, _, cx| {
                 app.edit_host(None, cx);
             }))
+            .on_action(cx.listener(|app, _: &OpenVaultInNewWindow, _, cx| {
+                app.open_vault_in_new_window(
+                    app.active_vault_id.clone(),
+                    app.active_vault.clone(),
+                    cx,
+                );
+            }))
             .on_action(cx.listener(|app, _: &ReconnectSession, window, cx| {
                 app.reconnect_active_session(window, cx);
             }))
@@ -1302,6 +1309,9 @@ impl Render for Shellumi {
                 }
                 if let Some(modal) = &self.create_vault_modal {
                     result = result.child(self.render_create_vault_modal(modal, cx));
+                }
+                if let Some(modal) = &self.unlock_vault_modal {
+                    result = result.child(self.render_unlock_vault_modal(modal, cx));
                 }
                 return result;
             }

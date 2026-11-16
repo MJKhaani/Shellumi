@@ -1099,6 +1099,9 @@ impl Shellumi {
         if let Some(modal) = &self.create_vault_modal {
             root = root.child(self.render_create_vault_modal(modal, cx));
         }
+        if let Some(modal) = &self.unlock_vault_modal {
+            root = root.child(self.render_unlock_vault_modal(modal, cx));
+        }
         if let Some(modal) = &self.invite_modal {
             root = root.child(self.render_invite_team_modal(modal, cx));
         }

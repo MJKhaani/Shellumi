@@ -85,6 +85,58 @@ impl Shellumi {
             );
         }
 
+        // 5. Vault multi-window and security actions
+        registry.register(
+            PaletteCommand::new(
+                "vault:open-new-window",
+                format!("Open Vault in New Window: {}", self.active_vault),
+                format!(
+                    "Spawn an independent window scoped to vault '{}'",
+                    self.active_vault
+                ),
+                PaletteCategory::Vault,
+                PaletteAction::OpenVaultInNewWindow {
+                    vault_id: self.active_vault_id.clone(),
+                    vault_name: self.active_vault.clone(),
+                },
+            )
+            .with_shortcut("Cmd+Shift+N"),
+        );
+
+        for v in &self.available_vaults {
+            if v.id != self.active_vault_id {
+                registry.register(PaletteCommand::new(
+                    format!("vault:open:{}", v.id),
+                    format!("Open Vault in New Window: {}", v.name),
+                    format!("Spawn an independent window scoped to vault '{}'", v.name),
+                    PaletteCategory::Vault,
+                    PaletteAction::OpenVaultInNewWindow {
+                        vault_id: v.id.clone(),
+                        vault_name: v.name.clone(),
+                    },
+                ));
+            }
+        }
+
+        registry.register(PaletteCommand::new(
+            "vault:lock-active",
+            format!("Lock Active Vault: {}", self.active_vault),
+            format!(
+                "Protect vault '{}' at rest and require recovery passphrase",
+                self.active_vault
+            ),
+            PaletteCategory::Vault,
+            PaletteAction::LockActiveVault,
+        ));
+
+        registry.register(PaletteCommand::new(
+            "vault:unlock",
+            "Unlock Vault…",
+            "Enter recovery passphrase to reconstruct vault key and unlock storage",
+            PaletteCategory::Vault,
+            PaletteAction::UnlockActiveVault,
+        ));
+
         let input =
             cx.new(|cx| TextInput::new(cx, "", "Type a command, host, snippet, or action…"));
         self.command_palette = Some(CommandPaletteState {
@@ -281,6 +333,20 @@ impl Shellumi {
             }
             PaletteAction::OpenSessionRecordings => {
                 self.open_session_replay_modal(cx);
+            }
+            PaletteAction::OpenVaultInNewWindow {
+                vault_id,
+                vault_name,
+            } => {
+                self.open_vault_in_new_window(vault_id, vault_name, cx);
+            }
+            PaletteAction::LockActiveVault => {
+                self.lock_active_vault(cx);
+            }
+            PaletteAction::UnlockActiveVault => {
+                let vid = self.active_vault_id.clone();
+                let vname = self.active_vault.clone();
+                self.open_unlock_vault_modal(vid, vname, cx);
             }
         }
     }

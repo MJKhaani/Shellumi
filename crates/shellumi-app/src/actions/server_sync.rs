@@ -12,6 +12,7 @@ pub(crate) struct VaultContextSummary {
     pub is_remote: bool,
     pub server_url: Option<String>,
     pub server_vault_id: Option<String>,
+    pub is_locked: bool,
 }
 
 impl Shellumi {
@@ -41,6 +42,11 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
 
+                let legacy_locked = store
+                    .is_vault_locked(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                    .await
+                    .unwrap_or(false);
+
                 let mut summaries = Vec::new();
                 summaries.push(VaultContextSummary {
                     id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
@@ -48,6 +54,7 @@ impl Shellumi {
                     is_remote: false,
                     server_url: None,
                     server_vault_id: None,
+                    is_locked: legacy_locked,
                 });
 
                 for (name, ctx) in contexts {
@@ -55,6 +62,7 @@ impl Shellumi {
                     if id == shellumi_storage::LEGACY_LOCAL_VAULT_ID {
                         continue;
                     }
+                    let is_locked = store.is_vault_locked(&id).await.unwrap_or(false);
                     match ctx.location() {
                         shellumi_core::VaultLocation::Local => {
                             summaries.push(VaultContextSummary {
@@ -63,6 +71,7 @@ impl Shellumi {
                                 is_remote: false,
                                 server_url: None,
                                 server_vault_id: None,
+                                is_locked,
                             });
                         }
                         shellumi_core::VaultLocation::Remote {
@@ -80,6 +89,7 @@ impl Shellumi {
                                 is_remote: true,
                                 server_url: srv_url,
                                 server_vault_id: Some(server_vault_id.as_str().to_string()),
+                                is_locked,
                             });
                         }
                     }
@@ -112,6 +122,19 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let is_locked = self
+            .available_vaults
+            .iter()
+            .find(|v| v.id == vault_id)
+            .map(|v| v.is_locked)
+            .unwrap_or(false);
+
+        if is_locked {
+            self.vault_dropdown_open = false;
+            self.open_unlock_vault_modal(vault_id, vault_name, cx);
+            return;
+        }
+
         self.active_vault_id = vault_id;
         self.active_vault = vault_name;
         self.vault_dropdown_open = false;

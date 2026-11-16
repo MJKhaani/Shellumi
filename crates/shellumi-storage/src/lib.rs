@@ -2272,6 +2272,129 @@ impl HostStore {
         }
     }
 
+    /// Constructs the unencrypted `VaultDirectory` representing all known vaults.
+    pub async fn build_vault_directory(
+        &self,
+    ) -> Result<shellumi_core::VaultDirectory, StorageError> {
+        let contexts = self.list_vault_contexts().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut dir = shellumi_core::VaultDirectory::new();
+        for (name, ctx) in contexts {
+            let location = match ctx.location() {
+                shellumi_core::VaultLocation::Local => shellumi_core::VaultDirectoryLocation::Local,
+                shellumi_core::VaultLocation::Remote {
+                    server,
+                    server_vault_id,
+                } => shellumi_core::VaultDirectoryLocation::Remote {
+                    server_connection_id: server.as_str().to_string(),
+                    server_vault_id: server_vault_id.as_str().to_string(),
+                },
+            };
+            let has_recovery = self
+                .get_vault_recovery_envelope(ctx.id().as_str())
+                .await?
+                .is_some();
+            dir.upsert(shellumi_core::VaultDirectoryEntry {
+                id: ctx.id().as_str().to_string(),
+                name,
+                location,
+                has_recovery_envelope: has_recovery,
+                created_at: now,
+                updated_at: now,
+            });
+        }
+        Ok(dir)
+    }
+
+    /// Encrypts and persists the vault directory under the default local vault's key.
+    pub async fn save_vault_directory_from_model(
+        &mut self,
+        default_vault_id: &shellumi_core::VaultId,
+        default_vault_key: &shellumi_core::VaultKey,
+        directory: &shellumi_core::VaultDirectory,
+    ) -> Result<String, StorageError> {
+        let envelope = directory
+            .encrypt(default_vault_id, default_vault_key)
+            .map_err(|e| {
+                StorageError::Serialization(format!("Failed to encrypt vault directory: {e}"))
+            })?;
+        let serialized = serde_json::to_string(&envelope).map_err(|e| {
+            StorageError::Serialization(format!(
+                "Failed to serialize vault directory envelope: {e}"
+            ))
+        })?;
+        self.save_encrypted_vault_directory("primary_directory", &serialized)
+            .await?;
+        Ok(serialized)
+    }
+
+    /// Imports and applies an encrypted vault directory envelope.
+    /// If default vault key is provided, decrypts and registers any newly discovered vaults.
+    pub async fn import_encrypted_vault_directory(
+        &mut self,
+        default_vault_id: &shellumi_core::VaultId,
+        default_vault_key: Option<&shellumi_core::VaultKey>,
+        envelope_json: &str,
+    ) -> Result<usize, StorageError> {
+        self.save_encrypted_vault_directory("primary_directory", envelope_json)
+            .await?;
+        let envelope: shellumi_core::sync::EncryptedEnvelope = serde_json::from_str(envelope_json)
+            .map_err(|e| {
+                StorageError::Serialization(format!("Corrupt vault directory envelope: {e}"))
+            })?;
+
+        let Some(key) = default_vault_key else {
+            return Ok(0);
+        };
+        let directory = shellumi_core::VaultDirectory::decrypt(default_vault_id, key, &envelope)
+            .map_err(|e| {
+                StorageError::Serialization(format!("Failed to decrypt vault directory: {e}"))
+            })?;
+
+        let existing = self.list_vault_contexts().await?;
+        let mut newly_registered = 0;
+        for entry in directory.entries {
+            if !existing
+                .iter()
+                .any(|(_, ctx)| ctx.id().as_str() == entry.id)
+            {
+                let Ok(vid) = shellumi_core::VaultId::new(&entry.id) else {
+                    continue;
+                };
+                let loc = match entry.location {
+                    shellumi_core::VaultDirectoryLocation::Local => {
+                        shellumi_core::VaultLocation::Local
+                    }
+                    shellumi_core::VaultDirectoryLocation::Remote {
+                        server_connection_id,
+                        server_vault_id,
+                    } => {
+                        let Ok(srv_conn) =
+                            shellumi_core::ServerConnectionId::new(&server_connection_id)
+                        else {
+                            continue;
+                        };
+                        let _ = self.register_vault_server(&srv_conn).await;
+                        let Ok(srv_vid) = shellumi_core::VaultId::new(&server_vault_id) else {
+                            continue;
+                        };
+                        shellumi_core::VaultLocation::Remote {
+                            server: srv_conn,
+                            server_vault_id: srv_vid,
+                        }
+                    }
+                };
+                let ctx = shellumi_core::VaultContext::new(vid, loc);
+                self.register_vault_context(&entry.name, &ctx).await?;
+                newly_registered += 1;
+            }
+        }
+        Ok(newly_registered)
+    }
+
     /// Copies a host from its source vault to target vault according to the specified policy.
     pub async fn copy_host_across_vaults(
         &mut self,
@@ -4741,6 +4864,16 @@ impl HostStore {
             .as_secs();
         let mut vault = shellumi_core::SyncVault::new(format!("vault-{device_id}-{now}"), now);
 
+        // Include encrypted directory describing other vaults during default-vault sync
+        if self.vault_id().as_str() == LEGACY_LOCAL_VAULT_ID {
+            if let Ok(Some(enc_dir)) = self
+                .get_encrypted_vault_directory("primary_directory")
+                .await
+            {
+                vault.encrypted_directory = Some(enc_dir);
+            }
+        }
+
         // Export identities
         let identities = self.list_identities().await?;
         for ident in identities {
@@ -4982,6 +5115,13 @@ impl HostStore {
         vault: &shellumi_core::SyncVault,
     ) -> Result<ImportVaultSummary, StorageError> {
         let mut summary = ImportVaultSummary::default();
+
+        // Restore encrypted vault directory envelope if present in sync payload
+        if let Some(enc_dir) = &vault.encrypted_directory {
+            let _ = self
+                .save_encrypted_vault_directory("primary_directory", enc_dir)
+                .await;
+        }
 
         for record in &vault.records {
             if record.deleted {
@@ -8393,5 +8533,80 @@ mod tests {
         assert!(store.get_workspace(ws_id).await.unwrap().is_none());
         store.set_vault_id(v_dst.clone());
         assert!(store.get_workspace(moved_ws_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_vault_directory_sync_and_cross_device_import() {
+        use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultKey, VaultLocation};
+
+        let mut store_a = HostStore::open(":memory:").await.unwrap();
+        let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        let default_key = VaultKey::generate().unwrap();
+
+        // Register a secondary local vault and a remote server vault in store_a
+        let secondary_vid = VaultId::new("work-vault").unwrap();
+        let secondary_ctx = VaultContext::new(secondary_vid.clone(), VaultLocation::Local);
+        store_a
+            .register_vault_context("Work Vault", &secondary_ctx)
+            .await
+            .unwrap();
+
+        let srv_conn_id = ServerConnectionId::new("srv-corp").unwrap();
+        store_a.register_vault_server(&srv_conn_id).await.unwrap();
+        let remote_vid = VaultId::new("corp-remote-123").unwrap();
+        let remote_vid_obj = VaultId::new("corp-vault").unwrap();
+        let remote_ctx = VaultContext::new(
+            remote_vid_obj.clone(),
+            VaultLocation::Remote {
+                server: srv_conn_id,
+                server_vault_id: remote_vid,
+            },
+        );
+        store_a
+            .register_vault_context("Corp Vault", &remote_ctx)
+            .await
+            .unwrap();
+
+        // Build vault directory and save it encrypted
+        let dir = store_a.build_vault_directory().await.unwrap();
+        assert_eq!(dir.entries.len(), 3);
+        assert!(dir.get(LEGACY_LOCAL_VAULT_ID).is_some());
+        assert!(dir.get("work-vault").is_some());
+        assert!(dir.get("corp-vault").is_some());
+
+        let envelope_json = store_a
+            .save_vault_directory_from_model(&default_vid, &default_key, &dir)
+            .await
+            .unwrap();
+
+        // Verify export_vault attaches the encrypted directory
+        store_a.set_vault_id(default_vid.clone());
+        let exported = store_a
+            .export_vault("test-passphrase-1234", "device-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            exported.encrypted_directory.as_deref(),
+            Some(envelope_json.as_str())
+        );
+
+        // In a fresh store_b (representing a second user device), import the encrypted vault directory
+        let mut store_b = HostStore::open(":memory:").await.unwrap();
+        assert_eq!(store_b.list_vault_contexts().await.unwrap().len(), 1);
+
+        let newly_registered = store_b
+            .import_encrypted_vault_directory(&default_vid, Some(&default_key), &envelope_json)
+            .await
+            .unwrap();
+        assert_eq!(newly_registered, 2);
+
+        let b_contexts = store_b.list_vault_contexts().await.unwrap();
+        assert_eq!(b_contexts.len(), 3);
+        assert!(b_contexts
+            .iter()
+            .any(|(name, ctx)| name == "Work Vault" && ctx.id().as_str() == "work-vault"));
+        assert!(b_contexts
+            .iter()
+            .any(|(name, ctx)| name == "Corp Vault" && ctx.id().as_str() == "corp-vault"));
     }
 }

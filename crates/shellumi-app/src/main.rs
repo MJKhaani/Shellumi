@@ -122,6 +122,7 @@ actions!(
         ZoomWindow,
         BringAllToFront,
         OpenShortcutsHelp,
+        OpenVaultInNewWindow,
     ]
 );
 
@@ -453,6 +454,14 @@ pub(crate) struct CreateVaultModalState {
     pub(crate) is_submitting: bool,
 }
 
+pub(crate) struct UnlockVaultModalState {
+    pub(crate) vault_id: String,
+    pub(crate) vault_name: String,
+    pub(crate) passphrase_input: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) is_submitting: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MobileViewportPreset {
     IPhone15Pro,
@@ -620,6 +629,7 @@ struct Shellumi {
     session_replay_modal: Option<SessionReplayModalState>,
     tunnel_modal: Option<TunnelModalState>,
     create_vault_modal: Option<CreateVaultModalState>,
+    unlock_vault_modal: Option<UnlockVaultModalState>,
     sidebar_visible: bool,
     sidebar_collapsed: bool,
     vault_dropdown_open: bool,
@@ -956,6 +966,22 @@ fn key_bytes(key: &gpui::Keystroke) -> Option<Vec<u8>> {
 
 impl Shellumi {
     fn new(database: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_vault(
+            database,
+            shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+            "Personal".to_string(),
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn new_with_vault(
+        database: Option<String>,
+        vault_id: String,
+        vault_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let search_input =
@@ -1004,17 +1030,19 @@ impl Shellumi {
             session_replay_modal: None,
             tunnel_modal: None,
             create_vault_modal: None,
+            unlock_vault_modal: None,
             sidebar_visible: true,
             sidebar_collapsed: false,
             vault_dropdown_open: false,
-            active_vault: "Personal".to_string(),
-            active_vault_id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+            active_vault: vault_name.clone(),
+            active_vault_id: vault_id.clone(),
             available_vaults: vec![actions::VaultContextSummary {
-                id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
-                name: "Personal".to_string(),
+                id: vault_id,
+                name: vault_name,
                 is_remote: false,
                 server_url: None,
                 server_vault_id: None,
+                is_locked: false,
             }],
             sftp_left_pane: {
                 let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".into());
@@ -1041,6 +1069,39 @@ impl Shellumi {
             sftp_context_menu: None,
             sftp_modal: None,
         }
+    }
+
+    /// Opens an independent application window bound to the specified vault context.
+    pub(crate) fn open_vault_in_new_window(
+        &mut self,
+        vault_id: String,
+        vault_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let database = self.database.clone();
+        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+        let title = format!("Shellumi — {vault_name}");
+        let _ = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(940.0), px(650.0))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(title.into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(14.0), px(14.0))),
+                }),
+                ..Default::default()
+            },
+            |window, cx| {
+                let view = cx
+                    .new(|cx| Shellumi::new_with_vault(database, vault_id, vault_name, window, cx));
+                view.update(cx, |app, cx| {
+                    app.start_storage(false, cx);
+                });
+                view
+            },
+        );
+        cx.activate(true);
     }
 
     // --- Group Inspector, Identity, Sorting, and Invite Handlers ---
@@ -2334,8 +2395,11 @@ impl Shellumi {
 
                     for v in local_vaults {
                         let is_active = v.id == self.active_vault_id;
+                        let is_locked = v.is_locked;
                         let v_id = v.id.clone();
                         let v_name = v.name.clone();
+                        let v_id_win = v.id.clone();
+                        let v_name_win = v.name.clone();
                         menu = menu.child(
                             div()
                                 .id(gpui::SharedString::from(format!("vault-opt-{}", v.id)))
@@ -2362,10 +2426,51 @@ impl Shellumi {
                                         .flex()
                                         .items_center()
                                         .gap_1p5()
-                                        .child("💻")
-                                        .child(v.name),
+                                        .child(if is_locked { "🔒" } else { "💻" })
+                                        .child(v.name)
+                                        .children(if is_locked {
+                                            Some(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                                    .child("(Locked)"),
+                                            )
+                                        } else {
+                                            None
+                                        }),
                                 )
-                                .child(if is_active { "✓" } else { "" }),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .id(gpui::SharedString::from(format!(
+                                                    "vault-win-{}",
+                                                    v.id
+                                                )))
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_md()
+                                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                                .hover(|s| {
+                                                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                })
+                                                .on_click(cx.listener(move |app, _, _, cx| {
+                                                    app.vault_dropdown_open = false;
+                                                    app.open_vault_in_new_window(
+                                                        v_id_win.clone(),
+                                                        v_name_win.clone(),
+                                                        cx,
+                                                    );
+                                                    cx.stop_propagation();
+                                                }))
+                                                .child("🗗"),
+                                        )
+                                        .child(if is_active { "✓" } else { "" }),
+                                ),
                         );
                     }
 
@@ -2384,8 +2489,11 @@ impl Shellumi {
 
                         for v in remote_vaults {
                             let is_active = v.id == self.active_vault_id;
+                            let is_locked = v.is_locked;
                             let v_id = v.id.clone();
                             let v_name = v.name.clone();
+                            let v_id_win = v.id.clone();
+                            let v_name_win = v.name.clone();
                             let url_hint = v.server_url.clone().unwrap_or_default();
                             menu = menu.child(
                                 div()
@@ -2418,8 +2526,24 @@ impl Shellumi {
                                                     .flex()
                                                     .items_center()
                                                     .gap_1p5()
-                                                    .child("☁️")
-                                                    .child(v.name),
+                                                    .child(if is_locked {
+                                                        "🔒"
+                                                    } else {
+                                                        "☁️"
+                                                    })
+                                                    .child(v.name)
+                                                    .children(if is_locked {
+                                                        Some(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(
+                                                                    MacTheme::TEXT_TERTIARY,
+                                                                ))
+                                                                .child("(Locked)"),
+                                                        )
+                                                    } else {
+                                                        None
+                                                    }),
                                             )
                                             .child(
                                                 div()
@@ -2428,12 +2552,79 @@ impl Shellumi {
                                                     .child(url_hint),
                                             ),
                                     )
-                                    .child(if is_active { "✓" } else { "" }),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .id(gpui::SharedString::from(format!(
+                                                        "vault-win-{}",
+                                                        v.id
+                                                    )))
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_md()
+                                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                                    .hover(|s| {
+                                                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                    })
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        app.vault_dropdown_open = false;
+                                                        app.open_vault_in_new_window(
+                                                            v_id_win.clone(),
+                                                            v_name_win.clone(),
+                                                            cx,
+                                                        );
+                                                        cx.stop_propagation();
+                                                    }))
+                                                    .child("🗗"),
+                                            )
+                                            .child(if is_active { "✓" } else { "" }),
+                                    ),
                             );
                         }
                     }
 
                     menu.child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)).my_1())
+                        .child(
+                            div()
+                                .id("vault-opt-new-window")
+                                .px_2p5()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.vault_dropdown_open = false;
+                                    app.open_vault_in_new_window(
+                                        app.active_vault_id.clone(),
+                                        app.active_vault.clone(),
+                                        cx,
+                                    );
+                                }))
+                                .child("🗗 Open in New Window (Cmd+Shift+N)"),
+                        )
+                        .child(
+                            div()
+                                .id("vault-opt-lock")
+                                .px_2p5()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.vault_dropdown_open = false;
+                                    app.lock_active_vault(cx);
+                                }))
+                                .child("🔒 Lock Active Vault"),
+                        )
                         .child(
                             div()
                                 .id("vault-opt-create")
@@ -2604,6 +2795,7 @@ fn main() {
             KeyBinding::new("cmd-shift-u", GoToSftp, None),
             KeyBinding::new("cmd-shift-y", GoToKeychain, None),
             KeyBinding::new("cmd-shift-p", GoToPortForwarding, None),
+            KeyBinding::new("cmd-shift-n", OpenVaultInNewWindow, None),
         ]);
 
         #[cfg(not(target_os = "macos"))]
@@ -2652,6 +2844,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-u", GoToSftp, None),
             KeyBinding::new("ctrl-shift-y", GoToKeychain, None),
             KeyBinding::new("ctrl-shift-p", GoToPortForwarding, None),
+            KeyBinding::new("ctrl-shift-n", OpenVaultInNewWindow, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(

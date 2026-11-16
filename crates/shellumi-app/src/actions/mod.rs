@@ -24,6 +24,7 @@ mod terminal;
 mod terminal_input;
 mod tunnels;
 mod vault_creation;
+mod vault_lock;
 mod workspaces;
 
 pub(crate) use server_sync::VaultContextSummary;

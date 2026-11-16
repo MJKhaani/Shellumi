@@ -419,6 +419,8 @@ pub struct SyncVault {
     pub created_at: u64,
     pub updated_at: u64,
     pub records: Vec<SyncRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_directory: Option<String>,
 }
 
 impl SyncVault {
@@ -429,6 +431,7 @@ impl SyncVault {
             created_at,
             updated_at: created_at,
             records: Vec::new(),
+            encrypted_directory: None,
         }
     }
 
@@ -1679,6 +1682,8 @@ pub struct SyncExecutionReport {
     pub conflicts_resolved: usize,
     pub duration_ms: u64,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_directory: Option<String>,
 }
 
 /// Result of evaluating or executing an end-to-end sync cycle.
@@ -1806,6 +1811,7 @@ pub fn execute_sync_cycle(
         message: format!(
             "Sync complete: {local_applied} local updated, {remote_uploaded} remote updated, {conflict_idx} conflicts resolved"
         ),
+        encrypted_directory: None,
     };
 
     SyncCycleResult::Success {
@@ -1974,12 +1980,16 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
                         "Initial cloud vault uploaded with {} records",
                         local_vault.records.len()
                     ),
+                    encrypted_directory: local_vault.encrypted_directory.clone(),
                 },
                 merged_records: local_vault.records.clone(),
             })
         }
         SyncPlan::DownloadInitial { .. } => {
             let records = remote_records.to_vec();
+            let remote_dir = remote_vault
+                .as_ref()
+                .and_then(|v| v.encrypted_directory.clone());
             Ok(SyncCycleResult::Success {
                 report: SyncExecutionReport {
                     local_updated: records.len(),
@@ -1990,6 +2000,7 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
                         "Initial cloud vault downloaded with {} records",
                         records.len()
                     ),
+                    encrypted_directory: remote_dir,
                 },
                 merged_records: records,
             })
@@ -1998,20 +2009,28 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
         SyncPlan::ApplyRemoteUpdates { .. }
         | SyncPlan::UploadLocalUpdates { .. }
         | SyncPlan::ConflictDetected { .. } => {
-            let sync_res = execute_sync_cycle(
+            let mut sync_res = execute_sync_cycle(
                 &local_vault.records,
                 remote_records,
                 passphrase,
                 resolutions,
             );
             if let SyncCycleResult::Success {
-                ref report,
+                ref mut report,
                 ref merged_records,
             } = sync_res
             {
+                let synced_directory = local_vault.encrypted_directory.clone().or_else(|| {
+                    remote_vault
+                        .as_ref()
+                        .and_then(|v| v.encrypted_directory.clone())
+                });
+                report.encrypted_directory = synced_directory.clone();
+
                 if report.remote_updated > 0 {
                     let mut updated_vault = local_vault.clone();
                     updated_vault.records = merged_records.clone();
+                    updated_vault.encrypted_directory = synced_directory;
                     updated_vault.updated_at = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()

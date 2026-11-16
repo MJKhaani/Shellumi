@@ -1750,10 +1750,10 @@ fn verifies_keyboard_shortcut_actions_and_keystroke_parsing() {
     use super::{
         ClosePane, CloseTab, FindInTerminal, FocusNextPane, FocusPrevPane, GoToHosts, GoToKeychain,
         GoToOverview, GoToPortForwarding, GoToSftp, GoToWorkspaces, NewHost, NewTab, NextTab,
-        OpenLocalTerminal, OpenSettings, PrevTab, QuickConnect, ReconnectSession, RefreshHosts,
-        ResetZoom, SelectTab1, SelectTab9, SplitHorizontal, SplitVertical, ToggleBroadcast,
-        ToggleCommandPalette, ToggleFocusMode, ToggleSidebar, ToggleSidebarCollapse,
-        ToggleSnippets, ZoomIn, ZoomOut,
+        OpenLocalTerminal, OpenSettings, OpenVaultInNewWindow, PrevTab, QuickConnect,
+        ReconnectSession, RefreshHosts, ResetZoom, SelectTab1, SelectTab9, SplitHorizontal,
+        SplitVertical, ToggleBroadcast, ToggleCommandPalette, ToggleFocusMode, ToggleSidebar,
+        ToggleSidebarCollapse, ToggleSnippets, ZoomIn, ZoomOut,
     };
 
     // Ensure all actions are constructible
@@ -1790,6 +1790,7 @@ fn verifies_keyboard_shortcut_actions_and_keystroke_parsing() {
     let _ = OpenSettings;
     let _ = RefreshHosts;
     let _ = ToggleCommandPalette;
+    let _ = OpenVaultInNewWindow;
 
     // Test Keystroke matching logic
     let cmd_t = Keystroke {
@@ -2222,4 +2223,184 @@ fn test_remote_desktop_microphone_redirection_state_and_events() {
     } else {
         panic!("Expected SetMicrophoneVolume command");
     }
+}
+
+#[test]
+fn test_multi_window_vault_binding_and_context_isolation() {
+    let default_vid = shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string();
+    let corp_vid = "corp-vault-99".to_string();
+
+    let summary_local = crate::actions::VaultContextSummary {
+        id: default_vid.clone(),
+        name: "Personal".to_string(),
+        is_remote: false,
+        server_url: None,
+        server_vault_id: None,
+        is_locked: false,
+    };
+
+    let summary_remote = crate::actions::VaultContextSummary {
+        id: corp_vid.clone(),
+        name: "Corporate Ops".to_string(),
+        is_remote: true,
+        server_url: Some("https://shellumi.internal:8443".to_string()),
+        server_vault_id: Some("srv-corp-123".to_string()),
+        is_locked: false,
+    };
+
+    let title_1 = format!("Shellumi — {}", summary_local.name);
+    let title_2 = format!("Shellumi — {}", summary_remote.name);
+    assert_eq!(title_1, "Shellumi — Personal");
+    assert_eq!(title_2, "Shellumi — Corporate Ops");
+
+    assert!(!summary_local.is_remote);
+    assert!(summary_remote.is_remote);
+    assert_eq!(
+        summary_remote.server_url.as_deref(),
+        Some("https://shellumi.internal:8443")
+    );
+
+    let action = crate::OpenVaultInNewWindow;
+    let _ = format!("{action:?}");
+}
+
+#[tokio::test]
+async fn test_vault_lock_and_unlock_recovery_roundtrip() {
+    use shellumi_core::{VaultId, VaultKey, VaultKeyManager};
+    use shellumi_storage::HostStore;
+
+    let mut store = HostStore::open(":memory:").await.unwrap();
+    let vid = VaultId::new("finance-vault").unwrap();
+    let key = VaultKey::generate().unwrap();
+    let passphrase = "finance-recovery-passphrase-2026";
+
+    // 0. Register the vault context in storage
+    let ctx = shellumi_core::VaultContext::new(vid.clone(), shellumi_core::VaultLocation::Local);
+    store
+        .register_vault_context("Finance Vault", &ctx)
+        .await
+        .unwrap();
+
+    // 1. Wrap key into recovery envelope
+    let envelope = key.wrap_recovery(&vid, passphrase).unwrap();
+    let envelope_json = serde_json::to_string(&envelope).unwrap();
+
+    // 2. Persist recovery envelope and mark vault locked
+    store
+        .save_vault_recovery_envelope("finance-vault", &envelope_json)
+        .await
+        .unwrap();
+    store.set_vault_locked("finance-vault", true).await.unwrap();
+    assert!(store.is_vault_locked("finance-vault").await.unwrap());
+
+    // 3. Reconstruct envelope and recover key
+    let retrieved_str = store
+        .get_vault_recovery_envelope("finance-vault")
+        .await
+        .unwrap()
+        .unwrap();
+    let retrieved_env: shellumi_core::sync::EncryptedEnvelope =
+        serde_json::from_str(&retrieved_str).unwrap();
+
+    // Rejects invalid/short passphrases
+    assert!(VaultKey::recover(&vid, "short", &retrieved_env).is_err());
+    assert!(VaultKey::recover(&vid, "wrong-passphrase-here-1234", &retrieved_env).is_err());
+
+    // Succeeds with correct passphrase
+    let recovered_key = VaultKey::recover(&vid, passphrase, &retrieved_env).unwrap();
+    assert_eq!(recovered_key.expose_bytes(), key.expose_bytes());
+
+    // Provision into credential store and unlock in database
+    let cred_store = shellumi_core::EphemeralCredentialStore::default();
+    VaultKeyManager::provision_key(&cred_store, &vid, &recovered_key).unwrap();
+    store
+        .set_vault_locked("finance-vault", false)
+        .await
+        .unwrap();
+    assert!(!store.is_vault_locked("finance-vault").await.unwrap());
+
+    // Verify key retrieved from credential store matches
+    let retrieved_key = VaultKeyManager::retrieve_key(&cred_store, &vid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retrieved_key.expose_bytes(), key.expose_bytes());
+}
+
+#[test]
+fn test_client_side_directory_sync_envelope_and_palette_commands() {
+    use shellumi_core::{
+        PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, SyncExecutionReport,
+        SyncVault, VaultDirectory, VaultDirectoryEntry, VaultDirectoryLocation, VaultId, VaultKey,
+    };
+
+    let default_vid = VaultId::new("legacy-local").unwrap();
+    let default_key = VaultKey::generate().unwrap();
+
+    let mut dir = VaultDirectory::new();
+    dir.upsert(VaultDirectoryEntry {
+        id: "legacy-local".to_string(),
+        name: "Personal".to_string(),
+        location: VaultDirectoryLocation::Local,
+        has_recovery_envelope: false,
+        created_at: 1000,
+        updated_at: 1000,
+    });
+    dir.upsert(VaultDirectoryEntry {
+        id: "remote-corp".to_string(),
+        name: "Corporate".to_string(),
+        location: VaultDirectoryLocation::Remote {
+            server_connection_id: "conn-1".to_string(),
+            server_vault_id: "corp-srv-vault".to_string(),
+        },
+        has_recovery_envelope: true,
+        created_at: 1000,
+        updated_at: 1000,
+    });
+
+    let envelope = dir.encrypt(&default_vid, &default_key).unwrap();
+    let envelope_json = serde_json::to_string(&envelope).unwrap();
+
+    // Verify SyncVault attaches encrypted directory
+    let mut sync_vault = SyncVault::new("test-vault", 1000);
+    sync_vault.encrypted_directory = Some(envelope_json.clone());
+    let json = sync_vault.to_json().unwrap();
+    let restored_vault = SyncVault::from_json(&json).unwrap();
+    assert_eq!(restored_vault.encrypted_directory, Some(envelope_json));
+
+    // Verify SyncExecutionReport attaches encrypted directory
+    let report = SyncExecutionReport {
+        local_updated: 5,
+        remote_updated: 2,
+        conflicts_resolved: 0,
+        duration_ms: 15,
+        message: "Sync OK".to_string(),
+        encrypted_directory: restored_vault.encrypted_directory,
+    };
+    assert!(report.encrypted_directory.is_some());
+
+    // Verify Palette commands
+    let mut reg = PaletteRegistry::new();
+    reg.register(PaletteCommand::new(
+        "vault:open-new-window",
+        "Open Vault in New Window: Personal",
+        "Spawn an independent window",
+        PaletteCategory::Vault,
+        PaletteAction::OpenVaultInNewWindow {
+            vault_id: "legacy-local".to_string(),
+            vault_name: "Personal".to_string(),
+        },
+    ));
+    reg.register(PaletteCommand::new(
+        "vault:lock-active",
+        "Lock Active Vault",
+        "Protect vault",
+        PaletteCategory::Vault,
+        PaletteAction::LockActiveVault,
+    ));
+
+    let matches = reg.search("Vault");
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].command.category, PaletteCategory::Vault);
+    assert_eq!(PaletteCategory::Vault.badge_icon(), "🔒");
+    assert_eq!(PaletteCategory::Vault.as_str(), "Vault");
 }

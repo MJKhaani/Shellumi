@@ -1154,6 +1154,13 @@ impl Shellumi {
             .relative()
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &RefreshHosts, _, cx| app.load_hosts(cx)))
+            .on_action(cx.listener(|app, _: &OpenVaultInNewWindow, _, cx| {
+                app.open_vault_in_new_window(
+                    app.active_vault_id.clone(),
+                    app.active_vault.clone(),
+                    cx,
+                );
+            }))
             .on_action(cx.listener(|app, _: &ToggleCommandPalette, window, cx| {
                 app.toggle_command_palette(window, cx)
             }))
@@ -1240,6 +1247,9 @@ impl Shellumi {
         }
         if let Some(modal) = &self.create_vault_modal {
             result = result.child(self.render_create_vault_modal(modal, cx));
+        }
+        if let Some(modal) = &self.unlock_vault_modal {
+            result = result.child(self.render_unlock_vault_modal(modal, cx));
         }
         if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
             result = result.child(dropdown);
