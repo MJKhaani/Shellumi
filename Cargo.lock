@@ -7375,6 +7375,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vte",
+ "which 6.0.3",
 ]
 
 [[package]]

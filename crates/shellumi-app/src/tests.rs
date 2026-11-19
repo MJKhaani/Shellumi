@@ -2406,3 +2406,41 @@ fn test_client_side_directory_sync_envelope_and_palette_commands() {
     assert_eq!(PaletteCategory::Vault.badge_icon(), "🔒");
     assert_eq!(PaletteCategory::Vault.as_str(), "Vault");
 }
+
+#[test]
+fn verifies_resolve_icon_path_finds_or_extracts_icons() {
+    for name in [
+        "terminal",
+        "hosts",
+        "sftp",
+        "serial",
+        "settings",
+        "vaults",
+        "search",
+        "connect",
+        "shellumi_logo",
+        "os_windows",
+        "os_ubuntu",
+    ] {
+        let regular = crate::resolve_icon_path(name, false, 48);
+        assert!(
+            regular.is_some(),
+            "Expected regular icon '{name}' to resolve"
+        );
+        let regular_path = regular.unwrap();
+        assert!(
+            regular_path.exists(),
+            "Expected regular icon file '{name}' to exist at {:?}",
+            regular_path
+        );
+
+        let hover = crate::resolve_icon_path(name, true, 48);
+        assert!(hover.is_some(), "Expected hover icon '{name}' to resolve");
+        let hover_path = hover.unwrap();
+        assert!(
+            hover_path.exists(),
+            "Expected hover icon file '{name}' to exist at {:?}",
+            hover_path
+        );
+    }
+}

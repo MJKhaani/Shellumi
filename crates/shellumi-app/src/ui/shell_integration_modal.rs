@@ -178,7 +178,7 @@ impl Shellumi {
                     .child(
                         div()
                             .text_xs()
-                            .font_family(".AppleSystemUIFontMonospaced")
+                            .font_family(crate::MONOSPACE_FONT)
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(hook_code),
                     );
@@ -217,7 +217,7 @@ impl Shellumi {
                             .py_1()
                             .rounded_sm()
                             .bg(rgb(MacTheme::CONTENT_BG))
-                            .font_family(".AppleSystemUIFontMonospaced")
+                            .font_family(crate::MONOSPACE_FONT)
                             .text_color(rgb(MacTheme::ACCENT_BLUE))
                             .child(install_cmd),
                     );
@@ -321,7 +321,7 @@ impl Shellumi {
                     .child(
                         div()
                             .text_xs()
-                            .font_family(".AppleSystemUIFontMonospaced")
+                            .font_family(crate::MONOSPACE_FONT)
                             .text_color(rgb(MacTheme::TEXT_SECONDARY))
                             .child(active_tab_info),
                     );
@@ -431,7 +431,7 @@ impl Shellumi {
                     .child(
                         div()
                             .text_xs()
-                            .font_family(".AppleSystemUIFontMonospaced")
+                            .font_family(crate::MONOSPACE_FONT)
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(modal.test_prompt_input.clone()),
                     )
@@ -560,7 +560,7 @@ impl Shellumi {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .font_family(".AppleSystemUIFontMonospaced")
+                                            .font_family(crate::MONOSPACE_FONT)
                                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                             .child(item.display_label.clone()),
                                     ),

@@ -107,11 +107,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          mkdir -p dist
+          mkdir -p dist/windows-bundle/resources
+          cp "target/${{ matrix.target }}/release/shellumi-app.exe" "dist/windows-bundle/shellumi-app.exe"
+          cp "target/${{ matrix.target }}/release/shellumi-cli.exe" "dist/windows-bundle/shellumi-cli.exe"
+          cp -r resources/icon_pack "dist/windows-bundle/resources/"
+          if [ -f resources/shellumi.ico ]; then
+            cp resources/shellumi.ico "dist/windows-bundle/resources/"
+          fi
+          cd dist/windows-bundle
+          7z a "../shellumi-${SHELLUMI_VERSION}-windows-${{ matrix.arch }}.zip" *
+          cd ../..
           cp "target/${{ matrix.target }}/release/shellumi-app.exe" "dist/shellumi-app-windows-${{ matrix.arch }}.exe"
           cp "target/${{ matrix.target }}/release/shellumi-cli.exe" "dist/shellumi-cli-windows-${{ matrix.arch }}.exe"
-          cd dist
-          7z a "shellumi-${SHELLUMI_VERSION}-windows-${{ matrix.arch }}.zip" "shellumi-app-windows-${{ matrix.arch }}.exe" "shellumi-cli-windows-${{ matrix.arch }}.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: assets-${{ matrix.os_name }}-${{ matrix.arch }}

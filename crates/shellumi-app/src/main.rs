@@ -4,6 +4,7 @@ mod askpass;
 mod connection;
 mod data_path;
 mod desktop;
+mod embedded_icons;
 mod hosts_view;
 mod session;
 mod sftp_transfer;
@@ -55,11 +56,11 @@ use shellumi_terminal::{Color, SearchBuffer, SearchMatch, StyledSpan, Terminal, 
 use text_input::TextInput;
 
 #[cfg(target_os = "macos")]
-const MONOSPACE_FONT: &str = "Menlo";
+pub(crate) const MONOSPACE_FONT: &str = "Menlo";
 #[cfg(target_os = "windows")]
-const MONOSPACE_FONT: &str = "Consolas";
+pub(crate) const MONOSPACE_FONT: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
+pub(crate) const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
 
 actions!(
     shellumi,
@@ -1191,40 +1192,61 @@ pub(crate) fn resolve_icon_path(
     };
     let filename = format!("{name}.png");
 
+    // 1. Check relative to current executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            let bundle_path = parent
-                .join("../Resources/icon_pack/icons")
-                .join(size_folder)
-                .join(state)
-                .join(&filename);
-            if bundle_path.exists() {
-                return Some(bundle_path);
-            }
-            let bundle_alt = parent
-                .join("../Resources/icon_pack/icons")
-                .join(size_folder)
-                .join(alt_state)
-                .join(&filename);
-            if bundle_alt.exists() {
-                return Some(bundle_alt);
+            let candidate_dirs = [
+                parent.join("../Resources/icon_pack/icons"),
+                parent.join("resources/icon_pack/icons"),
+                parent.join("icon_pack/icons"),
+                parent.join("../resources/icon_pack/icons"),
+                parent.join("../../resources/icon_pack/icons"),
+            ];
+            for dir in &candidate_dirs {
+                let candidate = dir.join(size_folder).join(state).join(&filename);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                let candidate_alt = dir.join(size_folder).join(alt_state).join(&filename);
+                if candidate_alt.exists() {
+                    return Some(candidate_alt);
+                }
             }
         }
     }
-    let local = std::path::PathBuf::from("resources/icon_pack/icons")
-        .join(size_folder)
-        .join(state)
-        .join(&filename);
-    if local.exists() {
-        return Some(local);
+
+    // 2. Check relative to current working directory
+    let local_dirs = [
+        std::path::PathBuf::from("resources/icon_pack/icons"),
+        std::path::PathBuf::from("icon_pack/icons"),
+    ];
+    for dir in &local_dirs {
+        let local = dir.join(size_folder).join(state).join(&filename);
+        if local.exists() {
+            return Some(local);
+        }
+        let local_alt = dir.join(size_folder).join(alt_state).join(&filename);
+        if local_alt.exists() {
+            return Some(local_alt);
+        }
     }
-    let local_alt = std::path::PathBuf::from("resources/icon_pack/icons")
-        .join(size_folder)
-        .join(alt_state)
-        .join(&filename);
-    if local_alt.exists() {
-        return Some(local_alt);
+
+    // 3. Embedded fallback: ensures 100% icon availability even on standalone binary distributions
+    if let Some(bytes) = embedded_icons::get_embedded_icon(name, is_active) {
+        let cache_dir = std::env::temp_dir()
+            .join("shellumi-icons-cache")
+            .join(size_folder)
+            .join(state);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let cache_file = cache_dir.join(&filename);
+        if !cache_file.exists() {
+            let _ = std::fs::write(&cache_file, bytes);
+        }
+        if cache_file.exists() {
+            return Some(cache_file);
+        }
     }
+
     None
 }
 

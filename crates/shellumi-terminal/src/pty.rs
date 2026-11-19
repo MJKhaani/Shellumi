@@ -79,6 +79,68 @@ impl TerminalCommand {
     }
 }
 
+/// Resolves the executable path across platforms, appending `.exe` and checking PATH and standard system locations on Windows.
+pub fn resolve_command_program(program: &str) -> String {
+    #[cfg(windows)]
+    {
+        let path = Path::new(program);
+        if path.is_file() {
+            return program.to_string();
+        }
+
+        let with_exe = if path.extension().is_none() {
+            format!("{program}.exe")
+        } else {
+            program.to_string()
+        };
+
+        if Path::new(&with_exe).is_file() {
+            return with_exe;
+        }
+
+        if let Ok(resolved) = which::which(program) {
+            return resolved.to_string_lossy().to_string();
+        }
+        if let Ok(resolved) = which::which(&with_exe) {
+            return resolved.to_string_lossy().to_string();
+        }
+
+        let sysroot = std::env::var("SystemRoot")
+            .or_else(|_| std::env::var("windir"))
+            .unwrap_or_else(|_| "C:\\Windows".to_string());
+
+        let sys32_openssh = Path::new(&sysroot)
+            .join("System32")
+            .join("OpenSSH")
+            .join(&with_exe);
+        if sys32_openssh.is_file() {
+            return sys32_openssh.to_string_lossy().to_string();
+        }
+
+        let sys32 = Path::new(&sysroot).join("System32").join(&with_exe);
+        if sys32.is_file() {
+            return sys32.to_string_lossy().to_string();
+        }
+
+        let prog_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let git_ssh = Path::new(&prog_files)
+            .join("Git")
+            .join("usr")
+            .join("bin")
+            .join(&with_exe);
+        if git_ssh.is_file() {
+            return git_ssh.to_string_lossy().to_string();
+        }
+
+        with_exe
+    }
+    #[cfg(not(windows))]
+    {
+        program.to_string()
+    }
+}
+
 /// A running pseudo-terminal session.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -101,7 +163,8 @@ impl PtySession {
             .openpty(size)
             .map_err(|e| io::Error::other(format!("failed to open PTY: {e}")))?;
 
-        let mut builder = CommandBuilder::new(&cmd.program);
+        let program_path = resolve_command_program(&cmd.program);
+        let mut builder = CommandBuilder::new(program_path);
         builder.args(&cmd.args);
         if let Some(ref cwd) = cmd.cwd {
             builder.cwd(cwd);
@@ -173,5 +236,19 @@ impl Drop for PtySession {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_command_program() {
+        let cmd = resolve_command_program("echo");
+        assert!(!cmd.is_empty());
+
+        let ssh = resolve_command_program("ssh");
+        assert!(!ssh.is_empty());
     }
 }

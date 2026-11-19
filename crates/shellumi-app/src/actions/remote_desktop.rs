@@ -537,22 +537,52 @@ impl Shellumi {
                     });
 
                 let protocol = rd.protocol;
-                cx.background_executor()
-                    .spawn(async move {
-                        match protocol {
-                            RemoteDesktopProtocol::Vnc => {
-                                let _ =
-                                    shellumi_vnc::run_vnc_session(session_cfg, worker_handle, fb)
-                                        .await;
+                let worker_err = worker_handle.clone();
+                std::thread::Builder::new()
+                    .name("shellumi-remote-desktop".into())
+                    .spawn(move || {
+                        let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+                            .enable_all()
+                            .build()
+                        else {
+                            let _ =
+                                worker_err
+                                    .try_send_event(shellumi_remote_desktop::SessionEvent::Error(
+                                    "Failed to initialize Tokio runtime for remote desktop session"
+                                        .into(),
+                                ));
+                            let _ = worker_err.try_send_event(
+                                shellumi_remote_desktop::SessionEvent::StateChanged(
+                                    shellumi_remote_desktop::SessionState::Error(
+                                        "Failed to initialize async network runtime".into(),
+                                    ),
+                                ),
+                            );
+                            return;
+                        };
+
+                        runtime.block_on(async move {
+                            match protocol {
+                                RemoteDesktopProtocol::Vnc => {
+                                    let _ = shellumi_vnc::run_vnc_session(
+                                        session_cfg,
+                                        worker_handle,
+                                        fb,
+                                    )
+                                    .await;
+                                }
+                                RemoteDesktopProtocol::Rdp => {
+                                    let _ = shellumi_rdp::run_rdp_session(
+                                        session_cfg,
+                                        worker_handle,
+                                        fb,
+                                    )
+                                    .await;
+                                }
                             }
-                            RemoteDesktopProtocol::Rdp => {
-                                let _ =
-                                    shellumi_rdp::run_rdp_session(session_cfg, worker_handle, fb)
-                                        .await;
-                            }
-                        }
+                        });
                     })
-                    .detach();
+                    .expect("failed to spawn remote desktop thread");
 
                 let proto_name = match rd.protocol {
                     RemoteDesktopProtocol::Vnc => "VNC",

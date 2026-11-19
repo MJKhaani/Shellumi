@@ -412,7 +412,7 @@ impl Shellumi {
             screen_area = screen_area.child(
                 div()
                     .text_xs()
-                    .font_family(".AppleSystemUIFontMonospaced")
+                    .font_family(crate::MONOSPACE_FONT)
                     .text_color(rgb(MacTheme::SUCCESS))
                     .child(line.clone()),
             );
@@ -564,7 +564,7 @@ impl Shellumi {
                 telemetry = telemetry.child(
                     div()
                         .text_xs()
-                        .font_family(".AppleSystemUIFontMonospaced")
+                        .font_family(crate::MONOSPACE_FONT)
                         .text_color(rgb(MacTheme::ACCENT_BLUE))
                         .child(entry.clone()),
                 );

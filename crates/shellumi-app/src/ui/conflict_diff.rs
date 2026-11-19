@@ -661,7 +661,7 @@ impl Shellumi {
             .max_h(px(220.0))
             .overflow_y_scroll()
             .p_2()
-            .font_family(".AppleSystemUIFontMonospaced")
+            .font_family(crate::MONOSPACE_FONT)
             .text_xs();
 
         if model.diff_lines.is_empty() {
@@ -1231,7 +1231,7 @@ impl Shellumi {
                     .child(
                         div()
                             .flex_1()
-                            .font_family(".AppleSystemUIFontMonospaced")
+                            .font_family(crate::MONOSPACE_FONT)
                             .text_color(if is_match {
                                 rgb(MacTheme::TEXT_PRIMARY)
                             } else {
@@ -1242,7 +1242,7 @@ impl Shellumi {
                     .child(
                         div()
                             .flex_1()
-                            .font_family(".AppleSystemUIFontMonospaced")
+                            .font_family(crate::MONOSPACE_FONT)
                             .text_color(if is_match {
                                 rgb(MacTheme::TEXT_PRIMARY)
                             } else {

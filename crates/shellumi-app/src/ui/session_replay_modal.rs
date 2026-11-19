@@ -623,7 +623,7 @@ impl Shellumi {
                                 div()
                                     .id(("screen-line", l_idx))
                                     .text_xs()
-                                    .font_family(".AppleSystemUIFontMonospaced")
+                                    .font_family(crate::MONOSPACE_FONT)
                                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .child(if line.is_empty() { " " } else { line }.to_string()),
                             );

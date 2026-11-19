@@ -11,6 +11,12 @@ pub(super) fn environment(plan: &ConnectionPlan) -> Result<Vec<(String, String)>
         .into_os_string()
         .into_string()
         .map_err(|_| "The askpass executable path is not UTF-8.")?;
+    #[cfg(windows)]
+    let executable = if executable.contains(' ') && !executable.starts_with('"') {
+        format!("\"{executable}\"")
+    } else {
+        executable
+    };
     let mut env = vec![
         ("SSH_ASKPASS".into(), executable),
         ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
