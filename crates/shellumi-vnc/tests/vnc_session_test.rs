@@ -489,14 +489,6 @@ async fn test_vnc_session_auto_reconnects_after_network_drop() {
     };
     let port = listener.local_addr().unwrap().port();
 
-    // Verify local loopback connect is permitted in this execution environment
-    if let Err(e) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            eprintln!("Skipping live loopback test: network sandboxed ({e})");
-            return;
-        }
-    }
-
     let server_task = tokio::spawn(async move {
         // First connection: accept, handshake, send frame, then drop immediately
         if let Ok((mut stream1, _)) = listener.accept().await {
@@ -579,14 +571,6 @@ async fn test_vnc_session_reconnect_cancellation_by_user() {
         Err(e) => panic!("Failed to bind loopback: {e}"),
     };
     let port = listener.local_addr().unwrap().port();
-
-    // Verify local loopback connect is permitted in this execution environment
-    if let Err(e) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            eprintln!("Skipping live loopback test: network sandboxed ({e})");
-            return;
-        }
-    }
 
     let server_task = tokio::spawn(async move {
         if let Ok((mut stream, _)) = listener.accept().await {
