@@ -485,6 +485,7 @@ impl Shellumi {
             sftp_state: None,
             remote_desktop_state: first_rd_state,
             multiplayer: None,
+            collab_state: None,
         };
 
         self.tabs.push(tab);

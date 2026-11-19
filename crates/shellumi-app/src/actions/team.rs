@@ -1,5 +1,13 @@
 //! Team actions.
 use super::*;
+use shellumi_core::server::crypto::{
+    decrypt_collab_frame, encrypt_collab_frame, generate_collab_session_key,
+};
+use shellumi_core::server::types::{
+    CollabFrameType, CollabPollQuery, CollabPollResponse, CreateCollabSessionRequest,
+    GrantControlRequest, SendCollabFrameRequest,
+};
+use shellumi_core::server::ShellumiServerClient;
 
 impl Shellumi {
     pub(crate) fn open_team_modal(&mut self, cx: &mut Context<Self>) {
@@ -612,7 +620,20 @@ impl Shellumi {
         };
 
         if tab.multiplayer.is_some() {
+            if let Some(collab) = &tab.collab_state {
+                let session_id = collab.session_id;
+                let server_url = collab.server_url.clone();
+                let token = collab.token.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let mut client = ShellumiServerClient::new(&server_url);
+                        client.set_token(token);
+                        let _ = client.terminate_collab_session(session_id);
+                    })
+                    .detach();
+            }
             tab.multiplayer = None;
+            tab.collab_state = None;
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -625,8 +646,96 @@ impl Shellumi {
                 "local_user",
                 format!("{now}"),
             ));
+            tab.collab_state = None;
         }
         cx.notify();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn start_server_collab_session(
+        &mut self,
+        server_url: &str,
+        token: &str,
+        title: &str,
+        mode: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(idx) = self.active_tab_idx else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        let tab_id = tab.id;
+
+        let key = match generate_collab_session_key() {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("Failed to generate collab session key: {e}");
+                return;
+            }
+        };
+
+        let server_url_owned = server_url.to_string();
+        let token_owned = token.to_string();
+        let title_owned = title.to_string();
+        let mode_owned = mode.to_string();
+
+        let task = cx.background_executor().spawn(async move {
+            let mut client = ShellumiServerClient::new(&server_url_owned);
+            client.set_token(token_owned);
+            client.create_collab_session(&CreateCollabSessionRequest {
+                title: title_owned,
+                mode: mode_owned,
+                ttl_secs: Some(7200),
+            })
+        });
+
+        let server_url_cloned = server_url.to_string();
+        let token_cloned = token.to_string();
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    match result {
+                        Ok(resp) => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            tab.multiplayer = Some(
+                                MultiplayerSession::new(
+                                    format!("srv-{}", resp.session_id),
+                                    None,
+                                    "local_user",
+                                    format!("{now}"),
+                                )
+                                .with_server_coordination(
+                                    resp.session_id,
+                                    resp.lease_token,
+                                    resp.mode,
+                                    true,
+                                ),
+                            );
+                            tab.collab_state = Some(TabCollabState {
+                                session_id: resp.session_id,
+                                key,
+                                outbound_seq: 0,
+                                last_polled_seq: 0,
+                                server_url: server_url_cloned,
+                                token: token_cloned,
+                            });
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to create server collab session: {e}");
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn grant_multiplayer_control(&mut self, target_user: &str, cx: &mut Context<Self>) {
@@ -636,6 +745,48 @@ impl Shellumi {
         let Some(tab) = self.tabs.get_mut(idx) else {
             return;
         };
+        let tab_id = tab.id;
+
+        if let Some(collab) = &tab.collab_state {
+            let session_id = collab.session_id;
+            let server_url = collab.server_url.clone();
+            let token = collab.token.clone();
+            let target_uuid = uuid::Uuid::parse_str(target_user).unwrap_or_else(|_| {
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, target_user.as_bytes())
+            });
+            let target_user_owned = target_user.to_string();
+
+            let task = cx.background_executor().spawn(async move {
+                let mut client = ShellumiServerClient::new(&server_url);
+                client.set_token(token);
+                client.grant_collab_control(
+                    session_id,
+                    &GrantControlRequest {
+                        target_user_id: target_uuid,
+                        target_device_id: target_uuid,
+                        ttl_secs: Some(300),
+                    },
+                )
+            });
+
+            cx.spawn(async move |app, cx| {
+                let result = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        if let Ok(resp) = result {
+                            if let Some(session) = &mut tab.multiplayer {
+                                session
+                                    .advance_lease_token(resp.lease_token, Some(target_user_owned));
+                                cx.notify();
+                            }
+                        }
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+
         if let Some(session) = &mut tab.multiplayer {
             let requester = session.owner_id.clone();
             let _ = session.grant_keyboard_control(&requester, target_user);
@@ -650,6 +801,37 @@ impl Shellumi {
         let Some(tab) = self.tabs.get_mut(idx) else {
             return;
         };
+        let tab_id = tab.id;
+
+        if let Some(collab) = &tab.collab_state {
+            let session_id = collab.session_id;
+            let server_url = collab.server_url.clone();
+            let token = collab.token.clone();
+
+            let task = cx.background_executor().spawn(async move {
+                let mut client = ShellumiServerClient::new(&server_url);
+                client.set_token(token);
+                client.revoke_collab_control(session_id)
+            });
+
+            cx.spawn(async move |app, cx| {
+                let result = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        if let Ok(resp) = result {
+                            if let Some(session) = &mut tab.multiplayer {
+                                let owner = session.owner_id.clone();
+                                session.advance_lease_token(resp.lease_token, Some(owner));
+                                cx.notify();
+                            }
+                        }
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+
         if let Some(session) = &mut tab.multiplayer {
             let requester = session.owner_id.clone();
             let _ = session.revoke_keyboard_control(&requester);
@@ -675,6 +857,232 @@ impl Shellumi {
             let _ = session.add_participant(&user_id, &name, format!("{now}"));
             cx.notify();
         }
+    }
+
+    pub(crate) fn broadcast_collab_output(
+        &mut self,
+        tab_id: u64,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(mp) = &tab.multiplayer else {
+            return;
+        };
+        if !mp.is_active || !mp.is_host {
+            return;
+        }
+        let Some(collab) = &mut tab.collab_state else {
+            return;
+        };
+        collab.outbound_seq = collab.outbound_seq.wrapping_add(1);
+        let seq = collab.outbound_seq;
+        let session_id = collab.session_id;
+        let lease_token = mp.lease_token;
+        let server_url = collab.server_url.clone();
+        let token = collab.token.clone();
+
+        match encrypt_collab_frame(&collab.key, session_id, seq, bytes) {
+            Ok(envelope) => {
+                cx.background_executor()
+                    .spawn(async move {
+                        let mut client = ShellumiServerClient::new(&server_url);
+                        client.set_token(token);
+                        let _ = client.send_collab_frame(
+                            session_id,
+                            &SendCollabFrameRequest {
+                                frame_type: CollabFrameType::Output,
+                                lease_token: Some(lease_token),
+                                encrypted_envelope: envelope,
+                            },
+                        );
+                    })
+                    .detach();
+            }
+            Err(e) => {
+                eprintln!("Failed to encrypt collab output frame: {e}");
+            }
+        }
+    }
+
+    pub(crate) fn forward_collab_input(
+        &mut self,
+        tab_id: u64,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(mp) = &tab.multiplayer else {
+            return;
+        };
+        if !mp.is_active {
+            return;
+        }
+        if !mp.can_write("local_user", Some(mp.lease_token)) {
+            return;
+        }
+        let Some(collab) = &mut tab.collab_state else {
+            return;
+        };
+        collab.outbound_seq = collab.outbound_seq.wrapping_add(1);
+        let seq = collab.outbound_seq;
+        let session_id = collab.session_id;
+        let lease_token = mp.lease_token;
+        let server_url = collab.server_url.clone();
+        let token = collab.token.clone();
+
+        match encrypt_collab_frame(&collab.key, session_id, seq, bytes) {
+            Ok(envelope) => {
+                cx.background_executor()
+                    .spawn(async move {
+                        let mut client = ShellumiServerClient::new(&server_url);
+                        client.set_token(token);
+                        let _ = client.send_collab_frame(
+                            session_id,
+                            &SendCollabFrameRequest {
+                                frame_type: CollabFrameType::Input,
+                                lease_token: Some(lease_token),
+                                encrypted_envelope: envelope,
+                            },
+                        );
+                    })
+                    .detach();
+            }
+            Err(e) => {
+                eprintln!("Failed to encrypt collab input frame: {e}");
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn poll_server_collab_relay(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(mp) = &tab.multiplayer else {
+            return;
+        };
+        if !mp.is_active {
+            return;
+        }
+        let Some(collab) = &tab.collab_state else {
+            return;
+        };
+
+        let session_id = collab.session_id;
+        let last_seq = collab.last_polled_seq;
+        let server_url = collab.server_url.clone();
+        let token = collab.token.clone();
+        let key = collab.key.clone();
+        let is_host = mp.is_host;
+
+        let task = cx.background_executor().spawn(async move {
+            let mut client = ShellumiServerClient::new(&server_url);
+            client.set_token(token);
+            client.poll_collab_frames(
+                session_id,
+                &CollabPollQuery {
+                    since_sequence: Some(last_seq),
+                    limit: Some(50),
+                },
+            )
+        });
+
+        cx.spawn(async move |app, cx| {
+            if let Ok(resp) = task.await {
+                let _ = app.update(cx, |app, cx| {
+                    app.handle_polled_collab_frames(tab_id, resp, &key, is_host, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn handle_polled_collab_frames(
+        &mut self,
+        tab_id: u64,
+        resp: CollabPollResponse,
+        key: &zeroize::Zeroizing<[u8; 32]>,
+        is_host: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(mp) = &mut tab.multiplayer else {
+            return;
+        };
+        if !mp.is_active {
+            return;
+        }
+        let Some(collab) = &mut tab.collab_state else {
+            return;
+        };
+
+        for frame in resp.frames {
+            if frame.sequence <= collab.last_polled_seq {
+                continue;
+            }
+            collab.last_polled_seq = frame.sequence;
+
+            match frame.frame_type {
+                CollabFrameType::Output => {
+                    if !is_host {
+                        if let Ok(decrypted) = decrypt_collab_frame(
+                            key,
+                            collab.session_id,
+                            frame.sequence,
+                            &frame.encrypted_envelope,
+                        ) {
+                            let active_pane =
+                                tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+                            if let Some(pane) = tab.panes.get_mut(active_pane) {
+                                pane.terminal.process_bytes(&decrypted);
+                                pane.scroll.scroll_to_bottom();
+                            }
+                        }
+                    }
+                }
+                CollabFrameType::Input => {
+                    if is_host {
+                        if let Ok(decrypted) = decrypt_collab_frame(
+                            key,
+                            collab.session_id,
+                            frame.sequence,
+                            &frame.encrypted_envelope,
+                        ) {
+                            let active_pane =
+                                tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+                            if let Some(pane) = tab.panes.get_mut(active_pane) {
+                                if let Some(sess) = &pane.session {
+                                    let _ = sess.input(decrypted);
+                                }
+                            }
+                        }
+                    }
+                }
+                CollabFrameType::ControlGranted => {
+                    if let Some(token) = frame.lease_token {
+                        mp.advance_lease_token(token, Some(frame.sender_user_id.to_string()));
+                    }
+                }
+                CollabFrameType::ControlRevoked => {
+                    if let Some(token) = frame.lease_token {
+                        mp.advance_lease_token(token, Some(mp.owner_id.clone()));
+                    }
+                }
+                CollabFrameType::Terminated => {
+                    mp.is_active = false;
+                }
+                CollabFrameType::Signal => {}
+            }
+        }
+        cx.notify();
     }
 
     // =========================================================================

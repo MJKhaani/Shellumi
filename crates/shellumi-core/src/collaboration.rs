@@ -368,8 +368,16 @@ pub struct MultiplayerParticipant {
     pub joined_at: String,
 }
 
+fn default_lease_token() -> u64 {
+    1
+}
+
+fn default_collab_mode() -> String {
+    "controllable".to_string()
+}
+
 /// State machine for a real-time multiplayer terminal session.
-/// Enforces single-active-writer semantics with immediate owner revocation.
+/// Enforces single-active-writer semantics with immediate owner revocation and monotonic fencing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiplayerSession {
     pub session_id: String,
@@ -379,6 +387,14 @@ pub struct MultiplayerSession {
     pub participants: Vec<MultiplayerParticipant>,
     pub is_active: bool,
     pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_session_id: Option<uuid::Uuid>,
+    #[serde(default = "default_lease_token")]
+    pub lease_token: u64,
+    #[serde(default = "default_collab_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub is_host: bool,
 }
 
 impl MultiplayerSession {
@@ -405,6 +421,51 @@ impl MultiplayerSession {
             participants: vec![owner_participant],
             is_active: true,
             started_at: started,
+            server_session_id: None,
+            lease_token: 1,
+            mode: "controllable".to_string(),
+            is_host: true,
+        }
+    }
+
+    /// Attaches remote server coordination attributes to the session.
+    pub fn with_server_coordination(
+        mut self,
+        server_session_id: uuid::Uuid,
+        lease_token: u64,
+        mode: impl Into<String>,
+        is_host: bool,
+    ) -> Self {
+        self.server_session_id = Some(server_session_id);
+        self.lease_token = lease_token;
+        self.mode = mode.into();
+        self.is_host = is_host;
+        self
+    }
+
+    /// Checks if a user currently has typing permission, taking into account single-writer role
+    /// and monotonic lease token fencing.
+    pub fn can_write(&self, user_id: &str, token: Option<u64>) -> bool {
+        if !self.is_active || self.mode != "controllable" {
+            return false;
+        }
+        if self.current_controller.as_deref() != Some(user_id) {
+            return false;
+        }
+        if let Some(tok) = token {
+            tok == self.lease_token
+        } else {
+            // Uncoordinated local session permits None, server-coordinated sessions require token
+            self.server_session_id.is_none()
+        }
+    }
+
+    /// Transactionally updates the monotonic lease token and active writer.
+    pub fn advance_lease_token(&mut self, new_token: u64, new_writer: Option<String>) {
+        self.lease_token = new_token;
+        self.current_controller = new_writer.clone();
+        for p in &mut self.participants {
+            p.is_writer = new_writer.as_deref() == Some(&p.user_id);
         }
     }
 

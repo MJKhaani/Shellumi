@@ -64,6 +64,7 @@ impl Shellumi {
                                             pane.search_matches =
                                                 pane.terminal.search(&pane.search_query, false);
                                         }
+                                        app.broadcast_collab_output(tab_id, &bytes, cx);
                                     }
                                     SessionEvent::Error(error) => {
                                         pane.message = Some(format!("Session error: {error}"));
@@ -186,6 +187,7 @@ impl Shellumi {
             sftp_state,
             remote_desktop_state: None,
             multiplayer: None,
+            collab_state: None,
         });
         self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);

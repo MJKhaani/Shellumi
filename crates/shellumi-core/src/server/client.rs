@@ -495,6 +495,14 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
         self.send_request::<(), _>("GET", "api/v1/collab/sessions", None)
     }
 
+    /// Gets details of a collaboration session (`GET /api/v1/collab/sessions/{session_id}`).
+    pub fn get_collab_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<CollabSessionResponse, ServerError> {
+        self.send_request::<(), _>("GET", &format!("api/v1/collab/sessions/{session_id}"), None)
+    }
+
     /// Enrolls or joins a participant in a collaboration session (`POST /api/v1/collab/sessions/{session_id}/participants`).
     pub fn enroll_collab_participant(
         &self,
@@ -508,16 +516,49 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
         )
     }
 
+    /// Lists participants enrolled in a collaboration session (`GET /api/v1/collab/sessions/{session_id}/participants`).
+    pub fn list_collab_participants(
+        &self,
+        session_id: Uuid,
+    ) -> Result<CollabParticipantListResponse, ServerError> {
+        self.send_request::<(), _>(
+            "GET",
+            &format!("api/v1/collab/sessions/{session_id}/participants"),
+            None,
+        )
+    }
+
     /// Grants terminal write control to a participant (`POST /api/v1/collab/sessions/{session_id}/control/grant`).
     pub fn grant_collab_control(
         &self,
         session_id: Uuid,
         req: &GrantControlRequest,
-    ) -> Result<(), ServerError> {
-        self.send_empty_response(
+    ) -> Result<CollabSessionResponse, ServerError> {
+        self.send_request(
             "POST",
             &format!("api/v1/collab/sessions/{session_id}/control/grant"),
             Some(req),
+        )
+    }
+
+    /// Revokes terminal write control back to host (`POST /api/v1/collab/sessions/{session_id}/control/revoke`).
+    pub fn revoke_collab_control(
+        &self,
+        session_id: Uuid,
+    ) -> Result<CollabSessionResponse, ServerError> {
+        self.send_request::<(), _>(
+            "POST",
+            &format!("api/v1/collab/sessions/{session_id}/control/revoke"),
+            None,
+        )
+    }
+
+    /// Emergency terminates the collaboration session (`POST /api/v1/collab/sessions/{session_id}/terminate`).
+    pub fn terminate_collab_session(&self, session_id: Uuid) -> Result<(), ServerError> {
+        self.send_empty_response::<()>(
+            "POST",
+            &format!("api/v1/collab/sessions/{session_id}/terminate"),
+            None,
         )
     }
 
@@ -526,8 +567,8 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
         &self,
         session_id: Uuid,
         req: &SendCollabFrameRequest,
-    ) -> Result<(), ServerError> {
-        self.send_empty_response(
+    ) -> Result<CollabFrame, ServerError> {
+        self.send_request(
             "POST",
             &format!("api/v1/collab/sessions/{session_id}/frames"),
             Some(req),

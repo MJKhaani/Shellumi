@@ -450,3 +450,227 @@ pub fn unwrap_dek_for_device(
     dek.copy_from_slice(decrypted);
     Ok(Zeroizing::new(dek))
 }
+
+// ---------------------------------------------------------------------------
+// Live Terminal Collaboration E2EE Cipher Helpers
+// ---------------------------------------------------------------------------
+
+fn derive_collab_wrap_key(
+    shared_secret: &[u8],
+    session_id: Uuid,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let salt = b"shellumi-collab-wrap-salt-v1";
+    let info = format!("collab:{session_id}");
+
+    use ring::hmac;
+    let s_key = hmac::Key::new(hmac::HMAC_SHA256, salt);
+    let prk = hmac::sign(&s_key, shared_secret);
+
+    let prk_key = hmac::Key::new(hmac::HMAC_SHA256, prk.as_ref());
+    let mut ctx = hmac::Context::with_key(&prk_key);
+    ctx.update(info.as_bytes());
+    ctx.update(&[1u8]);
+    let okm = ctx.sign();
+
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(okm.as_ref());
+    Ok(Zeroizing::new(key_bytes))
+}
+
+/// Generates an ephemeral 256-bit AES-GCM session key for live terminal collaboration.
+pub fn generate_collab_session_key() -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let rng = SystemRandom::new();
+    let mut key = [0u8; 32];
+    rng.fill(&mut key)
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    Ok(Zeroizing::new(key))
+}
+
+/// Encrypts a live terminal collaboration frame (PTY output or writer input) using AES-256-GCM.
+/// Binds session_id and monotonic sequence in the authenticated associated data (AAD).
+pub fn encrypt_collab_frame(
+    key: &[u8; 32],
+    session_id: Uuid,
+    sequence: u64,
+    plaintext: &[u8],
+) -> Result<String, CryptoError> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    let rng = SystemRandom::new();
+    let mut nonce_bytes = [0u8; 12];
+    rng.fill(&mut nonce_bytes)
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+
+    let unbound =
+        UnboundKey::new(&AES_256_GCM, key).map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let sealing_key = LessSafeKey::new(unbound);
+
+    let aad = format!("shellumi-collab-v1:{session_id}:{sequence}");
+    let mut in_out = plaintext.to_vec();
+    sealing_key
+        .seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce_bytes),
+            Aad::from(aad.as_bytes()),
+            &mut in_out,
+        )
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+
+    let mut payload = Vec::with_capacity(12 + in_out.len());
+    payload.extend_from_slice(&nonce_bytes);
+    payload.extend_from_slice(&in_out);
+
+    Ok(BASE64_STANDARD.encode(payload))
+}
+
+/// Decrypts a live terminal collaboration frame using AES-256-GCM.
+pub fn decrypt_collab_frame(
+    key: &[u8; 32],
+    session_id: Uuid,
+    sequence: u64,
+    ciphertext_b64: &str,
+) -> Result<Vec<u8>, CryptoError> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    let payload = BASE64_STANDARD
+        .decode(ciphertext_b64)
+        .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+
+    if payload.len() < 12 + 16 {
+        return Err(CryptoError::KeyGen(
+            "Frame ciphertext payload too short".to_string(),
+        ));
+    }
+
+    let (nonce_slice, ciphertext_and_tag) = payload.split_at(12);
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(nonce_slice);
+
+    let unbound =
+        UnboundKey::new(&AES_256_GCM, key).map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let opening_key = LessSafeKey::new(unbound);
+
+    let aad = format!("shellumi-collab-v1:{session_id}:{sequence}");
+    let mut in_out = ciphertext_and_tag.to_vec();
+    let decrypted = opening_key
+        .open_in_place(
+            Nonce::assume_unique_for_key(nonce_arr),
+            Aad::from(aad.as_bytes()),
+            &mut in_out,
+        )
+        .map_err(|e| CryptoError::SignatureVerificationFailed(e.to_string()))?;
+
+    Ok(decrypted.to_vec())
+}
+
+/// Wraps an ephemeral collaboration session key for a participant's X25519 agreement public key.
+pub fn wrap_collab_key_for_participant(
+    collab_key: &[u8; 32],
+    recipient_agreement_pk_b64: &str,
+    session_id: Uuid,
+) -> Result<(String, String), CryptoError> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    let recipient_bytes = BASE64_STANDARD
+        .decode(recipient_agreement_pk_b64)
+        .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+    if recipient_bytes.len() != 32 {
+        return Err(CryptoError::InvalidPublicKeyLength(recipient_bytes.len()));
+    }
+    let mut recipient_arr = [0u8; 32];
+    recipient_arr.copy_from_slice(&recipient_bytes);
+    let recipient_pk = X25519PublicKey::from(recipient_arr);
+
+    let rng = SystemRandom::new();
+    let mut ephem_secret_bytes = [0u8; 32];
+    rng.fill(&mut ephem_secret_bytes)
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let ephem_secret = X25519StaticSecret::from(ephem_secret_bytes);
+    let ephem_public = X25519PublicKey::from(&ephem_secret);
+
+    let shared_secret = ephem_secret.diffie_hellman(&recipient_pk);
+    let wrap_key = derive_collab_wrap_key(shared_secret.as_bytes(), session_id)?;
+
+    let mut nonce_bytes = [0u8; 12];
+    rng.fill(&mut nonce_bytes)
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+
+    let unbound = UnboundKey::new(&AES_256_GCM, wrap_key.as_ref())
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let sealing_key = LessSafeKey::new(unbound);
+
+    let aad = format!("shellumi-collab-wrap-v1:{session_id}");
+    let mut in_out = collab_key.to_vec();
+    sealing_key
+        .seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce_bytes),
+            Aad::from(aad.as_bytes()),
+            &mut in_out,
+        )
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+
+    let mut wrapped_payload = Vec::with_capacity(12 + in_out.len());
+    wrapped_payload.extend_from_slice(&nonce_bytes);
+    wrapped_payload.extend_from_slice(&in_out);
+
+    let wrapped_b64 = BASE64_STANDARD.encode(wrapped_payload);
+    let ephem_pk_b64 = BASE64_STANDARD.encode(ephem_public.as_bytes());
+
+    Ok((wrapped_b64, ephem_pk_b64))
+}
+
+/// Unwraps an ephemeral collaboration session key using device X25519 static secret.
+pub fn unwrap_collab_key_for_participant(
+    wrapped_b64: &str,
+    ephemeral_pk_b64: &str,
+    device_x25519_secret: &[u8; 32],
+    session_id: Uuid,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    let ephem_bytes = BASE64_STANDARD
+        .decode(ephemeral_pk_b64)
+        .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+    if ephem_bytes.len() != 32 {
+        return Err(CryptoError::InvalidPublicKeyLength(ephem_bytes.len()));
+    }
+    let mut ephem_arr = [0u8; 32];
+    ephem_arr.copy_from_slice(&ephem_bytes);
+    let ephem_pk = X25519PublicKey::from(ephem_arr);
+
+    let dev_secret = X25519StaticSecret::from(*device_x25519_secret);
+    let shared_secret = dev_secret.diffie_hellman(&ephem_pk);
+    let wrap_key = derive_collab_wrap_key(shared_secret.as_bytes(), session_id)?;
+
+    let wrapped_bytes = BASE64_STANDARD
+        .decode(wrapped_b64)
+        .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+    if wrapped_bytes.len() < 12 + 16 {
+        return Err(CryptoError::KeyGen(
+            "Wrapped ciphertext too short".to_string(),
+        ));
+    }
+
+    let (nonce_slice, ciphertext_and_tag) = wrapped_bytes.split_at(12);
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(nonce_slice);
+
+    let unbound = UnboundKey::new(&AES_256_GCM, wrap_key.as_ref())
+        .map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let opening_key = LessSafeKey::new(unbound);
+
+    let aad = format!("shellumi-collab-wrap-v1:{session_id}");
+    let mut in_out = ciphertext_and_tag.to_vec();
+    let decrypted = opening_key
+        .open_in_place(
+            Nonce::assume_unique_for_key(nonce_arr),
+            Aad::from(aad.as_bytes()),
+            &mut in_out,
+        )
+        .map_err(|e| CryptoError::SignatureVerificationFailed(e.to_string()))?;
+
+    if decrypted.len() != 32 {
+        return Err(CryptoError::KeyGen(
+            "Decrypted collaboration key length is not 32 bytes".to_string(),
+        ));
+    }
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(decrypted);
+    Ok(Zeroizing::new(key))
+}

@@ -158,6 +158,7 @@ impl Shellumi {
             sftp_state: None,
             remote_desktop_state: Some(rd_state),
             multiplayer: None,
+            collab_state: None,
         });
 
         self.page = None;
@@ -273,6 +274,7 @@ impl Shellumi {
             sftp_state: None,
             remote_desktop_state: Some(rd_state),
             multiplayer: None,
+            collab_state: None,
         });
 
         self.page = None;

@@ -495,3 +495,236 @@ fn test_websocket_message_codec() {
     let de_server: WsServerMessage = serde_json::from_str(&server_json).unwrap();
     assert_eq!(de_server, server_msg);
 }
+
+#[test]
+fn test_collab_key_generation_and_frame_crypto_roundtrip() {
+    let session_id = Uuid::new_v4();
+    let collab_key = generate_collab_session_key().unwrap();
+    let plaintext = b"Hello, secure collaborative terminal session!";
+
+    // Encrypt frame sequence 1
+    let seq = 1;
+    let enc_envelope = encrypt_collab_frame(&collab_key, session_id, seq, plaintext).unwrap();
+
+    // Decrypt frame with correct session_id and sequence
+    let decrypted = decrypt_collab_frame(&collab_key, session_id, seq, &enc_envelope).unwrap();
+    assert_eq!(decrypted, plaintext);
+
+    // Decrypt with mismatched sequence fails (AAD authentication tag failure)
+    let bad_seq = decrypt_collab_frame(&collab_key, session_id, 2, &enc_envelope);
+    assert!(bad_seq.is_err());
+
+    // Decrypt with mismatched session_id fails
+    let bad_session = decrypt_collab_frame(&collab_key, Uuid::new_v4(), seq, &enc_envelope);
+    assert!(bad_session.is_err());
+
+    // Decrypt with invalid base64 fails
+    let bad_b64 = decrypt_collab_frame(&collab_key, session_id, seq, "not-valid-base64!");
+    assert!(bad_b64.is_err());
+}
+
+#[test]
+fn test_collab_key_wrapping_and_unwrapping() {
+    let session_id = Uuid::new_v4();
+    let collab_key = generate_collab_session_key().unwrap();
+
+    // Recipient generates X25519 keypair
+    let (recipient_secret, recipient_pk_b64) = generate_device_x25519_keypair().unwrap();
+
+    // Wrap session key for recipient
+    let (wrapped_b64, ephem_pk_b64) =
+        wrap_collab_key_for_participant(&collab_key, &recipient_pk_b64, session_id).unwrap();
+
+    // Recipient unwraps session key
+    let unwrapped = unwrap_collab_key_for_participant(
+        &wrapped_b64,
+        &ephem_pk_b64,
+        &recipient_secret,
+        session_id,
+    )
+    .unwrap();
+    assert_eq!(*unwrapped, *collab_key);
+
+    // Mismatched session id fails unwrapping
+    assert!(unwrap_collab_key_for_participant(
+        &wrapped_b64,
+        &ephem_pk_b64,
+        &recipient_secret,
+        Uuid::new_v4()
+    )
+    .is_err());
+
+    // Wrong recipient secret fails unwrapping
+    let (other_secret, _) = generate_device_x25519_keypair().unwrap();
+    assert!(unwrap_collab_key_for_participant(
+        &wrapped_b64,
+        &ephem_pk_b64,
+        &other_secret,
+        session_id
+    )
+    .is_err());
+}
+
+#[test]
+fn test_collab_client_endpoints_and_wire_flow() {
+    let mock = MockHttpTransport::new();
+    let client = ShellumiServerClient::with_transport("https://server.example.com", mock.clone());
+    let session_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let dev_id = Uuid::new_v4();
+
+    // 1. Create session
+    let create_resp = CollabSessionResponse {
+        session_id,
+        host_user_id: user_id,
+        host_device_id: dev_id,
+        title: "Incident Response #42".to_string(),
+        mode: "controllable".to_string(),
+        active_writer_user_id: Some(user_id),
+        active_writer_device_id: Some(dev_id),
+        lease_token: 1,
+        lease_expires_at: None,
+        expires_at: 1735000000,
+        terminated_at: None,
+        created_at: 1734000000,
+    };
+    mock.queue_json_response(200, &create_resp);
+
+    let session = client
+        .create_collab_session(&CreateCollabSessionRequest {
+            title: "Incident Response #42".into(),
+            mode: "controllable".into(),
+            ttl_secs: Some(3600),
+        })
+        .unwrap();
+    assert_eq!(session.session_id, session_id);
+    assert_eq!(session.lease_token, 1);
+
+    // 2. Grant control
+    let target_user = Uuid::new_v4();
+    let target_dev = Uuid::new_v4();
+    let granted_resp = CollabSessionResponse {
+        session_id,
+        host_user_id: user_id,
+        host_device_id: dev_id,
+        title: "Incident Response #42".to_string(),
+        mode: "controllable".to_string(),
+        active_writer_user_id: Some(target_user),
+        active_writer_device_id: Some(target_dev),
+        lease_token: 2,
+        lease_expires_at: Some(1734000300),
+        expires_at: 1735000000,
+        terminated_at: None,
+        created_at: 1734000000,
+    };
+    mock.queue_json_response(200, &granted_resp);
+
+    let updated = client
+        .grant_collab_control(
+            session_id,
+            &GrantControlRequest {
+                target_user_id: target_user,
+                target_device_id: target_dev,
+                ttl_secs: Some(300),
+            },
+        )
+        .unwrap();
+    assert_eq!(updated.lease_token, 2);
+    assert_eq!(updated.active_writer_user_id, Some(target_user));
+
+    // 3. Send frame
+    let frame_resp = CollabFrame {
+        session_id,
+        sequence: 1,
+        frame_type: CollabFrameType::Output,
+        sender_user_id: user_id,
+        sender_device_id: dev_id,
+        lease_token: Some(2),
+        encrypted_envelope: "envelope-payload".to_string(),
+        created_at: 1734000010,
+    };
+    mock.queue_json_response(200, &frame_resp);
+
+    let sent = client
+        .send_collab_frame(
+            session_id,
+            &SendCollabFrameRequest {
+                frame_type: CollabFrameType::Output,
+                lease_token: Some(2),
+                encrypted_envelope: "envelope-payload".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(sent.sequence, 1);
+
+    // 4. Poll frames
+    let poll_resp = CollabPollResponse {
+        frames: vec![frame_resp],
+        latest_sequence: 1,
+    };
+    mock.queue_json_response(200, &poll_resp);
+
+    let polled = client
+        .poll_collab_frames(
+            session_id,
+            &CollabPollQuery {
+                since_sequence: Some(0),
+                limit: Some(50),
+            },
+        )
+        .unwrap();
+    assert_eq!(polled.frames.len(), 1);
+    assert_eq!(polled.latest_sequence, 1);
+
+    // 5. Revoke control
+    let mut revoked_resp = granted_resp;
+    revoked_resp.lease_token = 3;
+    revoked_resp.active_writer_user_id = Some(user_id);
+    revoked_resp.active_writer_device_id = Some(dev_id);
+    mock.queue_json_response(200, &revoked_resp);
+
+    let rev_res = client.revoke_collab_control(session_id).unwrap();
+    assert_eq!(rev_res.lease_token, 3);
+    assert_eq!(rev_res.active_writer_user_id, Some(user_id));
+
+    // 6. Terminate session
+    mock.queue_response(200, b"{\"status\":\"terminated\"}".to_vec());
+    assert!(client.terminate_collab_session(session_id).is_ok());
+}
+
+#[test]
+fn test_multiplayer_session_server_coordination_and_fencing() {
+    use crate::collaboration::MultiplayerSession;
+
+    let server_session_id = Uuid::new_v4();
+    let mut session = MultiplayerSession::new("sess-123", None, "alice", "1000")
+        .with_server_coordination(server_session_id, 1, "controllable", true);
+
+    assert_eq!(session.server_session_id, Some(server_session_id));
+    assert_eq!(session.lease_token, 1);
+    assert!(session.is_host);
+
+    // Alice holds control with token 1
+    assert!(session.can_write("alice", Some(1)));
+    // Stale token rejected
+    assert!(!session.can_write("alice", Some(0)));
+    // Missing token rejected when lease_token > 0
+    assert!(!session.can_write("alice", None));
+    // Non-writer rejected even with correct token
+    assert!(!session.can_write("bob", Some(1)));
+
+    // Advance lease token to Bob with token 2
+    session.advance_lease_token(2, Some("bob".into()));
+    assert_eq!(session.lease_token, 2);
+    assert_eq!(session.current_controller.as_deref(), Some("bob"));
+
+    assert!(session.can_write("bob", Some(2)));
+    assert!(!session.can_write("bob", Some(1))); // Stale token rejected!
+    assert!(!session.can_write("alice", Some(2))); // Alice no longer controller
+
+    // Emergency revocation advances token to 3 and restores host
+    session.advance_lease_token(3, Some("alice".into()));
+    assert_eq!(session.lease_token, 3);
+    assert!(session.can_write("alice", Some(3)));
+    assert!(!session.can_write("bob", Some(3)));
+}

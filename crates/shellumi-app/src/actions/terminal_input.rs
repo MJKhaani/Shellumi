@@ -126,13 +126,27 @@ impl Shellumi {
         }
 
         if let Some(mp) = &tab.multiplayer {
-            if mp.is_active
-                && mp.current_controller.as_deref() != Some("local_user")
-                && mp.owner_id != "local_user"
-            {
-                // Keystrokes suppressed: another participant holds exclusive writer control.
+            if mp.is_active && !mp.can_write("local_user", Some(mp.lease_token)) {
+                // Keystrokes suppressed: writer fencing or participant does not hold exclusive write lease.
                 cx.stop_propagation();
                 return;
+            }
+
+            if mp.is_active && !mp.is_host && tab.collab_state.is_some() {
+                let tab_id = tab.id;
+                if is_paste_keystroke(&event.keystroke) {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        let bytes = text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
+                        self.forward_collab_input(tab_id, &bytes, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if let Some(bytes) = key_bytes(&event.keystroke) {
+                    self.forward_collab_input(tab_id, &bytes, cx);
+                    cx.stop_propagation();
+                    return;
+                }
             }
         }
 

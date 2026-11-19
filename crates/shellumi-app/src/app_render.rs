@@ -548,6 +548,23 @@ impl Render for Shellumi {
                             .child(format!("{participants_count} participant(s)")),
                     );
 
+                    if multiplayer.server_session_id.is_some() {
+                        info_left = info_left.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xffffff))
+                                .child(format!(
+                                    "🔒 E2EE Relay · Lease #{}",
+                                    multiplayer.lease_token
+                                )),
+                        );
+                    }
+
                     mp_strip = mp_strip.child(info_left);
 
                     let mut mp_actions = div().flex().items_center().gap_2();

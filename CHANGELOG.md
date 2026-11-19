@@ -2,6 +2,36 @@
 
 ## 0.0.8-alpha
 
+### Encrypted Terminal Collaboration with Single-Writer Fencing & E2EE Relay (Increment 7)
+- **Zero-Knowledge Ephemeral Session Encryption & AAD Monotonic Framing:**
+  - Implemented client-side generation of ephemeral AES-256-GCM session keys (`generate_collab_session_key`) protected by `zeroize::Zeroizing`.
+  - Implemented monotonic authenticated associated data binding (`shellumi-collab-v1:{session_id}:{sequence}`) on every frame via `encrypt_collab_frame` and `decrypt_collab_frame`, completely sealing payload, sequence index, and session scope against replay and tampering.
+  - Implemented participant key wrapping and unwrapping (`wrap_collab_key_for_participant` / `unwrap_collab_key_for_participant`) using ephemeral X25519 Diffie-Hellman + HKDF-SHA256 (`shellumi-collab-wrap-salt-v1`) + AES-256-GCM.
+- **Protocol v1 Collaboration Relay Client Endpoints:**
+  - Added collaboration endpoints to `ShellumiServerClient`:
+    - `POST /api/v1/collab/sessions`: `create_collab_session` with title, mode (`controllable` vs `read_only`), and TTL.
+    - `GET /api/v1/collab/sessions`: `list_collab_sessions`.
+    - `GET /api/v1/collab/sessions/{id}`: `get_collab_session`.
+    - `GET /api/v1/collab/sessions/{id}/participants`: `list_collab_participants`.
+    - `POST /api/v1/collab/sessions/{id}/participants`: `enroll_collab_participant` with role and wrapped key.
+    - `POST /api/v1/collab/sessions/{id}/control/grant`: `grant_collab_control` designating active writer and advancing `lease_token`.
+    - `POST /api/v1/collab/sessions/{id}/control/revoke`: `revoke_collab_control` immediately returning control to host with new `lease_token`.
+    - `POST /api/v1/collab/sessions/{id}/terminate`: `terminate_collab_session` terminating session with 410 enforcement.
+    - `POST /api/v1/collab/sessions/{id}/frames`: `send_collab_frame` submitting encrypted envelopes.
+    - `GET /api/v1/collab/sessions/{id}/poll`: `poll_collab_frames` with cursor-based pagination.
+- **Monotonic Fencing Tokens & Single-Writer Keystroke Arbitration:**
+  - Single-writer role policy strictly enforced via monotonic `lease_token`: token starts at 1 and increments on every writer transfer and emergency revocation.
+  - Keystroke submissions are validated against active `lease_token`; stale or mismatched tokens are rejected client-side and return HTTP 409 `STALE_LEASE_TOKEN` server-side.
+  - Emergency host revocation immediately advances `lease_token` and restores host authority without race conditions.
+- **Desktop GPUI Terminal Integration:**
+  - Enhanced `multiplayer-control-strip` in `crates/shellumi-app/src/app_render.rs` with live E2EE relay status badges (`🔒 E2EE Relay · Lease #X`), participant counts, and active writer badges.
+  - Added background PTY output streaming (`broadcast_collab_output`) encrypting terminal output chunks and sending `CollabFrameType::Output` to the relay.
+  - Added writer input forwarding (`forward_collab_input`) encrypting keystrokes and sending `CollabFrameType::Input` to the relay.
+  - Added relay polling & frame dispatching (`poll_server_collab_relay` and `handle_polled_collab_frames`), injecting decrypted input into host PTY and updating non-host terminal screens.
+- **Automated Unit & Integration Test Coverage:**
+  - Added comprehensive test suites in `crates/shellumi-core/src/server/tests.rs` (crypto roundtrip, AAD tampering detection, X25519 key wrapping, endpoint mock tests, and fencing token validation).
+  - Added integration test suite in `crates/shellumi-app/src/tests/collaboration.rs` testing the full multi-party lifecycle from session creation, enrollment, encrypted PTY streaming, lease token transfer, writer input forwarding, emergency host revocation, and session termination.
+
 ### Multi-Window Vault Binding & Concurrent Window Lifecycle (Increment 2)
 - **Multi-Window Vault Binding in One Instance:**
   - Independent concurrent application windows spawned via `open_vault_in_new_window`, `Cmd+Shift+N`, the Command Palette (`vault:open-new-window` / `vault:open:{id}`), or the vault dropdown menu quick-window buttons (`🗗`).

@@ -837,6 +837,17 @@ struct SftpBrowserState {
     queue: TransferQueue,
 }
 
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) struct TabCollabState {
+    pub(crate) session_id: uuid::Uuid,
+    pub(crate) key: zeroize::Zeroizing<[u8; 32]>,
+    pub(crate) outbound_seq: u64,
+    pub(crate) last_polled_seq: u64,
+    pub(crate) server_url: String,
+    pub(crate) token: String,
+}
+
 struct SessionTab {
     id: u64,
     name: String,
@@ -847,6 +858,7 @@ struct SessionTab {
     sftp_state: Option<SftpBrowserState>,
     remote_desktop_state: Option<RemoteDesktopState>,
     multiplayer: Option<MultiplayerSession>,
+    collab_state: Option<TabCollabState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
