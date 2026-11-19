@@ -247,7 +247,7 @@ mod tests {
         if cancel {
             let other = token.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(30));
+                std::thread::sleep(Duration::from_millis(10));
                 other.cancel();
             });
         }
@@ -257,8 +257,12 @@ mod tests {
     fn blocked_reads_timeout_or_cancel_without_waiting_for_the_os_pipe() {
         for cancel in [false, true] {
             let (release, blocked) = mpsc::channel();
-            let mut reader =
-                BoundedReader::new(Blocked(blocked), Duration::from_millis(100)).unwrap();
+            let timeout = if cancel {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(50)
+            };
+            let mut reader = BoundedReader::new(Blocked(blocked), timeout).unwrap();
             let token = cancellation(cancel);
             reader.budget.begin(Some(&token));
             let start = Instant::now();
@@ -279,8 +283,12 @@ mod tests {
     fn blocked_writes_timeout_or_cancel_and_cannot_be_reused() {
         for cancel in [false, true] {
             let (release, blocked) = mpsc::channel();
-            let mut writer =
-                BoundedWriter::new(Blocked(blocked), Duration::from_millis(100)).unwrap();
+            let timeout = if cancel {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(50)
+            };
+            let mut writer = BoundedWriter::new(Blocked(blocked), timeout).unwrap();
             let token = cancellation(cancel);
             writer.budget.begin(Some(&token));
             let start = Instant::now();
