@@ -22,6 +22,9 @@ fn verifies_zero_knowledge_sync_payload_and_pkce_challenge() {
 
     // 2. Verify Sync Conflict Logic
     let env = EncryptedEnvelope {
+        format_version: 1,
+        suite: "aes256gcm_dek_v1".into(),
+        key_epoch: 1,
         salt: "salt".into(),
         nonce: "nonce".into(),
         ciphertext: "cipher".into(),
@@ -195,6 +198,9 @@ fn verifies_sync_cycle_execution_and_conflict_resolution_in_app() {
     use crate::*;
 
     let dummy_env = EncryptedEnvelope {
+        format_version: 1,
+        suite: "aes256gcm_dek_v1".into(),
+        key_epoch: 1,
         salt: "s".into(),
         nonce: "n".into(),
         ciphertext: "c".into(),

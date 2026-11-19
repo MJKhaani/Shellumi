@@ -5,6 +5,7 @@ pub mod client;
 pub mod crypto;
 pub mod error;
 pub mod types;
+pub mod ws;
 
 #[cfg(test)]
 mod tests;
@@ -13,3 +14,4 @@ pub use client::ShellumiServerClient;
 pub use crypto::*;
 pub use error::ServerError;
 pub use types::*;
+pub use ws::{ShellumiWsClient, SyncNotificationEvent, WsClientConfig, WsConnectionStatus};

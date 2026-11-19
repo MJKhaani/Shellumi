@@ -10,6 +10,7 @@ fn computes_record_diffs_correctly() {
         ciphertext: "c".into(),
         associated_data: "host:1".into(),
         kdf_iterations: 1000,
+        ..Default::default()
     };
 
     let local1 = SyncRecord::new(
@@ -127,6 +128,7 @@ fn verifies_resolve_record_conflict_choices() {
         ciphertext: "cipher".into(),
         associated_data: "host:server1".into(),
         kdf_iterations: 1000,
+        ..Default::default()
     };
 
     let local_record = SyncRecord::new(

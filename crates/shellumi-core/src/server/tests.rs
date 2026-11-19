@@ -67,6 +67,9 @@ fn test_canonical_preimage_formatting() {
 #[test]
 fn test_ciphertext_digest_computation() {
     let envelope = EncryptedEnvelope {
+        format_version: 1,
+        suite: "aes256gcm_dek_v1".to_string(),
+        key_epoch: 1,
         salt: "c2FsdA==".to_string(),
         nonce: "bm9uY2U=".to_string(),
         ciphertext: "dGVzdC1jaXBoZXJ0ZXh0".to_string(),
@@ -107,6 +110,9 @@ fn test_envelope_validation_bounds() {
     use base64::Engine;
 
     let valid_envelope = EncryptedEnvelope {
+        format_version: 1,
+        suite: "argon2id_aes256gcm_legacy".to_string(),
+        key_epoch: 1,
         salt: BASE64_STANDARD.encode([1u8; 16]),
         nonce: BASE64_STANDARD.encode([2u8; 12]),
         ciphertext: BASE64_STANDARD.encode(vec![3u8; 128]),
@@ -115,6 +121,19 @@ fn test_envelope_validation_bounds() {
     };
 
     assert!(validate_envelope(&valid_envelope, 1024).is_ok());
+
+    // Direct DEK envelope
+    let direct_dek = EncryptedEnvelope {
+        format_version: 1,
+        suite: "aes256gcm_dek_v1".to_string(),
+        key_epoch: 1,
+        salt: String::new(),
+        nonce: BASE64_STANDARD.encode([2u8; 12]),
+        ciphertext: BASE64_STANDARD.encode(vec![3u8; 64]),
+        associated_data: String::new(),
+        kdf_iterations: 0,
+    };
+    assert!(validate_envelope(&direct_dek, 1024).is_ok());
 
     // Low iteration count
     let mut low_iter = valid_envelope.clone();
@@ -144,24 +163,33 @@ fn test_client_health_and_capabilities() {
     let mock = MockHttpTransport::new();
     let client = ShellumiServerClient::with_transport("https://server.example.com", mock.clone());
 
+    let instance_id = Uuid::new_v4();
     let caps = CapabilitiesResponse {
+        server_instance_id: instance_id,
         server_version: "0.1.0".to_string(),
         protocol_version: 1,
         min_protocol_version: 1,
         supported_features: vec!["vault_sync_v1".to_string(), "device_auth".to_string()],
-        supported_e2ee_suites: vec!["x25519_hkdf_aes256gcm".to_string()],
+        supported_e2ee_suites: vec!["aes256gcm_dek_v1".to_string()],
+        websocket: Some(WebSocketCapability {
+            endpoint: "/api/v1/events/ws".to_string(),
+            heartbeat_seconds: 30,
+        }),
         limits: ServerLimits {
             max_request_bytes: 10485760,
             max_record_bytes: 1048576,
             max_mutations_per_commit: 100,
+            max_change_page: 500,
         },
     };
 
     mock.queue_json_response(200, &caps);
     let result = client.capabilities().unwrap();
+    assert_eq!(result.server_instance_id, instance_id);
     assert_eq!(result.server_version, "0.1.0");
     assert_eq!(result.protocol_version, 1);
     assert_eq!(result.limits.max_mutations_per_commit, 100);
+    assert_eq!(result.limits.max_change_page, 500);
 
     let sent = mock.last_req().unwrap();
     assert_eq!(sent.method, "GET");
@@ -337,4 +365,133 @@ fn test_client_error_parsing() {
     mock.queue_json_response(404, &not_found_resp);
     let err3 = client.get_vault(Uuid::new_v4()).unwrap_err();
     assert!(err3.is_not_found());
+}
+
+#[test]
+fn test_device_challenge_and_signing() {
+    let mock = MockHttpTransport::new();
+    let client = ShellumiServerClient::with_transport("https://server.example.com", mock.clone());
+
+    let challenge_resp = DeviceChallengeResponse {
+        challenge: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        expires_at: 1700000000,
+    };
+    mock.queue_json_response(200, &challenge_resp);
+
+    let res = client
+        .device_challenge(&DeviceChallengeRequest::default())
+        .unwrap();
+    assert_eq!(res.challenge, challenge_resp.challenge);
+
+    let (keypair, pk_b64) = generate_device_ed25519_keypair().unwrap();
+    let sig = sign_device_challenge(&keypair, &res.challenge);
+    let expected_msg = format!("shellumi-device-challenge:{}", res.challenge);
+    assert!(verify_device_signature(&pk_b64, expected_msg.as_bytes(), &sig).is_ok());
+
+    let fingerprint = compute_key_fingerprint(&pk_b64).unwrap();
+    assert_eq!(fingerprint.len(), 64);
+}
+
+#[test]
+fn test_x25519_dek_wrap_and_unwrap_roundtrip() {
+    let vault_id = Uuid::new_v4();
+    let epoch = 1;
+
+    // Recipient device generates X25519 pair
+    let (recipient_secret, recipient_pk_b64) = generate_device_x25519_keypair().unwrap();
+
+    // Owner generates a 32-byte DEK and wraps it for recipient
+    let raw_dek = [42u8; 32];
+    let (wrapped_dek_b64, ephem_pk_b64) =
+        wrap_dek_for_recipient(&raw_dek, &recipient_pk_b64, vault_id, epoch).unwrap();
+
+    // Recipient device unwraps DEK using its static secret and sender's ephemeral public key
+    let unwrapped_dek = unwrap_dek_for_device(
+        &wrapped_dek_b64,
+        &ephem_pk_b64,
+        &recipient_secret,
+        vault_id,
+        epoch,
+    )
+    .unwrap();
+
+    assert_eq!(unwrapped_dek.as_ref(), &raw_dek);
+
+    // Mismatched vault_id fails unwrapping (AAD protection)
+    let other_vault = Uuid::new_v4();
+    assert!(unwrap_dek_for_device(
+        &wrapped_dek_b64,
+        &ephem_pk_b64,
+        &recipient_secret,
+        other_vault,
+        epoch
+    )
+    .is_err());
+
+    // Mismatched epoch fails unwrapping
+    assert!(unwrap_dek_for_device(
+        &wrapped_dek_b64,
+        &ephem_pk_b64,
+        &recipient_secret,
+        vault_id,
+        epoch + 1
+    )
+    .is_err());
+}
+
+#[test]
+fn test_recipient_devices_and_envelopes_flow() {
+    let mock = MockHttpTransport::new();
+    let client = ShellumiServerClient::with_transport("https://server.example.com", mock.clone());
+
+    let vault_id = Uuid::new_v4();
+    let dev_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+
+    let recip_resp = RecipientDevicesResponse {
+        vault_id,
+        devices: vec![RecipientDeviceResponse {
+            device_id: dev_id,
+            user_id,
+            device_name: "MacBook Pro".to_string(),
+            agreement_public_key: "x25519_pk".to_string(),
+            key_fingerprint: "abcdef123456".to_string(),
+        }],
+    };
+    mock.queue_json_response(200, &recip_resp);
+
+    let devices = client.list_recipient_devices(vault_id).unwrap();
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(devices.devices[0].device_name, "MacBook Pro");
+
+    let req = mock.last_req().unwrap();
+    assert_eq!(
+        req.url,
+        format!("https://server.example.com/api/v1/vaults/{vault_id}/recipient-devices")
+    );
+}
+
+#[test]
+fn test_websocket_message_codec() {
+    let vault_id = Uuid::new_v4();
+    let notif_id = Uuid::new_v4();
+
+    let client_msg = WsClientMessage::Subscribe {
+        request_id: "req-1".to_string(),
+        vault_ids: vec![vault_id],
+    };
+    let client_json = serde_json::to_string(&client_msg).unwrap();
+    assert!(client_json.contains(r#""action":"subscribe""#));
+
+    let server_msg = WsServerMessage::VaultChanged {
+        vault_id,
+        latest_sequence: 42,
+        notification_id: notif_id,
+    };
+    let server_json = serde_json::to_string(&server_msg).unwrap();
+    assert!(server_json.contains(r#""event":"vault.changed""#));
+    assert!(server_json.contains(r#""latest_sequence":42"#));
+
+    let de_server: WsServerMessage = serde_json::from_str(&server_json).unwrap();
+    assert_eq!(de_server, server_msg);
 }

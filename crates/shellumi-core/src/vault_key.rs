@@ -58,6 +58,9 @@ impl VaultKey {
             )
             .map_err(|_| SyncError::EncryptionFailed)?;
         Ok(EncryptedEnvelope {
+            format_version: 1,
+            suite: "argon2id_aes256gcm_legacy".to_string(),
+            key_epoch: 0,
             salt: STANDARD.encode(salt),
             nonce: STANDARD.encode(nonce),
             ciphertext: STANDARD.encode(ciphertext.as_slice()),

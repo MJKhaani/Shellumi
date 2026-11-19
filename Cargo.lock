@@ -7288,6 +7288,7 @@ name = "shellumi-core"
 version = "0.0.8-alpha"
 dependencies = [
  "base64 0.22.1",
+ "futures-util",
  "hex",
  "ring",
  "security-framework",
@@ -7295,7 +7296,10 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
+ "tokio-tungstenite",
  "uuid",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -7352,6 +7356,7 @@ name = "shellumi-storage"
 version = "0.0.8-alpha"
 dependencies = [
  "base64 0.22.1",
+ "ring",
  "serde",
  "serde_json",
  "shellumi-core",

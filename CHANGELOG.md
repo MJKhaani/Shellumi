@@ -2,6 +2,34 @@
 
 ## 0.0.8-alpha
 
+### Shellumi Server Protocol v1 & Phase 11 Desktop Integration
+- **Server Protocol v1 Wire Contract & Security Implementation:**
+  - Implemented complete wire protocol v1 client (`ShellumiServerClient`) supporting capabilities negotiation (`/api/v1/capabilities`), system limits, and authentication lifecycle (`/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`).
+  - Implemented cryptographic challenge-response device enrollment (`/api/v1/devices/challenge` and `/api/v1/devices`): server issues random nonce, client signs canonical `shellumi-device-challenge:{nonce}` with Ed25519 signing key and enrolls both Ed25519 signing public key and X25519 key agreement public key.
+  - Implemented end-to-end encryption (`aes256gcm_dek_v1`) with random 256-bit DEKs and canonical whole-envelope SHA-256 digest binding (`compute_ciphertext_digest`) over length-prefixed suite, nonce, salt, iterations, AAD, and ciphertext.
+  - Implemented signed CAS commits: mutations sealed in zero-knowledge envelopes, signed with Ed25519 over canonical preimage format (`shellumi-v1-mutation:{vault_id}:{object_id}:{entity_type}:{expected_revision}:{deleted}:{key_epoch}:{device_counter}:{ciphertext_digest}`).
+  - Added batch idempotency keys and replay protection, cursor-based delta change feeds (`/api/v1/vaults/{id}/changes`), and automated full snapshot recovery on HTTP 410 cursor expiration.
+- **Storage & Schema Upgrade (Migration 21):**
+  - Upgraded Turso schema version to 21 with transactional migrations:
+    - Added `server_instance_id` and `device_agreement_key` to `vault_server_connections`.
+    - Added `active_key_epoch`, `dek_envelope`, and `sync_provider` to `vault_contexts`.
+    - Added `idempotency_key`, `key_epoch`, and `device_counter` to `vault_mutations`.
+    - Added `active_key_epoch`, `conflicted_object_id`, and `conflict_details` to `vault_sync_state`.
+  - Added multi-server and multi-vault isolation: verified server instance ID checking preventing silent database reinitialization overwrites.
+  - Implemented client-side X25519 DEK wrapping and unwrapping (`wrap_dek_for_recipient` / `unwrap_dek_for_device`) with ephemeral Diffie-Hellman + HKDF-SHA256 + AES-256-GCM.
+  - Implemented automated key epoch rotation (`RotateKeyEpochRequest`) and revision conflict detection with local preservation of conflicting mutations.
+- **Phase 11 WebSocket Notification Broker:**
+  - Created pure-Rust `ShellumiWsClient` connecting to `/api/v1/events/ws` with Bearer authorization and `X-Device-Id` headers.
+  - Multi-vault subscriptions (`subscribe_vaults` / `unsubscribe_vaults`), ping/pong heartbeats, and jittered exponential backoff auto-reconnection.
+  - Live event dispatching (`SyncNotificationEvent::VaultChanged`, `KeyRotated`, `AccessRevoked`) triggering debounced REST reconciliation.
+- **Desktop GPUI Integration (`shellumi-app`):**
+  - Updated Settings view with dedicated "Synchronization" panel surfacing active vault scope, sync provider, sync status, device enrollment card, live WebSocket connection status badge, and team key rotation triggers.
+  - Wired global sync actions (`trigger_sync`) to dynamically dispatch to `sync_active_vault` when a remote server vault is active, while preserving direct Google Drive and local-only modes.
+  - Connected conflict modal to server revision conflicts and wired team modal key rotation to remote server API.
+- **Comprehensive Automated Testing:**
+  - Verified 207 tests in `shellumi-core`, 43 tests in `shellumi-storage`, 68 tests in `shellumi-app`, 25 in `shellumi-terminal`, and 38 in `shellumi-vnc`.
+  - Zero compiler warnings and clean `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ### Release Packaging & Documentation Polish (Phase 8)
 - **Crate & Manifest Version Synchronization:**
   - Synchronized all 8 workspace crates (`shellumi-core`, `shellumi-terminal`, `shellumi-storage`, `shellumi-cli`, `shellumi-app`, `shellumi-remote-desktop`, `shellumi-vnc`, `shellumi-rdp`) and `Cargo.lock` to `0.0.8-alpha`.

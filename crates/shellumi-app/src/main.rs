@@ -635,6 +635,7 @@ struct Shellumi {
     vault_dropdown_open: bool,
     active_vault: String,
     active_vault_id: String,
+    server_ws_status: Option<shellumi_core::server::WsConnectionStatus>,
     available_vaults: Vec<actions::VaultContextSummary>,
     sftp_left_pane: SftpPaneView,
     sftp_right_pane: SftpPaneView,
@@ -1036,6 +1037,7 @@ impl Shellumi {
             vault_dropdown_open: false,
             active_vault: vault_name.clone(),
             active_vault_id: vault_id.clone(),
+            server_ws_status: None,
             available_vaults: vec![actions::VaultContextSummary {
                 id: vault_id,
                 name: vault_name,

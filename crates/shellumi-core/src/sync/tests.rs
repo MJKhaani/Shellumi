@@ -39,6 +39,7 @@ fn determines_sync_actions_correctly() {
         ciphertext: "dummy".into(),
         associated_data: "host:1".into(),
         kdf_iterations: 1000,
+        ..Default::default()
     };
 
     let local_v1 = SyncRecord::new("1", SyncEntityType::Host, 1, "devA", 100, dummy_env.clone());
@@ -109,6 +110,7 @@ fn verifies_plan_sync_cycle() {
         ciphertext: "c".into(),
         associated_data: "host:1".into(),
         kdf_iterations: 1000,
+        ..Default::default()
     };
 
     let local_record = SyncRecord::new(

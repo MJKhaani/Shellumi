@@ -3,8 +3,9 @@ use super::*;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use shellumi_core::server::{
-    generate_device_ed25519_keypair_pkcs8, CreateVaultRequest, LoginRequest, RegisterDeviceRequest,
-    ShellumiServerClient,
+    generate_device_ed25519_keypair_pkcs8, generate_device_x25519_keypair, keypair_from_pkcs8,
+    sign_device_challenge, CreateVaultRequest, DeviceChallengeRequest, LoginRequest,
+    RegisterDeviceRequest, ShellumiServerClient,
 };
 use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
 use shellumi_storage::{VaultServerConnectionRecord, VaultSyncStateRecord};
@@ -300,15 +301,28 @@ impl Shellumi {
 
                     client.set_token(login_resp.access_token.clone());
 
-                    // 2. Generate local device signing keypair (Ed25519)
+                    // 2. Generate local device signing keypair (Ed25519) & agreement keypair (X25519)
                     let (signing_pkcs8, signing_pub_b64) =
                         generate_device_ed25519_keypair_pkcs8().map_err(|e| e.to_string())?;
+                    let (agreement_secret, agreement_pub_b64) =
+                        generate_device_x25519_keypair().map_err(|e| e.to_string())?;
+                    let signing_keypair =
+                        keypair_from_pkcs8(&signing_pkcs8).map_err(|e| e.to_string())?;
+
+                    // Challenge and sign
+                    let challenge_resp = client
+                        .device_challenge(&DeviceChallengeRequest::default())
+                        .map_err(|e| format!("Device challenge failed: {e}"))?;
+                    let challenge_sig =
+                        sign_device_challenge(&signing_keypair, &challenge_resp.challenge);
 
                     // 3. Register device with server
                     let dev_reg = RegisterDeviceRequest {
                         device_name: device_name.clone(),
                         signing_public_key: signing_pub_b64,
-                        agreement_public_key: "dummy-agreement-key".to_string(),
+                        agreement_public_key: agreement_pub_b64,
+                        challenge: Some(challenge_resp.challenge),
+                        challenge_signature: Some(challenge_sig),
                     };
                     let device_resp = client
                         .register_device(&dev_reg)
@@ -343,6 +357,10 @@ impl Shellumi {
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
 
+                    let server_inst = client
+                        .capabilities()
+                        .ok()
+                        .map(|c| c.server_instance_id.to_string());
                     let conn_id = format!("srv-{}", Uuid::new_v4());
                     let conn_record = VaultServerConnectionRecord {
                         id: conn_id.clone(),
@@ -351,6 +369,10 @@ impl Shellumi {
                         refresh_token: Some(login_resp.refresh_token),
                         device_id: Some(device_resp.device_id.to_string()),
                         device_signing_key: Some(BASE64_STANDARD.encode(&signing_pkcs8)),
+                        server_instance_id: server_inst,
+                        device_agreement_key: Some(
+                            BASE64_STANDARD.encode(agreement_secret.as_ref()),
+                        ),
                         created_at: now,
                         updated_at: now,
                     };
@@ -399,6 +421,9 @@ impl Shellumi {
                         last_synced_at: None,
                         status: "idle".to_string(),
                         error_message: None,
+                        active_key_epoch: 1,
+                        conflicted_object_id: None,
+                        conflict_details: None,
                     };
                     store
                         .save_vault_sync_state(&sync_state)

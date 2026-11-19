@@ -29,6 +29,17 @@ The server compatibility matrix is a protocol target rather than proof that this
 
 The following work is included in the alpha source:
 
+- Complete Shellumi Server Protocol v1 and Phase 11 Desktop Integration:
+  - Wire protocol v1 client (`ShellumiServerClient`) with capabilities negotiation (`/api/v1/capabilities`), bounded limits, and authentication lifecycle (`/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`).
+  - Cryptographic challenge-response device enrollment (`/api/v1/devices/challenge` and `/api/v1/devices`) with Ed25519 signing keys and X25519 key agreement keys.
+  - End-to-end encryption with zero-knowledge envelopes (`aes256gcm_dek_v1`), random 256-bit DEKs, and canonical whole-envelope SHA-256 digest binding (`compute_ciphertext_digest`).
+  - CAS commit signing (`canonical_mutation_preimage` and Ed25519 `sign_message`), batch idempotency keys, and replay protection.
+  - Change feed delta synchronization (`/api/v1/vaults/{id}/changes`), cursor pagination, and automatic snapshot recovery (`fetch_latest_snapshot`) on 410 cursor expiration.
+  - Multi-server & multi-vault management with per-vault isolation in schema v21 (`vault_server_connections`, `vault_contexts`, `vault_sync_state`, `vault_mutations`), verified server instance ID checking, and offline persistence.
+  - Stale key epoch detection, X25519 recipient DEK wrapping/unwrapping (`wrap_dek_for_recipient` / `unwrap_dek_for_device`), and automated epoch rotation (`RotateKeyEpochRequest`).
+  - Revision conflict detection with persistent local conflict details and user resolution flow.
+  - Phase 11 WebSocket notification broker (`ShellumiWsClient` connecting to `/api/v1/events/ws`) with multi-vault subscriptions, auto-reconnection with jittered backoff, and REST reconciliation.
+  - GPUI desktop integration: Settings page with active vault scope, sync status, device enrollment card, WebSocket connection badge, team key rotation controls, and preserved direct Google Drive sync.
 - Uniform pinned 56px action bar and scrolling content architecture across all application views (`Hosts`, `Keychain`, `Port Forwarding`, `Snippets`, `Known Hosts`, `Session Logs`, `Settings`, and `Workspaces`), eliminating visual jitter and vertical margin discrepancies.
 - Fully functional 4-scenario SFTP file manager (Local-Local, Local-Remote, Remote-Local, Remote-Remote) with recursive directory transfers, platform folder MIME icons, dedicated selection status bar with instant "Deselect" action, empty space click-to-deselect, and hover-isolated context menus.
 - Upgraded Command Palette (`Cmd+K`) and view mode menus with high-resolution vector SVG iconography.

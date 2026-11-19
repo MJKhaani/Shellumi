@@ -253,7 +253,79 @@ impl Shellumi {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
                 match result {
-                    Ok(_report) => {
+                    Ok(report) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if report.has_conflicts {
+                            app.sync_status = AppSyncStatus::Conflict {
+                                message:
+                                    "Conflict detected on remote server. Local changes preserved."
+                                        .to_string(),
+                            };
+                        } else {
+                            app.sync_status = AppSyncStatus::UpToDate {
+                                last_sync_time: now,
+                            };
+                        }
+                        app.load_hosts(cx);
+                        app.desktop_command(Command::Refresh, cx);
+                        app.listen_server_ws_events(cx);
+                    }
+                    Err(error) => {
+                        app.sync_status = AppSyncStatus::Error(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Enrolls the current desktop device with a remote Shellumi Server using protocol v1 challenge-response.
+    pub(crate) fn enroll_current_device(
+        &mut self,
+        server_conn_id: String,
+        device_label: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let conn = store
+                    .get_vault_server_connection(&server_conn_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Server connection '{server_conn_id}' not found"))?;
+
+                let token = conn
+                    .auth_token
+                    .clone()
+                    .ok_or_else(|| "Server connection missing auth token".to_string())?;
+                let mut client = ShellumiServerClient::new(&conn.base_url);
+                client.set_token(token);
+
+                let resp = store
+                    .enroll_device_with_server(&server_conn_id, &mut client, &device_label)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                Ok::<_, String>(resp)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match result {
+                    Ok(_resp) => {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -261,14 +333,112 @@ impl Shellumi {
                         app.sync_status = AppSyncStatus::UpToDate {
                             last_sync_time: now,
                         };
-                        app.load_hosts(cx);
-                        app.desktop_command(Command::Refresh, cx);
+                        app.load_vault_list(cx);
                     }
-                    Err(error) => {
-                        app.sync_status = AppSyncStatus::Error(error);
+                    Err(e) => {
+                        app.sync_status =
+                            AppSyncStatus::Error(format!("Device enrollment failed: {e}"));
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Subscribes to Phase 11 WebSocket notification events for the active remote vault.
+    pub(crate) fn listen_server_ws_events(&mut self, cx: &mut Context<Self>) {
+        if !self.is_active_vault_remote() {
+            return;
+        }
+        let Some(path) = self.database.clone() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let contexts = store
+                    .list_vault_contexts()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let target_ctx = contexts
+                    .into_iter()
+                    .find(|(_, ctx)| ctx.id().as_str() == active_vault_id)
+                    .ok_or_else(|| "Active vault context not found".to_string())?;
+
+                let (server_conn_id, remote_vault_id) = match target_ctx.1.location() {
+                    shellumi_core::VaultLocation::Remote {
+                        server,
+                        server_vault_id,
+                    } => (
+                        server.as_str().to_string(),
+                        server_vault_id.as_str().to_string(),
+                    ),
+                    shellumi_core::VaultLocation::Local => return Ok(()),
+                };
+
+                let conn_record = store
+                    .get_vault_server_connection(&server_conn_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Server connection not found".to_string())?;
+
+                let token = conn_record.auth_token.clone().unwrap_or_default();
+                let device_uuid = conn_record
+                    .device_id
+                    .as_deref()
+                    .and_then(|d| uuid::Uuid::parse_str(d).ok())
+                    .unwrap_or_else(uuid::Uuid::new_v4);
+                let remote_uuid =
+                    uuid::Uuid::parse_str(&remote_vault_id).map_err(|e| e.to_string())?;
+
+                let config = shellumi_core::server::WsClientConfig::new(
+                    conn_record.base_url,
+                    token,
+                    device_uuid,
+                );
+
+                let ws_client = shellumi_core::server::ShellumiWsClient::spawn(config);
+                let _ = ws_client.subscribe_vaults(vec![remote_uuid]).await;
+                let mut rx = ws_client.subscribe_events();
+
+                if let Ok(event) = rx.recv().await {
+                    match event {
+                        shellumi_core::server::SyncNotificationEvent::VaultChanged { .. } => {
+                            return Ok(());
+                        }
+                        shellumi_core::server::SyncNotificationEvent::KeyRotated { .. } => {
+                            return Ok(());
+                        }
+                        shellumi_core::server::SyncNotificationEvent::AccessRevoked { .. } => {
+                            return Err("AccessRevoked".to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| match res {
+                Ok(()) => {
+                    app.sync_active_vault(cx);
+                }
+                Err(e) if e == "AccessRevoked" => {
+                    app.sync_status = AppSyncStatus::Error(
+                        "Vault access was revoked by administrator on server.".into(),
+                    );
+                    cx.notify();
+                }
+                _ => {}
             });
         })
         .detach();

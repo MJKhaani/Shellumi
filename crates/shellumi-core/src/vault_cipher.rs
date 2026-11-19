@@ -17,12 +17,28 @@ use crate::vault_key::VaultKey;
 pub struct VaultCipher<'a> {
     key: &'a VaultKey,
     vault_id: &'a VaultId,
+    key_epoch: u32,
 }
 
 impl<'a> VaultCipher<'a> {
     /// Construct a new cipher bound to the specified vault.
     pub fn new(key: &'a VaultKey, vault_id: &'a VaultId) -> Self {
-        Self { key, vault_id }
+        Self {
+            key,
+            vault_id,
+            key_epoch: 1,
+        }
+    }
+
+    /// Set explicit key epoch for the cipher.
+    pub fn with_key_epoch(mut self, epoch: u32) -> Self {
+        self.key_epoch = epoch;
+        self
+    }
+
+    /// Active key epoch of this cipher.
+    pub fn key_epoch(&self) -> u32 {
+        self.key_epoch
     }
 
     /// Derive domain-separated Associated Authenticated Data (AAD) for the record.
@@ -60,6 +76,9 @@ impl<'a> VaultCipher<'a> {
             .map_err(|_| SyncError::EncryptionFailed)?;
 
         Ok(EncryptedEnvelope {
+            format_version: 1,
+            suite: "aes256gcm_dek_v1".to_string(),
+            key_epoch: self.key_epoch,
             salt: String::new(), // Master vault key is used directly; no salt derivation needed
             nonce: STANDARD.encode(nonce_bytes),
             ciphertext: STANDARD.encode(&in_out),

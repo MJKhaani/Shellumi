@@ -172,7 +172,84 @@ impl Shellumi {
                 content=content.child(row("SSH host-key verification","Unknown servers require an explicit decision. Changed keys are rejected by OpenSSH.".into(),muted("Required").into_any_element())).child(row("Agent forwarding","SSH sessions do not forward your authentication agent.".into(),muted("Disabled").into_any_element())).child(row("Authentication","System OpenSSH uses your local SSH config, agent and interactive authentication prompts.".into(),muted("OpenSSH").into_any_element()));
             }
             "Synchronization" => {
-                content=content.child(heading("Encrypted Google Drive Synchronization")).child(muted("End-to-end encrypted synchronization over HTTPS using system curl transport to your private Google Drive appDataFolder. Passphrases never leave your machine and Google cannot inspect payload ciphertext."));
+                let is_remote = self.is_active_vault_remote();
+                let status_label = match &self.sync_status {
+                    AppSyncStatus::LocalOnly => {
+                        "Local only (no remote synchronization)".to_string()
+                    }
+                    AppSyncStatus::Syncing => "Syncing in progress...".to_string(),
+                    AppSyncStatus::UpToDate { last_sync_time } => {
+                        format!("Up to date (synced at {last_sync_time})")
+                    }
+                    AppSyncStatus::Conflict { message } => message.clone(),
+                    AppSyncStatus::Error(err) => err.clone(),
+                };
+
+                let active_vault_summary = self
+                    .available_vaults
+                    .iter()
+                    .find(|v| v.id == self.active_vault_id);
+
+                let server_url_display = active_vault_summary
+                    .and_then(|v| v.server_url.as_deref())
+                    .unwrap_or("None (Local Vault)");
+
+                content = content
+                    .child(heading("Active Vault Synchronization"))
+                    .child(row(
+                        "Active Vault Scope",
+                        format!("{} (ID: {})", self.active_vault, self.active_vault_id),
+                        muted(if is_remote { "Remote E2EE" } else { "Local Only" }).into_any_element(),
+                    ))
+                    .child(row(
+                        "Synchronization Status",
+                        status_label,
+                        button("sync-active-vault-btn", "Sync Now")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if app.is_active_vault_remote() {
+                                    app.sync_active_vault(cx);
+                                } else {
+                                    app.trigger_sync(cx);
+                                }
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(heading("Shellumi Server Protocol v1 Integration"))
+                    .child(muted(
+                        "Zero-knowledge End-to-End Encryption with signed CAS commits, Ed25519 device signatures, X25519 key agreement, and Phase 11 WebSocket change notifications.",
+                    ))
+                    .child(row(
+                        "Configured Remote Server",
+                        server_url_display.to_string(),
+                        button("enroll-device-btn", "Enroll Device")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.enroll_current_device("corp-server".into(), "Desktop Client".into(), cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "Real-time WebSocket Notifications",
+                        "Live change feeds via Phase 11 events broker (/api/v1/events/ws)".into(),
+                        muted(match &self.server_ws_status {
+                            Some(shellumi_core::server::WsConnectionStatus::Connected) => "Connected",
+                            Some(shellumi_core::server::WsConnectionStatus::Connecting) => "Connecting...",
+                            Some(shellumi_core::server::WsConnectionStatus::Reconnecting) => "Reconnecting...",
+                            _ => "Disconnected / On Demand",
+                        }).into_any_element(),
+                    ))
+                    .child(row(
+                        "Team Sharing & RBAC",
+                        "Manage member key envelopes, epoch rotations, and collaborative access.".into(),
+                        button("open-team-sharing-btn", "Manage Team & Keys")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.open_team_modal(cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(heading("Direct Google Drive Synchronization"))
+                    .child(muted(
+                        "Direct client-side synchronization using system curl to your private Google Drive appDataFolder. Compatible with local and offline vaults.",
+                    ));
             }
             "Keyboard Shortcuts" => {
                 for (name, key) in [

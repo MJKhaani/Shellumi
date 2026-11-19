@@ -175,6 +175,10 @@ impl Shellumi {
     }
 
     pub(crate) fn trigger_sync(&mut self, cx: &mut Context<Self>) {
+        if self.is_active_vault_remote() {
+            self.sync_active_vault(cx);
+            return;
+        }
         let Some(path) = self.database.clone() else {
             self.sync_status = AppSyncStatus::Error("Database not open.".into());
             cx.notify();

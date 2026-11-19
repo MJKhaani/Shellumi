@@ -23,12 +23,27 @@ pub struct HealthResponse {
 /// Server capabilities response payload for `/api/v1/capabilities`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitiesResponse {
+    #[serde(default = "uuid::Uuid::nil")]
+    pub server_instance_id: Uuid,
     pub server_version: String,
     pub protocol_version: u32,
     pub min_protocol_version: u32,
     pub supported_features: Vec<String>,
     pub supported_e2ee_suites: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketCapability>,
     pub limits: ServerLimits,
+}
+
+/// WebSocket capability configuration advertised by the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSocketCapability {
+    pub endpoint: String,
+    pub heartbeat_seconds: u64,
+}
+
+fn default_max_change_page() -> usize {
+    500
 }
 
 /// Bounded limits advertised by the server.
@@ -37,6 +52,8 @@ pub struct ServerLimits {
     pub max_request_bytes: usize,
     pub max_record_bytes: usize,
     pub max_mutations_per_commit: usize,
+    #[serde(default = "default_max_change_page")]
+    pub max_change_page: usize,
 }
 
 /// Standard machine-readable error response.
@@ -137,12 +154,30 @@ pub struct MeResponse {
 // Device Management DTOs
 // ---------------------------------------------------------------------------
 
+/// Request payload for requesting a device enrollment challenge (`POST /api/v1/devices/challenge`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeviceChallengeRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<Uuid>,
+}
+
+/// Response containing a cryptographic challenge nonce for device enrollment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceChallengeResponse {
+    pub challenge: String,
+    pub expires_at: i64,
+}
+
 /// Request payload for registering a new client device (`POST /api/v1/devices`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterDeviceRequest {
     pub device_name: String,
     pub signing_public_key: String,
     pub agreement_public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_signature: Option<String>,
 }
 
 /// Device representation returned by device management endpoints.
@@ -402,6 +437,23 @@ pub struct RotateKeyEpochResponse {
     pub enrolled_envelopes: usize,
 }
 
+/// Authorized member device capable of receiving wrapped DEKs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipientDeviceResponse {
+    pub device_id: Uuid,
+    pub user_id: Uuid,
+    pub device_name: String,
+    pub agreement_public_key: String,
+    pub key_fingerprint: String,
+}
+
+/// List of recipient devices for a vault (`GET /api/v1/vaults/{id}/recipient-devices`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipientDevicesResponse {
+    pub vault_id: Uuid,
+    pub devices: Vec<RecipientDeviceResponse>,
+}
+
 /// Representation of an audit event (`GET /api/v1/vaults/{id}/audit`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEventResponse {
@@ -560,4 +612,73 @@ pub struct CollabPollQuery {
 pub struct CollabPollResponse {
     pub frames: Vec<CollabFrame>,
     pub latest_sequence: u64,
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket Live Notification DTOs (`/api/v1/events/ws`)
+// ---------------------------------------------------------------------------
+
+/// Per-vault durable high-watermark reported on subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultWatermark {
+    pub vault_id: Uuid,
+    #[serde(alias = "current_sequence")]
+    pub latest_sequence: u64,
+}
+
+/// Client-to-server WebSocket messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action")]
+pub enum WsClientMessage {
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        request_id: String,
+        vault_ids: Vec<Uuid>,
+    },
+    #[serde(rename = "unsubscribe")]
+    Unsubscribe {
+        request_id: String,
+        vault_ids: Vec<Uuid>,
+    },
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+/// Server-to-client WebSocket notification messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event")]
+pub enum WsServerMessage {
+    #[serde(rename = "subscribed")]
+    Subscribed {
+        request_id: String,
+        vaults: Vec<VaultWatermark>,
+    },
+    #[serde(rename = "vault.changed")]
+    VaultChanged {
+        vault_id: Uuid,
+        latest_sequence: u64,
+        notification_id: Uuid,
+    },
+    #[serde(rename = "vault.key_rotated")]
+    VaultKeyRotated {
+        vault_id: Uuid,
+        #[serde(rename = "epoch", alias = "key_epoch")]
+        epoch: u32,
+        notification_id: Uuid,
+    },
+    #[serde(rename = "vault.access_revoked")]
+    VaultAccessRevoked {
+        vault_id: Uuid,
+        notification_id: Uuid,
+    },
+    #[serde(rename = "error")]
+    Error {
+        #[serde(rename = "code", alias = "error_code")]
+        code: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    #[serde(rename = "pong")]
+    Pong,
 }

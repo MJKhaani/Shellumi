@@ -16,7 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -2044,6 +2044,142 @@ impl HostStore {
 
             tx.execute("PRAGMA user_version = 20", ()).await?;
         }
+        if version < 21 {
+            // 1. vault_server_connections: server_instance_id and device_agreement_key
+            let mut columns = tx
+                .query("PRAGMA table_info(vault_server_connections)", ())
+                .await?;
+            let mut has_server_instance_id = false;
+            let mut has_device_agreement_key = false;
+            while let Some(row) = columns.next().await? {
+                let col_name: String = row.get(1)?;
+                has_server_instance_id |= col_name == "server_instance_id";
+                has_device_agreement_key |= col_name == "device_agreement_key";
+            }
+            drop(columns);
+
+            if !has_server_instance_id {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN server_instance_id TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_device_agreement_key {
+                tx.execute(
+                    "ALTER TABLE vault_server_connections ADD COLUMN device_agreement_key TEXT",
+                    (),
+                )
+                .await?;
+            }
+
+            // 2. vault_contexts: active_key_epoch, dek_envelope, sync_provider
+            let mut columns = tx.query("PRAGMA table_info(vault_contexts)", ()).await?;
+            let mut has_active_key_epoch = false;
+            let mut has_dek_envelope = false;
+            let mut has_sync_provider = false;
+            while let Some(row) = columns.next().await? {
+                let col_name: String = row.get(1)?;
+                has_active_key_epoch |= col_name == "active_key_epoch";
+                has_dek_envelope |= col_name == "dek_envelope";
+                has_sync_provider |= col_name == "sync_provider";
+            }
+            drop(columns);
+
+            if !has_active_key_epoch {
+                tx.execute(
+                    "ALTER TABLE vault_contexts ADD COLUMN active_key_epoch INTEGER NOT NULL DEFAULT 1",
+                    (),
+                )
+                .await?;
+            }
+            if !has_dek_envelope {
+                tx.execute(
+                    "ALTER TABLE vault_contexts ADD COLUMN dek_envelope TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_sync_provider {
+                tx.execute(
+                    "ALTER TABLE vault_contexts ADD COLUMN sync_provider TEXT NOT NULL DEFAULT 'local'",
+                    (),
+                )
+                .await?;
+            }
+
+            // 3. vault_mutations: idempotency_key, key_epoch, device_counter
+            let mut columns = tx.query("PRAGMA table_info(vault_mutations)", ()).await?;
+            let mut has_idempotency_key = false;
+            let mut has_key_epoch = false;
+            let mut has_device_counter = false;
+            while let Some(row) = columns.next().await? {
+                let col_name: String = row.get(1)?;
+                has_idempotency_key |= col_name == "idempotency_key";
+                has_key_epoch |= col_name == "key_epoch";
+                has_device_counter |= col_name == "device_counter";
+            }
+            drop(columns);
+
+            if !has_idempotency_key {
+                tx.execute(
+                    "ALTER TABLE vault_mutations ADD COLUMN idempotency_key TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_key_epoch {
+                tx.execute(
+                    "ALTER TABLE vault_mutations ADD COLUMN key_epoch INTEGER NOT NULL DEFAULT 1",
+                    (),
+                )
+                .await?;
+            }
+            if !has_device_counter {
+                tx.execute(
+                    "ALTER TABLE vault_mutations ADD COLUMN device_counter INTEGER NOT NULL DEFAULT 1",
+                    (),
+                )
+                .await?;
+            }
+
+            // 4. vault_sync_state: active_key_epoch, conflicted_object_id, conflict_details
+            let mut columns = tx.query("PRAGMA table_info(vault_sync_state)", ()).await?;
+            let mut has_state_epoch = false;
+            let mut has_conflicted_obj = false;
+            let mut has_conflict_details = false;
+            while let Some(row) = columns.next().await? {
+                let col_name: String = row.get(1)?;
+                has_state_epoch |= col_name == "active_key_epoch";
+                has_conflicted_obj |= col_name == "conflicted_object_id";
+                has_conflict_details |= col_name == "conflict_details";
+            }
+            drop(columns);
+
+            if !has_state_epoch {
+                tx.execute(
+                    "ALTER TABLE vault_sync_state ADD COLUMN active_key_epoch INTEGER NOT NULL DEFAULT 1",
+                    (),
+                )
+                .await?;
+            }
+            if !has_conflicted_obj {
+                tx.execute(
+                    "ALTER TABLE vault_sync_state ADD COLUMN conflicted_object_id TEXT",
+                    (),
+                )
+                .await?;
+            }
+            if !has_conflict_details {
+                tx.execute(
+                    "ALTER TABLE vault_sync_state ADD COLUMN conflict_details TEXT",
+                    (),
+                )
+                .await?;
+            }
+
+            tx.execute("PRAGMA user_version = 21", ()).await?;
+        }
         tx.commit().await?;
         Ok(Self {
             _database: database,
@@ -2198,6 +2334,76 @@ impl HostStore {
         } else {
             Ok(None)
         }
+    }
+
+    /// Retrieves the wrapped DEK envelope for a vault context.
+    pub async fn get_vault_dek_envelope(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT dek_envelope FROM vault_contexts WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let env: Option<String> = row.get(0)?;
+            Ok(env)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Sets the wrapped DEK envelope and key epoch for a vault context.
+    pub async fn set_vault_dek_envelope(
+        &mut self,
+        vault_id: &str,
+        envelope_json: Option<&str>,
+        epoch: u32,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_contexts SET dek_envelope = ?1, active_key_epoch = ?2 WHERE id = ?3",
+                (envelope_json, epoch as i64, vault_id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Gets the active key epoch for a vault context.
+    pub async fn get_vault_active_key_epoch(&self, vault_id: &str) -> Result<u32, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT active_key_epoch FROM vault_contexts WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let epoch: i64 = row.get(0)?;
+            Ok(epoch.max(1) as u32)
+        } else {
+            Ok(1)
+        }
+    }
+
+    /// Sets the active key epoch for a vault context.
+    pub async fn set_vault_active_key_epoch(
+        &mut self,
+        vault_id: &str,
+        epoch: u32,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_contexts SET active_key_epoch = ?1 WHERE id = ?2",
+                (epoch as i64, vault_id),
+            )
+            .await?;
+        Ok(rows > 0)
     }
 
     /// Sets the locked status of a vault context.
@@ -8168,14 +8374,14 @@ mod tests {
     async fn test_schema_20_vault_contexts_recovery_and_lock() {
         let mut store = HostStore::open(":memory:").await.unwrap();
 
-        // Check user_version is 20
+        // Check user_version is at least 20
         let mut rows = store
             .connection
             .query("PRAGMA user_version", ())
             .await
             .unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(version, 20);
+        assert!(version >= 20);
 
         // Verify recovery envelope storage
         assert_eq!(

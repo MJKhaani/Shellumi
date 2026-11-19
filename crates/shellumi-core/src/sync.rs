@@ -102,19 +102,54 @@ impl NonceSequence for OneNonce {
     }
 }
 
+fn default_format_version() -> u32 {
+    1
+}
+
+fn default_suite() -> String {
+    "aes256gcm_dek_v1".to_string()
+}
+
 /// An authenticated ciphertext envelope containing encrypted data and metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedEnvelope {
-    /// Base64-encoded KDF salt (16 bytes).
+    /// Envelope format version (default: 1).
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
+    /// Cipher suite identifier (e.g. `aes256gcm_dek_v1`, `argon2id_aes256gcm_legacy`).
+    #[serde(default = "default_suite")]
+    pub suite: String,
+    /// Active key epoch for the vault.
+    #[serde(default)]
+    pub key_epoch: u32,
+    /// Base64-encoded KDF salt (16 bytes, empty for direct-DEK envelopes).
+    #[serde(default)]
     pub salt: String,
     /// Base64-encoded AEAD nonce (12 bytes).
     pub nonce: String,
     /// Base64-encoded ciphertext + 16-byte Poly1305/GCM authentication tag.
     pub ciphertext: String,
     /// Bound associated data (e.g. `entity_type:object_id`).
+    #[serde(default)]
     pub associated_data: String,
-    /// KDF iteration count.
+    /// KDF iteration count (0 for direct-DEK envelopes).
+    #[serde(default)]
     pub kdf_iterations: u32,
+}
+
+impl Default for EncryptedEnvelope {
+    fn default() -> Self {
+        Self {
+            format_version: default_format_version(),
+            suite: default_suite(),
+            key_epoch: 1,
+            salt: String::new(),
+            nonce: String::new(),
+            ciphertext: String::new(),
+            associated_data: String::new(),
+            kdf_iterations: 0,
+        }
+    }
 }
 
 /// Derives a 256-bit Key Encryption Key (KEK) using PBKDF2-HMAC-SHA256 with memory zeroization on drop.
@@ -236,6 +271,9 @@ pub fn encrypt_entity_with_iterations<T: Serialize>(
     let ciphertext = seal_payload(&key, &nonce, &json_bytes, aad_string.as_bytes())?;
 
     Ok(EncryptedEnvelope {
+        format_version: 1,
+        suite: "argon2id_aes256gcm_legacy".to_string(),
+        key_epoch: 0,
         salt: BASE64_STANDARD.encode(salt),
         nonce: BASE64_STANDARD.encode(nonce),
         ciphertext: BASE64_STANDARD.encode(ciphertext),
@@ -249,9 +287,6 @@ pub fn decrypt_entity<T: DeserializeOwned>(
     passphrase: &str,
     envelope: &EncryptedEnvelope,
 ) -> Result<T, SyncError> {
-    let salt = BASE64_STANDARD
-        .decode(&envelope.salt)
-        .map_err(|e| SyncError::InvalidBase64(e.to_string()))?;
     let nonce_bytes = BASE64_STANDARD
         .decode(&envelope.nonce)
         .map_err(|e| SyncError::InvalidBase64(e.to_string()))?;
@@ -259,20 +294,48 @@ pub fn decrypt_entity<T: DeserializeOwned>(
         .decode(&envelope.ciphertext)
         .map_err(|e| SyncError::InvalidBase64(e.to_string()))?;
 
-    if salt.len() != SALT_LEN {
-        return Err(SyncError::InvalidSaltLength);
-    }
     if nonce_bytes.len() != NONCE_LEN {
         return Err(SyncError::InvalidNonceLength);
     }
 
-    let mut salt_arr = [0u8; SALT_LEN];
-    salt_arr.copy_from_slice(&salt);
-
     let mut nonce_arr = [0u8; NONCE_LEN];
     nonce_arr.copy_from_slice(&nonce_bytes);
 
-    let key = derive_key(passphrase, &salt_arr, envelope.kdf_iterations)?;
+    let key: Zeroizing<[u8; KEY_LEN]> = if envelope.salt.is_empty() && envelope.kdf_iterations == 0
+    {
+        if let Ok(dek_bytes) = BASE64_STANDARD.decode(passphrase) {
+            if dek_bytes.len() == KEY_LEN {
+                let mut arr = [0u8; KEY_LEN];
+                arr.copy_from_slice(&dek_bytes);
+                Zeroizing::new(arr)
+            } else {
+                let d = digest(&SHA256, passphrase.as_bytes());
+                let mut arr = [0u8; KEY_LEN];
+                arr.copy_from_slice(d.as_ref());
+                Zeroizing::new(arr)
+            }
+        } else if passphrase.len() == KEY_LEN {
+            let mut arr = [0u8; KEY_LEN];
+            arr.copy_from_slice(passphrase.as_bytes());
+            Zeroizing::new(arr)
+        } else {
+            let d = digest(&SHA256, passphrase.as_bytes());
+            let mut arr = [0u8; KEY_LEN];
+            arr.copy_from_slice(d.as_ref());
+            Zeroizing::new(arr)
+        }
+    } else {
+        let salt = BASE64_STANDARD
+            .decode(&envelope.salt)
+            .map_err(|e| SyncError::InvalidBase64(e.to_string()))?;
+        if salt.len() != SALT_LEN {
+            return Err(SyncError::InvalidSaltLength);
+        }
+        let mut salt_arr = [0u8; SALT_LEN];
+        salt_arr.copy_from_slice(&salt);
+        derive_key(passphrase, &salt_arr, envelope.kdf_iterations)?
+    };
+
     let plaintext = open_payload(
         &key,
         &nonce_arr,

@@ -242,6 +242,14 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
     // Device Management Endpoints
     // -----------------------------------------------------------------------
 
+    /// Requests a cryptographic enrollment challenge nonce (`POST /api/v1/devices/challenge`).
+    pub fn device_challenge(
+        &self,
+        req: &DeviceChallengeRequest,
+    ) -> Result<DeviceChallengeResponse, ServerError> {
+        self.send_request("POST", "api/v1/devices/challenge", Some(req))
+    }
+
     /// Lists all registered devices for the current user (`GET /api/v1/devices`).
     pub fn list_devices(&self) -> Result<Vec<DeviceResponse>, ServerError> {
         self.send_request::<(), _>("GET", "api/v1/devices", None)
@@ -354,6 +362,11 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
         )
     }
 
+    /// Fetches the latest full recovery snapshot for a vault (`GET /api/v1/vaults/{vault_id}/snapshots`).
+    pub fn fetch_latest_snapshot(&self, vault_id: Uuid) -> Result<SnapshotResponse, ServerError> {
+        self.send_request::<(), _>("GET", &format!("api/v1/vaults/{vault_id}/snapshots"), None)
+    }
+
     // -----------------------------------------------------------------------
     // Team Vault Members & Invites Endpoints
     // -----------------------------------------------------------------------
@@ -414,6 +427,18 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
     // -----------------------------------------------------------------------
     // Key Envelopes Endpoints
     // -----------------------------------------------------------------------
+
+    /// Lists authorized recipient member devices for a vault (`GET /api/v1/vaults/{vault_id}/recipient-devices`).
+    pub fn list_recipient_devices(
+        &self,
+        vault_id: Uuid,
+    ) -> Result<RecipientDevicesResponse, ServerError> {
+        self.send_request::<(), _>(
+            "GET",
+            &format!("api/v1/vaults/{vault_id}/recipient-devices"),
+            None,
+        )
+    }
 
     /// Fetches wrapped key envelopes for the current device in a vault (`GET /api/v1/vaults/{vault_id}/keys/envelopes`).
     pub fn list_key_envelopes(
