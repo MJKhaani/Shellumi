@@ -2,6 +2,37 @@
 
 ## 0.0.8-alpha
 
+### Two-Server, Two-Client Integration Verification (Increment 8)
+- **Multi-Server & Multi-Client Full-Lifecycle Topology:**
+  - Automated integration test suite validating end-to-end compatibility across two independent self-hosted servers (`Server Alpha` at `inst_alpha` and `Server Beta` at `inst_beta`) and two distinct clients (`Client 1 / Device 1 / Alice` on macOS and `Client 2 / Device 2 / Bob` on Linux).
+  - Validated independent server capabilities negotiation (`/api/v1/capabilities`), protocol version checking, and verified server instance ID binding preventing cross-server token misuse or spoofing.
+- **Challenge-Response Device Enrollment & Credential Isolation:**
+  - Cryptographic challenge-response enrollment (`/api/v1/devices/challenge` and `/api/v1/devices`) verifying Ed25519 signing signatures over `shellumi-device-challenge:{nonce}` and registering X25519 agreement public keys.
+  - Strict credential isolation verified: authentication tokens and device signatures registered on Server Alpha are strictly rejected on Server Beta (HTTP 401/403).
+- **Multi-Window Vault Binding & Local Inventory Scoping:**
+  - Concurrent application windows bound to independent remote vaults on different servers maintain completely isolated Turso database query scopes (`HostStore`).
+  - Verified that concurrent insertion of identically named hosts (`bastion.corp`) across windows results in zero cross-contamination of endpoints (`10.0.0.1:22` vs `192.168.1.1:2222`), tags, or credentials.
+- **Zero-Knowledge E2EE CAS Synchronization & Convergence:**
+  - Client-side AES-256-GCM envelope encryption with 256-bit DEKs, whole-envelope SHA-256 digest computation, and Ed25519 mutation signing over canonical preimages.
+  - Convergence verified: Alice commits record to Server Alpha; Bob fetches change feed (`fetch_changes`) and obtains identical decrypted payload.
+- **Optimistic Concurrency Control (OCC) & Revision Conflict Handling:**
+  - Concurrent commit attempts based on stale revisions return HTTP 409 `REVISION_MISMATCH` with detailed conflict payloads, preventing silent overwrites and preserving local dirty mutations.
+- **Tombstone Deletion & Change Feed Propagation:**
+  - Deletions committed as signed tombstones with empty ciphertext digests, propagated via change feeds, and verified to remove entries from active snapshot views.
+- **HTTP 410 Cursor Expiration & Full Snapshot Recovery:**
+  - Verified fallback mechanism: when a client's delta cursor expires (HTTP 410 `CURSOR_EXPIRED`), client triggers full snapshot recovery (`fetch_latest_snapshot`) to reconcile state.
+- **Reconnection Idempotency Protection:**
+  - Replaying identical batch commit requests with duplicated `idempotency_key` returns cached responses without advancing sequence numbers or duplicating mutations.
+- **Team Sharing, X25519 Key Wrapping & Forward-Secure Revocation:**
+  - Rotating key epoch to 2 wraps fresh DEK for Bob via `wrap_dek_for_recipient` and Bob successfully decrypts via `unwrap_dek_for_device`.
+  - Member revocation: Alice rotates to epoch 3 without Bob; Bob is immediately locked out from committing mutations (HTTP 403 `STALE_EPOCH`) and cannot decrypt new records.
+- **Live Encrypted Terminal Collaboration Relay & Writer Fencing:**
+  - Verified live encrypted PTY streaming, participant input forwarding, monotonic `lease_token` arbitration (stale keystroke rejection with HTTP 409 `STALE_LEASE_TOKEN`), emergency host control revocation, and session termination (subsequent actions returning HTTP 410).
+- **Cryptographic Memory Zeroization:**
+  - Memory zeroization validated via `zeroize::Zeroizing` for DEKs, private keypairs, and session secrets across all client lifecycles.
+- **Automated Verification Harness:**
+  - Implemented end-to-end integration test in `crates/shellumi-app/src/tests/real_server_verification.rs`.
+
 ### Encrypted Terminal Collaboration with Single-Writer Fencing & E2EE Relay (Increment 7)
 - **Zero-Knowledge Ephemeral Session Encryption & AAD Monotonic Framing:**
   - Implemented client-side generation of ephemeral AES-256-GCM session keys (`generate_collab_session_key`) protected by `zeroize::Zeroizing`.

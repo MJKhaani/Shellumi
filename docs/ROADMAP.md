@@ -29,6 +29,21 @@ The server compatibility matrix is a protocol target rather than proof that this
 
 The following work is included in the alpha source:
 
+- Two-Server, Two-Client Integration Verification (Increment 8):
+  - Multi-tenant integration verified across two independent servers (`Server Alpha` at `inst_alpha` and `Server Beta` at `inst_beta`) and two clients (`Client 1 / Device 1 / Alice` on macOS and `Client 2 / Device 2 / Bob` on Linux).
+  - Multi-server capability negotiation, protocol v1 version checking, and independent instance ID verification preventing cross-server impersonation.
+  - Cryptographic challenge-response device enrollment with Ed25519 signing keys (`sign_device_challenge`), SHA-256 canonical challenge binding, and X25519 agreement key enrollment.
+  - Credential and token isolation: verified that credentials and device keys bound to Server Alpha are completely rejected on Server Beta (HTTP 401/403).
+  - Multi-window concurrent vault binding and strict inventory isolation in local Turso storage (`HostStore`): verified that concurrent windows inserting identically named hosts (`bastion.corp`) maintain completely isolated endpoints, credentials, and settings with zero cross-contamination.
+  - E2EE zero-knowledge vault synchronization: client-side AES-256-GCM encryption with 256-bit DEKs, whole-envelope SHA-256 digest computation, and Ed25519-signed CAS commits over canonical mutation preimages.
+  - Optimistic concurrency control (OCC) & CAS conflict detection: concurrent edits on stale revisions immediately rejected with HTTP 409 `REVISION_MISMATCH`, preserving local changes without silent overwrite.
+  - Deletion, tombstones, and feed convergence: deleted items committed as signed tombstones and reliably propagated to other clients via cursor-paginated change feeds.
+  - HTTP 410 cursor expiration & full snapshot recovery: expired cursors trigger full snapshot recovery (`fetch_latest_snapshot`), converging client state while filtering out tombstones.
+  - Network reconnection idempotency: retried commits with duplicate idempotency keys return cached commit responses without creating duplicate sequence numbers or re-applying mutations.
+  - Team sharing, X25519 DEK wrapping & unwrapping (`wrap_dek_for_recipient` / `unwrap_dek_for_device`), epoch rotation, and revocation: rotating to epoch 3 without wrapping keys for a revoked member guarantees cryptographic forward secrecy and immediately locks out stale commits (HTTP 403 `STALE_EPOCH`).
+  - Live encrypted terminal collaboration relay with monotonic writer fencing: verified real PTY frame streaming, participant keystroke forwarding, lease token validation (HTTP 409 on stale tokens), emergency host revocation, and immediate session termination.
+  - Memory zeroization (`Zeroizing`) for all cryptographic keys, secrets, and ephemeral wrapping keys across client runtimes.
+  - Automated integration test suite: `crates/shellumi-app/src/tests/real_server_verification.rs` (executing all 10 phases end-to-end).
 - Multi-Window Vault Binding and Concurrent Window Lifecycle (Increment 2):
   - Independent concurrent application windows in one process (`cx.open_window`), each bound to its own vault context (`active_vault_id`, `active_vault_name`).
   - Dynamic macOS window titles reflecting context: `Shellumi — {vault_name}` for local vaults and `Shellumi — {vault_name} ({server_url})` for remote vaults.
