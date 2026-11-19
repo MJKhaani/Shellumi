@@ -1,5 +1,6 @@
 mod collaboration;
 mod infrastructure;
+mod multi_window;
 mod sftp;
 mod sync;
 

@@ -636,6 +636,7 @@ struct Shellumi {
     active_vault: String,
     active_vault_id: String,
     server_ws_status: Option<shellumi_core::server::WsConnectionStatus>,
+    active_ws_client: Option<shellumi_core::server::ShellumiWsClient>,
     available_vaults: Vec<actions::VaultContextSummary>,
     sftp_left_pane: SftpPaneView,
     sftp_right_pane: SftpPaneView,
@@ -1038,6 +1039,7 @@ impl Shellumi {
             active_vault: vault_name.clone(),
             active_vault_id: vault_id.clone(),
             server_ws_status: None,
+            active_ws_client: None,
             available_vaults: vec![actions::VaultContextSummary {
                 id: vault_id,
                 name: vault_name,
@@ -1082,7 +1084,16 @@ impl Shellumi {
     ) {
         let database = self.database.clone();
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-        let title = format!("Shellumi — {vault_name}");
+        let server_url = self
+            .available_vaults
+            .iter()
+            .find(|v| v.id == vault_id)
+            .and_then(|v| v.server_url.as_deref());
+        let title = if let Some(url) = server_url {
+            format!("Shellumi — {vault_name} ({url})")
+        } else {
+            format!("Shellumi — {vault_name}")
+        };
         let _ = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1993,46 +2004,83 @@ impl Shellumi {
                 _ => ("Remote", rgb(MacTheme::TEXT_TERTIARY), false),
             };
 
-            Some(
-                div()
-                    .id("topbar-sync-controls")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .id("topbar-sync-status-badge")
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(rgba(0x2563eb18))
-                            .text_xs()
-                            .text_color(status_color)
-                            .child(if is_syncing { "🔄" } else { "☁️" })
-                            .child(status_text),
-                    )
-                    .child(
-                        div()
-                            .id("topbar-sync-now-btn")
-                            .px_1p5()
-                            .py_1()
-                            .rounded_md()
-                            .text_xs()
-                            .cursor_pointer()
-                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                            .hover(|s| {
-                                s.bg(rgb(MacTheme::SURFACE_HOVER))
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            })
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.sync_active_vault(cx);
-                            }))
-                            .child("↻"),
-                    ),
-            )
+            let server_host = self
+                .available_vaults
+                .iter()
+                .find(|v| v.id == self.active_vault_id)
+                .and_then(|v| v.server_url.as_deref())
+                .map(|url| {
+                    if let Some(stripped) = url.strip_prefix("https://") {
+                        stripped.trim_end_matches('/')
+                    } else if let Some(stripped) = url.strip_prefix("http://") {
+                        stripped.trim_end_matches('/')
+                    } else {
+                        url
+                    }
+                });
+
+            let mut sync_row = div()
+                .id("topbar-sync-controls")
+                .flex()
+                .items_center()
+                .gap_1();
+
+            if let Some(host_str) = server_host {
+                sync_row = sync_row.child(
+                    div()
+                        .id("topbar-server-host-badge")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .child("🌐")
+                        .child(host_str.to_string()),
+                );
+            }
+
+            sync_row = sync_row
+                .child(
+                    div()
+                        .id("topbar-sync-status-badge")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgba(0x2563eb18))
+                        .text_xs()
+                        .text_color(status_color)
+                        .child(if is_syncing { "🔄" } else { "☁️" })
+                        .child(status_text),
+                )
+                .child(
+                    div()
+                        .id("topbar-sync-now-btn")
+                        .px_1p5()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .cursor_pointer()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        })
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.sync_active_vault(cx);
+                        }))
+                        .child("↻"),
+                );
+
+            Some(sync_row)
         } else {
             None
         };
@@ -2854,7 +2902,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(940.0), px(650.0))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Shellumi".into()),
+                    title: Some("Shellumi — Personal".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(14.0), px(14.0))),
                 }),

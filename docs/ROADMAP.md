@@ -29,6 +29,13 @@ The server compatibility matrix is a protocol target rather than proof that this
 
 The following work is included in the alpha source:
 
+- Multi-Window Vault Binding and Concurrent Window Lifecycle (Increment 2):
+  - Independent concurrent application windows in one process (`cx.open_window`), each bound to its own vault context (`active_vault_id`, `active_vault_name`).
+  - Dynamic macOS window titles reflecting context: `Shellumi — {vault_name}` for local vaults and `Shellumi — {vault_name} ({server_url})` for remote vaults.
+  - Visible topbar server chips (`🌐 {server_host}`) and live sync badges (`☁️ Synced` / `🔄 Syncing…`), providing immediate visual distinction across multiple windows.
+  - Window-scoped Phase 11 WebSocket notification client (`ShellumiWsClient`), automatic delta sync trigger upon opening remote vault windows, and clean broker loop termination on window close via `Drop for ShellumiWsClientInner`.
+  - Vault switcher dropdown quick-launch buttons (`🗗`), `Cmd+Shift+N` shortcut, and Command Palette actions (`vault:open-new-window` and `vault:open:{id}`).
+  - Full automated test coverage in `crates/shellumi-app/src/tests/multi_window.rs`: simultaneous company vaults binding, strict inventory isolation with identical host names across vaults, groups/snippets/workspaces isolation, pending mutation queue isolation, and independent window lifecycle.
 - Complete Shellumi Server Protocol v1 and Phase 11 Desktop Integration:
   - Wire protocol v1 client (`ShellumiServerClient`) with capabilities negotiation (`/api/v1/capabilities`), bounded limits, and authentication lifecycle (`/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`).
   - Cryptographic challenge-response device enrollment (`/api/v1/devices/challenge` and `/api/v1/devices`) with Ed25519 signing keys and X25519 key agreement keys.

@@ -106,13 +106,24 @@ impl WsClientConfig {
 }
 
 /// High-level client for Shellumi Server live notifications.
+#[derive(Clone)]
 pub struct ShellumiWsClient {
+    inner: Arc<ShellumiWsClientInner>,
+}
+
+struct ShellumiWsClientInner {
     config: WsClientConfig,
     cmd_tx: mpsc::Sender<WsBrokerCommand>,
     event_tx: broadcast::Sender<SyncNotificationEvent>,
     status: Arc<RwLock<WsConnectionStatus>>,
     subscribed_vaults: Arc<Mutex<HashSet<Uuid>>>,
     shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for ShellumiWsClientInner {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
 }
 
 impl ShellumiWsClient {
@@ -136,29 +147,32 @@ impl ShellumiWsClient {
         tokio::spawn(broker.run());
 
         Self {
-            config,
-            cmd_tx,
-            event_tx,
-            status,
-            subscribed_vaults,
-            shutdown,
+            inner: Arc::new(ShellumiWsClientInner {
+                config,
+                cmd_tx,
+                event_tx,
+                status,
+                subscribed_vaults,
+                shutdown,
+            }),
         }
     }
 
     /// Returns a reference to the client configuration.
     pub fn config(&self) -> &WsClientConfig {
-        &self.config
+        &self.inner.config
     }
 
     /// Subscribes to change notifications for the given vault UUIDs.
     pub async fn subscribe_vaults(&self, vault_ids: Vec<Uuid>) -> Result<(), String> {
         {
-            let mut set = self.subscribed_vaults.lock().await;
+            let mut set = self.inner.subscribed_vaults.lock().await;
             for id in &vault_ids {
                 set.insert(*id);
             }
         }
-        self.cmd_tx
+        self.inner
+            .cmd_tx
             .send(WsBrokerCommand::Subscribe(vault_ids))
             .await
             .map_err(|e| e.to_string())
@@ -167,12 +181,13 @@ impl ShellumiWsClient {
     /// Unsubscribes from notifications for the given vault UUIDs.
     pub async fn unsubscribe_vaults(&self, vault_ids: Vec<Uuid>) -> Result<(), String> {
         {
-            let mut set = self.subscribed_vaults.lock().await;
+            let mut set = self.inner.subscribed_vaults.lock().await;
             for id in &vault_ids {
                 set.remove(id);
             }
         }
-        self.cmd_tx
+        self.inner
+            .cmd_tx
             .send(WsBrokerCommand::Unsubscribe(vault_ids))
             .await
             .map_err(|e| e.to_string())
@@ -180,18 +195,18 @@ impl ShellumiWsClient {
 
     /// Subscribes to the event stream.
     pub fn subscribe_events(&self) -> broadcast::Receiver<SyncNotificationEvent> {
-        self.event_tx.subscribe()
+        self.inner.event_tx.subscribe()
     }
 
     /// Returns the current connection status.
     pub async fn connection_status(&self) -> WsConnectionStatus {
-        *self.status.read().await
+        *self.inner.status.read().await
     }
 
     /// Shuts down the client connection.
     pub async fn close(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        let _ = self.cmd_tx.send(WsBrokerCommand::Close).await;
+        self.inner.shutdown.store(true, Ordering::SeqCst);
+        let _ = self.inner.cmd_tx.send(WsBrokerCommand::Close).await;
     }
 }
 

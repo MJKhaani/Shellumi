@@ -2,6 +2,30 @@
 
 ## 0.0.8-alpha
 
+### Multi-Window Vault Binding & Concurrent Window Lifecycle (Increment 2)
+- **Multi-Window Vault Binding in One Instance:**
+  - Independent concurrent application windows spawned via `open_vault_in_new_window`, `Cmd+Shift+N`, the Command Palette (`vault:open-new-window` / `vault:open:{id}`), or the vault dropdown menu quick-window buttons (`🗗`).
+  - Strict vault scoping per window: `active_vault_id`, `active_vault`, and independently scoped storage queries (`load_hosts`, `load_identities`, `load_workspaces`, `list_snippets`, `list_groups`).
+  - Dynamic window title rendering matching context: `Shellumi — {vault_name}` for local vaults and `Shellumi — {vault_name} ({server_url})` for remote vaults.
+  - Initial startup window title correctly reflects the default local vault: `Shellumi — Personal`.
+- **Visible Vault & Server Context in GPUI Desktop UI:**
+  - Added visible server host badge (`🌐 {server_host}`) in the pinned top action bar next to the sync badge for remote vaults, enabling instant visual distinction of active connection context across multiple windows.
+  - Added live sync badge (`☁️ Synced` / `🔄 Syncing…`) and manual delta sync trigger (`↻`).
+  - Enhanced vault dropdown list with server connection URL previews, lock indicators, and per-vault `🗗` buttons to spawn independent windows directly.
+- **Window Lifecycle, Scoped WebSocket Broker & Cancellation:**
+  - Bound Phase 11 WebSocket notification client (`ShellumiWsClient`) to individual window instances.
+  - Implemented `Drop for ShellumiWsClientInner` to ensure atomic broker shutdown and connection teardown as soon as a window is closed or its vault is switched.
+  - Automatically initiates background delta synchronization and event listeners when opening a window bound to a remote vault.
+  - Independent window lifecycles: closing one window terminates only its scoped connections without impacting other active windows or terminating the process prematurely.
+- **Automated Multi-Window & Isolation Tests (`crates/shellumi-app/src/tests/multi_window.rs`):**
+  - Added end-to-end multi-window test suite verifying:
+    - Simultaneous company vaults binding (`Alpha Infrastructure` and `Beta Production`) alongside local `Personal` vault.
+    - Mutation and inventory isolation with identical host names (`bastion`) across concurrent vaults.
+    - Group, snippet, and workspace namespace isolation across concurrent company vaults.
+    - Per-vault pending mutation queue isolation and non-interfering commit acknowledgments.
+    - Window lifecycle independent WebSocket client shutdown and task isolation.
+    - Command Palette and dropdown window spawning action registration.
+
 ### Shellumi Server Protocol v1 & Phase 11 Desktop Integration
 - **Server Protocol v1 Wire Contract & Security Implementation:**
   - Implemented complete wire protocol v1 client (`ShellumiServerClient`) supporting capabilities negotiation (`/api/v1/capabilities`), system limits, and authentication lifecycle (`/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`).

@@ -106,6 +106,9 @@ impl Shellumi {
                     app.available_vaults = summaries;
                     if !app.is_active_vault_remote() {
                         app.sync_status = AppSyncStatus::LocalOnly;
+                    } else if matches!(app.sync_status, AppSyncStatus::LocalOnly) {
+                        app.sync_status = AppSyncStatus::Syncing;
+                        app.sync_active_vault(cx);
                     }
                     cx.notify();
                 }
@@ -138,6 +141,8 @@ impl Shellumi {
         self.active_vault_id = vault_id;
         self.active_vault = vault_name;
         self.vault_dropdown_open = false;
+        self.active_ws_client = None;
+        self.server_ws_status = None;
         self.navigate_page("Hosts", window, cx);
 
         self.load_hosts(cx);
@@ -356,6 +361,10 @@ impl Shellumi {
         };
         let active_vault_id = self.active_vault_id.clone();
 
+        if self.active_ws_client.is_some() {
+            return;
+        }
+
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -380,7 +389,7 @@ impl Shellumi {
                         server.as_str().to_string(),
                         server_vault_id.as_str().to_string(),
                     ),
-                    shellumi_core::VaultLocation::Local => return Ok(()),
+                    shellumi_core::VaultLocation::Local => return Err("Local vault".to_string()),
                 };
 
                 let conn_record = store
@@ -404,42 +413,58 @@ impl Shellumi {
                     device_uuid,
                 );
 
-                let ws_client = shellumi_core::server::ShellumiWsClient::spawn(config);
-                let _ = ws_client.subscribe_vaults(vec![remote_uuid]).await;
-                let mut rx = ws_client.subscribe_events();
-
-                if let Ok(event) = rx.recv().await {
-                    match event {
-                        shellumi_core::server::SyncNotificationEvent::VaultChanged { .. } => {
-                            return Ok(());
-                        }
-                        shellumi_core::server::SyncNotificationEvent::KeyRotated { .. } => {
-                            return Ok(());
-                        }
-                        shellumi_core::server::SyncNotificationEvent::AccessRevoked { .. } => {
-                            return Err("AccessRevoked".to_string());
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(())
+                Ok::<_, String>((config, remote_uuid))
             })
         });
 
         cx.spawn(async move |app, cx| {
             let res = task.await;
-            let _ = app.update(cx, |app, cx| match res {
-                Ok(()) => {
-                    app.sync_active_vault(cx);
-                }
-                Err(e) if e == "AccessRevoked" => {
-                    app.sync_status = AppSyncStatus::Error(
-                        "Vault access was revoked by administrator on server.".into(),
-                    );
+            if let Ok((config, remote_uuid)) = res {
+                let ws_client = shellumi_core::server::ShellumiWsClient::spawn(config);
+                let client_ref = ws_client.clone();
+                let _ = app.update(cx, |app, cx| {
+                    app.active_ws_client = Some(ws_client);
+                    app.server_ws_status =
+                        Some(shellumi_core::server::WsConnectionStatus::Connecting);
                     cx.notify();
-                }
-                _ => {}
-            });
+                });
+
+                let sub_task = cx.background_executor().spawn(async move {
+                    let _ = client_ref.subscribe_vaults(vec![remote_uuid]).await;
+                    let mut rx = client_ref.subscribe_events();
+                    while let Ok(event) = rx.recv().await {
+                        match event {
+                            shellumi_core::server::SyncNotificationEvent::VaultChanged {
+                                ..
+                            }
+                            | shellumi_core::server::SyncNotificationEvent::KeyRotated { .. } => {
+                                return Ok(());
+                            }
+                            shellumi_core::server::SyncNotificationEvent::AccessRevoked {
+                                ..
+                            } => {
+                                return Err("AccessRevoked".to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(())
+                });
+
+                let event_res = sub_task.await;
+                let _ = app.update(cx, |app, cx| match event_res {
+                    Ok(()) => {
+                        app.sync_active_vault(cx);
+                    }
+                    Err(e) if e == "AccessRevoked" => {
+                        app.sync_status = AppSyncStatus::Error(
+                            "Vault access was revoked by administrator on server.".into(),
+                        );
+                        cx.notify();
+                    }
+                    _ => {}
+                });
+            }
         })
         .detach();
     }
