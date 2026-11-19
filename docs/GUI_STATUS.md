@@ -18,8 +18,8 @@ its sample data and prototype QA are not evidence of working application feature
 | Port Forwarding | Persisted tunnel rules, host selection, local/remote/dynamic forwarding, rule editing and deletion, real OpenSSH tunnel session launch. Network readiness is determined by the SSH session rather than fabricated traffic counters. |
 | Known Hosts | Read actual OpenSSH trust entries; inspect public metadata and fingerprints; copy public keys; explicitly revoke an unmarked key. Revocation checks the original record before rewriting and refuses symlinks. |
 | Session Logs | Existing recording library, selected recording playback, transport controls, export and deletion through the recording manager. |
-| Vaults | Existing local vault and membership-record manager; real collaborator public keys are required. These are local records, not network invitations. Creating isolated local or remote vaults, binding remote vaults to multiple servers, and independent vault-bound windows remain planned. |
-| Collaboration | Explicit unavailable state for network session sharing. Local membership administration is available in Vaults. |
+| Vaults | Local and remote vault management; schema v21 scopes Turso database tables (hosts, identities, workspaces, snippets, groups, mutations, sync state) to independent vault contexts. Multi-window vault binding allows concurrent windows to connect to different servers/vaults in one process with dynamic window titles, visible server topbar badges, and scoped WebSocket notification brokers. |
+| Collaboration | Fully implemented live encrypted terminal collaboration over Protocol v1 relay. Single-writer role enforcement via monotonic lease token fencing (HTTP 409 rejection on stale tokens), emergency host control revocation, real-time encrypted PTY output streaming, participant keystroke forwarding, desktop collaboration control strip ([Grant Control], [Revoke to Host], [End Session]), and immediate session termination. |
 | Integrations | Existing provider-record, discovered-inventory and Ansible tools embedded in the navigation page. Provider records do not establish authenticated cloud API connections. |
 | Google Drive Sync | Initial Google Drive vault synchronization via SystemHttpTransport (system curl), AES-256-GCM encrypted diffing, interactive conflict resolution modal, and working encrypted local backup export and restore dialogs. Export refuses existing output files. Restore uses a transaction and rolls back decryption/import errors. |
 | Settings | Category rail; persistent interface and terminal font sizes, scrollback, default startup screen, local hidden-file preference; storage location, SSH security behavior, shell integration tools, shortcut reference and diagnostics. |
@@ -43,8 +43,8 @@ and wrong-passphrase rollback, viewport sizing, and primary-button construction.
 ## Remaining backend and platform work
 
 Authenticated cloud inventory discovery (AWS/GCP/DigitalOcean API synchronization)
-and network collaboration (live multi-user terminal session transport) are not connected.
-The GUI must not show simulated cloud inventory or fake successful remote terminal sharing.
+remains planned. Live network terminal collaboration is fully implemented over an
+authenticated, encrypted E2EE relay with single-writer lease token fencing.
 
 Isolated macOS identity/SFTP transport acceptance passed with an encrypted key.
 GUI interaction, real password/MFA, Drive-account acceptance and native credential

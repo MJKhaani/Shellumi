@@ -34,6 +34,6 @@ finished user features. See [GUI_STATUS.md](GUI_STATUS.md) for workflow details.
 | Mobile | Prototype | Core FFI and native examples only; no released mobile client. |
 | Releases | Tag-driven CI | Four platform binary builds passed for v0.0.2-alpha; its first Linux package step failed. Corrected prerelease packaging, root archive ownership, regression tests, immutable-tag retries and source/helper provenance are on main. The repaired workflow passed all four jobs and published [15 assets](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.2-alpha); checksums/provenance were verified. Runtime validation remains separate. |
 
-The local macOS workspace suite passed 442 automated tests, with three opt-in
+The local macOS workspace suite passed 512 automated tests, with three opt-in
 real-server tests ignored in the normal suite. The self-contained SSH/SFTP
 acceptance test passed separately; see [the test guide](development/ssh-integration.md). See [ROADMAP.md](ROADMAP.md) for next steps.

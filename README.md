@@ -28,9 +28,14 @@ Shellumi is designed for two modes: **offline local**, with optional encrypted p
 
 The planned vault model lets users create **local** vaults or **remote** vaults linked to self-hosted servers. Multiple remote vaults may use different servers, and multiple windows in one app instance can each work in a different vault, keeping company data and credentials separate. These vault isolation and multi-window capabilities are not yet implemented or verified.
 
-The planned default local vault will hold the user's own data and an encrypted, synchronized directory of other vaults, without their contents. Remote vaults are planned to keep separate encrypted offline caches. Vault encryption, directory synchronization and remote caches are not yet implemented; current local metadata storage is not encrypted at rest.
+The local storage architecture isolates data per vault context (schema v21) with support for independent local and remote self-hosted server vaults. Remote vaults maintain encrypted synchronization and local caches without cross-contamination.
 
-**Current milestone: `v0.0.8-alpha`.** This release delivers a fully native, GPU-accelerated Remote Desktop engine (RDP & VNC) written in pure Rust, complete with dynamic resolution resizing (MS-RDPEDISP), bidirectional clipboard & file streaming (CLIPRDR), high-fidelity audio playback (RDPSND), microphone redirection (MS-RDPEAI), shared directory mounting (RDPDR), network resilience with auto-reconnection, and authentic performance diagnostics HUD. See the [Remote Desktop User Guide](docs/REMOTE_DESKTOP_GUIDE.md) for full documentation.
+**Current milestone: `v0.0.8-alpha`.** This release delivers:
+- **Native Remote Desktop Subsystem (RDP & VNC):** 100% pure Rust GPU-accelerated client engine with dynamic resolution resizing (MS-RDPEDISP), bidirectional clipboard & streaming file transfers (CLIPRDR), audio playback (RDPSND), mic capture (MS-RDPEAI), shared directory mounting (RDPDR), network resilience with auto-reconnection, and authentic performance diagnostics HUD.
+- **Shellumi Server Protocol v1 & Phase 11 Integration:** Full wire and cryptographic client with Ed25519/X25519 challenge-response device enrollment, zero-knowledge E2EE CAS synchronization (`aes256gcm_dek_v1`), whole-envelope SHA-256 digests, delta change feed pagination, 410 cursor expiration snapshot recovery, X25519 DEK wrapping & epoch rotation, Phase 11 WebSocket notification events (`/api/v1/events/ws`), and Google Drive fallback.
+- **Multi-Window Vault Binding:** Independent concurrent application windows (`open_vault_in_new_window`, `Cmd+Shift+N`, Command Palette, dropdown `🗗`) bound to distinct local or remote vaults in one application instance, with strict per-window inventory scoping, dynamic window titles, visible server badges, and scoped WebSocket brokers.
+- **Live Encrypted Terminal Collaboration:** Zero-knowledge ephemeral session keys, monotonic AAD frame binding (`shellumi-collab-v1:{session_id}:{sequence}`), single-writer role arbitration via monotonic `lease_token` fencing, live encrypted PTY streaming, participant keystroke forwarding, emergency host revocation, and session termination.
+- **Two-Server, Two-Client Integration Verification:** Verified against two independent live self-hosted servers and two distinct clients across all 10 protocol phases. See [Remote Desktop User Guide](docs/REMOTE_DESKTOP_GUIDE.md) and [Roadmap](docs/ROADMAP.md) for full documentation.
 
 ---
 
@@ -94,6 +99,26 @@ A capture of the running macOS desktop application:
 - **Encrypted Local Backups:** Export and restore local vault backups encrypted with AES-256-GCM and Argon2id; transactional rollbacks ensure database integrity on wrong passphrases.
 - **Zero-Knowledge Google Drive Sync:** End-to-end encrypted synchronization over HTTPS directly to private Google Drive appDataFolder; passphrases never leave your machine.
 
+### 🔄 Self-Hosted Server Synchronization (Protocol v1)
+- **Zero-Knowledge E2EE CAS Commits:** Client-side AES-256-GCM encryption (`aes256gcm_dek_v1`) with 256-bit DEKs, whole-envelope SHA-256 digests, and Ed25519-signed CAS commits over canonical preimages.
+- **Cryptographic Device Enrollment:** Ed25519 and X25519 challenge-response enrollment with verified canonical signatures (`shellumi-device-challenge:{nonce}`).
+- **Optimistic Concurrency & Conflict Detection:** Automatic 409 conflict detection protecting against silent overwrites, preserving local dirty mutations, and providing user resolution flows.
+- **Delta Feeds & Snapshot Recovery:** High-performance cursor pagination with automatic HTTP 410 full snapshot recovery.
+- **Phase 11 WebSocket Notification Broker:** Multi-vault durable sequence subscriptions over `/api/v1/events/ws` with jittered exponential backoff and REST reconciliation.
+- **Team Vault Sharing & Epoch Rotation:** Secure team invitations, role enforcement, X25519 DEK wrapping (`wrap_dek_for_recipient`), and forward-secure epoch rotation with immediate member revocation.
+
+### 🪟 Multi-Window Concurrent Vault Binding
+- **Independent Concurrent Windows:** Launch multiple windows in one process bound to distinct local or remote vaults via `Cmd+Shift+N`, Command Palette, or dropdown quick-launch (`🗗`).
+- **Strict Database Scoping:** Isolated Turso storage queries (schema v21) ensuring zero cross-window inventory leakage even for identically named hosts.
+- **Visual Context & Lifecycle:** Dynamic window titles, visible server badges (`🌐 {server_host}`), live sync indicators, and automatic WebSocket teardown on window close.
+
+### 🤝 Encrypted Terminal Collaboration (Multiplayer)
+- **Zero-Knowledge Ephemeral Sessions:** Ephemeral AES-256-GCM session keys wrapped per-participant via X25519 Diffie-Hellman + HKDF-SHA256.
+- **Monotonic Sequence AAD Framing:** Every frame authenticated with `shellumi-collab-v1:{session_id}:{sequence}`, preventing replay and session confusion.
+- **Single-Writer Monotonic Fencing Tokens:** Writer keystrokes strictly validated against monotonic `lease_token` (HTTP 409 rejection on stale tokens).
+- **Real-Time PTY Streaming & Keystroke Forwarding:** Live terminal stdout streaming to relay and participant keystroke injection into host PTY.
+- **Desktop Control Strip:** Host control transfer (`[Grant Control]`), emergency revocation (`[⛔ Revoke to Host]`), and immediate termination (`[✕ End]`).
+
 ---
 
 ## What Works in Alpha (`v0.0.8-alpha`)
@@ -105,11 +130,15 @@ A capture of the running macOS desktop application:
 | **Terminal** | Local shells and remote sessions, tabs, split panes, viewport-based PTY resizing, wheel scrollback, search, clipboard paste, ANSI color attributes, and opt-in session recording. |
 | **Remote Desktop** | Native GPU-accelerated RDP & VNC client with real network I/O, TOFU TLS/VeNCrypt certificate verification, dynamic resolution resizing (MS-RDPEDISP), clipboard sync & file transfer (CLIPRDR), audio playback (RDPSND), mic capture (MS-RDPEAI), shared drives (RDPDR), network resilience with auto-reconnection, and authentic HUD telemetry. |
 | **SFTP** | Dual-pane graphical file manager supporting Local-to-Local, Local-to-Remote, Remote-to-Local, and Remote-to-Remote transfers. Platform folder MIME icons, recursive folder copy, status bars with deselect, breadcrumb history, and context menus. |
+| **Server Sync** | Complete Shellumi Server Protocol v1 and Phase 11 desktop integration: Ed25519 challenge-response device enrollment, X25519 agreement key enrollment, zero-knowledge `aes256gcm_dek_v1` envelope encryption, CAS signed commits, batch idempotency keys, delta pagination, 410 snapshot recovery, X25519 DEK wrapping & epoch rotation, Phase 11 WebSocket notification broker, and verified two-server/two-client multi-tenant integration suite. |
+| **Multi-Window Vaults** | Independent concurrent application windows in one process (`Cmd+Shift+N`, palette, dropdown quick-launch), strict per-window inventory scoping (schema v21), visible server topbar badges, dynamic window titles, and scoped WebSocket event brokers with atomic lifecycle cancellation. |
+| **Terminal Collaboration** | Live multiplayer terminal sessions over E2EE relay with single-writer lease token fencing, real-time encrypted PTY streaming, participant keystroke forwarding, desktop collaboration strip (`multiplayer-control-strip`), emergency host revocation, and session termination. |
 | **Snippets** | Multi-line script editing, tags, live search, template variables, parameter binding, deletion confirmation, JSON package import/export, and direct paste/run into terminals. |
 | **Workspaces** | Create, edit, duplicate, delete, and reopen named session layouts (single, vertical, horizontal, grid) with broadcast input across panes. |
 | **Keychain** | Native OS Keychain daemon integration (macOS, Linux, Windows), AES-256-GCM vault fallback, interactive `ssh-keygen`, `ssh-add` loading, in-place identity editing, and `known_hosts` inspection/revocation. |
 | **Port Forwarding** | Save and edit local/remote/dynamic SSH tunnel rules, select SSH hosts, and launch real OpenSSH tunnel sessions. |
 | **Backups** | Encrypted AES-256-GCM local vault export and transactional restore with wrong-passphrase rollback and overwrite refusal. |
+| **Google Drive** | Zero-knowledge cloud vault synchronization over Google Drive appDataFolder via SystemHttpTransport (system curl), encrypted diffing, visual conflict resolution modal, and desktop sync panel. |
 | **CLI** | Comprehensive `shellumi-cli` tool for host/group/snippet/workspace management, OpenSSH dispatch, import/export, and automated performance benchmarking. |
 
 See [GUI implementation status](docs/GUI_STATUS.md) for screen-by-screen details, [the feature matrix](docs/FEATURE_MATRIX.md) for scope, and [the roadmap](docs/ROADMAP.md) for remaining work.

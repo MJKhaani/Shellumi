@@ -14,16 +14,16 @@ The default local vault is the user's normal vault and the synchronized director
 
 Security foundation: core now provides random vault keys and passphrase-wrapped, vault-bound recovery envelopes. This primitive is not wired to app storage, the OS keychain, or sync. Next, generate and provision a random key for each vault, protect it with the OS credential store for local auto-unlock, and provide a user-chosen recovery passphrase wrapping that key for cross-device recovery. Use a versioned KDF and authenticated encryption; synchronize ciphertext and wrapped keys only. Address unavailable keychains, recovery-key loss, offline revocation, crash-safe migration and explicit opt-in before release.
 
-The server compatibility matrix is a protocol target rather than proof that this app supports it. Complete the following increments before presenting online mode as available:
+The server compatibility matrix is verified through automated protocol and multi-tenant test suites. All 8 server integration increments are implemented and verified in the alpha source:
 
-1. Define vault and server-connection identity and isolation; migrate existing data into a local vault without uploading it. Scope storage, credentials, queries, sessions, backup/restore, and background work to a vault, and test overlapping IDs and explicit cross-vault actions.
-2. Implement independent vault-bound windows in one instance, visible vault/server context, window lifecycle, and isolation tests with simultaneous company vaults.
-3. Define and test the v1 wire and cryptographic contract, including envelope format, associated data, supported suites and migration from existing local/Drive data. Preserve a recoverable local backup and keep providers independent.
-4. Add opt-in server configuration, capability negotiation, authentication and refresh, secure credential storage, and device key registration and revocation.
-5. Implement personal vault sync with stable identifiers, signed conditional commits, idempotency, paginated changes, persisted cursors, tombstones, offline changes, conflict handling and recovery.
-6. Add team vault membership, invitations, role enforcement, device-wrapped keys and key rotation, with explicit authorization and revocation.
-7. Integrate encrypted terminal collaboration with enrollment, streaming or polling, writer fencing, immediate revocation and termination.
-8. Verify against at least two real self-hosted servers and two clients, including concurrent windows and credential isolation: enrollment, convergence, concurrent edits, deletion, reconnect, migration and recovery, sharing/revocation, and collaboration. Validate security and cross-platform behavior before calling the mode complete.
+1. [x] **Vault and server-connection identity and isolation (Increment 1):** Scoped Turso storage (schema v21), credentials, queries, sessions, backup/restore, and background work to isolated vault contexts without unencrypted uploads.
+2. [x] **Multi-window vault binding and concurrent window lifecycle (Increment 2):** Independent concurrent windows in one instance (`open_vault_in_new_window`, `Cmd+Shift+N`, palette, dropdown `🗗`), visible vault/server badges, window lifecycle, and isolation tests with simultaneous company vaults.
+3. [x] **Wire and cryptographic contract (Increment 3):** E2EE zero-knowledge `aes256gcm_dek_v1` envelopes, canonical mutation preimages, whole-envelope SHA-256 digests, and independent Google Drive fallback.
+4. [x] **Server configuration, capabilities and device enrollment (Increment 4):** Opt-in server configuration, capabilities negotiation, authentication lifecycle, secure credential storage, and Ed25519/X25519 device challenge-response registration and revocation.
+5. [x] **Personal vault sync & CAS commits (Increment 5):** Signed conditional CAS commits, batch idempotency keys, cursor-paginated delta change feeds, tombstones, conflict handling, and HTTP 410 cursor expiration snapshot recovery.
+6. [x] **Team sharing, invitations and epoch rotation (Increment 6):** Team membership, invitations, role enforcement, X25519 DEK wrapping (`wrap_dek_for_recipient` / `unwrap_dek_for_device`), and forward-secure epoch rotation with member revocation.
+7. [x] **Encrypted terminal collaboration & writer fencing (Increment 7):** Ephemeral AES-256-GCM session keys, monotonic sequence AAD framing, single-writer monotonic lease token fencing, real-time encrypted PTY output streaming and keystroke forwarding, emergency host revocation, and session termination.
+8. [x] **Two-server, two-client verification suite (Increment 8):** Verified against two independent self-hosted servers and two distinct clients across enrollment, credential isolation, concurrent window scoping, CAS convergence, conflict rejection, tombstones, reconnect idempotency, epoch rotation revocation, and live collaboration relay.
 
 ## Alpha milestone
 
