@@ -367,13 +367,14 @@ impl Shellumi {
         self.form_error = None;
         let active_vault_id = self.active_vault_id.clone();
         let is_remote = self.is_active_vault_remote();
+        let vault_key = self.active_vault_key();
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path)
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
@@ -477,12 +478,13 @@ impl Shellumi {
         };
         let active_vault_id = self.active_vault_id.clone();
         let is_remote = self.is_active_vault_remote();
+        let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path)
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
@@ -534,6 +536,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
         self.hosts = HostState::Loading;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
@@ -542,7 +545,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                     store.set_vault_id(vid);
                 }

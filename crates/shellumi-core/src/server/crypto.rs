@@ -189,6 +189,16 @@ pub fn validate_envelope(
     }
 
     // Passphrase/recovery envelope: validate salt and iterations
+    if envelope.suite == "argon2id_aes256gcm_v2" {
+        let salt_bytes = BASE64_STANDARD
+            .decode(&envelope.salt)
+            .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+        if salt_bytes.len() < SALT_LEN {
+            return Err(CryptoError::InvalidSaltLength(salt_bytes.len()));
+        }
+        return Ok(());
+    }
+
     if envelope.suite == "argon2id_aes256gcm_legacy"
         || envelope.kdf_iterations > 0
         || !envelope.salt.is_empty()

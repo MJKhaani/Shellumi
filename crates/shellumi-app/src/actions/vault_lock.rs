@@ -1,6 +1,6 @@
 //! Vault lock, unlock, and recovery passphrase actions.
 use super::*;
-use shellumi_core::{default_credential_store, VaultId, VaultKey, VaultKeyManager};
+use shellumi_core::{default_credential_store, VaultId, VaultKey, VaultKeyManager, VaultManifest};
 
 impl Shellumi {
     /// Opens the interactive Unlock Vault modal for a locked vault.
@@ -10,12 +10,13 @@ impl Shellumi {
         vault_name: String,
         cx: &mut Context<Self>,
     ) {
-        let input = cx
-            .new(|cx| TextInput::new(cx, "", "Enter recovery passphrase (min 12 chars)…").masked());
+        let input =
+            cx.new(|cx| TextInput::new(cx, "", "Enter vault password or recovery code…").masked());
         self.unlock_vault_modal = Some(UnlockVaultModalState {
             vault_id,
             vault_name,
             passphrase_input: input,
+            remember_in_keychain: true,
             error: None,
             is_submitting: false,
         });
@@ -28,20 +29,29 @@ impl Shellumi {
         cx.notify();
     }
 
-    /// Submits the entered recovery passphrase to unlock the vault.
+    /// Toggles the "remember in keychain" checkbox for unlocking.
+    pub(crate) fn toggle_unlock_remember_keychain(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.unlock_vault_modal {
+            modal.remember_in_keychain = !modal.remember_in_keychain;
+            cx.notify();
+        }
+    }
+
+    /// Submits the entered recovery passphrase or password to unlock the vault.
     pub(crate) fn submit_unlock_vault(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = &mut self.unlock_vault_modal else {
             return;
         };
         let passphrase = modal.passphrase_input.read(cx).value().trim().to_string();
-        if passphrase.len() < 12 {
-            modal.error = Some("Passphrase must be at least 12 characters long.".to_string());
+        if passphrase.is_empty() {
+            modal.error = Some("Password or recovery code cannot be empty.".to_string());
             cx.notify();
             return;
         }
 
         let vault_id_str = modal.vault_id.clone();
         let vault_name = modal.vault_name.clone();
+        let remember_in_keychain = modal.remember_in_keychain;
         modal.error = None;
         modal.is_submitting = true;
         cx.notify();
@@ -57,52 +67,92 @@ impl Shellumi {
 
         let vault_id_task = vault_id_str.clone();
         let task = cx.background_executor().spawn(async move {
+            let vid =
+                VaultId::new(&vault_id_task).map_err(|_| "Invalid vault identifier".to_string())?;
+
+            let manifest_path =
+                VaultManifest::manifest_path_for_vault(std::path::Path::new(&path), &vid);
+
+            let recovered_key = if manifest_path.exists() {
+                let mut manifest = VaultManifest::load_from_path(&manifest_path)
+                    .map_err(|e| format!("Failed to read vault manifest: {e}"))?;
+                let key = manifest.unlock(&passphrase).map_err(|_| {
+                    "Incorrect vault password, invalid recovery code, or corrupted envelope."
+                        .to_string()
+                })?;
+
+                let cred_store = default_credential_store();
+                if remember_in_keychain {
+                    VaultKeyManager::provision_key(&*cred_store, &vid, &key).map_err(|e| {
+                        format!("Failed to store vault key in OS credential store: {e}")
+                    })?;
+                    manifest.remember_in_keychain = true;
+                } else {
+                    let _ = VaultKeyManager::forget_key(&*cred_store, &vid);
+                    manifest.remember_in_keychain = false;
+                }
+                let _ = manifest.save_to_path(&manifest_path);
+                key
+            } else {
+                // Backwards-compatible fallback for legacy unmanifested recovery envelopes
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                runtime.block_on(async {
+                    let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let envelope_str = store
+                        .get_vault_recovery_envelope(&vault_id_task)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| {
+                            "No vault manifest or recovery envelope found for this vault."
+                                .to_string()
+                        })?;
+
+                    let envelope: shellumi_core::sync::EncryptedEnvelope =
+                        serde_json::from_str(&envelope_str)
+                            .map_err(|e| format!("Corrupt recovery envelope JSON format: {e}"))?;
+
+                    let key = VaultKey::unwrap_with_password(&vid, &passphrase, &envelope)
+                        .map_err(|_| {
+                            "Incorrect recovery passphrase or corrupted recovery envelope."
+                                .to_string()
+                        })?;
+
+                    if remember_in_keychain {
+                        let cred_store = default_credential_store();
+                        let _ = VaultKeyManager::provision_key(&*cred_store, &vid, &key);
+                    }
+
+                    Ok::<_, String>(key)
+                })?
+            };
+
+            // Now open the database with the recovered DEK and mark it unlocked
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                let envelope_str = store
-                    .get_vault_recovery_envelope(&vault_id_task)
+                let mut store = HostStore::open_with_key(&path, Some(&recovered_key))
                     .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| {
-                        "No recovery envelope found for this vault in storage.".to_string()
-                    })?;
-
-                let envelope: shellumi_core::sync::EncryptedEnvelope =
-                    serde_json::from_str(&envelope_str)
-                        .map_err(|e| format!("Corrupt recovery envelope JSON format: {e}"))?;
-
-                let vid = VaultId::new(&vault_id_task)
-                    .map_err(|_| "Invalid vault identifier".to_string())?;
-
-                let recovered_key =
-                    VaultKey::recover(&vid, &passphrase, &envelope).map_err(|_| {
-                        "Incorrect recovery passphrase or corrupted recovery envelope.".to_string()
-                    })?;
-
-                // Provision the recovered key into the OS credential store
-                let cred_store = default_credential_store();
-                VaultKeyManager::provision_key(&*cred_store, &vid, &recovered_key).map_err(
-                    |e| format!("Failed to provision vault key in OS credential store: {e}"),
-                )?;
-
-                // Unlock the vault in database
+                    .map_err(|e| e.to_string())?;
                 store
                     .set_vault_locked(&vault_id_task, false)
                     .await
                     .map_err(|e| e.to_string())?;
-
                 Ok::<_, String>(())
-            })
+            })?;
+
+            Ok::<_, String>(recovered_key)
         });
 
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
                 match result {
-                    Ok(()) => {
+                    Ok(recovered_key) => {
+                        app.active_vault_keys
+                            .insert(vault_id_str.clone(), recovered_key);
                         app.unlock_vault_modal = None;
                         app.active_vault_id = vault_id_str;
                         app.active_vault = vault_name;
@@ -131,12 +181,29 @@ impl Shellumi {
         let is_active = self.active_vault_id == vault_id;
         let vname = self.active_vault.clone();
 
+        // Evict from active in-memory keys
+        let vault_key = self.active_vault_keys.remove(&vault_id);
+
+        // Evict from OS Keychain when explicitly locked
+        if let Ok(vid) = VaultId::new(&vault_id) {
+            let cred_store = default_credential_store();
+            let _ = VaultKeyManager::forget_key(&*cred_store, &vid);
+            let manifest_path =
+                VaultManifest::manifest_path_for_vault(std::path::Path::new(&path), &vid);
+            if let Ok(mut manifest) = VaultManifest::load_from_path(&manifest_path) {
+                manifest.remember_in_keychain = false;
+                let _ = manifest.save_to_path(&manifest_path);
+            }
+        }
+
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .set_vault_locked(&vid_clone, true)
                     .await

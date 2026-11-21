@@ -36,6 +36,16 @@ impl Shellumi {
             TextInput::new(cx, "", "Zero-knowledge passphrase (min 12 characters)").masked()
         });
         let local_desc = cx.new(|cx| TextInput::new(cx, "", "Description (optional)"));
+        let local_password = cx.new(|cx| {
+            TextInput::new(
+                cx,
+                "",
+                "Vault password (min 8 chars, uppercase, lowercase, number, symbol)",
+            )
+            .masked()
+        });
+        let local_password_confirm =
+            cx.new(|cx| TextInput::new(cx, "", "Confirm vault password").masked());
 
         self.create_vault_modal = Some(CreateVaultModalState {
             active_tab: CreateVaultModalTab::RemoteServer,
@@ -46,6 +56,9 @@ impl Shellumi {
             vault_name_input: vault_name,
             vault_passphrase_input: vault_passphrase,
             local_vault_desc_input: local_desc,
+            local_vault_password_input: local_password,
+            local_vault_password_confirm_input: local_password_confirm,
+            remember_in_keychain: true,
             error: None,
             status_message: None,
             is_testing: false,
@@ -70,6 +83,14 @@ impl Shellumi {
             modal.active_tab = tab;
             modal.error = None;
             modal.status_message = None;
+            cx.notify();
+        }
+    }
+
+    /// Toggles the "remember in keychain" checkbox for local vault creation.
+    pub(crate) fn toggle_create_vault_remember_keychain(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.create_vault_modal {
+            modal.remember_in_keychain = !modal.remember_in_keychain;
             cx.notify();
         }
     }
@@ -150,9 +171,40 @@ impl Shellumi {
                     .value()
                     .trim()
                     .to_string();
+                let password = modal
+                    .local_vault_password_input
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .to_string();
+                let password_confirm = modal
+                    .local_vault_password_confirm_input
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .to_string();
+                let remember_in_keychain = modal.remember_in_keychain;
 
                 if vault_name.is_empty() {
                     modal.error = Some("Vault name cannot be empty.".to_string());
+                    cx.notify();
+                    return;
+                }
+                if password.is_empty() {
+                    modal.error = Some("Vault password cannot be empty.".to_string());
+                    cx.notify();
+                    return;
+                }
+                if password != password_confirm {
+                    modal.error =
+                        Some("Passwords do not match. Please verify your password.".to_string());
+                    cx.notify();
+                    return;
+                }
+                if let Err(err) = shellumi_core::validate_vault_password(&password) {
+                    modal.error = Some(format!(
+                        "Password does not meet security requirements: {err} (min 8 characters, with uppercase, lowercase, numbers, and symbols)."
+                    ));
                     cx.notify();
                     return;
                 }
@@ -193,35 +245,51 @@ impl Shellumi {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                    // Provision vault key into OS credential store and generate recovery envelope
+                    // Provision random 256-bit DEK, wrap with Argon2id password, and generate recovery code
                     let cred_store = shellumi_core::default_credential_store();
-                    let recovery_passphrase =
-                        format!("shellumi-vault-recovery-{}", local_vault_id.as_str());
-                    let (_, recovery_env) = shellumi_core::VaultKeyManager::provision_new_vault(
-                        cred_store.as_ref(),
-                        &local_vault_id,
-                        Some(&recovery_passphrase),
-                    )
-                    .map_err(|e| e.to_string())?;
+                    let recovery_code = shellumi_core::VaultKey::generate_recovery_code()
+                        .map_err(|e| e.to_string())?;
+                    let (key, primary_env, recovery_env) =
+                        shellumi_core::VaultKeyManager::provision_new_vault(
+                            cred_store.as_ref(),
+                            &local_vault_id,
+                            &password,
+                            remember_in_keychain,
+                            Some(&recovery_code),
+                        )
+                        .map_err(|e| e.to_string())?;
 
-                    if let Some(env) = recovery_env {
-                        if let Ok(env_json) = serde_json::to_string(&env) {
-                            store
-                                .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                        }
+                    // Persist portable key envelope manifest
+                    let manifest = shellumi_core::VaultManifest::new(
+                        local_vault_id.as_str().to_string(),
+                        vault_name.clone(),
+                        primary_env.clone(),
+                        recovery_env.clone(),
+                        remember_in_keychain,
+                    );
+                    let manifest_path = shellumi_core::VaultManifest::manifest_path_for_vault(
+                        std::path::Path::new(&db_path),
+                        &local_vault_id,
+                    );
+                    let _ = manifest.save_to_path(&manifest_path);
+
+                    if let Ok(env_json) = serde_json::to_string(&primary_env) {
+                        store
+                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                            .await
+                            .map_err(|e| e.to_string())?;
                     }
 
-                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string()))
+                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string(), key))
                 });
 
                 cx.spawn(async move |app, cx| {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
-                        Ok((created_name, vault_id)) => {
+                        Ok((created_name, vault_id, key)) => {
                             app.active_vault = created_name;
-                            app.active_vault_id = vault_id;
+                            app.active_vault_id = vault_id.clone();
+                            app.active_vault_keys.insert(vault_id, key);
                             app.create_vault_modal = None;
                             app.load_vault_list(cx);
                             app.load_hosts(cx);
@@ -398,20 +466,34 @@ impl Shellumi {
 
                     // Provision vault key into OS credential store and generate recovery envelope
                     let cred_store = shellumi_core::default_credential_store();
-                    let (_, recovery_env) = shellumi_core::VaultKeyManager::provision_new_vault(
-                        cred_store.as_ref(),
-                        &local_vault_id,
-                        Some(&passphrase),
-                    )
-                    .map_err(|e| e.to_string())?;
+                    let (key, primary_env, recovery_env) =
+                        shellumi_core::VaultKeyManager::provision_new_vault(
+                            cred_store.as_ref(),
+                            &local_vault_id,
+                            &passphrase,
+                            true,
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?;
 
-                    if let Some(env) = recovery_env {
-                        if let Ok(env_json) = serde_json::to_string(&env) {
-                            store
-                                .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                        }
+                    let manifest = shellumi_core::VaultManifest::new(
+                        local_vault_id.as_str().to_string(),
+                        vault_name.clone(),
+                        primary_env.clone(),
+                        recovery_env,
+                        true,
+                    );
+                    let manifest_path = shellumi_core::VaultManifest::manifest_path_for_vault(
+                        std::path::Path::new(&db_path),
+                        &local_vault_id,
+                    );
+                    let _ = manifest.save_to_path(&manifest_path);
+
+                    if let Ok(env_json) = serde_json::to_string(&primary_env) {
+                        store
+                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                            .await
+                            .map_err(|e| e.to_string())?;
                     }
 
                     let sync_state = VaultSyncStateRecord {
@@ -430,15 +512,16 @@ impl Shellumi {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string()))
+                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string(), key))
                 });
 
                 cx.spawn(async move |app, cx| {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
-                        Ok((created_name, vault_id)) => {
+                        Ok((created_name, vault_id, key)) => {
                             app.active_vault = created_name;
-                            app.active_vault_id = vault_id;
+                            app.active_vault_id = vault_id.clone();
+                            app.active_vault_keys.insert(vault_id, key);
                             app.create_vault_modal = None;
                             app.load_vault_list(cx);
                             app.load_hosts(cx);

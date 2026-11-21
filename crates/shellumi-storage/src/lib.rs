@@ -656,8 +656,31 @@ fn parse_tags(tags_str: &str) -> Vec<String> {
 impl HostStore {
     /// Open a local database path, or `:memory:` for an ephemeral database.
     pub async fn open(path: &str) -> Result<Self, StorageError> {
-        tracing::debug!(path, "Opening HostStore database");
-        let database = Builder::new_local(path).build().await?;
+        Self::open_with_key(path, None).await
+    }
+
+    /// Open a database path with optional Data Encryption Key (DEK).
+    pub async fn open_with_key(
+        path: &str,
+        key: Option<&shellumi_core::VaultKey>,
+    ) -> Result<Self, StorageError> {
+        tracing::debug!(
+            path,
+            encrypted = key.is_some(),
+            "Opening HostStore database"
+        );
+        let builder = Builder::new_local(path);
+        let builder = if let Some(k) = key {
+            builder
+                .experimental_encryption(true)
+                .with_encryption(turso::core::EncryptionOpts {
+                    cipher: "aes256gcm".to_string(),
+                    hexkey: hex::encode(k.expose_bytes()),
+                })
+        } else {
+            builder
+        };
+        let database = builder.build().await?;
         let mut connection = database.connect()?;
         connection.execute("PRAGMA foreign_keys = ON", ()).await?;
         let tx = connection
@@ -5098,6 +5121,16 @@ impl HostStore {
             }
         }
 
+        // Include key envelope for this vault if available
+        if let Ok(Some(env_str)) = self
+            .get_vault_recovery_envelope(self.vault_id().as_str())
+            .await
+        {
+            if let Ok(env) = serde_json::from_str::<shellumi_core::EncryptedEnvelope>(&env_str) {
+                vault.key_envelope = Some(env);
+            }
+        }
+
         // Export identities
         let identities = self.list_identities().await?;
         for ident in identities {
@@ -5345,6 +5378,14 @@ impl HostStore {
             let _ = self
                 .save_encrypted_vault_directory("primary_directory", enc_dir)
                 .await;
+        }
+
+        // Restore key envelope if present in sync payload
+        if let Some(key_env) = &vault.key_envelope {
+            if let Ok(json) = serde_json::to_string(key_env) {
+                let vid = self.vault_id().as_str().to_string();
+                let _ = self.save_vault_recovery_envelope(&vid, &json).await;
+            }
         }
 
         for record in &vault.records {
@@ -8832,5 +8873,215 @@ mod tests {
         assert!(b_contexts
             .iter()
             .any(|(name, ctx)| name == "Corp Vault" && ctx.id().as_str() == "corp-vault"));
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_database_backend_enforces_dek() {
+        use shellumi_core::{SshDestination, VaultKey};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("encrypted_vault.db");
+        let db_str = db_path.to_str().unwrap();
+
+        let key1 = VaultKey::generate().unwrap();
+        let key2 = VaultKey::generate().unwrap();
+
+        // 1. Create and populate database using key1
+        {
+            let mut store = HostStore::open_with_key(db_str, Some(&key1)).await.unwrap();
+            let dest = SshDestination::new("alice", "10.0.0.1", 22).unwrap();
+            store
+                .add("prod-server", &dest, None, &[], None, None)
+                .await
+                .unwrap();
+            let hosts = store.list().await.unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].name, "prod-server");
+        }
+
+        // 2. Opening with key1 succeeds and retrieves data
+        {
+            let store = HostStore::open_with_key(db_str, Some(&key1)).await.unwrap();
+            let hosts = store.list().await.unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].name, "prod-server");
+        }
+
+        // 3. Opening with wrong key (key2) MUST fail
+        {
+            let result = HostStore::open_with_key(db_str, Some(&key2)).await;
+            assert!(result.is_err(), "Opening with wrong key must fail");
+        }
+
+        // 4. Opening without key MUST fail
+        {
+            let result = HostStore::open_with_key(db_str, None).await;
+            assert!(result.is_err(), "Opening without key must fail");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vault_security_lifecycle_and_envelope_manifest() {
+        use shellumi_core::{
+            default_credential_store, validate_vault_password, SshDestination, VaultId, VaultKey,
+            VaultKeyManager, VaultManifest,
+        };
+
+        // 1. Password policy verification
+        assert!(validate_vault_password("short").is_err());
+        assert!(validate_vault_password("nouppercase123!").is_err());
+        assert!(validate_vault_password("NOLOWERCASE123!").is_err());
+        assert!(validate_vault_password("NoDigitsHere!").is_err());
+        assert!(validate_vault_password("NoSymbols1234").is_err());
+        let valid_pwd = "Str0ng#VaultP@ss2026";
+        assert!(validate_vault_password(valid_pwd).is_ok());
+
+        // 2. Independent random 256-bit DEKs
+        let vid = VaultId::new("vault-sec-test").unwrap();
+        let key1 = VaultKey::generate().unwrap();
+        let key2 = VaultKey::generate().unwrap();
+        assert_ne!(key1.expose_bytes(), key2.expose_bytes());
+        assert_eq!(key1.expose_bytes().len(), 32);
+
+        // 3. Argon2id KEK derivation and envelope wrapping
+        let cred_store = default_credential_store();
+        let recovery_code = VaultKey::generate_recovery_code().unwrap();
+        assert_eq!(recovery_code.chars().count(), 39); // 32 chars + 7 hyphens
+
+        let (dek, primary_env, recovery_env) = VaultKeyManager::provision_new_vault(
+            cred_store.as_ref(),
+            &vid,
+            valid_pwd,
+            false,
+            Some(&recovery_code),
+        )
+        .unwrap();
+
+        assert_eq!(primary_env.suite, "argon2id_aes256gcm_v2");
+        assert_eq!(primary_env.argon2_m_cost, Some(64 * 1024));
+        assert_eq!(primary_env.argon2_t_cost, Some(3));
+        assert_eq!(primary_env.argon2_p_cost, Some(1));
+        assert!(recovery_env.is_some());
+
+        // 4. Portable manifest persistence
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("secure_vault.db");
+        let manifest_path = VaultManifest::manifest_path_for_vault(&db_path, &vid);
+
+        let mut manifest = VaultManifest::new(
+            vid.as_str().to_string(),
+            "Secure Vault".to_string(),
+            primary_env,
+            recovery_env,
+            false,
+        );
+        manifest.save_to_path(&manifest_path).unwrap();
+        assert!(manifest_path.exists());
+
+        // 5. Open database with generated DEK and store records
+        let db_str = db_path.to_str().unwrap();
+        {
+            let mut store = HostStore::open_with_key(db_str, Some(&dek)).await.unwrap();
+            let context =
+                shellumi_core::VaultContext::new(vid.clone(), shellumi_core::VaultLocation::Local);
+            store
+                .register_vault_context("Secure Vault", &context)
+                .await
+                .unwrap();
+            store.set_vault_id(vid.clone());
+            let dest = SshDestination::new("admin", "192.168.10.1", 22).unwrap();
+            store
+                .add("db-cluster", &dest, None, &[], None, None)
+                .await
+                .unwrap();
+        }
+
+        // 6. Unlock via manifest using password
+        let loaded_manifest = VaultManifest::load_from_path(&manifest_path).unwrap();
+        let unlocked_key = loaded_manifest.unlock(valid_pwd).unwrap();
+        assert_eq!(unlocked_key.expose_bytes(), dek.expose_bytes());
+
+        // Verify unlocked DEK can query the database
+        {
+            let mut store = HostStore::open_with_key(db_str, Some(&unlocked_key))
+                .await
+                .unwrap();
+            store.set_vault_id(vid.clone());
+            let hosts = store.list().await.unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].name, "db-cluster");
+        }
+
+        // 7. Reject wrong password
+        assert!(loaded_manifest.unlock("WrongPassword123!").is_err());
+
+        // 8. Unlock via recovery code
+        let recovered_from_code = loaded_manifest.unlock(&recovery_code).unwrap();
+        assert_eq!(recovered_from_code.expose_bytes(), dek.expose_bytes());
+
+        // 9. Password change without re-encrypting the database
+        let new_pwd = "N3w#StrongVaultPass2026!";
+        manifest.change_password(&unlocked_key, new_pwd).unwrap();
+        manifest.save_to_path(&manifest_path).unwrap();
+
+        // New password unlocks the DEK
+        let reloaded = VaultManifest::load_from_path(&manifest_path).unwrap();
+        let new_unlocked = reloaded.unlock(new_pwd).unwrap();
+        assert_eq!(new_unlocked.expose_bytes(), dek.expose_bytes());
+
+        // Old password rejected
+        assert!(reloaded.unlock(valid_pwd).is_err());
+
+        // Database is still intact with unchanged DEK
+        {
+            let mut store = HostStore::open_with_key(db_str, Some(&new_unlocked))
+                .await
+                .unwrap();
+            store.set_vault_id(vid.clone());
+            let hosts = store.list().await.unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].name, "db-cluster");
+        }
+
+        // 10. Tampered envelope rejection
+        let mut tampered_manifest = reloaded.clone();
+        if let Some(first_byte) = tampered_manifest.primary_envelope.ciphertext.chars().next() {
+            let replacement = if first_byte == 'A' { 'B' } else { 'A' };
+            tampered_manifest
+                .primary_envelope
+                .ciphertext
+                .replace_range(0..1, &replacement.to_string());
+        }
+        assert!(
+            tampered_manifest.unlock(new_pwd).is_err(),
+            "Tampered ciphertext must be rejected"
+        );
+
+        // 11. Cross-device sync export and recovery
+        // When exported, the non-default vault attaches its password-wrapped DEK envelope
+        {
+            let mut store = HostStore::open_with_key(db_str, Some(&dek)).await.unwrap();
+            store.set_vault_id(vid.clone());
+            if let Ok(env_json) = serde_json::to_string(&manifest.primary_envelope) {
+                store
+                    .save_vault_recovery_envelope(vid.as_str(), &env_json)
+                    .await
+                    .unwrap();
+            }
+
+            let sync_vault = store
+                .export_vault_with_iterations("sync-passphrase-12", "device-x", 1000)
+                .await
+                .unwrap();
+            assert!(
+                sync_vault.key_envelope.is_some(),
+                "Opted-in vault must export key envelope"
+            );
+
+            // On another device:
+            let remote_env = sync_vault.key_envelope.unwrap();
+            let device2_key = VaultKey::unwrap_with_password(&vid, new_pwd, &remote_env).unwrap();
+            assert_eq!(device2_key.expose_bytes(), dek.expose_bytes());
+        }
     }
 }

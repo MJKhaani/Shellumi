@@ -53,6 +53,20 @@ pub enum SyncError {
     Network(String),
     Http(u16, String),
     Api(String),
+    PasswordMissingUppercase,
+    PasswordMissingLowercase,
+    PasswordMissingDigit,
+    PasswordMissingSymbol,
+    PasswordMismatch,
+    UnsupportedEnvelopeFormat(u32),
+    CorruptedEnvelope(String),
+    Io(String),
+}
+
+impl From<std::io::Error> for SyncError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err.to_string())
+    }
 }
 
 impl fmt::Display for SyncError {
@@ -87,6 +101,22 @@ impl fmt::Display for SyncError {
             Self::Network(msg) => write!(f, "network error: {msg}"),
             Self::Http(code, msg) => write!(f, "HTTP error {code}: {msg}"),
             Self::Api(msg) => write!(f, "Google Drive API error: {msg}"),
+            Self::PasswordMissingUppercase => {
+                f.write_str("password must contain at least one uppercase letter")
+            }
+            Self::PasswordMissingLowercase => {
+                f.write_str("password must contain at least one lowercase letter")
+            }
+            Self::PasswordMissingDigit => f.write_str("password must contain at least one number"),
+            Self::PasswordMissingSymbol => {
+                f.write_str("password must contain at least one symbol or special character")
+            }
+            Self::PasswordMismatch => f.write_str("passwords do not match"),
+            Self::UnsupportedEnvelopeFormat(v) => {
+                write!(f, "unsupported envelope format version {v}")
+            }
+            Self::CorruptedEnvelope(msg) => write!(f, "corrupted key envelope: {msg}"),
+            Self::Io(msg) => write!(f, "I/O error: {msg}"),
         }
     }
 }
@@ -110,13 +140,20 @@ fn default_suite() -> String {
     "aes256gcm_dek_v1".to_string()
 }
 
+/// Standard Argon2id memory cost in KiB (64 MiB).
+pub const DEFAULT_ARGON2_M_COST: u32 = 64 * 1024;
+/// Standard Argon2id time cost (iterations).
+pub const DEFAULT_ARGON2_T_COST: u32 = 3;
+/// Standard Argon2id parallelism.
+pub const DEFAULT_ARGON2_P_COST: u32 = 1;
+
 /// An authenticated ciphertext envelope containing encrypted data and metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedEnvelope {
-    /// Envelope format version (default: 1).
+    /// Envelope format version (default: 1, v2 for Argon2id envelopes).
     #[serde(default = "default_format_version")]
     pub format_version: u32,
-    /// Cipher suite identifier (e.g. `aes256gcm_dek_v1`, `argon2id_aes256gcm_legacy`).
+    /// Cipher suite identifier (e.g. `aes256gcm_dek_v1`, `argon2id_aes256gcm_legacy`, `argon2id_aes256gcm_v2`).
     #[serde(default = "default_suite")]
     pub suite: String,
     /// Active key epoch for the vault.
@@ -132,9 +169,18 @@ pub struct EncryptedEnvelope {
     /// Bound associated data (e.g. `entity_type:object_id`).
     #[serde(default)]
     pub associated_data: String,
-    /// KDF iteration count (0 for direct-DEK envelopes).
+    /// KDF iteration count (0 for direct-DEK envelopes, PBKDF2 iterations for legacy v1).
     #[serde(default)]
     pub kdf_iterations: u32,
+    /// Argon2id memory cost in KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argon2_m_cost: Option<u32>,
+    /// Argon2id time cost (passes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argon2_t_cost: Option<u32>,
+    /// Argon2id degree of parallelism.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argon2_p_cost: Option<u32>,
 }
 
 impl Default for EncryptedEnvelope {
@@ -148,8 +194,73 @@ impl Default for EncryptedEnvelope {
             ciphertext: String::new(),
             associated_data: String::new(),
             kdf_iterations: 0,
+            argon2_m_cost: None,
+            argon2_t_cost: None,
+            argon2_p_cost: None,
         }
     }
+}
+
+/// Validates user-defined vault password strength.
+///
+/// Requires minimum 8 characters with at least one uppercase letter, one lowercase letter,
+/// one number, and one symbol or punctuation character.
+pub fn validate_vault_password(password: &str) -> Result<(), SyncError> {
+    if password.is_empty() {
+        return Err(SyncError::EmptyPassphrase);
+    }
+    if password.chars().count() < MIN_PASSPHRASE_LENGTH {
+        return Err(SyncError::PassphraseTooShort(password.chars().count()));
+    }
+    // High-entropy recovery codes (e.g. 32+ characters with hyphen block delimiters)
+    if password.chars().count() >= 32
+        && password.chars().filter(|c| *c == '-').count() >= 3
+        && password.chars().any(|c| c.is_ascii_alphanumeric())
+    {
+        return Ok(());
+    }
+
+    if !password.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(SyncError::PasswordMissingUppercase);
+    }
+    if !password.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err(SyncError::PasswordMissingLowercase);
+    }
+    if !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err(SyncError::PasswordMissingDigit);
+    }
+    if !password
+        .chars()
+        .any(|c| c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace()))
+    {
+        return Err(SyncError::PasswordMissingSymbol);
+    }
+    Ok(())
+}
+
+/// Derives a 256-bit Key Encryption Key (KEK) using Argon2id with memory zeroization on drop.
+pub fn derive_argon2id_key(
+    password: &str,
+    salt: &[u8],
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, SyncError> {
+    if password.is_empty() {
+        return Err(SyncError::EmptyPassphrase);
+    }
+    if salt.len() < SALT_LEN {
+        return Err(SyncError::InvalidSaltLength);
+    }
+    let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(KEY_LEN))
+        .map_err(|_| SyncError::KeyDerivationFailed)?;
+    let argon2_inst =
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    argon2_inst
+        .hash_password_into(password.as_bytes(), salt, key.as_mut())
+        .map_err(|_| SyncError::KeyDerivationFailed)?;
+    Ok(key)
 }
 
 /// Derives a 256-bit Key Encryption Key (KEK) using PBKDF2-HMAC-SHA256 with memory zeroization on drop.
@@ -279,6 +390,9 @@ pub fn encrypt_entity_with_iterations<T: Serialize>(
         ciphertext: BASE64_STANDARD.encode(ciphertext),
         associated_data: aad_string,
         kdf_iterations: iterations,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     })
 }
 
@@ -484,6 +598,8 @@ pub struct SyncVault {
     pub records: Vec<SyncRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<EncryptedEnvelope>,
 }
 
 impl SyncVault {
@@ -495,6 +611,7 @@ impl SyncVault {
             updated_at: created_at,
             records: Vec::new(),
             encrypted_directory: None,
+            key_envelope: None,
         }
     }
 

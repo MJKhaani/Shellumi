@@ -75,6 +75,9 @@ fn test_ciphertext_digest_computation() {
         ciphertext: "dGVzdC1jaXBoZXJ0ZXh0".to_string(),
         associated_data: "host:01".to_string(),
         kdf_iterations: 600_000,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     };
 
     let digest = compute_ciphertext_digest(Some(&envelope));
@@ -118,6 +121,9 @@ fn test_envelope_validation_bounds() {
         ciphertext: BASE64_STANDARD.encode(vec![3u8; 128]),
         associated_data: "host:123".into(),
         kdf_iterations: 600_000,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     };
 
     assert!(validate_envelope(&valid_envelope, 1024).is_ok());
@@ -132,6 +138,9 @@ fn test_envelope_validation_bounds() {
         ciphertext: BASE64_STANDARD.encode(vec![3u8; 64]),
         associated_data: String::new(),
         kdf_iterations: 0,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     };
     assert!(validate_envelope(&direct_dek, 1024).is_ok());
 

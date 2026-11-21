@@ -449,6 +449,9 @@ pub(crate) struct CreateVaultModalState {
     pub(crate) vault_name_input: Entity<TextInput>,
     pub(crate) vault_passphrase_input: Entity<TextInput>,
     pub(crate) local_vault_desc_input: Entity<TextInput>,
+    pub(crate) local_vault_password_input: Entity<TextInput>,
+    pub(crate) local_vault_password_confirm_input: Entity<TextInput>,
+    pub(crate) remember_in_keychain: bool,
     pub(crate) error: Option<String>,
     pub(crate) status_message: Option<String>,
     pub(crate) is_testing: bool,
@@ -459,6 +462,7 @@ pub(crate) struct UnlockVaultModalState {
     pub(crate) vault_id: String,
     pub(crate) vault_name: String,
     pub(crate) passphrase_input: Entity<TextInput>,
+    pub(crate) remember_in_keychain: bool,
     pub(crate) error: Option<String>,
     pub(crate) is_submitting: bool,
 }
@@ -636,6 +640,7 @@ struct Shellumi {
     vault_dropdown_open: bool,
     active_vault: String,
     active_vault_id: String,
+    pub(crate) active_vault_keys: std::collections::HashMap<String, shellumi_core::VaultKey>,
     server_ws_status: Option<shellumi_core::server::WsConnectionStatus>,
     active_ws_client: Option<shellumi_core::server::ShellumiWsClient>,
     available_vaults: Vec<actions::VaultContextSummary>,
@@ -1053,6 +1058,7 @@ impl Shellumi {
             vault_dropdown_open: false,
             active_vault: vault_name.clone(),
             active_vault_id: vault_id.clone(),
+            active_vault_keys: std::collections::HashMap::new(),
             server_ws_status: None,
             active_ws_client: None,
             available_vaults: vec![actions::VaultContextSummary {

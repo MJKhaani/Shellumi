@@ -30,6 +30,9 @@ fn verifies_zero_knowledge_sync_payload_and_pkce_challenge() {
         ciphertext: "cipher".into(),
         associated_data: "host:1".into(),
         kdf_iterations: 1000,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     };
     let local_rec = SyncRecord::new(
         "host-1",
@@ -206,6 +209,9 @@ fn verifies_sync_cycle_execution_and_conflict_resolution_in_app() {
         ciphertext: "c".into(),
         associated_data: "host".into(),
         kdf_iterations: 1000,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     };
 
     let rec_local = SyncRecord::new(

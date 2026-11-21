@@ -84,6 +84,9 @@ impl<'a> VaultCipher<'a> {
             ciphertext: STANDARD.encode(&in_out),
             associated_data: aad_str,
             kdf_iterations: 0,
+            argon2_m_cost: None,
+            argon2_t_cost: None,
+            argon2_p_cost: None,
         })
     }
 

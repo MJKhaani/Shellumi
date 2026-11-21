@@ -61,7 +61,7 @@ impl Shellumi {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                    .child("Enter the 12+ character recovery passphrase to unlock this vault."),
+                                    .child("Enter the password or 32-character recovery code to unlock this vault."),
                             ),
                     ),
             )
@@ -81,36 +81,78 @@ impl Shellumi {
             );
 
         // Body with Passphrase Input
-        let body = div().flex().flex_col().gap_3().child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child("Recovery Passphrase"),
-                )
-                .child(
-                    div()
-                        .border_1()
-                        .border_color(rgb(MacTheme::BORDER))
-                        .rounded_md()
-                        .p_2()
-                        .bg(rgb(MacTheme::SURFACE_ACTIVE))
-                        .child(modal.passphrase_input.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                        .child(
-                        "The passphrase wraps the AES-256-GCM vault key using PBKDF2-HMAC-SHA256.",
+        let remember = modal.remember_in_keychain;
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Vault Password or Recovery Code"),
+                    )
+                    .child(
+                        div()
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .rounded_md()
+                            .p_2()
+                            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                            .child(modal.passphrase_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                            .child(
+                                "The password unwraps the AES-256-GCM vault DEK using Argon2id (64 MiB, 3 iterations).",
+                            ),
                     ),
-                ),
-        );
+            )
+            .child(
+                div()
+                    .id("toggle-unlock-remember-keychain")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.toggle_unlock_remember_keychain(cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(if remember {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SURFACE_ACTIVE)
+                            })
+                            .text_color(rgb(0xffffff))
+                            .text_xs()
+                            .child(if remember { "✓" } else { "" }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Remember on this device (stores DEK in OS Keychain)"),
+                    ),
+            );
 
         modal_box = modal_box.child(header).child(body);
 

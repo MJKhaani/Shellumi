@@ -470,6 +470,107 @@ impl Shellumi {
                         .child(modal.local_vault_desc_input.clone()),
                 );
 
+                // Vault Password Input & Confirm Password Input in a 2-column row
+                let pwd_row = div()
+                    .flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .child("VAULT PASSWORD"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                            .child("Min 8 chars, A-Z, a-z, 0-9, symbol"),
+                                    ),
+                            )
+                            .child(modal.local_vault_password_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("CONFIRM PASSWORD"),
+                            )
+                            .child(modal.local_vault_password_confirm_input.clone()),
+                    );
+                form = form.child(pwd_row);
+
+                // Remember on this device checkbox
+                let remember = modal.remember_in_keychain;
+                let remember_row = div()
+                    .id("toggle-create-remember-keychain")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.toggle_create_vault_remember_keychain(cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(if remember {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SURFACE_ACTIVE)
+                            })
+                            .text_color(rgb(0xffffff))
+                            .text_xs()
+                            .child(if remember { "✓" } else { "" }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Remember on this device"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child(
+                                        "Securely stores the 256-bit DEK in the OS Keychain/CredentialStore without storing your password.",
+                                    ),
+                            ),
+                    );
+                form = form.child(remember_row);
+
                 // Footer Actions
                 let is_submitting = modal.is_submitting;
                 let footer = div()

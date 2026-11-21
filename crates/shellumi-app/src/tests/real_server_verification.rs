@@ -960,6 +960,9 @@ async fn test_two_servers_two_clients_full_lifecycle_and_convergence() {
         ciphertext: "ZW5jcnlwdGVkLXBsYWluLXBheWxvYWQ=".into(),
         associated_data: "host:bastion-uuid:1".to_string(),
         kdf_iterations: 0,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
     };
     let digest = compute_ciphertext_digest(Some(&envelope));
     assert_eq!(digest.len(), 64);
