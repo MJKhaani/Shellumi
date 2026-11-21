@@ -176,9 +176,11 @@ impl Shellumi {
         else {
             return;
         };
-        let Some(database) = self.database.clone() else {
+        let Some(database) = self.active_vault_db_path() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
+        let active_key = self.active_vault_key();
         let prepared = ws.clone();
         let handle = window.window_handle();
         self.desktop.message = Some("Resolving workspace identities…".into());
@@ -200,7 +202,13 @@ impl Shellumi {
                         continue;
                     }
                     let plan = if let Some(id) = session.host_id {
-                        shellumi_storage::desktop::resolve_connection(&database, id).await?
+                        shellumi_storage::desktop::resolve_connection_with_key(
+                            &database,
+                            id,
+                            Some(&active_vault_id),
+                            active_key.as_ref(),
+                        )
+                        .await?
                     } else {
                         shellumi_core::connection::ConnectionPlan::new(
                             session

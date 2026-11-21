@@ -118,7 +118,42 @@ pub async fn execute_scoped(
     vault_id: Option<&str>,
     command: Command,
 ) -> Result<Snapshot, String> {
-    let mut store = HostStore::open(database).await.map_err(|e| e.to_string())?;
+    execute_scoped_with_key(database, vault_id, command, None).await
+}
+
+pub async fn execute_scoped_with_key(
+    database: &str,
+    vault_id: Option<&str>,
+    command: Command,
+    key: Option<&shellumi_core::VaultKey>,
+) -> Result<Snapshot, String> {
+    let resolved_key = if let Some(k) = key {
+        Some(k.clone())
+    } else if !crate::is_protected_vault_path(database) {
+        None
+    } else if let Some(vid) = vault_id {
+        if let Ok(v) = shellumi_core::VaultId::new(vid) {
+            let cred_store = shellumi_core::default_credential_store();
+            shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &v)
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    } else {
+        let cred_store = shellumi_core::default_credential_store();
+        if let Ok(v) = shellumi_core::VaultId::new(crate::LEGACY_LOCAL_VAULT_ID) {
+            shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &v)
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    };
+
+    let mut store = HostStore::open_with_key(database, resolved_key.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
     let vid_str = if let Some(vid) = vault_id {
         if let Ok(v) = shellumi_core::VaultId::new(vid) {
             store.set_vault_id(v);
@@ -830,7 +865,47 @@ pub async fn resolve_connection(
     database: &str,
     host_id: i64,
 ) -> Result<shellumi_core::connection::ConnectionPlan, String> {
-    let store = HostStore::open(database).await.map_err(|e| e.to_string())?;
+    resolve_connection_with_key(database, host_id, None, None).await
+}
+
+pub async fn resolve_connection_with_key(
+    database: &str,
+    host_id: i64,
+    active_vault_id: Option<&str>,
+    key: Option<&shellumi_core::VaultKey>,
+) -> Result<shellumi_core::connection::ConnectionPlan, String> {
+    let resolved_key = if let Some(k) = key {
+        Some(k.clone())
+    } else if !crate::is_protected_vault_path(database) {
+        None
+    } else if let Some(vid) = active_vault_id {
+        if let Ok(v) = shellumi_core::VaultId::new(vid) {
+            let cred_store = shellumi_core::default_credential_store();
+            shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &v)
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    } else {
+        let cred_store = shellumi_core::default_credential_store();
+        if let Ok(v) = shellumi_core::VaultId::new(crate::LEGACY_LOCAL_VAULT_ID) {
+            shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &v)
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    };
+
+    let mut store = HostStore::open_with_key(database, resolved_key.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(vid) = active_vault_id {
+        if let Ok(v) = shellumi_core::VaultId::new(vid) {
+            store.set_vault_id(v);
+        }
+    }
     let host = store
         .get_host(host_id)
         .await

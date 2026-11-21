@@ -969,6 +969,29 @@ impl ServerSyncEngine {
         client: &ShellumiServerClient<T>,
         passphrase: &str,
     ) -> Result<ServerSyncReport, StorageError> {
+        let cred_store = shellumi_core::default_credential_store();
+        Self::sync_vault_with_connection(
+            store,
+            vault_id,
+            remote_vault_id,
+            client,
+            passphrase,
+            None,
+            cred_store.as_ref(),
+        )
+        .await
+    }
+
+    /// Delta synchronizes a vault using a pre-resolved server connection record and credential store.
+    pub async fn sync_vault_with_connection<T: HttpTransport>(
+        store: &mut HostStore,
+        vault_id: &VaultId,
+        remote_vault_id: Uuid,
+        client: &ShellumiServerClient<T>,
+        passphrase: &str,
+        conn_record: Option<&VaultServerConnectionRecord>,
+        cred_store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<ServerSyncReport, StorageError> {
         let vault_str = vault_id.as_str();
 
         // 1. Fetch current sync sequence & state
@@ -989,42 +1012,49 @@ impl ServerSyncEngine {
                 });
 
         // 2. Locate associated server connection record and verify instance ID
-        let contexts = store.list_vault_contexts().await?;
-        let server_conn_id = contexts.into_iter().find_map(|(_, ctx)| {
-            if ctx.id() == vault_id {
-                match ctx.location() {
-                    shellumi_core::VaultLocation::Remote { server, .. } => Some(server.clone()),
-                    _ => None,
+        let found_conn_record = if let Some(cr) = conn_record {
+            Some(cr.clone())
+        } else {
+            let contexts = store.list_vault_contexts().await.unwrap_or_default();
+            let server_conn_id = contexts.into_iter().find_map(|(_, ctx)| {
+                if ctx.id() == vault_id {
+                    match ctx.location() {
+                        shellumi_core::VaultLocation::Remote { server, .. } => Some(server.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
                 }
+            });
+            if let Some(ref conn_id) = server_conn_id {
+                store.get_vault_server_connection(conn_id.as_str()).await?
             } else {
                 None
             }
-        });
+        };
 
-        if let Some(ref conn_id) = server_conn_id {
+        if let Some(mut active_conn_record) = found_conn_record.clone() {
             if let Ok(caps) = client.capabilities() {
-                if let Some(mut conn_record) =
-                    store.get_vault_server_connection(conn_id.as_str()).await?
-                {
-                    let remote_inst = caps.server_instance_id.to_string();
-                    if let Some(ref stored_inst) = conn_record.server_instance_id {
-                        if stored_inst != &remote_inst {
-                            let err_msg = format!(
-                                "Server instance mismatch for {}: expected {stored_inst}, server has {remote_inst}. Remote database may have been reset.",
-                                conn_id.as_str()
-                            );
-                            current_state.status = "error".to_string();
-                            current_state.error_message = Some(err_msg.clone());
-                            store.save_vault_sync_state(&current_state).await?;
-                            return Err(StorageError::InvalidSync(shellumi_core::SyncError::Api(
-                                err_msg,
-                            )));
-                        }
-                    } else {
-                        conn_record.server_instance_id = Some(remote_inst);
-                        conn_record.updated_at = current_timestamp();
-                        store.save_vault_server_connection(&conn_record).await?;
+                let remote_inst = caps.server_instance_id.to_string();
+                if let Some(ref stored_inst) = active_conn_record.server_instance_id {
+                    if stored_inst != &remote_inst {
+                        let err_msg = format!(
+                            "Server instance mismatch for {}: expected {stored_inst}, server has {remote_inst}. Remote database may have been reset.",
+                            active_conn_record.id
+                        );
+                        current_state.status = "error".to_string();
+                        current_state.error_message = Some(err_msg.clone());
+                        store.save_vault_sync_state(&current_state).await?;
+                        return Err(StorageError::InvalidSync(shellumi_core::SyncError::Api(
+                            err_msg,
+                        )));
                     }
+                } else {
+                    active_conn_record.server_instance_id = Some(remote_inst);
+                    active_conn_record.updated_at = current_timestamp();
+                    let _ = store
+                        .save_vault_server_connection(&active_conn_record)
+                        .await;
                 }
             }
         }
@@ -1098,131 +1128,125 @@ impl ServerSyncEngine {
         // -------------------------------------------------------------------
         let pending = store.get_pending_mutations(vault_str).await?;
         if !pending.is_empty() {
-            if let Some(conn_id) = server_conn_id {
-                if let Some(conn_record) =
-                    store.get_vault_server_connection(conn_id.as_str()).await?
-                {
-                    if let Some(signing_key_b64) = conn_record.device_signing_key {
-                        let pkcs8_bytes =
-                            BASE64_STANDARD.decode(&signing_key_b64).map_err(|e| {
-                                StorageError::InvalidSync(shellumi_core::SyncError::InvalidBase64(
-                                    e.to_string(),
-                                ))
-                            })?;
-                        let keypair = keypair_from_pkcs8(&pkcs8_bytes).map_err(|e| {
-                            StorageError::InvalidSync(shellumi_core::SyncError::Network(
-                                e.to_string(),
-                            ))
-                        })?;
+            if let Some(ref conn_record) = found_conn_record {
+                if let Some(signing_key_sec) = conn_record.resolve_signing_key(cred_store) {
+                    let raw_key = signing_key_sec.expose_secret().trim();
+                    let pkcs8_bytes = BASE64_STANDARD.decode(raw_key).map_err(|e| {
+                        StorageError::InvalidSync(shellumi_core::SyncError::InvalidBase64(
+                            e.to_string(),
+                        ))
+                    })?;
+                    let keypair = keypair_from_pkcs8(&pkcs8_bytes).map_err(|e| {
+                        StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+                    })?;
 
-                        let batch_idempotency_key = pending
-                            .iter()
-                            .find_map(|p| p.idempotency_key.clone())
-                            .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    let batch_idempotency_key = pending
+                        .iter()
+                        .find_map(|p| p.idempotency_key.clone())
+                        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-                        let active_epoch = current_state.active_key_epoch.max(1);
-                        let mut mutations_to_send = Vec::new();
-                        let mut pending_ids = Vec::new();
+                    let active_epoch = current_state.active_key_epoch.max(1);
+                    let mut mutations_to_send = Vec::new();
+                    let mut pending_ids = Vec::new();
 
-                        for (counter, p) in pending.iter().enumerate() {
-                            let device_counter = counter as u64 + 1;
-                            let envelope = if p.deleted {
-                                None
-                            } else if let Some(ref raw_json) = p.payload_json {
-                                let val: serde_json::Value = serde_json::from_str(raw_json)
-                                    .unwrap_or(serde_json::Value::Null);
-                                encrypt_entity(passphrase, &p.entity_type, &p.object_id, &val).ok()
-                            } else {
-                                None
-                            };
-
-                            let digest = compute_ciphertext_digest(envelope.as_ref());
-                            let preimage = canonical_mutation_preimage(
-                                remote_vault_id,
-                                &p.object_id,
-                                &p.entity_type,
-                                p.expected_revision,
-                                p.deleted,
-                                active_epoch,
-                                device_counter,
-                                &digest,
-                            );
-
-                            let signature = sign_message(&keypair, preimage.as_bytes());
-
-                            mutations_to_send.push(MutationItem {
-                                object_id: p.object_id.clone(),
-                                entity_type: p.entity_type.clone(),
-                                expected_revision: p.expected_revision,
-                                deleted: p.deleted,
-                                key_epoch: active_epoch,
-                                device_counter,
-                                encrypted_envelope: envelope,
-                                device_signature: signature,
-                            });
-                            pending_ids.push(p.id);
-                        }
-
-                        let commit_req = CommitBatchRequest {
-                            protocol_version: CURRENT_PROTOCOL_VERSION,
-                            vault_id: remote_vault_id,
-                            idempotency_key: batch_idempotency_key,
-                            base_cursor: current_state
-                                .last_cursor
-                                .clone()
-                                .or_else(|| Some(format!("seq:{}", report.latest_sequence))),
-                            mutations: mutations_to_send,
+                    for (counter, p) in pending.iter().enumerate() {
+                        let device_counter = counter as u64 + 1;
+                        let envelope = if p.deleted {
+                            None
+                        } else if let Some(ref raw_json) = p.payload_json {
+                            let val: serde_json::Value =
+                                serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
+                            encrypt_entity(passphrase, &p.entity_type, &p.object_id, &val).ok()
+                        } else {
+                            None
                         };
 
-                        let commit_result = client.commit(remote_vault_id, &commit_req);
+                        let digest = compute_ciphertext_digest(envelope.as_ref());
+                        let preimage = canonical_mutation_preimage(
+                            remote_vault_id,
+                            &p.object_id,
+                            &p.entity_type,
+                            p.expected_revision,
+                            p.deleted,
+                            active_epoch,
+                            device_counter,
+                            &digest,
+                        );
 
-                        match commit_result {
-                            Ok(commit_ack) => {
-                                report.mutations_committed = commit_ack.applied.len();
-                                if commit_ack.commit_sequence > report.latest_sequence {
-                                    report.latest_sequence = commit_ack.commit_sequence;
-                                }
-                                current_state.last_cursor = Some(commit_ack.next_cursor);
-                                current_state.conflicted_object_id = None;
-                                current_state.conflict_details = None;
+                        let signature = sign_message(&keypair, preimage.as_bytes());
 
-                                // Remove committed pending rows
-                                store
-                                    .clear_pending_mutations(vault_str, &pending_ids)
-                                    .await?;
+                        mutations_to_send.push(MutationItem {
+                            object_id: p.object_id.clone(),
+                            entity_type: p.entity_type.clone(),
+                            expected_revision: p.expected_revision,
+                            deleted: p.deleted,
+                            key_epoch: active_epoch,
+                            device_counter,
+                            encrypted_envelope: envelope,
+                            device_signature: signature,
+                        });
+                        pending_ids.push(p.id);
+                    }
+
+                    let commit_req = CommitBatchRequest {
+                        protocol_version: CURRENT_PROTOCOL_VERSION,
+                        vault_id: remote_vault_id,
+                        idempotency_key: batch_idempotency_key,
+                        base_cursor: current_state
+                            .last_cursor
+                            .clone()
+                            .or_else(|| Some(format!("seq:{}", report.latest_sequence))),
+                        mutations: mutations_to_send,
+                    };
+
+                    let commit_result = client.commit(remote_vault_id, &commit_req);
+
+                    match commit_result {
+                        Ok(commit_ack) => {
+                            report.mutations_committed = commit_ack.applied.len();
+                            if commit_ack.commit_sequence > report.latest_sequence {
+                                report.latest_sequence = commit_ack.commit_sequence;
                             }
-                            Err(err) => {
-                                let err_str = err.to_string();
-                                let err_lower = err_str.to_lowercase();
-                                if err_str.contains("STALE_KEY_EPOCH") {
-                                    // Stale key epoch: advance active epoch and report error
-                                    current_state.active_key_epoch += 1;
-                                    current_state.status = "error".to_string();
-                                    current_state.error_message = Some(err_str.clone());
-                                    store.save_vault_sync_state(&current_state).await?;
-                                    return Err(StorageError::InvalidSync(
-                                        shellumi_core::SyncError::Network(err_str),
-                                    ));
-                                } else if err_lower.contains("conflict")
-                                    || err_lower.contains("409")
-                                    || err_str.contains("REVISION_CONFLICT")
-                                {
-                                    // Conflict: record conflict status, do not discard pending mutations
-                                    report.has_conflicts = true;
-                                    current_state.status = "conflict".to_string();
-                                    current_state.conflicted_object_id =
-                                        pending.first().map(|p| p.object_id.clone());
-                                    current_state.conflict_details = Some(err_str.clone());
-                                    store.save_vault_sync_state(&current_state).await?;
-                                    return Ok(report);
-                                } else {
-                                    current_state.status = "error".to_string();
-                                    current_state.error_message = Some(err_str.clone());
-                                    store.save_vault_sync_state(&current_state).await?;
-                                    return Err(StorageError::InvalidSync(
-                                        shellumi_core::SyncError::Network(err_str),
-                                    ));
-                                }
+                            current_state.last_cursor = Some(commit_ack.next_cursor);
+                            current_state.conflicted_object_id = None;
+                            current_state.conflict_details = None;
+
+                            // Remove committed pending rows
+                            store
+                                .clear_pending_mutations(vault_str, &pending_ids)
+                                .await?;
+                        }
+                        Err(err) => {
+                            let err_str = err.to_string();
+                            let err_lower = err_str.to_lowercase();
+                            if err_str.contains("STALE_KEY_EPOCH") {
+                                // Stale key epoch: advance active epoch and report error
+                                current_state.active_key_epoch += 1;
+                                current_state.status = "error".to_string();
+                                current_state.error_message = Some(err_str.clone());
+                                store.save_vault_sync_state(&current_state).await?;
+                                return Err(StorageError::InvalidSync(
+                                    shellumi_core::SyncError::Network(err_str),
+                                ));
+                            } else if err_lower.contains("conflict")
+                                || err_lower.contains("409")
+                                || err_str.contains("REVISION_CONFLICT")
+                            {
+                                // Conflict: record conflict status, do not discard pending mutations
+                                report.has_conflicts = true;
+                                current_state.status = "conflict".to_string();
+                                current_state.conflicted_object_id =
+                                    pending.first().map(|p| p.object_id.clone());
+                                current_state.conflict_details = Some(err_str.clone());
+                                store.save_vault_sync_state(&current_state).await?;
+                                return Ok(report);
+                            } else {
+                                current_state.status = "error".to_string();
+                                current_state.error_message = Some(err_str.clone());
+                                store.save_vault_sync_state(&current_state).await?;
+                                return Err(StorageError::InvalidSync(
+                                    shellumi_core::SyncError::Network(err_str),
+                                ));
                             }
                         }
                     }

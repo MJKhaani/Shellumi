@@ -2,7 +2,7 @@
 pub mod desktop;
 pub mod migration;
 pub mod server_sync;
-pub use migration::{MigrationEngine, MigrationReport};
+pub use migration::{MigrationCredentials, MigrationEngine, MigrationReport};
 pub use server_sync::{
     PendingMutationRecord, ServerSyncEngine, ServerSyncReport, VaultServerConnectionRecord,
     VaultSyncStateRecord,
@@ -702,6 +702,17 @@ pub fn is_protected_vault_path(path: &str) -> bool {
         }
     }
     false
+}
+
+/// Configuration options for restoring a synchronized vault on a second device.
+pub struct RestoreVaultOptions<'a> {
+    pub vault_id: &'a shellumi_core::VaultId,
+    pub vault_name: &'a str,
+    pub password: &'a str,
+    pub target_db_path: &'a std::path::Path,
+    pub manifests_dir: &'a std::path::Path,
+    pub cred_store: Option<&'a dyn shellumi_core::CredentialStore>,
+    pub remember_in_keychain: bool,
 }
 
 impl HostStore {
@@ -2330,7 +2341,8 @@ impl HostStore {
             } => (Some(server.as_str()), Some(server_vault_id.as_str())),
         };
         self.connection.execute(
-            "INSERT INTO vault_contexts (id, name, server_connection_id, server_vault_id) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO vault_contexts (id, name, server_connection_id, server_vault_id) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, server_connection_id = excluded.server_connection_id, server_vault_id = excluded.server_vault_id",
             (context.id().as_str(), name, server, remote),
         ).await?;
         Ok(())
@@ -5710,6 +5722,72 @@ impl HostStore {
 
         let _ = self.archive_snapshot(&vault.vault_id, vault, 3).await;
         Ok(summary)
+    }
+
+    /// Restores a synchronized vault on a second device using only the user password and sync payload.
+    /// Obtains the wrapped DEK from `sync_vault.key_envelope`, unwraps it with `password` (Argon2id + AES-256-GCM),
+    /// initializes a fresh encrypted database at `target_db_path`, writes the portable manifest to `manifests_dir`,
+    /// provisions the key into `cred_store` if requested, and imports all synced records.
+    pub async fn restore_vault_from_sync(
+        sync_vault: &shellumi_core::SyncVault,
+        options: &RestoreVaultOptions<'_>,
+    ) -> Result<HostStore, StorageError> {
+        let envelope = sync_vault.key_envelope.as_ref().ok_or_else(|| {
+            StorageError::Serialization(
+                "Sync payload does not contain wrapped DEK key_envelope required for second-device restoration".into(),
+            )
+        })?;
+
+        let recovered_dek = shellumi_core::VaultKey::unwrap_with_password(
+            options.vault_id,
+            options.password,
+            envelope,
+        )
+        .map_err(|e| StorageError::Serialization(format!("Failed to unwrap DEK: {e}")))?;
+
+        std::fs::create_dir_all(options.manifests_dir).map_err(|e| {
+            StorageError::Serialization(format!("Failed to create manifests dir: {e}"))
+        })?;
+        let manifest_path = options
+            .manifests_dir
+            .join(format!("{}.manifest.json", options.vault_id.as_str()));
+        let manifest = shellumi_core::VaultManifest::new(
+            options.vault_id.as_str().to_string(),
+            options.vault_name.to_string(),
+            envelope.clone(),
+            None,
+            options.remember_in_keychain,
+        );
+        manifest.save_to_path(&manifest_path).map_err(|e| {
+            StorageError::Serialization(format!("Failed to save restored vault manifest: {e}"))
+        })?;
+
+        if options.remember_in_keychain {
+            if let Some(cs) = options.cred_store {
+                let _ = shellumi_core::VaultKeyManager::provision_key(
+                    cs,
+                    options.vault_id,
+                    &recovered_dek,
+                );
+            }
+        }
+
+        if let Some(parent) = options.target_db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let target_str = options.target_db_path.to_str().ok_or_else(|| {
+            StorageError::Serialization("Invalid target database path encoding".into())
+        })?;
+        let mut store = HostStore::open_with_key(target_str, Some(&recovered_dek)).await?;
+        store.set_vault_id(options.vault_id.clone());
+
+        let dek_passphrase = hex::encode(recovered_dek.expose_bytes());
+        let import_res = store.import_vault(&dek_passphrase, sync_vault).await;
+        if import_res.is_err() {
+            store.import_vault(options.password, sync_vault).await?;
+        }
+
+        Ok(store)
     }
 
     /// Archives a snapshot of the SyncVault into the local database for disaster recovery.
@@ -9372,12 +9450,22 @@ mod tests {
         // 2. Migration is needed
         assert!(MigrationEngine::is_migration_needed(base_dir));
 
-        // 3. Run migration
+        // 3. Run migration with explicit user credentials
         let cred_store = shellumi_core::EphemeralCredentialStore::new();
-        let report =
-            MigrationEngine::migrate_legacy_database_if_needed(base_dir, None, &cred_store)
-                .await
-                .unwrap();
+        let rec_code = shellumi_core::VaultKey::generate_recovery_code().unwrap();
+        let creds = MigrationCredentials {
+            default_password: Some("M@sterVault2026!".to_string()),
+            default_recovery_code: Some(rec_code),
+            secondary_passwords: std::collections::HashMap::new(),
+        };
+        let report = MigrationEngine::migrate_legacy_database_with_credentials(
+            base_dir,
+            None,
+            Some(&creds),
+            &cred_store,
+        )
+        .await
+        .unwrap();
 
         assert!(report.legacy_db_found);
         assert!(report.backup_path.is_some());
@@ -9387,9 +9475,10 @@ mod tests {
         assert_eq!(report.default_records_migrated, 1);
         assert_eq!(report.secondary_records_migrated, 1);
 
-        // 4. Legacy database was atomically renamed to .migrated
+        // 4. Legacy database was atomically renamed to .migrated and completion marker was created
         assert!(!legacy_db_path.exists());
         assert!(base_dir.join("shellumi.db.migrated").exists());
+        assert!(base_dir.join("vaults").join(".migration_complete").exists());
 
         // 5. Separate physical encrypted databases exist
         let default_db_path = base_dir.join("vaults").join("default.db");
@@ -9478,5 +9567,213 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(second_run.vaults_migrated, 0);
+    }
+
+    #[tokio::test]
+    async fn test_interrupted_migration_safety_and_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path();
+        let legacy_db_path = base_dir.join("shellumi.db");
+
+        // 1. Setup legacy database with records
+        {
+            let mut store = HostStore::open(legacy_db_path.to_str().unwrap())
+                .await
+                .unwrap();
+            let dest = SshDestination::new("192.168.1.10", "alice", 22).unwrap();
+            store
+                .add("interrupted-test-host", &dest, None, &[], None, None)
+                .await
+                .unwrap();
+            let snip = Snippet {
+                name: "test-snippet".into(),
+                command: "uptime".into(),
+                description: None,
+                tags: vec![],
+                variables: vec![],
+            };
+            store.add_snippet(&snip).await.unwrap();
+        }
+
+        // 2. Simulate an interrupted migration: vaults/default.db exists but NO .migration_complete marker
+        let vaults_dir = base_dir.join("vaults");
+        std::fs::create_dir_all(&vaults_dir).unwrap();
+        let partial_db_path = vaults_dir.join("default.db");
+        std::fs::write(&partial_db_path, b"corrupted partial sqlite file").unwrap();
+
+        // Verify that is_migration_needed is TRUE despite default.db existing (does not treat default.db existence as completion!)
+        assert!(MigrationEngine::is_migration_needed(base_dir));
+
+        // 3. Run migration with explicit user credentials
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let rec_code = shellumi_core::VaultKey::generate_recovery_code().unwrap();
+        let creds = MigrationCredentials {
+            default_password: Some("IntErrUptedP@ss123!".to_string()),
+            default_recovery_code: Some(rec_code),
+            secondary_passwords: std::collections::HashMap::new(),
+        };
+
+        let report = MigrationEngine::migrate_legacy_database_with_credentials(
+            base_dir,
+            None,
+            Some(&creds),
+            &cred_store,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.legacy_db_found);
+        assert_eq!(report.vaults_migrated, 1);
+        assert_eq!(report.default_records_migrated, 2);
+
+        // 4. Verify verified activation: marker created, legacy db renamed
+        assert!(vaults_dir.join(".migration_complete").exists());
+        assert!(!legacy_db_path.exists());
+        assert!(base_dir.join("shellumi.db.migrated").exists());
+        assert!(!MigrationEngine::is_migration_needed(base_dir));
+
+        // 5. Open migrated default vault with decrypted key and verify records
+        let default_vid = shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        let default_key = shellumi_core::VaultKeyManager::retrieve_key(&cred_store, &default_vid)
+            .unwrap()
+            .unwrap();
+        let def_store =
+            HostStore::open_with_key(partial_db_path.to_str().unwrap(), Some(&default_key))
+                .await
+                .unwrap();
+        let hosts = def_store.list().await.unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].name, "interrupted-test-host");
+        let snippets = def_store.list_snippets().await.unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].name, "test-snippet");
+    }
+
+    #[tokio::test]
+    async fn test_second_device_restoration_from_sync_payload() {
+        let temp_dev1 = tempfile::tempdir().unwrap();
+        let dev1_db_path = temp_dev1.path().join("vaults").join("vault_sync.db");
+        std::fs::create_dir_all(dev1_db_path.parent().unwrap()).unwrap();
+
+        let vault_id = shellumi_core::VaultId::new("vlt-finance-001").unwrap();
+        let user_password = "Str0ngVaultPassword!#2026";
+
+        // ===================================================================
+        // Device 1: Create vault, add records, and export SyncVault with key_envelope
+        // ===================================================================
+        let dev1_cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let rec_code = shellumi_core::VaultKey::generate_recovery_code().unwrap();
+        let (dek, primary_env, _rec_env) = shellumi_core::VaultKeyManager::provision_new_vault(
+            &dev1_cred_store,
+            &vault_id,
+            user_password,
+            true,
+            Some(&rec_code),
+        )
+        .unwrap();
+
+        let mut dev1_store = HostStore::open_with_key(dev1_db_path.to_str().unwrap(), Some(&dek))
+            .await
+            .unwrap();
+        dev1_store.set_vault_id(vault_id.clone());
+
+        // Add records
+        let dest = SshDestination::new("10.0.0.50", "admin", 22).unwrap();
+        dev1_store
+            .add(
+                "fin-prod-server",
+                &dest,
+                None,
+                &["pci-dss".to_string()],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let snip = Snippet {
+            name: "check-firewall".into(),
+            command: "iptables -L -n -v".into(),
+            description: Some("Security audit command".into()),
+            tags: vec!["audit".into()],
+            variables: vec![],
+        };
+        dev1_store.add_snippet(&snip).await.unwrap();
+
+        let dek_passphrase = hex::encode(dek.expose_bytes());
+        let mut sync_vault = dev1_store
+            .export_vault(&dek_passphrase, "device-1-uuid")
+            .await
+            .unwrap();
+        sync_vault.key_envelope = Some(primary_env.clone());
+
+        // Verify sync_vault payload contents
+        assert!(sync_vault.key_envelope.is_some());
+        assert_eq!(sync_vault.records.len(), 2);
+
+        // ===================================================================
+        // Device 2: Completely fresh device (no Keychain, no env vars)
+        // Restores vault using ONLY user_password and sync_vault payload
+        // ===================================================================
+        let temp_dev2 = tempfile::tempdir().unwrap();
+        let dev2_db_path = temp_dev2.path().join("vaults").join("vault_sync.db");
+        let dev2_manifests_dir = temp_dev2.path().join("vault_manifests");
+        let dev2_cred_store = shellumi_core::EphemeralCredentialStore::new();
+
+        // Attempt restoration with wrong password must fail
+        let wrong_opts = RestoreVaultOptions {
+            vault_id: &vault_id,
+            vault_name: "Finance Vault",
+            password: "WrongP@ssword123!",
+            target_db_path: &dev2_db_path,
+            manifests_dir: &dev2_manifests_dir,
+            cred_store: Some(&dev2_cred_store),
+            remember_in_keychain: true,
+        };
+        assert!(HostStore::restore_vault_from_sync(&sync_vault, &wrong_opts)
+            .await
+            .is_err());
+
+        // Restoration with correct user password succeeds
+        let correct_opts = RestoreVaultOptions {
+            vault_id: &vault_id,
+            vault_name: "Finance Vault",
+            password: user_password,
+            target_db_path: &dev2_db_path,
+            manifests_dir: &dev2_manifests_dir,
+            cred_store: Some(&dev2_cred_store),
+            remember_in_keychain: true,
+        };
+        let dev2_store = HostStore::restore_vault_from_sync(&sync_vault, &correct_opts)
+            .await
+            .unwrap();
+
+        // 1. Verify records on Device 2
+        let restored_hosts = dev2_store.list().await.unwrap();
+        assert_eq!(restored_hosts.len(), 1);
+        assert_eq!(restored_hosts[0].name, "fin-prod-server");
+        assert_eq!(restored_hosts[0].destination.host(), "10.0.0.50");
+
+        let restored_snippets = dev2_store.list_snippets().await.unwrap();
+        assert_eq!(restored_snippets.len(), 1);
+        assert_eq!(restored_snippets[0].name, "check-firewall");
+
+        // 2. Verify portable manifest was written on Device 2
+        let dev2_manifest_file =
+            dev2_manifests_dir.join(format!("{}.manifest.json", vault_id.as_str()));
+        assert!(dev2_manifest_file.exists());
+        let manifest = shellumi_core::VaultManifest::load_from_path(&dev2_manifest_file).unwrap();
+        assert_eq!(manifest.name, "Finance Vault");
+
+        // 3. Verify recovered DEK was provisioned into Device 2's local credential store
+        let dev2_key = shellumi_core::VaultKeyManager::retrieve_key(&dev2_cred_store, &vault_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(dev2_key.expose_bytes(), dek.expose_bytes());
+
+        // 4. Verify raw bytes on Device 2 disk are encrypted (no plaintext host names or IP)
+        let raw_disk = std::fs::read(&dev2_db_path).unwrap();
+        assert!(!raw_disk.starts_with(b"SQLite format 3\0"));
+        assert!(!raw_disk.windows(15).any(|w| w == b"fin-prod-server"));
+        assert!(!raw_disk.windows(9).any(|w| w == b"10.0.0.50"));
     }
 }

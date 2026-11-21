@@ -46,7 +46,7 @@ impl Shellumi {
     }
 
     fn load_team_vaults(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             if let Some(m) = &mut self.team_modal {
                 m.is_loading = false;
                 m.error = Some(
@@ -56,6 +56,7 @@ impl Shellumi {
             cx.notify();
             return;
         };
+        let active_key = self.active_vault_key();
 
         if let Some(m) = &mut self.team_modal {
             m.is_loading = true;
@@ -68,7 +69,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let vaults = store
                     .list_shared_vaults()
                     .await
@@ -107,9 +110,10 @@ impl Shellumi {
     }
 
     pub(crate) fn refresh_team_modal_vault(&mut self, vault_id: &str, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let vid = vault_id.to_string();
 
         let task = cx.background_executor().spawn(async move {
@@ -117,7 +121,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let members = store
                     .list_team_members(&vid)
                     .await
@@ -151,9 +157,10 @@ impl Shellumi {
     }
 
     pub(crate) fn create_team_vault(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let Some(modal) = &mut self.team_modal else {
             return;
         };
@@ -205,7 +212,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .create_shared_vault(&vault)
                     .await
@@ -247,9 +256,10 @@ impl Shellumi {
     }
 
     pub(crate) fn rotate_team_vault_key(&mut self, vault_id: &str, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let vid = vault_id.to_string();
 
         let now = std::time::SystemTime::now()
@@ -282,7 +292,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .update_shared_vault_epoch(&vid, new_epoch, &now_iso)
                     .await
@@ -317,9 +329,10 @@ impl Shellumi {
     }
 
     pub(crate) fn delete_team_vault(&mut self, vault_id: &str, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let vid = vault_id.to_string();
         let vid_task = vid.clone();
 
@@ -328,7 +341,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .delete_shared_vault(&vid_task)
                     .await
@@ -363,9 +378,10 @@ impl Shellumi {
     }
 
     pub(crate) fn invite_team_member(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let Some(modal) = &mut self.team_modal else {
             return;
         };
@@ -429,7 +445,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .add_team_member(&member)
                     .await
@@ -476,9 +494,10 @@ impl Shellumi {
         new_role: TeamRole,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let mid = member_id.to_string();
         let Some(modal) = &self.team_modal else {
             return;
@@ -509,7 +528,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .update_team_member_role(&mid, new_role)
                     .await
@@ -544,9 +565,10 @@ impl Shellumi {
     }
 
     pub(crate) fn revoke_team_member(&mut self, member_id: &str, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
         let mid = member_id.to_string();
         let Some(modal) = &self.team_modal else {
             return;
@@ -577,7 +599,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .revoke_team_member(&mid, &now_iso)
                     .await

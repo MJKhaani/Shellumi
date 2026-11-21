@@ -7,6 +7,7 @@
 //! Each database is encrypted with its own random 256-bit DEK using AES-256-GCM.
 //! Server credentials are migrated into OS-protected credential storage (`CredentialStore`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::info;
@@ -26,14 +27,22 @@ pub struct MigrationReport {
     pub server_credentials_migrated: usize,
 }
 
+/// Optional user credentials for provisioning encryption during legacy migration.
+#[derive(Clone, Debug, Default)]
+pub struct MigrationCredentials {
+    pub default_password: Option<String>,
+    pub default_recovery_code: Option<String>,
+    pub secondary_passwords: HashMap<String, String>,
+}
+
 pub struct MigrationEngine;
 
 impl MigrationEngine {
     /// Determines whether migration is needed for the given base directory.
     pub fn is_migration_needed(base_dir: &Path) -> bool {
         let legacy_db = base_dir.join("shellumi.db");
-        let default_vault_db = base_dir.join("vaults").join("default.db");
-        legacy_db.exists() && !default_vault_db.exists()
+        let marker = base_dir.join("vaults").join(".migration_complete");
+        legacy_db.exists() && !marker.exists()
     }
 
     /// Safely and resumably migrates an existing legacy database into separate encrypted databases.
@@ -42,19 +51,45 @@ impl MigrationEngine {
         default_dek: Option<&VaultKey>,
         cred_store: &dyn CredentialStore,
     ) -> Result<MigrationReport, StorageError> {
+        Self::migrate_legacy_database_with_credentials(base_dir, default_dek, None, cred_store)
+            .await
+    }
+
+    /// Migrates an existing legacy database into separate encrypted databases with optional user-confirmed credentials.
+    pub async fn migrate_legacy_database_with_credentials(
+        base_dir: &Path,
+        default_dek: Option<&VaultKey>,
+        credentials: Option<&MigrationCredentials>,
+        cred_store: &dyn CredentialStore,
+    ) -> Result<MigrationReport, StorageError> {
         let legacy_db_path = base_dir.join("shellumi.db");
         if !legacy_db_path.exists() {
             return Ok(MigrationReport::default());
         }
 
         let vaults_dir = base_dir.join("vaults");
-        let default_db_path = vaults_dir.join("default.db");
-        if default_db_path.exists() {
-            // Already migrated or destination default vault already exists
+        let complete_marker = vaults_dir.join(".migration_complete");
+        if complete_marker.exists() {
             return Ok(MigrationReport {
                 legacy_db_found: true,
                 ..Default::default()
             });
+        }
+
+        // Clean up partial files from interrupted previous migration attempt
+        let default_db_path = vaults_dir.join("default.db");
+        if default_db_path.exists() {
+            tracing::warn!(
+                "Previous database migration was interrupted before completion. Cleaning up partial vault files..."
+            );
+            if let Ok(entries) = std::fs::read_dir(&vaults_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
         }
 
         info!(
@@ -108,40 +143,56 @@ impl MigrationEngine {
             .ok_or_else(|| StorageError::Serialization("invalid path encoding".into()))?;
         let legacy_store = HostStore::open(legacy_str).await?;
 
-        // 4. Resolve or generate DEK for default vault
+        // 4. Resolve DEK for default vault
         let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         let default_key = if let Some(k) = default_dek {
             k.clone()
         } else if let Ok(Some(k)) = VaultKeyManager::retrieve_key(cred_store, &default_vid) {
             k
+        } else if let Some(creds) = credentials {
+            if let Some(ref pwd) = creds.default_password {
+                shellumi_core::validate_vault_password(pwd).map_err(|e| {
+                    StorageError::Serialization(format!("Password policy violation: {e}"))
+                })?;
+                let new_key = VaultKey::generate().map_err(|e| {
+                    StorageError::Serialization(format!("key generation error: {e}"))
+                })?;
+                let primary_env = new_key
+                    .wrap_with_password(&default_vid, pwd)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let rec_env = if let Some(ref rec_code) = creds.default_recovery_code {
+                    Some(
+                        new_key
+                            .wrap_with_password(&default_vid, rec_code)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+                let manifest = VaultManifest::new(
+                    LEGACY_LOCAL_VAULT_ID.to_string(),
+                    "Personal".to_string(),
+                    primary_env,
+                    rec_env,
+                    true,
+                );
+                let manifest_path =
+                    manifests_dir.join(format!("{LEGACY_LOCAL_VAULT_ID}.manifest.json"));
+                manifest
+                    .save_to_path(&manifest_path)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let _ = VaultKeyManager::provision_key(cred_store, &default_vid, &new_key);
+                new_key
+            } else {
+                return Err(StorageError::Serialization(
+                    "Migration requires user credentials or an unlocked default vault key".into(),
+                ));
+            }
         } else {
-            let new_key = VaultKey::generate()
-                .map_err(|e| StorageError::Serialization(format!("key generation error: {e}")))?;
-            let rec_code = VaultKey::generate_recovery_code().map_err(|e| {
-                StorageError::Serialization(format!("recovery code generation error: {e}"))
-            })?;
-            // Generate migration manifest with recovery code and store in keychain
-            let primary_env = new_key
-                .wrap_with_password(&default_vid, &rec_code)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            let rec_env = new_key
-                .wrap_with_password(&default_vid, &rec_code)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            let manifest = VaultManifest::new(
-                LEGACY_LOCAL_VAULT_ID.to_string(),
-                "Personal".to_string(),
-                primary_env,
-                Some(rec_env),
-                true,
-            );
-            let manifest_path =
-                manifests_dir.join(format!("{LEGACY_LOCAL_VAULT_ID}.manifest.json"));
-            manifest
-                .save_to_path(&manifest_path)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            let _ = VaultKeyManager::provision_key(cred_store, &default_vid, &new_key);
-            new_key
+            return Err(StorageError::Serialization(
+                "Migration requires user credentials or an unlocked default vault key".into(),
+            ));
         };
 
         // 5. Open/create encrypted default vault database
@@ -154,12 +205,12 @@ impl MigrationEngine {
         // 6. Migrate Registry into default.db
         let contexts = legacy_store.list_vault_contexts().await?;
         for (name, ctx) in &contexts {
-            let _ = default_store.register_vault_context(name, ctx).await;
+            default_store.register_vault_context(name, ctx).await?;
         }
 
         let conns = legacy_store.list_vault_server_connections().await?;
+        let conns_len = conns.len();
         for mut conn in conns {
-            // Secure plaintext credentials into credential store
             if conn.secure_credentials(cred_store).is_ok() {
                 report.server_credentials_migrated += 1;
             }
@@ -168,15 +219,15 @@ impl MigrationEngine {
 
         // Migrate sync state and directory envelopes
         if let Ok(dir_model) = legacy_store.build_vault_directory().await {
-            let _ = default_store
+            default_store
                 .save_vault_directory_from_model(&default_vid, &default_key, &dir_model)
-                .await;
+                .await?;
         }
 
         // 7. Migrate default vault records
         let default_hosts = legacy_store.list().await?;
-        for host in default_hosts {
-            let _ = default_store
+        for host in &default_hosts {
+            default_store
                 .add(
                     &host.name,
                     &host.destination,
@@ -190,21 +241,21 @@ impl MigrationEngine {
         }
 
         let default_snippets = legacy_store.list_snippets().await?;
-        for snippet in default_snippets {
+        for snippet in &default_snippets {
             let snip = Snippet {
-                name: snippet.name,
-                command: snippet.command,
-                description: snippet.description,
-                tags: snippet.tags,
-                variables: snippet.variables,
+                name: snippet.name.clone(),
+                command: snippet.command.clone(),
+                description: snippet.description.clone(),
+                tags: snippet.tags.clone(),
+                variables: snippet.variables.clone(),
             };
-            let _ = default_store.add_snippet(&snip).await?;
+            default_store.add_snippet(&snip).await?;
             report.default_records_migrated += 1;
         }
 
         let default_workspaces = legacy_store.list_workspaces().await?;
-        for ws in default_workspaces {
-            let _ = default_store
+        for ws in &default_workspaces {
+            default_store
                 .add_workspace(
                     &ws.name,
                     ws.description.as_deref(),
@@ -217,7 +268,7 @@ impl MigrationEngine {
         }
 
         let default_identities = legacy_store.list_identities().await?;
-        for id_rec in default_identities {
+        for id_rec in &default_identities {
             let new_id = id_rec.to_identity();
             let mut id_dto = shellumi_core::NewIdentity::new(
                 &new_id.name,
@@ -231,14 +282,14 @@ impl MigrationEngine {
             id_dto.certificate_path = new_id.certificate_path;
             id_dto.tags = new_id.tags;
             id_dto.comment = new_id.comment;
-            let _ = default_store.create_identity(&id_dto).await?;
+            default_store.create_identity(&id_dto).await?;
             report.default_records_migrated += 1;
         }
 
         report.vaults_migrated += 1;
 
         // 8. Migrate secondary vaults to separate physical databases
-        for (_name, ctx) in contexts {
+        for (_name, ctx) in &contexts {
             let vid_str = ctx.id().as_str();
             if vid_str == LEGACY_LOCAL_VAULT_ID {
                 continue;
@@ -262,25 +313,54 @@ impl MigrationEngine {
             let sec_key = match sec_key {
                 Some(k) => k,
                 None => {
-                    let k = VaultKey::generate().map_err(|e| {
-                        StorageError::Serialization(format!("secondary key generation error: {e}"))
-                    })?;
-                    let rec = VaultKey::generate_recovery_code().map_err(|e| {
-                        StorageError::Serialization(format!("recovery code error: {e}"))
-                    })?;
-                    let env = k
-                        .wrap_with_password(sec_vid, &rec)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                    let manifest = VaultManifest::new(
-                        vid_str.to_string(),
-                        vid_str.to_string(),
-                        env.clone(),
-                        Some(env),
-                        true,
-                    );
-                    let _ = manifest.save_to_path(&sec_manifest_path);
-                    let _ = VaultKeyManager::provision_key(cred_store, sec_vid, &k);
-                    k
+                    let sec_pwd = credentials
+                        .and_then(|c| c.secondary_passwords.get(vid_str).cloned())
+                        .or_else(|| credentials.and_then(|c| c.default_password.clone()));
+                    if let Some(ref pwd) = sec_pwd {
+                        let k = VaultKey::generate().map_err(|e| {
+                            StorageError::Serialization(format!(
+                                "secondary key generation error: {e}"
+                            ))
+                        })?;
+                        let env = k
+                            .wrap_with_password(sec_vid, pwd)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                        let manifest = VaultManifest::new(
+                            vid_str.to_string(),
+                            vid_str.to_string(),
+                            env.clone(),
+                            None,
+                            true,
+                        );
+                        manifest
+                            .save_to_path(&sec_manifest_path)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                        let _ = VaultKeyManager::provision_key(cred_store, sec_vid, &k);
+                        k
+                    } else {
+                        // Inherit from master default key so user retains full access
+                        let k = VaultKey::generate().map_err(|e| {
+                            StorageError::Serialization(format!(
+                                "secondary key generation error: {e}"
+                            ))
+                        })?;
+                        let derived_pwd = hex::encode(default_key.expose_bytes());
+                        let env = k
+                            .wrap_with_password(sec_vid, &derived_pwd)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                        let manifest = VaultManifest::new(
+                            vid_str.to_string(),
+                            vid_str.to_string(),
+                            env.clone(),
+                            None,
+                            true,
+                        );
+                        manifest
+                            .save_to_path(&sec_manifest_path)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                        let _ = VaultKeyManager::provision_key(cred_store, sec_vid, &k);
+                        k
+                    }
                 }
             };
 
@@ -296,8 +376,8 @@ impl MigrationEngine {
             scoped_legacy.set_vault_id(sec_vid.clone());
 
             let scoped_hosts = scoped_legacy.list().await?;
-            for h in scoped_hosts {
-                let _ = sec_store
+            for h in &scoped_hosts {
+                sec_store
                     .add(
                         &h.name,
                         &h.destination,
@@ -311,21 +391,21 @@ impl MigrationEngine {
             }
 
             let scoped_snippets = scoped_legacy.list_snippets().await?;
-            for s in scoped_snippets {
+            for s in &scoped_snippets {
                 let snip = Snippet {
-                    name: s.name,
-                    command: s.command,
-                    description: s.description,
-                    tags: s.tags,
-                    variables: s.variables,
+                    name: s.name.clone(),
+                    command: s.command.clone(),
+                    description: s.description.clone(),
+                    tags: s.tags.clone(),
+                    variables: s.variables.clone(),
                 };
-                let _ = sec_store.add_snippet(&snip).await?;
+                sec_store.add_snippet(&snip).await?;
                 report.secondary_records_migrated += 1;
             }
 
             let scoped_workspaces = scoped_legacy.list_workspaces().await?;
-            for ws in scoped_workspaces {
-                let _ = sec_store
+            for ws in &scoped_workspaces {
+                sec_store
                     .add_workspace(
                         &ws.name,
                         ws.description.as_deref(),
@@ -338,7 +418,7 @@ impl MigrationEngine {
             }
 
             let scoped_identities = scoped_legacy.list_identities().await?;
-            for id_rec in scoped_identities {
+            for id_rec in &scoped_identities {
                 let new_id = id_rec.to_identity();
                 let mut id_dto = shellumi_core::NewIdentity::new(
                     &new_id.name,
@@ -352,23 +432,91 @@ impl MigrationEngine {
                 id_dto.certificate_path = new_id.certificate_path;
                 id_dto.tags = new_id.tags;
                 id_dto.comment = new_id.comment;
-                let _ = sec_store.create_identity(&id_dto).await?;
+                sec_store.create_identity(&id_dto).await?;
                 report.secondary_records_migrated += 1;
+            }
+
+            // Verify secondary vault record counts
+            if sec_store.list().await?.len() != scoped_hosts.len() {
+                return Err(StorageError::Serialization(format!(
+                    "Verification failed: host count mismatch for secondary vault {vid_str}"
+                )));
+            }
+            if sec_store.list_snippets().await?.len() != scoped_snippets.len() {
+                return Err(StorageError::Serialization(format!(
+                    "Verification failed: snippet count mismatch for secondary vault {vid_str}"
+                )));
+            }
+            if sec_store.list_workspaces().await?.len() != scoped_workspaces.len() {
+                return Err(StorageError::Serialization(format!(
+                    "Verification failed: workspace count mismatch for secondary vault {vid_str}"
+                )));
+            }
+            if sec_store.list_identities().await?.len() != scoped_identities.len() {
+                return Err(StorageError::Serialization(format!(
+                    "Verification failed: identity count mismatch for secondary vault {vid_str}"
+                )));
             }
 
             report.vaults_migrated += 1;
         }
 
-        // 9. Atomic completion: rename original database to shellumi.db.migrated
+        // -------------------------------------------------------------------
+        // 9. Verification Phase: Verify default database counts
+        // -------------------------------------------------------------------
+        if default_store.list().await?.len() != default_hosts.len() {
+            return Err(StorageError::Serialization(
+                "Verification failed: default vault host count mismatch".into(),
+            ));
+        }
+        if default_store.list_snippets().await?.len() != default_snippets.len() {
+            return Err(StorageError::Serialization(
+                "Verification failed: default vault snippet count mismatch".into(),
+            ));
+        }
+        if default_store.list_workspaces().await?.len() != default_workspaces.len() {
+            return Err(StorageError::Serialization(
+                "Verification failed: default vault workspace count mismatch".into(),
+            ));
+        }
+        if default_store.list_identities().await?.len() != default_identities.len() {
+            return Err(StorageError::Serialization(
+                "Verification failed: default vault identity count mismatch".into(),
+            ));
+        }
+        if default_store.list_vault_contexts().await?.len() != contexts.len() {
+            return Err(StorageError::Serialization(
+                "Verification failed: registry vault context count mismatch".into(),
+            ));
+        }
+        if default_store.list_vault_server_connections().await?.len() != conns_len {
+            return Err(StorageError::Serialization(
+                "Verification failed: server connection count mismatch".into(),
+            ));
+        }
+
+        // 10. Atomic activation: write .migration_complete marker and rename legacy database
+        std::fs::write(&complete_marker, b"verified\n").map_err(|e| {
+            StorageError::Serialization(format!("failed to write migration complete marker: {e}"))
+        })?;
+
         let migrated_flag_path = base_dir.join("shellumi.db.migrated");
-        let _ = std::fs::rename(&legacy_db_path, &migrated_flag_path);
+        std::fs::rename(&legacy_db_path, &migrated_flag_path).map_err(|e| {
+            StorageError::Serialization(format!("failed to rename legacy database: {e}"))
+        })?;
+        if legacy_wal.exists() {
+            let _ = std::fs::rename(&legacy_wal, base_dir.join("shellumi.db-wal.migrated"));
+        }
+        if legacy_shm.exists() {
+            let _ = std::fs::rename(&legacy_shm, base_dir.join("shellumi.db-shm.migrated"));
+        }
 
         info!(
             vaults_migrated = report.vaults_migrated,
             default_records = report.default_records_migrated,
             secondary_records = report.secondary_records_migrated,
             server_credentials = report.server_credentials_migrated,
-            "Legacy database migration completed successfully"
+            "Legacy database migration verified and activated successfully"
         );
 
         Ok(report)

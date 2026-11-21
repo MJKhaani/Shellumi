@@ -75,6 +75,7 @@ impl Shellumi {
         let device_id =
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
         let active_key = self.active_vault_key();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
 
         let resolutions = modal.resolutions;
         self.sync_status = AppSyncStatus::Syncing;
@@ -93,15 +94,12 @@ impl Shellumi {
                     if let Ok(default_vid) =
                         shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
                     {
-                        if let Ok(Some(key)) = shellumi_core::VaultKeyManager::retrieve_key(
-                            &*shellumi_core::default_credential_store(),
-                            &default_vid,
-                        ) {
+                        if let Some(ref key) = default_key {
                             let mut wstore = HostStore::open_with_key(&path, active_key.as_ref())
                                 .await
                                 .map_err(|e| e.to_string())?;
                             let _ = wstore
-                                .save_vault_directory_from_model(&default_vid, &key, &dir)
+                                .save_vault_directory_from_model(&default_vid, key, &dir)
                                 .await;
                         }
                     }
@@ -142,12 +140,6 @@ impl Shellumi {
                             if let Ok(default_vid) =
                                 shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
                             {
-                                let default_key = shellumi_core::VaultKeyManager::retrieve_key(
-                                    &*shellumi_core::default_credential_store(),
-                                    &default_vid,
-                                )
-                                .ok()
-                                .flatten();
                                 let _ = write_store
                                     .import_encrypted_vault_directory(
                                         &default_vid,
@@ -238,6 +230,7 @@ impl Shellumi {
         let device_id =
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
         let active_key = self.active_vault_key();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
 
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
@@ -255,15 +248,12 @@ impl Shellumi {
                     if let Ok(default_vid) =
                         shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
                     {
-                        if let Ok(Some(key)) = shellumi_core::VaultKeyManager::retrieve_key(
-                            &*shellumi_core::default_credential_store(),
-                            &default_vid,
-                        ) {
+                        if let Some(ref key) = default_key {
                             let mut wstore = HostStore::open_with_key(&path, active_key.as_ref())
                                 .await
                                 .map_err(|e| e.to_string())?;
                             let _ = wstore
-                                .save_vault_directory_from_model(&default_vid, &key, &dir)
+                                .save_vault_directory_from_model(&default_vid, key, &dir)
                                 .await;
                         }
                     }
@@ -304,12 +294,6 @@ impl Shellumi {
                             if let Ok(default_vid) =
                                 shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
                             {
-                                let default_key = shellumi_core::VaultKeyManager::retrieve_key(
-                                    &*shellumi_core::default_credential_store(),
-                                    &default_vid,
-                                )
-                                .ok()
-                                .flatten();
                                 let _ = write_store
                                     .import_encrypted_vault_directory(
                                         &default_vid,

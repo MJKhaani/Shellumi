@@ -18,21 +18,37 @@ pub(crate) struct VaultContextSummary {
 impl Shellumi {
     /// Returns true if the active vault is bound to a remote Shellumi Server.
     pub(crate) fn is_active_vault_remote(&self) -> bool {
-        self.active_vault_id != shellumi_storage::LEGACY_LOCAL_VAULT_ID
-            && !self.active_vault_id.is_empty()
+        self.available_vaults
+            .iter()
+            .find(|v| v.id == self.active_vault_id)
+            .map(|v| v.is_remote)
+            .unwrap_or(false)
     }
 
     /// Loads the list of available vaults from storage and refreshes sync status.
     pub(crate) fn load_vault_list(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(reg_path) = self.registry_db_path() else {
             return;
         };
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = match HostStore::open_with_key(&reg_path, default_key.as_ref()).await {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return Ok(vec![VaultContextSummary {
+                            id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+                            name: "Personal".to_string(),
+                            is_remote: false,
+                            server_url: None,
+                            server_vault_id: None,
+                            is_locked: true,
+                        }]);
+                    }
+                };
                 let contexts = store
                     .list_vault_contexts()
                     .await
@@ -107,7 +123,6 @@ impl Shellumi {
                     if !app.is_active_vault_remote() {
                         app.sync_status = AppSyncStatus::LocalOnly;
                     } else if matches!(app.sync_status, AppSyncStatus::LocalOnly) {
-                        app.sync_status = AppSyncStatus::Syncing;
                         app.sync_active_vault(cx);
                     }
                     cx.notify();
@@ -151,7 +166,6 @@ impl Shellumi {
         self.desktop_command(Command::Refresh, cx);
 
         if self.is_active_vault_remote() {
-            self.sync_status = AppSyncStatus::Syncing;
             self.sync_active_vault(cx);
         } else {
             self.sync_status = AppSyncStatus::LocalOnly;
@@ -167,16 +181,40 @@ impl Shellumi {
             return;
         }
 
-        if matches!(self.sync_status, AppSyncStatus::Syncing) {
+        if self.is_server_sync_in_progress {
             return;
         }
 
-        let Some(path) = self.database.clone() else {
-            self.sync_status = AppSyncStatus::Error("Database not open.".into());
+        let Some(reg_path) = self.registry_db_path() else {
+            self.sync_status = AppSyncStatus::Error("Registry database not configured.".into());
+            cx.notify();
+            return;
+        };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            self.sync_status = AppSyncStatus::Error("Active vault database not configured.".into());
             cx.notify();
             return;
         };
 
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_key = self.active_vault_key();
+
+        let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
+            Ok(value) if value.chars().count() >= 8 => value,
+            _ => {
+                if let Some(ref key) = active_key {
+                    hex::encode(key.expose_bytes())
+                } else {
+                    self.sync_status = AppSyncStatus::Error(
+                        "Active vault must be unlocked before server sync can proceed.".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+
+        self.is_server_sync_in_progress = true;
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
 
@@ -186,8 +224,10 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                let contexts = store
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| format!("Failed to open vault registry: {e}"))?;
+                let contexts = reg_store
                     .list_vault_contexts()
                     .await
                     .map_err(|e| e.to_string())?;
@@ -211,7 +251,7 @@ impl Shellumi {
                     }
                 };
 
-                let conn_record = store
+                let conn_record = reg_store
                     .get_vault_server_connection(&server_conn_id)
                     .await
                     .map_err(|e| e.to_string())?
@@ -219,9 +259,13 @@ impl Shellumi {
                         format!("Server connection '{server_conn_id}' record not found")
                     })?;
 
-                let token = conn_record.auth_token.clone().ok_or_else(|| {
-                    "Server connection is not authenticated (missing access token)".to_string()
-                })?;
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn_record
+                    .resolve_auth_token(&*cred_store)
+                    .ok_or_else(|| {
+                        "Server connection is not authenticated (missing or unresolved access token)".to_string()
+                    })?;
+                let token = token_sec.expose_secret().to_string();
 
                 let mut client = ShellumiServerClient::new(&conn_record.base_url);
                 client.set_token(token);
@@ -234,18 +278,22 @@ impl Shellumi {
                 let remote_uuid = uuid::Uuid::parse_str(&remote_vault_id)
                     .map_err(|e| format!("Invalid remote vault UUID: {e}"))?;
 
-                let passphrase = std::env::var("SHELLUMI_VAULT_PASSPHRASE")
-                    .unwrap_or_else(|_| format!("passphrase-{remote_vault_id}"));
-
                 let vault_id_obj = shellumi_core::VaultId::new(&active_vault_id)
                     .map_err(|e| format!("Invalid local vault ID: {e}"))?;
 
-                let report = ServerSyncEngine::sync_vault(
-                    &mut store,
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                    .await
+                    .map_err(|e| format!("Failed to open active vault database: {e}"))?;
+                vault_store.set_vault_id(vault_id_obj.clone());
+
+                let report = ServerSyncEngine::sync_vault_with_connection(
+                    &mut vault_store,
                     &vault_id_obj,
                     remote_uuid,
                     &client,
                     &passphrase,
+                    Some(&conn_record),
+                    &*cred_store,
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -257,6 +305,7 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
+                app.is_server_sync_in_progress = false;
                 match result {
                     Ok(report) => {
                         let now = std::time::SystemTime::now()
@@ -295,29 +344,32 @@ impl Shellumi {
         device_label: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.database.clone() else {
+        let Some(reg_path) = self.registry_db_path() else {
             return;
         };
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                let conn = store
+                let mut reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let conn = reg_store
                     .get_vault_server_connection(&server_conn_id)
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("Server connection '{server_conn_id}' not found"))?;
 
-                let token = conn
-                    .auth_token
-                    .clone()
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn
+                    .resolve_auth_token(&*cred_store)
                     .ok_or_else(|| "Server connection missing auth token".to_string())?;
                 let mut client = ShellumiServerClient::new(&conn.base_url);
-                client.set_token(token);
+                client.set_token(token_sec.expose_secret().to_string());
 
-                let resp = store
+                let resp = reg_store
                     .enroll_device_with_server(&server_conn_id, &mut client, &device_label)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -356,9 +408,10 @@ impl Shellumi {
         if !self.is_active_vault_remote() {
             return;
         }
-        let Some(path) = self.database.clone() else {
+        let Some(reg_path) = self.registry_db_path() else {
             return;
         };
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let active_vault_id = self.active_vault_id.clone();
 
         if self.active_ws_client.is_some() {
@@ -371,8 +424,10 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
-                let contexts = store
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let contexts = reg_store
                     .list_vault_contexts()
                     .await
                     .map_err(|e| e.to_string())?;
@@ -392,13 +447,17 @@ impl Shellumi {
                     shellumi_core::VaultLocation::Local => return Err("Local vault".to_string()),
                 };
 
-                let conn_record = store
+                let conn_record = reg_store
                     .get_vault_server_connection(&server_conn_id)
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "Server connection not found".to_string())?;
 
-                let token = conn_record.auth_token.clone().unwrap_or_default();
+                let cred_store = shellumi_core::default_credential_store();
+                let token = conn_record
+                    .resolve_auth_token(&*cred_store)
+                    .map(|t| t.expose_secret().to_string())
+                    .unwrap_or_default();
                 let device_uuid = conn_record
                     .device_id
                     .as_deref()

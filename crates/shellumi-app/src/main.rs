@@ -643,6 +643,7 @@ struct Shellumi {
     active_vault: String,
     active_vault_id: String,
     pub(crate) active_vault_keys: std::collections::HashMap<String, shellumi_core::VaultKey>,
+    pub(crate) is_server_sync_in_progress: bool,
     server_ws_status: Option<shellumi_core::server::WsConnectionStatus>,
     active_ws_client: Option<shellumi_core::server::ShellumiWsClient>,
     available_vaults: Vec<actions::VaultContextSummary>,
@@ -1061,6 +1062,7 @@ impl Shellumi {
             active_vault: vault_name.clone(),
             active_vault_id: vault_id.clone(),
             active_vault_keys: std::collections::HashMap::new(),
+            is_server_sync_in_progress: false,
             server_ws_status: None,
             active_ws_client: None,
             available_vaults: vec![actions::VaultContextSummary {

@@ -1133,7 +1133,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let mut store = HostStore::open(db_path).await?;
+    let key = if shellumi_storage::is_protected_vault_path(db_path) {
+        let cred_store = shellumi_core::default_credential_store();
+        let default_vid = shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID).ok();
+        default_vid.as_ref().and_then(|vid| {
+            shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, vid)
+                .ok()
+                .flatten()
+        })
+    } else {
+        None
+    };
+    let mut store = HostStore::open_with_key(db_path, key.as_ref()).await?;
     match command {
         "list" => {
             let extra = &args[2..];

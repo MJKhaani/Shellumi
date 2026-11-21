@@ -66,6 +66,7 @@ impl Shellumi {
         };
 
         let vault_id_task = vault_id_str.clone();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let vid =
                 VaultId::new(&vault_id_task).map_err(|_| "Invalid vault identifier".to_string())?;
@@ -98,8 +99,16 @@ impl Shellumi {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
+                let reg_db_path = data_path::resolve_vault_db_file(
+                    std::path::Path::new(&path),
+                    shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                );
+                let reg_key = default_key.clone();
                 runtime.block_on(async {
-                    let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let store =
+                        HostStore::open_with_key(reg_db_path.to_str().unwrap(), reg_key.as_ref())
+                            .await
+                            .map_err(|e| e.to_string())?;
                     let envelope_str = store
                         .get_vault_recovery_envelope(&vault_id_task)
                         .await
@@ -147,15 +156,13 @@ impl Shellumi {
                     std::path::Path::new(&path),
                     shellumi_storage::LEGACY_LOCAL_VAULT_ID,
                 );
-                let default_vid = VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                    .map_err(|e| e.to_string())?;
-                let cred_store = default_credential_store();
-                let default_key = VaultKeyManager::retrieve_key(cred_store.as_ref(), &default_vid)
-                    .ok()
-                    .flatten();
+                let reg_key = if vault_id_task == shellumi_storage::LEGACY_LOCAL_VAULT_ID {
+                    Some(&recovered_key)
+                } else {
+                    default_key.as_ref()
+                };
                 if let Ok(mut reg_store) =
-                    HostStore::open_with_key(reg_db_path.to_str().unwrap(), default_key.as_ref())
-                        .await
+                    HostStore::open_with_key(reg_db_path.to_str().unwrap(), reg_key).await
                 {
                     let _ = reg_store.set_vault_locked(&vault_id_task, false).await;
                 }

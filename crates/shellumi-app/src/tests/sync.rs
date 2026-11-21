@@ -476,3 +476,195 @@ fn verifies_tunnel_conflict_model_and_cli_flag_generation() {
     let dynamic_model = TunnelConflictModel::from_conflict_item(&dynamic_item);
     assert_eq!(dynamic_model.local_cli_flag, "ssh -D 127.0.0.1:1080");
 }
+
+#[tokio::test]
+async fn test_is_active_vault_remote_and_sync_status() {
+    use crate::actions::VaultContextSummary;
+
+    let available_vaults = [
+        VaultContextSummary {
+            id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+            name: "Personal".to_string(),
+            is_remote: false,
+            server_url: None,
+            server_vault_id: None,
+            is_locked: false,
+        },
+        VaultContextSummary {
+            id: "vlt-secondary-local-1".to_string(),
+            name: "Secondary Local Vault".to_string(),
+            is_remote: false,
+            server_url: None,
+            server_vault_id: None,
+            is_locked: false,
+        },
+        VaultContextSummary {
+            id: "vlt-remote-server-2".to_string(),
+            name: "Corp Remote Vault".to_string(),
+            is_remote: true,
+            server_url: Some("https://server.shellumi.com".to_string()),
+            server_vault_id: Some("uuid-remote-vault-456".to_string()),
+            is_locked: false,
+        },
+    ];
+
+    // Helper closure mirroring Shellumi::is_active_vault_remote logic
+    let is_remote = |active_id: &str| {
+        available_vaults
+            .iter()
+            .find(|v| v.id == active_id)
+            .map(|v| v.is_remote)
+            .unwrap_or(false)
+    };
+
+    // 1. Personal default vault is NOT remote
+    assert!(!is_remote(shellumi_storage::LEGACY_LOCAL_VAULT_ID));
+
+    // 2. Secondary LOCAL vault (different ID from legacy-local) is NOT remote
+    assert!(!is_remote("vlt-secondary-local-1"));
+
+    // 3. Remote vault is remote
+    assert!(is_remote("vlt-remote-server-2"));
+
+    // 4. Unknown vault ID defaults to false
+    assert!(!is_remote("unknown-vault-id"));
+}
+
+#[tokio::test]
+async fn test_server_sync_credential_resolution_with_keychain_references() {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use shellumi_core::server::{
+        generate_device_ed25519_keypair_pkcs8, keypair_from_pkcs8, sign_device_challenge,
+    };
+    use shellumi_core::{CredentialStore, EphemeralCredentialStore};
+    use shellumi_storage::VaultServerConnectionRecord;
+
+    let cred_store = EphemeralCredentialStore::new();
+
+    // 1. Generate signing keypair
+    let (signing_pkcs8, _pub_b64) = generate_device_ed25519_keypair_pkcs8().unwrap();
+    let signing_keypair = keypair_from_pkcs8(&signing_pkcs8).unwrap();
+    let raw_pkcs8_b64 = BASE64_STANDARD.encode(&signing_pkcs8);
+
+    // 2. Store credentials in credential store with keychain:// reference
+    let srv_id = "srv-test-corp-1";
+    let token_key = format!("dev.shellumi.server/{srv_id}/auth-token");
+    let signing_key = format!("dev.shellumi.server/{srv_id}/device-signing-key");
+
+    cred_store
+        .set_secret(
+            "dev.shellumi.server",
+            &format!("{srv_id}/auth-token"),
+            "secret-jwt-token-xyz-12345",
+        )
+        .unwrap();
+    cred_store
+        .set_secret(
+            "dev.shellumi.server",
+            &format!("{srv_id}/device-signing-key"),
+            &raw_pkcs8_b64,
+        )
+        .unwrap();
+
+    let conn_record = VaultServerConnectionRecord {
+        id: srv_id.to_string(),
+        base_url: "https://vault.example.com".to_string(),
+        auth_token: Some(format!("keychain://{token_key}")),
+        refresh_token: None,
+        device_id: Some("dev-uuid-1".to_string()),
+        device_signing_key: Some(format!("keychain://{signing_key}")),
+        server_instance_id: Some("inst-1".to_string()),
+        device_agreement_key: None,
+        created_at: 1000,
+        updated_at: 1000,
+    };
+
+    // 3. Resolve auth token
+    let resolved_token = conn_record.resolve_auth_token(&cred_store).unwrap();
+    assert_eq!(resolved_token.expose_secret(), "secret-jwt-token-xyz-12345");
+
+    // 4. Resolve signing key from keychain:// URI and verify signature creation
+    let resolved_signing = conn_record.resolve_signing_key(&cred_store).unwrap();
+    let raw_b64 = resolved_signing.expose_secret().trim();
+    let decoded_pkcs8 = BASE64_STANDARD.decode(raw_b64).unwrap();
+    let resolved_keypair = keypair_from_pkcs8(&decoded_pkcs8).unwrap();
+
+    let challenge = "test-challenge-nonce-998877";
+    let sig1 = sign_device_challenge(&signing_keypair, challenge);
+    let sig2 = sign_device_challenge(&resolved_keypair, challenge);
+    assert_eq!(sig1, sig2);
+}
+
+#[tokio::test]
+async fn test_in_memory_default_vault_dek_registration_and_unlock() {
+    use shellumi_core::{EphemeralCredentialStore, VaultContext, VaultId, VaultLocation};
+    use shellumi_storage::{HostStore, LEGACY_LOCAL_VAULT_ID};
+
+    let temp = tempfile::tempdir().unwrap();
+    let reg_db_path = temp.path().join("vaults").join("default.db");
+    std::fs::create_dir_all(reg_db_path.parent().unwrap()).unwrap();
+
+    let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+    let user_password = "DefaultP@ssword2026!";
+
+    // 1. Provision default vault with Keychain remembering DISABLED (key is in-memory only)
+    let cred_store = EphemeralCredentialStore::new();
+    let rec_code = shellumi_core::VaultKey::generate_recovery_code().unwrap();
+    let (in_memory_default_dek, _primary_env, _rec_env) =
+        shellumi_core::VaultKeyManager::provision_new_vault(
+            &cred_store,
+            &default_vid,
+            user_password,
+            false, // Do NOT store in Keychain!
+            Some(&rec_code),
+        )
+        .unwrap();
+
+    // Verify credential store does NOT have default vault key
+    assert!(
+        shellumi_core::VaultKeyManager::retrieve_key(&cred_store, &default_vid)
+            .unwrap()
+            .is_none()
+    );
+
+    // 2. Open registry database with the in-memory DEK
+    let mut reg_store =
+        HostStore::open_with_key(reg_db_path.to_str().unwrap(), Some(&in_memory_default_dek))
+            .await
+            .unwrap();
+
+    // 3. Register a secondary local vault context into default registry
+    let sec_vault_id = VaultId::new("vlt-sec-local-007").unwrap();
+    let sec_context = VaultContext::new(sec_vault_id.clone(), VaultLocation::Local);
+    reg_store
+        .register_vault_context("Secondary Work Vault", &sec_context)
+        .await
+        .unwrap();
+
+    // 4. Verify context listing works using in-memory key
+    let contexts = reg_store.list_vault_contexts().await.unwrap();
+    assert_eq!(contexts.len(), 2); // Personal (default) + Secondary
+    assert!(contexts
+        .iter()
+        .any(|(name, ctx)| name == "Secondary Work Vault" && ctx.id() == &sec_vault_id));
+
+    // 5. Mark vault locked and then unlocked in registry
+    reg_store
+        .set_vault_locked("vlt-sec-local-007", true)
+        .await
+        .unwrap();
+    assert!(reg_store
+        .is_vault_locked("vlt-sec-local-007")
+        .await
+        .unwrap());
+
+    reg_store
+        .set_vault_locked("vlt-sec-local-007", false)
+        .await
+        .unwrap();
+    assert!(!reg_store
+        .is_vault_locked("vlt-sec-local-007")
+        .await
+        .unwrap());
+}

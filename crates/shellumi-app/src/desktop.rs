@@ -236,7 +236,7 @@ impl Shellumi {
         if self.desktop.busy {
             return;
         }
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             self.desktop.message = Some("Local storage is unavailable.".into());
             cx.notify();
             return;
@@ -245,14 +245,16 @@ impl Shellumi {
         self.desktop.busy = true;
         self.desktop.message = None;
         let active_vault_id = self.active_vault_id.clone();
+        let active_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
-            runtime.block_on(shellumi_storage::desktop::execute_scoped(
+            runtime.block_on(shellumi_storage::desktop::execute_scoped_with_key(
                 &path,
                 Some(&active_vault_id),
                 command,
+                active_key.as_ref(),
             ))
         });
         cx.spawn(async move |app, cx| {

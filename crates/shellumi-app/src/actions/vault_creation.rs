@@ -7,7 +7,7 @@ use shellumi_core::server::{
     sign_device_challenge, CreateVaultRequest, DeviceChallengeRequest, LoginRequest,
     RegisterDeviceRequest, ShellumiServerClient,
 };
-use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultKeyManager, VaultLocation};
+use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
 use shellumi_storage::{VaultServerConnectionRecord, VaultSyncStateRecord};
 use uuid::Uuid;
 
@@ -347,6 +347,14 @@ impl Shellumi {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
                         Ok((created_name, vault_id, key, recovery_code)) => {
+                            app.available_vaults.push(VaultContextSummary {
+                                id: vault_id.clone(),
+                                name: created_name.clone(),
+                                is_remote: false,
+                                server_url: None,
+                                server_vault_id: None,
+                                is_locked: false,
+                            });
                             app.active_vault = created_name;
                             app.active_vault_id = vault_id.clone();
                             app.active_vault_keys.insert(vault_id, key);
@@ -426,6 +434,7 @@ impl Shellumi {
                 modal.status_message = None;
                 cx.notify();
 
+                let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
                 let task = cx.background_executor().spawn(async move {
                     let mut client = ShellumiServerClient::new(&server_url);
 
@@ -495,12 +504,6 @@ impl Shellumi {
                         shellumi_storage::LEGACY_LOCAL_VAULT_ID,
                     );
                     let cred_store = shellumi_core::default_credential_store();
-                    let default_vid = VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                        .map_err(|e| e.to_string())?;
-                    let default_key =
-                        VaultKeyManager::retrieve_key(cred_store.as_ref(), &default_vid)
-                            .ok()
-                            .flatten();
                     let mut reg_store = HostStore::open_with_key(
                         reg_db_path.to_str().unwrap(),
                         default_key.as_ref(),
@@ -637,6 +640,14 @@ impl Shellumi {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
                         Ok((created_name, vault_id, key)) => {
+                            app.available_vaults.push(VaultContextSummary {
+                                id: vault_id.clone(),
+                                name: created_name.clone(),
+                                is_remote: true,
+                                server_url: None,
+                                server_vault_id: None,
+                                is_locked: false,
+                            });
                             app.active_vault = created_name;
                             app.active_vault_id = vault_id.clone();
                             app.active_vault_keys.insert(vault_id, key);

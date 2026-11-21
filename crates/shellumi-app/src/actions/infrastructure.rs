@@ -37,7 +37,7 @@ impl Shellumi {
     }
 
     fn load_infra_providers(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             if let Some(m) = &mut self.infra_modal {
                 m.is_loading = false;
                 m.error = Some(
@@ -48,6 +48,7 @@ impl Shellumi {
             cx.notify();
             return;
         };
+        let active_key = self.active_vault_key();
 
         if let Some(m) = &mut self.infra_modal {
             m.is_loading = true;
@@ -60,7 +61,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let providers = store
                     .list_cloud_providers()
                     .await
@@ -99,9 +102,10 @@ impl Shellumi {
     }
 
     pub(crate) fn create_infra_provider(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
 
         let (name, kind, region, inv_path) = {
             let Some(m) = &self.infra_modal else {
@@ -177,7 +181,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .create_cloud_provider(&record)
                     .await
@@ -204,9 +210,10 @@ impl Shellumi {
     }
 
     pub(crate) fn delete_infra_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
 
         if let Some(m) = &mut self.infra_modal {
             m.is_loading = true;
@@ -220,7 +227,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .delete_cloud_provider(&pid)
                     .await
@@ -252,9 +261,10 @@ impl Shellumi {
     }
 
     pub(crate) fn sync_infra_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
 
         if let Some(m) = &mut self.infra_modal {
             m.is_loading = true;
@@ -269,7 +279,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let prov = store
                     .get_cloud_provider(&pid)
                     .await
@@ -364,9 +376,10 @@ impl Shellumi {
         host_idx: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
 
         let host_record = {
             let Some(m) = &self.infra_modal else {
@@ -391,7 +404,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let u = h_rec.username.as_deref().unwrap_or("root");
                 let dest = SshDestination::new(&h_rec.hostname, u, h_rec.port as u16)
                     .map_err(|e| e.to_string())?;
@@ -447,9 +462,10 @@ impl Shellumi {
     }
 
     pub(crate) fn export_ansible_inventory_file(&mut self, is_yaml: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_key = self.active_vault_key();
 
         if let Some(m) = &mut self.infra_modal {
             m.is_loading = true;
@@ -462,7 +478,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let hosts = store.list().await.map_err(|e| e.to_string())?;
                 let export_items: Vec<HostExportItem> = hosts
                     .into_iter()

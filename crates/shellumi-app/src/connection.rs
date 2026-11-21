@@ -7,7 +7,7 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
         if !self.connecting_hosts.insert(host.id) {
@@ -15,6 +15,8 @@ impl Shellumi {
         }
         let host = host.clone();
         let host_id = host.id;
+        let active_vault_id = self.active_vault_id.clone();
+        let active_key = self.active_vault_key();
         let handle = window.window_handle();
         self.desktop.message = Some("Resolving connection identity…".into());
         cx.notify();
@@ -22,8 +24,11 @@ impl Shellumi {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
-            runtime.block_on(shellumi_storage::desktop::resolve_connection(
-                &path, host_id,
+            runtime.block_on(shellumi_storage::desktop::resolve_connection_with_key(
+                &path,
+                host_id,
+                Some(&active_vault_id),
+                active_key.as_ref(),
             ))
         });
         cx.spawn(async move |app, cx| {
@@ -114,16 +119,21 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(database) = self.database.clone() else {
+        let Some(database) = self.active_vault_db_path() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
+        let active_key = self.active_vault_key();
         let handle = window.window_handle();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
-            let plan = runtime.block_on(shellumi_storage::desktop::resolve_connection(
-                &database, host.id,
+            let plan = runtime.block_on(shellumi_storage::desktop::resolve_connection_with_key(
+                &database,
+                host.id,
+                Some(&active_vault_id),
+                active_key.as_ref(),
             ))?;
             arguments.extend(plan.ssh_arguments.clone());
             askpass::command("ssh", arguments, &plan)
