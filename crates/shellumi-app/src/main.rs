@@ -452,6 +452,8 @@ pub(crate) struct CreateVaultModalState {
     pub(crate) local_vault_password_input: Entity<TextInput>,
     pub(crate) local_vault_password_confirm_input: Entity<TextInput>,
     pub(crate) remember_in_keychain: bool,
+    pub(crate) generated_recovery_code: Option<String>,
+    pub(crate) recovery_code_confirmed: bool,
     pub(crate) error: Option<String>,
     pub(crate) status_message: Option<String>,
     pub(crate) is_testing: bool,

@@ -16,7 +16,7 @@ impl Shellumi {
             vault_id,
             vault_name,
             passphrase_input: input,
-            remember_in_keychain: true,
+            remember_in_keychain: false,
             error: None,
             is_submitting: false,
         });
@@ -128,18 +128,37 @@ impl Shellumi {
                 })?
             };
 
-            // Now open the database with the recovered DEK and mark it unlocked
+            // Open the vault's physical database with the recovered DEK to verify decryption
+            let target_vault_path =
+                data_path::resolve_vault_db_file(std::path::Path::new(&path), &vault_id_task);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open_with_key(&path, Some(&recovered_key))
-                    .await
+                let _verified_store = HostStore::open_with_key(
+                    target_vault_path.to_str().unwrap(),
+                    Some(&recovered_key),
+                )
+                .await
+                .map_err(|e| format!("Failed to open encrypted vault database: {e}"))?;
+
+                // Mark unlocked in default vault registry
+                let reg_db_path = data_path::resolve_vault_db_file(
+                    std::path::Path::new(&path),
+                    shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                );
+                let default_vid = VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
                     .map_err(|e| e.to_string())?;
-                store
-                    .set_vault_locked(&vault_id_task, false)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let cred_store = default_credential_store();
+                let default_key = VaultKeyManager::retrieve_key(cred_store.as_ref(), &default_vid)
+                    .ok()
+                    .flatten();
+                if let Ok(mut reg_store) =
+                    HostStore::open_with_key(reg_db_path.to_str().unwrap(), default_key.as_ref())
+                        .await
+                {
+                    let _ = reg_store.set_vault_locked(&vault_id_task, false).await;
+                }
                 Ok::<_, String>(())
             })?;
 
@@ -172,19 +191,19 @@ impl Shellumi {
         .detach();
     }
 
-    /// Locks a vault, marking it locked in storage and prompting for unlock if active.
+    /// Locks a vault, marking it locked in storage, evicting keys/data, and prompting for unlock if active.
     pub(crate) fn lock_vault(&mut self, vault_id: String, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.registry_db_path() else {
             return;
         };
         let vid_clone = vault_id.clone();
         let is_active = self.active_vault_id == vault_id;
         let vname = self.active_vault.clone();
 
-        // Evict from active in-memory keys
-        let vault_key = self.active_vault_keys.remove(&vault_id);
+        // 1. Evict from active in-memory keys
+        let _ = self.active_vault_keys.remove(&vault_id);
 
-        // Evict from OS Keychain when explicitly locked
+        // 2. Evict from OS Keychain when explicitly locked
         if let Ok(vid) = VaultId::new(&vault_id) {
             let cred_store = default_credential_store();
             let _ = VaultKeyManager::forget_key(&*cred_store, &vid);
@@ -196,12 +215,21 @@ impl Shellumi {
             }
         }
 
+        // 3. If active, revoke access: clear in-memory sensitive data immediately
+        if is_active {
+            self.hosts = HostState::Loaded(Vec::new());
+            self.snippets.clear();
+            self.workspaces.clear();
+            self.identities.clear();
+        }
+
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                let mut store = HostStore::open_with_key(&path, default_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
                 store

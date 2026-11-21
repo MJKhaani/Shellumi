@@ -98,15 +98,22 @@ impl Shellumi {
                 .and_then(|identity| identity.comment.clone()),
         };
 
-        let Some(db_path) = self.database.clone() else {
+        let Some(db_path) = self.active_vault_db_path() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 let credential_store = shellumi_core::default_credential_store();
                 let nonce = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

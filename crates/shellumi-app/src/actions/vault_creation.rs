@@ -7,7 +7,7 @@ use shellumi_core::server::{
     sign_device_challenge, CreateVaultRequest, DeviceChallengeRequest, LoginRequest,
     RegisterDeviceRequest, ShellumiServerClient,
 };
-use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
+use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultKeyManager, VaultLocation};
 use shellumi_storage::{VaultServerConnectionRecord, VaultSyncStateRecord};
 use uuid::Uuid;
 
@@ -58,7 +58,9 @@ impl Shellumi {
             local_vault_desc_input: local_desc,
             local_vault_password_input: local_password,
             local_vault_password_confirm_input: local_password_confirm,
-            remember_in_keychain: true,
+            remember_in_keychain: false,
+            generated_recovery_code: None,
+            recovery_code_confirmed: false,
             error: None,
             status_message: None,
             is_testing: false,
@@ -71,6 +73,32 @@ impl Shellumi {
     pub(crate) fn dismiss_create_vault_modal(&mut self, cx: &mut Context<Self>) {
         self.create_vault_modal = None;
         cx.notify();
+    }
+
+    /// Toggles confirmation of having saved the emergency recovery code.
+    pub(crate) fn toggle_create_vault_recovery_confirmed(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.create_vault_modal {
+            modal.recovery_code_confirmed = !modal.recovery_code_confirmed;
+            cx.notify();
+        }
+    }
+
+    /// Finalizes vault creation after the user confirms saving their recovery code.
+    pub(crate) fn finalize_vault_creation(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.create_vault_modal {
+            if !modal.recovery_code_confirmed {
+                modal.error = Some(
+                    "Please confirm that you have saved your recovery code before proceeding."
+                        .to_string(),
+                );
+                cx.notify();
+                return;
+            }
+            self.create_vault_modal = None;
+            self.load_vault_list(cx);
+            self.start_storage(false, cx);
+            cx.notify();
+        }
     }
 
     /// Switches between Remote Server and Local vault creation tabs.
@@ -165,7 +193,7 @@ impl Shellumi {
         match active_tab {
             CreateVaultModalTab::Local => {
                 let vault_name = modal.vault_name_input.read(cx).value().trim().to_string();
-                let desc = modal
+                let _desc = modal
                     .local_vault_desc_input
                     .read(cx)
                     .value()
@@ -214,38 +242,18 @@ impl Shellumi {
                 modal.status_message = None;
                 cx.notify();
 
+                let db_path_clone = db_path.clone();
+                let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
                 let task = cx.background_executor().spawn(async move {
-                    let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default();
                     let now_secs = now.as_secs();
                     let now_nanos = now.subsec_nanos();
                     let vault_id_str = format!("vlt-{now_secs}-{now_nanos}");
-                    let now_iso = format!("{now_secs}");
-                    let desc_opt = if desc.is_empty() { None } else { Some(desc) };
+                    let local_vault_id = VaultId::new(&vault_id_str).map_err(|e| e.to_string())?;
 
-                    let shared_vault = SharedVault::new(
-                        &vault_id_str,
-                        &vault_name,
-                        desc_opt,
-                        "local_owner",
-                        &now_iso,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    store
-                        .create_shared_vault(&shared_vault)
-                        .await
-                        .map_err(|e| e.to_string())?;
-
-                    let local_vault_id = VaultId::new(vault_id_str).map_err(|e| e.to_string())?;
-                    let context = VaultContext::new(local_vault_id.clone(), VaultLocation::Local);
-                    store
-                        .register_vault_context(&vault_name, &context)
-                        .await
-                        .map_err(|e| e.to_string())?;
-
-                    // Provision random 256-bit DEK, wrap with Argon2id password, and generate recovery code
+                    // 1. Provision random 256-bit DEK, wrap with Argon2id password, and generate recovery code
                     let cred_store = shellumi_core::default_credential_store();
                     let recovery_code = shellumi_core::VaultKey::generate_recovery_code()
                         .map_err(|e| e.to_string())?;
@@ -259,7 +267,7 @@ impl Shellumi {
                         )
                         .map_err(|e| e.to_string())?;
 
-                    // Persist portable key envelope manifest
+                    // 2. Persist portable key envelope manifest BEFORE creating database
                     let manifest = shellumi_core::VaultManifest::new(
                         local_vault_id.as_str().to_string(),
                         vault_name.clone(),
@@ -267,30 +275,86 @@ impl Shellumi {
                         recovery_env.clone(),
                         remember_in_keychain,
                     );
-                    let manifest_path = shellumi_core::VaultManifest::manifest_path_for_vault(
-                        std::path::Path::new(&db_path),
-                        &local_vault_id,
+                    let manifest_path = data_path::resolve_manifest_file(
+                        std::path::Path::new(&db_path_clone),
+                        local_vault_id.as_str(),
                     );
-                    let _ = manifest.save_to_path(&manifest_path);
+                    manifest
+                        .save_to_path(&manifest_path)
+                        .map_err(|e| format!("Failed to save vault manifest: {e}"))?;
 
-                    if let Ok(env_json) = serde_json::to_string(&primary_env) {
-                        store
-                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                    // 3. Create separate physical encrypted database for this vault
+                    let new_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path_clone),
+                        local_vault_id.as_str(),
+                    );
+                    if let Err(e) = data_path::prepare_parent(&new_db_path) {
+                        let _ = std::fs::remove_file(&manifest_path);
+                        return Err(e);
+                    }
+                    let new_db_str = new_db_path
+                        .to_str()
+                        .ok_or_else(|| "Invalid UTF-8 path for new vault database".to_string())?;
+                    let mut new_store = match HostStore::open_with_key(new_db_str, Some(&key)).await
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            let _ = std::fs::remove_file(&manifest_path);
+                            let _ = std::fs::remove_file(&new_db_path);
+                            return Err(format!("Failed to initialize encrypted database: {err}"));
+                        }
+                    };
+                    new_store.set_vault_id(local_vault_id.clone());
+
+                    // 4. Register in default vault registry (default.db)
+                    let reg_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path_clone),
+                        shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                    );
+                    let mut reg_store = match HostStore::open_with_key(
+                        reg_db_path.to_str().unwrap(),
+                        default_key.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            let _ = std::fs::remove_file(&manifest_path);
+                            let _ = std::fs::remove_file(&new_db_path);
+                            return Err(format!("Failed to open default registry database: {err}"));
+                        }
+                    };
+
+                    let context = VaultContext::new(local_vault_id.clone(), VaultLocation::Local);
+                    if let Err(e) = reg_store
+                        .register_vault_context(&vault_name, &context)
+                        .await
+                    {
+                        let _ = std::fs::remove_file(&manifest_path);
+                        let _ = std::fs::remove_file(&new_db_path);
+                        return Err(format!("Failed to register vault context: {e}"));
                     }
 
-                    Ok::<_, String>((vault_name, local_vault_id.as_str().to_string(), key))
+                    Ok::<_, String>((
+                        vault_name,
+                        local_vault_id.as_str().to_string(),
+                        key,
+                        recovery_code,
+                    ))
                 });
 
                 cx.spawn(async move |app, cx| {
                     let result = task.await;
                     let _ = app.update(cx, |app, cx| match result {
-                        Ok((created_name, vault_id, key)) => {
+                        Ok((created_name, vault_id, key, recovery_code)) => {
                             app.active_vault = created_name;
                             app.active_vault_id = vault_id.clone();
                             app.active_vault_keys.insert(vault_id, key);
-                            app.create_vault_modal = None;
+                            if let Some(modal) = &mut app.create_vault_modal {
+                                modal.is_submitting = false;
+                                modal.generated_recovery_code = Some(recovery_code);
+                                modal.recovery_code_confirmed = false;
+                            }
                             app.load_vault_list(cx);
                             app.load_hosts(cx);
                             app.load_identities(cx);
@@ -338,6 +402,13 @@ impl Shellumi {
                 }
                 if vault_name.is_empty() {
                     modal.error = Some("Vault name cannot be empty.".to_string());
+                    cx.notify();
+                    return;
+                }
+                if let Err(err) = shellumi_core::validate_vault_password(&passphrase) {
+                    modal.error = Some(format!(
+                        "Passphrase does not meet security requirements: {err} (min 8 characters, with uppercase, lowercase, numbers, and symbols)."
+                    ));
                     cx.notify();
                     return;
                 }
@@ -418,8 +489,25 @@ impl Shellumi {
                         new_vault.vault_id
                     };
 
-                    // 5. Store connection and vault in local Turso database
-                    let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                    // 5. Store connection and vault in default registry database
+                    let reg_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path),
+                        shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                    );
+                    let cred_store = shellumi_core::default_credential_store();
+                    let default_vid = VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                        .map_err(|e| e.to_string())?;
+                    let default_key =
+                        VaultKeyManager::retrieve_key(cred_store.as_ref(), &default_vid)
+                            .ok()
+                            .flatten();
+                    let mut reg_store = HostStore::open_with_key(
+                        reg_db_path.to_str().unwrap(),
+                        default_key.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -444,8 +532,8 @@ impl Shellumi {
                         created_at: now,
                         updated_at: now,
                     };
-                    store
-                        .save_vault_server_connection(&conn_record)
+                    reg_store
+                        .save_vault_server_connection_secured(&conn_record, cred_store.as_ref())
                         .await
                         .map_err(|e| e.to_string())?;
 
@@ -459,13 +547,12 @@ impl Shellumi {
                                 .map_err(|e| e.to_string())?,
                         },
                     );
-                    store
+                    reg_store
                         .register_vault_context(&vault_name, &context)
                         .await
                         .map_err(|e| e.to_string())?;
 
                     // Provision vault key into OS credential store and generate recovery envelope
-                    let cred_store = shellumi_core::default_credential_store();
                     let (key, primary_env, recovery_env) =
                         shellumi_core::VaultKeyManager::provision_new_vault(
                             cred_store.as_ref(),
@@ -483,17 +570,47 @@ impl Shellumi {
                         recovery_env,
                         true,
                     );
-                    let manifest_path = shellumi_core::VaultManifest::manifest_path_for_vault(
+                    let manifest_path = data_path::resolve_manifest_file(
                         std::path::Path::new(&db_path),
-                        &local_vault_id,
+                        local_vault_id.as_str(),
                     );
-                    let _ = manifest.save_to_path(&manifest_path);
+                    manifest
+                        .save_to_path(&manifest_path)
+                        .map_err(|e| format!("Failed to save manifest: {e}"))?;
+
+                    // Initialize separate encrypted physical database for remote vault cache
+                    let new_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path),
+                        local_vault_id.as_str(),
+                    );
+                    if let Err(e) = data_path::prepare_parent(&new_db_path) {
+                        let _ = std::fs::remove_file(&manifest_path);
+                        return Err(e);
+                    }
+                    let mut new_store =
+                        match HostStore::open_with_key(new_db_path.to_str().unwrap(), Some(&key))
+                            .await
+                        {
+                            Ok(s) => s,
+                            Err(err) => {
+                                let _ = std::fs::remove_file(&manifest_path);
+                                let _ = std::fs::remove_file(&new_db_path);
+                                return Err(format!(
+                                    "Failed to initialize encrypted database: {err}"
+                                ));
+                            }
+                        };
+                    new_store.set_vault_id(local_vault_id.clone());
 
                     if let Ok(env_json) = serde_json::to_string(&primary_env) {
-                        store
+                        if let Err(e) = reg_store
                             .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
                             .await
-                            .map_err(|e| e.to_string())?;
+                        {
+                            let _ = std::fs::remove_file(&manifest_path);
+                            let _ = std::fs::remove_file(&new_db_path);
+                            return Err(e.to_string());
+                        }
                     }
 
                     let sync_state = VaultSyncStateRecord {
@@ -507,10 +624,11 @@ impl Shellumi {
                         conflicted_object_id: None,
                         conflict_details: None,
                     };
-                    store
-                        .save_vault_sync_state(&sync_state)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    if let Err(e) = reg_store.save_vault_sync_state(&sync_state).await {
+                        let _ = std::fs::remove_file(&manifest_path);
+                        let _ = std::fs::remove_file(&new_db_path);
+                        return Err(e.to_string());
+                    }
 
                     Ok::<_, String>((vault_name, local_vault_id.as_str().to_string(), key))
                 });

@@ -30,6 +30,8 @@ impl Shellumi {
     }
 
     pub(crate) fn toggle_pane_recording(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        let active_db = self.active_vault_db_path();
+        let active_key = self.active_vault_key();
         for tab in self.tabs.iter_mut() {
             for pane in tab.panes.iter_mut() {
                 if pane.id == pane_id {
@@ -64,8 +66,9 @@ impl Shellumi {
                                 created_at: now_str,
                             };
 
-                            if let Some(path) = self.database.clone() {
+                            if let Some(path) = active_db {
                                 let db_rec_clone = db_rec.clone();
+                                let vault_key = active_key;
                                 cx.background_executor()
                                     .spawn(async move {
                                         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -73,7 +76,11 @@ impl Shellumi {
                                             .map_err(|e| e.to_string());
                                         if let Ok(rt) = runtime {
                                             rt.block_on(async {
-                                                if let Ok(mut store) = HostStore::open(&path).await
+                                                if let Ok(mut store) = HostStore::open_with_key(
+                                                    &path,
+                                                    vault_key.as_ref(),
+                                                )
+                                                .await
                                                 {
                                                     let _ = store
                                                         .save_session_recording(&db_rec_clone)
@@ -103,13 +110,16 @@ impl Shellumi {
     }
 
     fn load_session_recordings(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.database.clone() {
+        if let Some(path) = self.active_vault_db_path() {
+            let vault_key = self.active_vault_key();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let store = HostStore::open_with_key(&path, vault_key.as_ref())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     store
                         .list_session_recordings(None)
                         .await
@@ -136,14 +146,17 @@ impl Shellumi {
         rec_id: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(path) = self.database.clone() {
+        if let Some(path) = self.active_vault_db_path() {
             let id_clone = rec_id.clone();
+            let vault_key = self.active_vault_key();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let store = HostStore::open_with_key(&path, vault_key.as_ref())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     store
                         .get_session_recording(&id_clone)
                         .await
@@ -240,14 +253,17 @@ impl Shellumi {
     }
 
     pub(crate) fn delete_session_recording_ui(&mut self, rec_id: String, cx: &mut Context<Self>) {
-        if let Some(path) = self.database.clone() {
+        if let Some(path) = self.active_vault_db_path() {
             let id_clone = rec_id.clone();
+            let vault_key = self.active_vault_key();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     store
                         .delete_session_recording(&id_clone)
                         .await

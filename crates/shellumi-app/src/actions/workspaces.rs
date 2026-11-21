@@ -3,16 +3,19 @@ use super::*;
 
 impl Shellumi {
     pub(crate) fn load_workspaces(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                     store.set_vault_id(vid);
                 }
@@ -38,9 +41,10 @@ impl Shellumi {
         let Some(tab) = self.tabs.get(active_idx) else {
             return;
         };
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let vault_key = self.active_vault_key();
 
         let layout = match tab.split {
             Some(SplitDirection::Vertical) => WorkspaceLayout::SplitVertical,
@@ -127,7 +131,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                     store.set_vault_id(vid);
                 }

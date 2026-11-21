@@ -34,34 +34,47 @@ impl Shellumi {
         let Some(modal) = self.conflict_modal.take() else {
             return;
         };
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             self.sync_status = AppSyncStatus::Error("Database not open.".into());
             cx.notify();
             return;
         };
 
-        let token = std::env::var("SHELLUMI_GDRIVE_TOKEN")
-            .or_else(|_| std::env::var("GOOGLE_DRIVE_TOKEN"))
+        let cred_store = shellumi_core::default_credential_store();
+        let token = cred_store
+            .get_secret("org.shellumi.sync", "gdrive_oauth_token")
+            .ok()
+            .flatten()
+            .map(|s| s.expose_secret().to_string())
+            .or_else(|| std::env::var("SHELLUMI_GDRIVE_TOKEN").ok())
+            .or_else(|| std::env::var("GOOGLE_DRIVE_TOKEN").ok())
             .unwrap_or_default();
 
         if token.trim().is_empty() {
-            self.sync_status = AppSyncStatus::Error("Google Drive OAuth token not found.".into());
+            self.sync_status = AppSyncStatus::Error(
+                "Google Drive OAuth token not found. Please authenticate with Google Drive.".into(),
+            );
             cx.notify();
             return;
         }
 
         let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
-            Ok(value) if value.chars().count() >= 12 => shellumi_core::SecretString::new(value),
+            Ok(value) if value.chars().count() >= 8 => shellumi_core::SecretString::new(value),
             _ => {
-                self.sync_status = AppSyncStatus::Error(
-                    "Set a vault passphrase of at least 12 characters before syncing.".into(),
-                );
-                cx.notify();
-                return;
+                if let Some(key) = self.active_vault_key() {
+                    shellumi_core::SecretString::new(hex::encode(key.expose_bytes()))
+                } else {
+                    self.sync_status = AppSyncStatus::Error(
+                        "Vault must be unlocked with a valid encryption key before syncing.".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
             }
         };
         let device_id =
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
+        let active_key = self.active_vault_key();
 
         let resolutions = modal.resolutions;
         self.sync_status = AppSyncStatus::Syncing;
@@ -72,7 +85,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 // Refresh encrypted vault directory if default vault key is available
                 if let Ok(dir) = store.build_vault_directory().await {
                     if let Ok(default_vid) =
@@ -82,8 +97,9 @@ impl Shellumi {
                             &*shellumi_core::default_credential_store(),
                             &default_vid,
                         ) {
-                            let mut wstore =
-                                HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                            let mut wstore = HostStore::open_with_key(&path, active_key.as_ref())
+                                .await
+                                .map_err(|e| e.to_string())?;
                             let _ = wstore
                                 .save_vault_directory_from_model(&default_vid, &key, &dir)
                                 .await;
@@ -111,8 +127,9 @@ impl Shellumi {
                         merged_records,
                         report,
                     } => {
-                        let mut write_store =
-                            HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                        let mut write_store = HostStore::open_with_key(&path, active_key.as_ref())
+                            .await
+                            .map_err(|e| e.to_string())?;
                         let mut merged_vault = SyncVault::new("cloud-vault", 0);
                         merged_vault.records = merged_records;
                         merged_vault.encrypted_directory = report.encrypted_directory.clone();
@@ -179,36 +196,48 @@ impl Shellumi {
             self.sync_active_vault(cx);
             return;
         }
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             self.sync_status = AppSyncStatus::Error("Database not open.".into());
             cx.notify();
             return;
         };
 
-        let token = std::env::var("SHELLUMI_GDRIVE_TOKEN")
-            .or_else(|_| std::env::var("GOOGLE_DRIVE_TOKEN"))
+        let cred_store = shellumi_core::default_credential_store();
+        let token = cred_store
+            .get_secret("org.shellumi.sync", "gdrive_oauth_token")
+            .ok()
+            .flatten()
+            .map(|s| s.expose_secret().to_string())
+            .or_else(|| std::env::var("SHELLUMI_GDRIVE_TOKEN").ok())
+            .or_else(|| std::env::var("GOOGLE_DRIVE_TOKEN").ok())
             .unwrap_or_default();
 
         if token.trim().is_empty() {
             self.sync_status = AppSyncStatus::Error(
-                "Google Drive OAuth token not found. Set GOOGLE_DRIVE_TOKEN or SHELLUMI_GDRIVE_TOKEN environment variable.".into(),
+                "Google Drive OAuth token not found. Please authenticate with Google Drive in Settings or configure your credentials."
+                    .into(),
             );
             cx.notify();
             return;
         }
 
         let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
-            Ok(value) if value.chars().count() >= 12 => shellumi_core::SecretString::new(value),
+            Ok(value) if value.chars().count() >= 8 => shellumi_core::SecretString::new(value),
             _ => {
-                self.sync_status = AppSyncStatus::Error(
-                    "Set a vault passphrase of at least 12 characters before syncing.".into(),
-                );
-                cx.notify();
-                return;
+                if let Some(key) = self.active_vault_key() {
+                    shellumi_core::SecretString::new(hex::encode(key.expose_bytes()))
+                } else {
+                    self.sync_status = AppSyncStatus::Error(
+                        "Vault must be unlocked with a valid encryption key before syncing.".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
             }
         };
         let device_id =
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
+        let active_key = self.active_vault_key();
 
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
@@ -218,7 +247,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 // Refresh encrypted vault directory if default vault key is available
                 if let Ok(dir) = store.build_vault_directory().await {
                     if let Ok(default_vid) =
@@ -228,8 +259,9 @@ impl Shellumi {
                             &*shellumi_core::default_credential_store(),
                             &default_vid,
                         ) {
-                            let mut wstore =
-                                HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                            let mut wstore = HostStore::open_with_key(&path, active_key.as_ref())
+                                .await
+                                .map_err(|e| e.to_string())?;
                             let _ = wstore
                                 .save_vault_directory_from_model(&default_vid, &key, &dir)
                                 .await;
@@ -257,8 +289,9 @@ impl Shellumi {
                         merged_records,
                         report,
                     } => {
-                        let mut write_store =
-                            HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                        let mut write_store = HostStore::open_with_key(&path, active_key.as_ref())
+                            .await
+                            .map_err(|e| e.to_string())?;
                         let mut merged_vault = SyncVault::new("cloud-vault", 0);
                         merged_vault.records = merged_records;
                         merged_vault.encrypted_directory = report.encrypted_directory.clone();

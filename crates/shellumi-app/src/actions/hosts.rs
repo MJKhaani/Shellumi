@@ -360,7 +360,7 @@ impl Shellumi {
         };
         let id = form.id;
         let identity_id = form.identity_id;
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
         self.saving = true;
@@ -473,7 +473,7 @@ impl Shellumi {
     }
 
     pub(crate) fn delete_host(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
@@ -532,7 +532,7 @@ impl Shellumi {
         if matches!(self.hosts, HostState::Loading) {
             return;
         }
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();

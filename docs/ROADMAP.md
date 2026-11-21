@@ -24,6 +24,7 @@ The server compatibility matrix is verified through automated protocol and multi
 6. [x] **Team sharing, invitations and epoch rotation (Increment 6):** Team membership, invitations, role enforcement, X25519 DEK wrapping (`wrap_dek_for_recipient` / `unwrap_dek_for_device`), and forward-secure epoch rotation with member revocation.
 7. [x] **Encrypted terminal collaboration & writer fencing (Increment 7):** Ephemeral AES-256-GCM session keys, monotonic sequence AAD framing, single-writer monotonic lease token fencing, real-time encrypted PTY output streaming and keystroke forwarding, emergency host revocation, and session termination.
 8. [x] **Two-server, two-client verification suite (Increment 8):** Verified against two independent self-hosted servers and two distinct clients across enrollment, credential isolation, concurrent window scoping, CAS convergence, conflict rejection, tombstones, reconnect idempotency, epoch rotation revocation, and live collaboration relay.
+9. [x] **Separate Physical Encrypted Vault Databases & Cryptographic Manifests (Increment 9):** Replaced shared database with separate physical encrypted Turso databases (`Shellumi/vaults/default.db` and `Shellumi/vaults/<vault-id>.db`). Provisioned independent 256-bit DEKs per vault wrapped with Argon2id + AES-256-GCM. Isolated registry exclusively to default vault with fail-closed protection. Implemented resumable `MigrationEngine`, OS-protected server credential storage (`keychain://org.shellumi.server/...`), and zero-plaintext raw disk byte verification.
 
 ## Alpha milestone
 

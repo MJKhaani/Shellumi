@@ -31,14 +31,17 @@ impl Shellumi {
         });
         cx.notify();
 
-        if let Some(path) = self.database.clone() {
+        if let Some(path) = self.active_vault_db_path() {
             let active_vault_id = self.active_vault_id.clone();
+            let vault_key = self.active_vault_key();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                         store.set_vault_id(vid);
                     }
@@ -277,9 +280,10 @@ impl Shellumi {
             .tunnel_modal
             .as_ref()
             .and_then(|modal| modal.editing_id);
-        if let Some(path) = self.database.clone() {
+        if let Some(path) = self.active_vault_db_path() {
             let active_vault_id = self.active_vault_id.clone();
             let is_remote = self.is_active_vault_remote();
+            let vault_key = self.active_vault_key();
             let name_clone = name.clone();
             let rule_clone = rule.clone();
             let task = cx.background_executor().spawn(async move {
@@ -287,7 +291,9 @@ impl Shellumi {
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                         store.set_vault_id(vid);
                     }
@@ -409,15 +415,18 @@ impl Shellumi {
     }
 
     pub(crate) fn delete_tunnel_modal(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
-        if let Some(path) = self.database.clone() {
+        if let Some(path) = self.active_vault_db_path() {
             let active_vault_id = self.active_vault_id.clone();
             let is_remote = self.is_active_vault_remote();
+            let vault_key = self.active_vault_key();
             let task = cx.background_executor().spawn(async move {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    let mut store = HostStore::open(&path).await.map_err(|e| e.to_string())?;
+                    let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                         store.set_vault_id(vid);
                     }

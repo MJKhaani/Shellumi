@@ -2,12 +2,43 @@
 use super::*;
 
 impl Shellumi {
+    /// Returns the database path for the vault registry (always default.db).
+    pub(crate) fn registry_db_path(&self) -> Option<String> {
+        let base = self.database.as_deref()?;
+        let path = data_path::resolve_vault_db_file(
+            std::path::Path::new(base),
+            shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+        );
+        path.to_str().map(str::to_owned)
+    }
+
+    /// Returns the database path for the active vault.
+    pub(crate) fn active_vault_db_path(&self) -> Option<String> {
+        let base = self.database.as_deref()?;
+        let path =
+            data_path::resolve_vault_db_file(std::path::Path::new(base), &self.active_vault_id);
+        path.to_str().map(str::to_owned)
+    }
+
+    /// Returns the database path for a given vault ID.
+    #[allow(dead_code)]
+    pub(crate) fn vault_db_path(&self, vault_id: &str) -> Option<String> {
+        let base = self.database.as_deref()?;
+        let path = data_path::resolve_vault_db_file(std::path::Path::new(base), vault_id);
+        path.to_str().map(str::to_owned)
+    }
+
     /// Returns the active vault's DEK from memory or the OS Keychain.
     pub(crate) fn active_vault_key(&self) -> Option<shellumi_core::VaultKey> {
-        if let Some(key) = self.active_vault_keys.get(&self.active_vault_id) {
+        self.vault_key_for(&self.active_vault_id)
+    }
+
+    /// Returns the DEK for the specified vault from memory or OS credential storage.
+    pub(crate) fn vault_key_for(&self, vault_id: &str) -> Option<shellumi_core::VaultKey> {
+        if let Some(key) = self.active_vault_keys.get(vault_id) {
             return Some(key.clone());
         }
-        if let Ok(vid) = shellumi_core::VaultId::new(&self.active_vault_id) {
+        if let Ok(vid) = shellumi_core::VaultId::new(vault_id) {
             let cred_store = shellumi_core::default_credential_store();
             shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &vid)
                 .ok()
@@ -18,14 +49,40 @@ impl Shellumi {
     }
 
     pub(crate) fn start_storage(&mut self, create_parent: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
+            return;
+        };
+        let Some(base_db) = self.database.clone() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
         let in_memory_key = self.active_vault_key();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         self.hosts = HostState::Loading;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
+            let base_path = std::path::Path::new(&base_db);
+            let base_dir = if base_path.is_dir() {
+                base_path
+            } else if let Some(parent) = base_path.parent() {
+                if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+                    parent.parent().unwrap_or(parent)
+                } else {
+                    parent
+                }
+            } else {
+                std::path::Path::new(".")
+            };
+
+            // Run migration from legacy shellumi.db if needed
+            let cred_store = shellumi_core::default_credential_store();
+            let _ = shellumi_storage::MigrationEngine::migrate_legacy_database_if_needed(
+                base_dir,
+                default_key.as_ref(),
+                &*cred_store,
+            )
+            .await;
+
             if create_parent {
                 data_path::prepare_parent(std::path::Path::new(&path))?;
             }
@@ -33,7 +90,6 @@ impl Shellumi {
                 Some(k) => Some(k),
                 None => {
                     if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
-                        let cred_store = shellumi_core::default_credential_store();
                         shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &vid)
                             .ok()
                             .flatten()
@@ -102,7 +158,7 @@ impl Shellumi {
     }
 
     pub(crate) fn load_identities(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.database.clone() else {
+        let Some(path) = self.active_vault_db_path() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();

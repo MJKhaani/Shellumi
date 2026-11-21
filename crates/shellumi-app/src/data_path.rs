@@ -11,7 +11,7 @@ pub(crate) enum Platform {
     Linux,
 }
 
-pub(crate) fn resolve_data_file(
+pub(crate) fn resolve_data_dir(
     platform: Platform,
     home: Option<&OsStr>,
     app_data: Option<&OsStr>,
@@ -41,22 +41,121 @@ pub(crate) fn resolve_data_file(
             None => home_dir()?.join(".local/share"),
         },
     };
-    Ok(root.join("Shellumi").join("shellumi.db"))
+    Ok(root.join("Shellumi"))
 }
 
-pub(crate) fn default_data_file() -> Result<PathBuf, String> {
+pub(crate) fn default_data_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     let platform = Platform::Mac;
     #[cfg(target_os = "windows")]
     let platform = Platform::Windows;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let platform = Platform::Linux;
-    resolve_data_file(
+    resolve_data_dir(
         platform,
         std::env::var_os("HOME").as_deref(),
         std::env::var_os("APPDATA").as_deref(),
         std::env::var_os("XDG_DATA_HOME").as_deref(),
     )
+}
+
+pub(crate) fn is_default_vault(vault_id: &str) -> bool {
+    vault_id.is_empty() || vault_id == "default" || vault_id == "legacy-local"
+}
+
+pub(crate) fn resolve_root_dir(base_path: &Path) -> PathBuf {
+    let has_extension = base_path.extension().is_some();
+    if has_extension {
+        if let Some(parent) = base_path.parent() {
+            if parent.file_name() == Some(OsStr::new("vaults"))
+                || parent.file_name() == Some(OsStr::new("vault_manifests"))
+            {
+                parent.parent().unwrap_or(parent).to_path_buf()
+            } else {
+                parent.to_path_buf()
+            }
+        } else {
+            PathBuf::from(".")
+        }
+    } else if base_path.file_name() == Some(OsStr::new("vaults"))
+        || base_path.file_name() == Some(OsStr::new("vault_manifests"))
+    {
+        base_path.parent().unwrap_or(base_path).to_path_buf()
+    } else {
+        base_path.to_path_buf()
+    }
+}
+
+pub(crate) fn resolve_vault_dir(base_path: &Path) -> PathBuf {
+    let root = resolve_root_dir(base_path);
+    root.join("vaults")
+}
+
+pub(crate) fn resolve_vault_db_file(base_path: &Path, vault_id: &str) -> PathBuf {
+    let vaults_dir = resolve_vault_dir(base_path);
+    if is_default_vault(vault_id) {
+        vaults_dir.join("default.db")
+    } else {
+        let sanitized: String = vault_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        vaults_dir.join(format!("{sanitized}.db"))
+    }
+}
+
+pub(crate) fn resolve_manifest_dir(base_path: &Path) -> PathBuf {
+    let root = resolve_root_dir(base_path);
+    root.join("vault_manifests")
+}
+
+pub(crate) fn resolve_manifest_file(base_path: &Path, vault_id: &str) -> PathBuf {
+    let manifests_dir = resolve_manifest_dir(base_path);
+    let vid = if is_default_vault(vault_id) {
+        shellumi_storage::LEGACY_LOCAL_VAULT_ID
+    } else {
+        vault_id
+    };
+    manifests_dir.join(format!("{vid}.manifest.json"))
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_legacy_db_file(base_path: &Path) -> PathBuf {
+    let root = resolve_root_dir(base_path);
+    root.join("shellumi.db")
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_data_file(
+    platform: Platform,
+    home: Option<&OsStr>,
+    app_data: Option<&OsStr>,
+    xdg_data: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let dir = resolve_data_dir(platform, home, app_data, xdg_data)?;
+    Ok(resolve_vault_db_file(&dir, "default"))
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_legacy_data_file(
+    platform: Platform,
+    home: Option<&OsStr>,
+    app_data: Option<&OsStr>,
+    xdg_data: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let dir = resolve_data_dir(platform, home, app_data, xdg_data)?;
+    Ok(dir.join("shellumi.db"))
+}
+
+pub(crate) fn default_data_file() -> Result<PathBuf, String> {
+    let dir = default_data_dir()?;
+    Ok(resolve_vault_db_file(&dir, "default"))
 }
 
 pub(crate) fn prepare_parent(path: &Path) -> Result<(), String> {
@@ -76,7 +175,10 @@ pub(crate) fn prepare_parent(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_parent, resolve_data_file, Platform};
+    use super::{
+        prepare_parent, resolve_data_file, resolve_legacy_data_file, resolve_manifest_file,
+        resolve_vault_db_file, Platform,
+    };
     use std::ffi::OsStr;
 
     #[test]
@@ -84,6 +186,10 @@ mod tests {
         let home = std::env::temp_dir().join("alice");
         assert_eq!(
             resolve_data_file(Platform::Mac, Some(home.as_os_str()), None, None).unwrap(),
+            home.join("Library/Application Support/Shellumi/vaults/default.db")
+        );
+        assert_eq!(
+            resolve_legacy_data_file(Platform::Mac, Some(home.as_os_str()), None, None).unwrap(),
             home.join("Library/Application Support/Shellumi/shellumi.db")
         );
     }
@@ -93,7 +199,7 @@ mod tests {
         let appdata = std::env::temp_dir().join("Roaming");
         assert_eq!(
             resolve_data_file(Platform::Windows, None, Some(appdata.as_os_str()), None).unwrap(),
-            appdata.join("Shellumi/shellumi.db")
+            appdata.join("Shellumi/vaults/default.db")
         );
     }
 
@@ -109,7 +215,7 @@ mod tests {
                 Some(xdg.as_os_str())
             )
             .unwrap(),
-            xdg.join("Shellumi/shellumi.db")
+            xdg.join("Shellumi/vaults/default.db")
         );
         assert_eq!(
             resolve_data_file(
@@ -119,7 +225,43 @@ mod tests {
                 Some(OsStr::new("relative"))
             )
             .unwrap(),
-            home.join(".local/share/Shellumi/shellumi.db")
+            home.join(".local/share/Shellumi/vaults/default.db")
+        );
+    }
+
+    #[test]
+    fn resolves_separate_vault_databases_and_manifests() {
+        let base = std::path::Path::new("/Users/alice/Library/Application Support/Shellumi");
+        assert_eq!(
+            resolve_vault_db_file(base, "default"),
+            base.join("vaults/default.db")
+        );
+        assert_eq!(
+            resolve_vault_db_file(base, "legacy-local"),
+            base.join("vaults/default.db")
+        );
+        assert_eq!(
+            resolve_vault_db_file(base, "vlt-finances-2026"),
+            base.join("vaults/vlt-finances-2026.db")
+        );
+        assert_eq!(
+            resolve_manifest_file(base, "vlt-finances-2026"),
+            base.join("vault_manifests/vlt-finances-2026.manifest.json")
+        );
+        assert_eq!(
+            resolve_manifest_file(base, "default"),
+            base.join("vault_manifests/legacy-local.manifest.json")
+        );
+
+        // Also works when passed a specific database file path
+        let db_file = base.join("vaults/default.db");
+        assert_eq!(
+            resolve_vault_db_file(&db_file, "vlt-cloud"),
+            base.join("vaults/vlt-cloud.db")
+        );
+        assert_eq!(
+            resolve_manifest_file(&db_file, "vlt-cloud"),
+            base.join("vault_manifests/vlt-cloud.manifest.json")
         );
     }
 

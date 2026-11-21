@@ -7311,6 +7311,7 @@ dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
  "gpui",
+ "hex",
  "image",
  "serde_json",
  "shellumi-core",

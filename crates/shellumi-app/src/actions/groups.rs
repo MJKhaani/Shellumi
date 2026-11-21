@@ -55,9 +55,10 @@ impl Shellumi {
         let default_port = default_port_str.parse::<u16>().ok();
         let identity_id = inspector.identity_id;
 
-        let Some(db_path) = self.database.clone() else {
+        let Some(db_path) = self.active_vault_db_path() else {
             return;
         };
+        let vault_key = self.active_vault_key();
 
         let group_res = shellumi_core::HostGroup::new(
             &new_name,
@@ -87,7 +88,9 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if store
                     .get_group(&group.name)
                     .await
@@ -131,15 +134,18 @@ impl Shellumi {
     pub(crate) fn delete_group_inspector(&mut self, name: &str, cx: &mut Context<Self>) {
         let name_str = name.to_string();
         let target_name = name_str.clone();
-        let Some(db_path) = self.database.clone() else {
+        let Some(db_path) = self.active_vault_db_path() else {
             return;
         };
+        let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open(&db_path).await.map_err(|e| e.to_string())?;
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store
                     .delete_group(&target_name)
                     .await

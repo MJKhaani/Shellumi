@@ -39,6 +39,123 @@ pub struct VaultServerConnectionRecord {
     pub updated_at: i64,
 }
 
+impl VaultServerConnectionRecord {
+    pub const CREDENTIAL_SERVICE: &'static str = "org.shellumi.server";
+
+    /// Secures secrets in the record by moving raw values to CredentialStore and replacing with `keychain://` references.
+    pub fn secure_credentials(
+        &mut self,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(), shellumi_core::CredentialError> {
+        if let Some(token) = &self.auth_token {
+            if !token.starts_with("keychain://") && !token.starts_with("env://") {
+                let account = format!("{}-auth-token", self.id);
+                let uri = shellumi_core::store_secret_to_ref(
+                    store,
+                    Self::CREDENTIAL_SERVICE,
+                    &account,
+                    token,
+                )?;
+                self.auth_token = Some(uri);
+            }
+        }
+        if let Some(refresh) = &self.refresh_token {
+            if !refresh.starts_with("keychain://") && !refresh.starts_with("env://") {
+                let account = format!("{}-refresh-token", self.id);
+                let uri = shellumi_core::store_secret_to_ref(
+                    store,
+                    Self::CREDENTIAL_SERVICE,
+                    &account,
+                    refresh,
+                )?;
+                self.refresh_token = Some(uri);
+            }
+        }
+        if let Some(signing) = &self.device_signing_key {
+            if !signing.starts_with("keychain://") && !signing.starts_with("env://") {
+                let account = format!("{}-signing-key", self.id);
+                let uri = shellumi_core::store_secret_to_ref(
+                    store,
+                    Self::CREDENTIAL_SERVICE,
+                    &account,
+                    signing,
+                )?;
+                self.device_signing_key = Some(uri);
+            }
+        }
+        if let Some(agreement) = &self.device_agreement_key {
+            if !agreement.starts_with("keychain://") && !agreement.starts_with("env://") {
+                let account = format!("{}-agreement-key", self.id);
+                let uri = shellumi_core::store_secret_to_ref(
+                    store,
+                    Self::CREDENTIAL_SERVICE,
+                    &account,
+                    agreement,
+                )?;
+                self.device_agreement_key = Some(uri);
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves auth token from reference or credential store.
+    pub fn resolve_auth_token(
+        &self,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Option<shellumi_core::SecretString> {
+        let token_ref = self.auth_token.as_deref()?;
+        if token_ref.starts_with("keychain://") || token_ref.starts_with("env://") {
+            shellumi_core::resolve_secret_from_ref(store, token_ref)
+                .ok()
+                .flatten()
+        } else {
+            Some(shellumi_core::SecretString::new(token_ref.to_string()))
+        }
+    }
+
+    pub fn resolve_refresh_token(
+        &self,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Option<shellumi_core::SecretString> {
+        let token_ref = self.refresh_token.as_deref()?;
+        if token_ref.starts_with("keychain://") || token_ref.starts_with("env://") {
+            shellumi_core::resolve_secret_from_ref(store, token_ref)
+                .ok()
+                .flatten()
+        } else {
+            Some(shellumi_core::SecretString::new(token_ref.to_string()))
+        }
+    }
+
+    pub fn resolve_signing_key(
+        &self,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Option<shellumi_core::SecretString> {
+        let key_ref = self.device_signing_key.as_deref()?;
+        if key_ref.starts_with("keychain://") || key_ref.starts_with("env://") {
+            shellumi_core::resolve_secret_from_ref(store, key_ref)
+                .ok()
+                .flatten()
+        } else {
+            Some(shellumi_core::SecretString::new(key_ref.to_string()))
+        }
+    }
+
+    pub fn resolve_agreement_key(
+        &self,
+        store: &dyn shellumi_core::CredentialStore,
+    ) -> Option<shellumi_core::SecretString> {
+        let key_ref = self.device_agreement_key.as_deref()?;
+        if key_ref.starts_with("keychain://") || key_ref.starts_with("env://") {
+            shellumi_core::resolve_secret_from_ref(store, key_ref)
+                .ok()
+                .flatten()
+        } else {
+            Some(shellumi_core::SecretString::new(key_ref.to_string()))
+        }
+    }
+}
+
 /// Synchronization progress and state for a vault.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultSyncStateRecord {
@@ -140,6 +257,19 @@ impl HostStore {
             )
             .await?;
         Ok(())
+    }
+
+    /// Upserts a remote server connection record after securing plaintext secrets into the credential store.
+    pub async fn save_vault_server_connection_secured(
+        &mut self,
+        conn: &VaultServerConnectionRecord,
+        cred_store: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(), StorageError> {
+        let mut secured = conn.clone();
+        secured
+            .secure_credentials(cred_store)
+            .map_err(StorageError::InvalidCredential)?;
+        self.save_vault_server_connection(&secured).await
     }
 
     /// Retrieves a remote server connection by ID.

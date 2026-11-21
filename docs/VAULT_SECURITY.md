@@ -171,3 +171,26 @@ Manifest writes use an atomic write-and-rename pattern:
 - **Format Version 1 Deprecation:** Legacy envelopes utilizing format version 1 (`pbkdf2_hmac_sha256_aes256gcm`) are detected during `unwrap_with_password` and unwrapped using legacy PBKDF2 parameters.
 - **Predictable Passphrase Elimination:** Legacy code that derived passphrases using predictable strings (such as `shellumi-vault-recovery-{vault_id}`) has been permanently eliminated. All new vaults strictly generate independent random DEKs and prompt for user-defined passwords.
 - **Seamless Upgrade:** When a legacy vault's password is updated or re-saved, it is automatically re-wrapped and upgraded to Format Version 2 (Argon2id + AES-256-GCM).
+
+---
+
+## 10. Physical Encrypted Database Architecture
+
+To provide total hardware- and disk-level isolation, Shellumi stores vaults in separate physical encrypted SQLite databases:
+- **Default / Registry Database:** `Shellumi/vaults/default.db` (for default vault `legacy-local`). Encrypted with its own random 256-bit DEK. Houses the central vault registry (`vault_contexts`, `vault_server_connections`, `vault_sync_state`, `vault_directories`) and the user's default records.
+- **Secondary Vault Databases:** `Shellumi/vaults/<vault-id>.db`. Each secondary vault database has its own independent random 256-bit DEK and contains exclusively that vault's records (hosts, identities, groups, snippets, workspaces, tunnels, session recordings).
+- **Registry Privacy:** The registry in `default.db` stores metadata only (vault ID, display name, location type, remote server reconnect URLs). It **never** contains secondary vaults' credentials, hosts, private keys, DEKs, or encrypted contents.
+- **Strict Decoupling:** Unlocking one vault never unlocks another. Opening a secondary database using the default DEK—or vice-versa—fails immediately.
+- **Fail-Closed Protection:** `HostStore::open_with_key` rejects any unencrypted open request (`key.is_none()`) targeting protected vault paths before any file creation or query execution occurs.
+
+---
+
+## 11. Resumable Migration Engine (`MigrationEngine`)
+
+Shellumi provides safe, resumable, zero-loss migration from legacy shared `shellumi.db` installations:
+1. **Detection:** `MigrationEngine::is_migration_needed` triggers when `shellumi.db` exists and `vaults/default.db` has not yet been provisioned.
+2. **Timestamped Backups:** Creates atomic backups of `shellumi.db`, WAL, and SHM files to `shellumi.db.backup.<timestamp>`.
+3. **Registry and Default Records:** Re-initializes `vaults/default.db` with an encrypted backend and migrates contexts, directory models, and default records.
+4. **Server Credential Hardening:** Extracts plaintext tokens (`auth_token`, `refresh_token`), signing private keys, and agreement keys from `vault_server_connections` columns into the OS-protected `CredentialStore`, replacing column values with opaque `keychain://org.shellumi.server/...` references.
+5. **Physical Partitioning:** Migrates each secondary vault into `vaults/<vault-id>.db` with its own newly provisioned DEK and manifest.
+6. **Atomic Activation:** Renames the legacy database to `shellumi.db.migrated`. Subsequent app launches detect `vaults/default.db` and bypass migration.

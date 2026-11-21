@@ -1,6 +1,8 @@
 //! Local Turso storage. Credentials are never stored in this database.
 pub mod desktop;
+pub mod migration;
 pub mod server_sync;
+pub use migration::{MigrationEngine, MigrationReport};
 pub use server_sync::{
     PendingMutationRecord, ServerSyncEngine, ServerSyncReport, VaultServerConnectionRecord,
     VaultSyncStateRecord,
@@ -653,6 +655,55 @@ fn parse_tags(tags_str: &str) -> Vec<String> {
         .collect()
 }
 
+/// Checks whether a given database path is an encrypted, protected vault database.
+pub fn is_protected_vault_path(path: &str) -> bool {
+    if path == ":memory:" {
+        return false;
+    }
+    let p = std::path::Path::new(path);
+    // 1. Located in a vaults/ directory or named default.db
+    let is_in_vaults_dir = p
+        .parent()
+        .is_some_and(|parent| parent.file_name() == Some(std::ffi::OsStr::new("vaults")));
+    let is_default_db = p.file_name() == Some(std::ffi::OsStr::new("default.db"));
+    if is_in_vaults_dir || is_default_db {
+        return true;
+    }
+    // 2. Has an associated manifest file on disk
+    let parent = p.parent().unwrap_or(p);
+    let root = if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    };
+    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+        let manifest_vid = if stem == "default" {
+            LEGACY_LOCAL_VAULT_ID
+        } else {
+            stem
+        };
+        let manifest_path = root
+            .join("vault_manifests")
+            .join(format!("{manifest_vid}.manifest.json"));
+        if manifest_path.exists() {
+            return true;
+        }
+    }
+    // 3. File exists on disk and is non-empty, but does NOT start with standard SQLite format header
+    if let Ok(metadata) = std::fs::metadata(p) {
+        if metadata.len() > 0 {
+            if let Ok(mut file) = std::fs::File::open(p) {
+                use std::io::Read;
+                let mut header = [0u8; 16];
+                if file.read_exact(&mut header).is_ok() && &header != b"SQLite format 3\0" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 impl HostStore {
     /// Open a local database path, or `:memory:` for an ephemeral database.
     pub async fn open(path: &str) -> Result<Self, StorageError> {
@@ -669,6 +720,16 @@ impl HostStore {
             encrypted = key.is_some(),
             "Opening HostStore database"
         );
+        if is_protected_vault_path(path) && key.is_none() {
+            tracing::warn!(
+                path,
+                "Rejected unencrypted open for protected vault database"
+            );
+            return Err(StorageError::ItemNotFound(
+                "Vault database is encrypted and requires a valid Data Encryption Key (DEK) to open"
+                    .to_string(),
+            ));
+        }
         let builder = Builder::new_local(path);
         let builder = if let Some(k) = key {
             builder
@@ -8918,13 +8979,44 @@ mod tests {
             let result = HostStore::open_with_key(db_str, None).await;
             assert!(result.is_err(), "Opening without key must fail");
         }
+
+        // 5. Inspect raw file bytes on disk: verify no plaintext and no standard SQLite format header
+        let raw_bytes = std::fs::read(&db_path).expect("must read encrypted db bytes");
+        assert!(!raw_bytes.is_empty(), "database file must not be empty");
+        assert!(
+            !raw_bytes.starts_with(b"SQLite format 3\0"),
+            "Encrypted database must not start with standard SQLite format header"
+        );
+        let search_terms = [
+            b"prod-server".as_slice(),
+            b"alice".as_slice(),
+            b"10.0.0.1".as_slice(),
+        ];
+        for term in &search_terms {
+            assert!(
+                !raw_bytes.windows(term.len()).any(|window| window == *term),
+                "Raw disk bytes must never contain plaintext: {:?}",
+                std::str::from_utf8(term)
+            );
+        }
+        let wal_path = temp_dir.path().join("encrypted_vault.db-wal");
+        if wal_path.exists() {
+            let wal_bytes = std::fs::read(&wal_path).unwrap_or_default();
+            for term in &search_terms {
+                assert!(
+                    !wal_bytes.windows(term.len()).any(|window| window == *term),
+                    "Raw WAL bytes must never contain plaintext: {:?}",
+                    std::str::from_utf8(term)
+                );
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_vault_security_lifecycle_and_envelope_manifest() {
         use shellumi_core::{
-            default_credential_store, validate_vault_password, SshDestination, VaultId, VaultKey,
-            VaultKeyManager, VaultManifest,
+            validate_vault_password, SshDestination, VaultId, VaultKey, VaultKeyManager,
+            VaultManifest,
         };
 
         // 1. Password policy verification
@@ -8944,12 +9036,12 @@ mod tests {
         assert_eq!(key1.expose_bytes().len(), 32);
 
         // 3. Argon2id KEK derivation and envelope wrapping
-        let cred_store = default_credential_store();
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
         let recovery_code = VaultKey::generate_recovery_code().unwrap();
         assert_eq!(recovery_code.chars().count(), 39); // 32 chars + 7 hyphens
 
         let (dek, primary_env, recovery_env) = VaultKeyManager::provision_new_vault(
-            cred_store.as_ref(),
+            &cred_store,
             &vid,
             valid_pwd,
             false,
@@ -9083,5 +9175,308 @@ mod tests {
             let device2_key = VaultKey::unwrap_with_password(&vid, new_pwd, &remote_env).unwrap();
             assert_eq!(device2_key.expose_bytes(), dek.expose_bytes());
         }
+    }
+
+    #[tokio::test]
+    async fn test_cross_vault_isolation_physical_files() {
+        use shellumi_core::{SshDestination, VaultContext, VaultId, VaultKey, VaultLocation};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let vaults_dir = temp_dir.path().join("vaults");
+        std::fs::create_dir_all(&vaults_dir).unwrap();
+
+        let default_db_path = vaults_dir.join("default.db");
+        let sec_db_path = vaults_dir.join("sec-vault.db");
+
+        let default_dek = VaultKey::generate().unwrap();
+        let sec_dek = VaultKey::generate().unwrap();
+        assert_ne!(default_dek.expose_bytes(), sec_dek.expose_bytes());
+
+        let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        let sec_vid = VaultId::new("sec-vault").unwrap();
+
+        // 1. Initialize default vault
+        {
+            let mut def_store =
+                HostStore::open_with_key(default_db_path.to_str().unwrap(), Some(&default_dek))
+                    .await
+                    .unwrap();
+            def_store.set_vault_id(default_vid.clone());
+
+            // Register secondary vault in default registry
+            let sec_ctx = VaultContext::new(sec_vid.clone(), VaultLocation::Local);
+            def_store
+                .register_vault_context("Secondary Vault", &sec_ctx)
+                .await
+                .unwrap();
+
+            // Add host to default vault
+            let dest = SshDestination::new("root", "192.168.1.1", 22).unwrap();
+            def_store
+                .add("default-host", &dest, None, &[], None, None)
+                .await
+                .unwrap();
+        }
+
+        // 2. Initialize secondary vault with its own DEK in its own physical file
+        {
+            let mut sec_store =
+                HostStore::open_with_key(sec_db_path.to_str().unwrap(), Some(&sec_dek))
+                    .await
+                    .unwrap();
+            sec_store.set_vault_id(sec_vid.clone());
+
+            let dest = SshDestination::new("developer", "10.10.10.10", 22).unwrap();
+            sec_store
+                .add("sec-host", &dest, None, &[], None, None)
+                .await
+                .unwrap();
+        }
+
+        // 3. Physical files exist separately on disk
+        assert!(default_db_path.exists());
+        assert!(sec_db_path.exists());
+
+        // 4. Attempting to open secondary vault with default vault's DEK must FAIL
+        assert!(
+            HostStore::open_with_key(sec_db_path.to_str().unwrap(), Some(&default_dek))
+                .await
+                .is_err(),
+            "Opening secondary vault with default DEK must fail"
+        );
+
+        // 5. Attempting to open default vault with secondary vault's DEK must FAIL
+        assert!(
+            HostStore::open_with_key(default_db_path.to_str().unwrap(), Some(&sec_dek))
+                .await
+                .is_err(),
+            "Opening default vault with secondary DEK must fail"
+        );
+
+        // 6. Secondary vault contains ONLY its own records
+        {
+            let mut sec_store =
+                HostStore::open_with_key(sec_db_path.to_str().unwrap(), Some(&sec_dek))
+                    .await
+                    .unwrap();
+            sec_store.set_vault_id(sec_vid.clone());
+            let hosts = sec_store.list().await.unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].name, "sec-host");
+
+            // Secondary database has no knowledge of default-host
+            assert!(!hosts.iter().any(|h| h.name == "default-host"));
+
+            // Secondary database does not store the registry contexts of other vaults
+            let contexts = sec_store.list_vault_contexts().await.unwrap();
+            assert!(!contexts.iter().any(|(name, _)| name == "Secondary Vault"));
+        }
+
+        // 7. Default vault contains ONLY default records and the registry
+        {
+            let def_store =
+                HostStore::open_with_key(default_db_path.to_str().unwrap(), Some(&default_dek))
+                    .await
+                    .unwrap();
+            let hosts = def_store.list().await.unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].name, "default-host");
+            assert!(!hosts.iter().any(|h| h.name == "sec-host"));
+
+            let contexts = def_store.list_vault_contexts().await.unwrap();
+            assert_eq!(contexts.len(), 2);
+            assert!(contexts
+                .iter()
+                .any(|(name, ctx)| name == "Secondary Vault" && ctx.id().as_str() == "sec-vault"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_migration_engine_from_legacy_to_isolated_physical_vaults() {
+        use crate::migration::MigrationEngine;
+        use shellumi_core::{SshDestination, VaultContext, VaultId, VaultLocation};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+        let legacy_db_path = base_dir.join("shellumi.db");
+
+        let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        let corp_vid = VaultId::new("corp-prod").unwrap();
+
+        // 1. Populate legacy database with default and secondary vault records
+        {
+            let mut store = HostStore::open(legacy_db_path.to_str().unwrap())
+                .await
+                .unwrap();
+
+            // Default vault data
+            store.set_vault_id(default_vid.clone());
+            let def_dest = SshDestination::new("alice", "192.168.1.100", 22).unwrap();
+            store
+                .add("legacy-default-host", &def_dest, None, &[], None, None)
+                .await
+                .unwrap();
+
+            // Register secondary vault context
+            let corp_ctx = VaultContext::new(corp_vid.clone(), VaultLocation::Local);
+            store
+                .register_vault_context("Corporate Production", &corp_ctx)
+                .await
+                .unwrap();
+
+            // Secondary vault data
+            store.set_vault_id(corp_vid.clone());
+            let corp_dest = SshDestination::new("bob", "10.0.0.50", 22).unwrap();
+            store
+                .add("legacy-corp-host", &corp_dest, None, &[], None, None)
+                .await
+                .unwrap();
+
+            // Server connection with plaintext credentials
+            let conn = crate::server_sync::VaultServerConnectionRecord {
+                id: "srv-legacy-1".to_string(),
+                base_url: "https://sync.shellumi.dev".to_string(),
+                auth_token: Some("secret-raw-access-token-999".to_string()),
+                refresh_token: Some("secret-raw-refresh-token-888".to_string()),
+                device_id: Some("dev-legacy-1".to_string()),
+                device_signing_key: Some("dGVzdC1zaWduaW5nLWtleQ==".to_string()),
+                server_instance_id: Some("inst-1".to_string()),
+                device_agreement_key: Some("dGVzdC1hZ3JlZW1lbnQta2V5".to_string()),
+                created_at: 1000,
+                updated_at: 1000,
+            };
+            store
+                .connection
+                .execute(
+                    "INSERT INTO vault_server_connections (
+                        id, base_url, auth_token, refresh_token, device_id, device_signing_key,
+                        server_instance_id, device_agreement_key, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    (
+                        conn.id.as_str(),
+                        conn.base_url.as_str(),
+                        conn.auth_token.as_deref().unwrap(),
+                        conn.refresh_token.as_deref().unwrap(),
+                        conn.device_id.as_deref().unwrap(),
+                        conn.device_signing_key.as_deref().unwrap(),
+                        conn.server_instance_id.as_deref().unwrap(),
+                        conn.device_agreement_key.as_deref().unwrap(),
+                        conn.created_at,
+                        conn.updated_at,
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+
+        // 2. Migration is needed
+        assert!(MigrationEngine::is_migration_needed(base_dir));
+
+        // 3. Run migration
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let report =
+            MigrationEngine::migrate_legacy_database_if_needed(base_dir, None, &cred_store)
+                .await
+                .unwrap();
+
+        assert!(report.legacy_db_found);
+        assert!(report.backup_path.is_some());
+        assert!(report.backup_path.unwrap().exists());
+        assert_eq!(report.vaults_migrated, 2);
+        assert_eq!(report.server_credentials_migrated, 1);
+        assert_eq!(report.default_records_migrated, 1);
+        assert_eq!(report.secondary_records_migrated, 1);
+
+        // 4. Legacy database was atomically renamed to .migrated
+        assert!(!legacy_db_path.exists());
+        assert!(base_dir.join("shellumi.db.migrated").exists());
+
+        // 5. Separate physical encrypted databases exist
+        let default_db_path = base_dir.join("vaults").join("default.db");
+        let corp_db_path = base_dir.join("vaults").join("corp-prod.db");
+        assert!(default_db_path.exists());
+        assert!(corp_db_path.exists());
+
+        // Manifests exist
+        let manifests_dir = base_dir.join("vault_manifests");
+        assert!(manifests_dir
+            .join(format!("{LEGACY_LOCAL_VAULT_ID}.manifest.json"))
+            .exists());
+        assert!(manifests_dir.join("corp-prod.manifest.json").exists());
+
+        // 6. Raw bytes on disk are encrypted - no plaintext credentials or hosts
+        let def_raw = std::fs::read(&default_db_path).unwrap();
+        assert!(!def_raw.starts_with(b"SQLite format 3\0"));
+        assert!(!def_raw.windows(19).any(|w| w == b"legacy-default-host"));
+        assert!(!def_raw
+            .windows(27)
+            .any(|w| w == b"secret-raw-access-token-999"));
+
+        let corp_raw = std::fs::read(&corp_db_path).unwrap();
+        assert!(!corp_raw.starts_with(b"SQLite format 3\0"));
+        assert!(!corp_raw.windows(16).any(|w| w == b"legacy-corp-host"));
+
+        // 7. Verify records and credential references in default database
+        let default_key = shellumi_core::VaultKeyManager::retrieve_key(&cred_store, &default_vid)
+            .unwrap()
+            .unwrap();
+        let def_store =
+            HostStore::open_with_key(default_db_path.to_str().unwrap(), Some(&default_key))
+                .await
+                .unwrap();
+
+        let def_hosts = def_store.list().await.unwrap();
+        assert_eq!(def_hosts.len(), 1);
+        assert_eq!(def_hosts[0].name, "legacy-default-host");
+
+        let conns = def_store.list_vault_server_connections().await.unwrap();
+        assert_eq!(conns.len(), 1);
+        let migrated_conn = &conns[0];
+        assert!(migrated_conn
+            .auth_token
+            .as_ref()
+            .unwrap()
+            .starts_with("keychain://org.shellumi.server/"));
+        assert!(migrated_conn
+            .refresh_token
+            .as_ref()
+            .unwrap()
+            .starts_with("keychain://org.shellumi.server/"));
+
+        // Credential store resolves the actual secret
+        let resolved_token = migrated_conn.resolve_auth_token(&cred_store).unwrap();
+        assert_eq!(
+            resolved_token.expose_secret(),
+            "secret-raw-access-token-999"
+        );
+
+        // 8. Verify secondary vault records with its own key
+        let corp_key = shellumi_core::VaultKeyManager::retrieve_key(&cred_store, &corp_vid)
+            .unwrap()
+            .unwrap();
+        let mut corp_store =
+            HostStore::open_with_key(corp_db_path.to_str().unwrap(), Some(&corp_key))
+                .await
+                .unwrap();
+        corp_store.set_vault_id(corp_vid.clone());
+
+        let corp_hosts = corp_store.list().await.unwrap();
+        assert_eq!(corp_hosts.len(), 1);
+        assert_eq!(corp_hosts[0].name, "legacy-corp-host");
+
+        // 9. Cross-vault key isolation
+        assert!(
+            HostStore::open_with_key(corp_db_path.to_str().unwrap(), Some(&default_key))
+                .await
+                .is_err()
+        );
+
+        // 10. Migration is now idempotent / no-op
+        assert!(!MigrationEngine::is_migration_needed(base_dir));
+        let second_run =
+            MigrationEngine::migrate_legacy_database_if_needed(base_dir, None, &cred_store)
+                .await
+                .unwrap();
+        assert_eq!(second_run.vaults_migrated, 0);
     }
 }

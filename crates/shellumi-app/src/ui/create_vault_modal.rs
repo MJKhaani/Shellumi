@@ -133,6 +133,136 @@ impl Shellumi {
         }
 
         // -------------------------------------------------------------------
+        // Emergency Recovery Code Presentation (Must confirm to dismiss)
+        // -------------------------------------------------------------------
+        if let Some(recovery_code) = &modal.generated_recovery_code {
+            let confirmed = modal.recovery_code_confirmed;
+            let mut rec_content = div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    div()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(0x3a2410))
+                        .border_1()
+                        .border_color(rgb(0xd97706))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xfbbf24))
+                                .child("⚠️ Save Your Emergency Recovery Code"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .child("This recovery code is the ONLY way to access your vault data if you forget your password. Shellumi does not have access to your keys and cannot recover your data for you."),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child("RECOVERY CODE"),
+                        )
+                        .child(
+                            div()
+                                .id("vault-recovery-code-display")
+                                .p_3()
+                                .rounded_md()
+                                .bg(rgb(0x18181b))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .text_sm()
+                                .font_family(".AppleSystemUIFontMonospaced")
+                                .text_color(rgb(0x10b981))
+                                .child(recovery_code.clone()),
+                        ),
+                );
+
+            let confirm_row = div()
+                .id("toggle-create-recovery-confirmed")
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.toggle_create_vault_recovery_confirmed(cx);
+                }))
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if confirmed {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(MacTheme::SURFACE_ACTIVE)
+                        })
+                        .text_color(rgb(0xffffff))
+                        .text_xs()
+                        .child(if confirmed { "✓" } else { "" }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .child("I have saved my emergency recovery code in a safe place"),
+                );
+            rec_content = rec_content.child(confirm_row);
+
+            let footer = div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .pt_3()
+                .border_t_1()
+                .border_color(rgb(MacTheme::SEPARATOR))
+                .child(
+                    div()
+                        .id("complete-create-vault-btn")
+                        .px_4()
+                        .py_2()
+                        .rounded_md()
+                        .bg(if confirmed {
+                            rgb(MacTheme::ACCENT_BLUE)
+                        } else {
+                            rgb(0x3f3f46)
+                        })
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.finalize_vault_creation(cx);
+                        }))
+                        .child("Finish Setup"),
+                );
+
+            modal_box = modal_box.child(rec_content).child(footer);
+            return overlay.child(modal_box).into_any_element();
+        }
+
+        // -------------------------------------------------------------------
         // Segmented Tab Selector
         // -------------------------------------------------------------------
         let is_remote = modal.active_tab == CreateVaultModalTab::RemoteServer;

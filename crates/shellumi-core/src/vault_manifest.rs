@@ -169,7 +169,12 @@ impl VaultManifest {
     /// Computes the default manifest file path for a vault relative to a base database path.
     pub fn manifest_path_for_vault(base_db_path: &Path, vault_id: &VaultId) -> PathBuf {
         let parent = base_db_path.parent().unwrap_or_else(|| Path::new("."));
-        let manifests_dir = parent.join("vault_manifests");
+        let root = if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+            parent.parent().unwrap_or(parent)
+        } else {
+            parent
+        };
+        let manifests_dir = root.join("vault_manifests");
         manifests_dir.join(format!("{}.manifest.json", vault_id.as_str()))
     }
 
