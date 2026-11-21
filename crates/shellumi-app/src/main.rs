@@ -751,6 +751,8 @@ struct RemoteDesktopState {
     domain: Option<String>,
     tls_strict: bool,
     show_diagnostics: bool,
+    username_input: Option<Entity<TextInput>>,
+    domain_input: Option<Entity<TextInput>>,
     password_input: Option<Entity<TextInput>>,
     enable_audio: bool,
     audio_muted: bool,

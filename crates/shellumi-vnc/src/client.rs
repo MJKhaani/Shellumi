@@ -178,14 +178,33 @@ pub async fn run_vnc_session(
                 return Ok(());
             }
             Err(err) => {
-                // If connection was active before the drop, reset attempt count for fresh reconnect attempts
-                if !matches!(err, VncClientError::Handshake(_)) {
-                    attempt = 0;
-                }
+                let err_msg = err.to_string();
+                tracing::error!(
+                    host = %config.host,
+                    port = config.port,
+                    attempt = attempt + 1,
+                    error = %err,
+                    "VNC session error"
+                );
 
-                if !policy.enabled || attempt >= policy.max_attempts {
+                // Authentication, Handshake, and Connection rejection errors must not be retried blindly!
+                let is_auth_or_fatal = matches!(
+                    &err,
+                    VncClientError::Handshake(
+                        crate::handshake::HandshakeError::AuthFailed(_)
+                            | crate::handshake::HandshakeError::ConnectionRejected(_)
+                            | crate::handshake::HandshakeError::NoSecurityTypes
+                            | crate::handshake::HandshakeError::UnsupportedVersion(_)
+                            | crate::handshake::HandshakeError::InvalidVersionString(_)
+                    )
+                );
+
+                if is_auth_or_fatal || !policy.enabled || attempt >= policy.max_attempts {
                     let _ = worker
-                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
+                        .send_event(SessionEvent::Error(err_msg.clone()))
+                        .await;
+                    let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
                         .await;
                     return Err(err);
                 }

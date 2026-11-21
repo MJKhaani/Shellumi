@@ -87,6 +87,15 @@ impl Shellumi {
             }
         };
 
+        let username_input = cx.new(|cx| {
+            TextInput::new(
+                cx,
+                username.as_deref().unwrap_or(""),
+                "Username (e.g. Administrator)",
+            )
+        });
+        let domain_input =
+            cx.new(|cx| TextInput::new(cx, domain.as_deref().unwrap_or(""), "Domain (optional)"));
         let password_input = cx.new(|cx| TextInput::new(cx, "", "Password…").masked());
         let rd_state = RemoteDesktopState {
             host_name: host.name.clone(),
@@ -120,6 +129,8 @@ impl Shellumi {
             domain,
             tls_strict,
             show_diagnostics: false,
+            username_input: Some(username_input),
+            domain_input: Some(domain_input),
             password_input: Some(password_input),
             enable_audio,
             audio_muted: false,
@@ -198,6 +209,14 @@ impl Shellumi {
             current_match_idx: None,
         };
 
+        let username_input = cx.new(|cx| {
+            TextInput::new(
+                cx,
+                username.as_deref().unwrap_or(""),
+                "Username (e.g. Administrator)",
+            )
+        });
+        let domain_input = cx.new(|cx| TextInput::new(cx, "", "Domain (optional)"));
         let password_input = cx.new(|cx| TextInput::new(cx, "", "Password…").masked());
         let rd_state = RemoteDesktopState {
             host_name: display_name.clone(),
@@ -230,6 +249,8 @@ impl Shellumi {
             domain: None,
             tls_strict: true,
             show_diagnostics: false,
+            username_input: Some(username_input),
+            domain_input: Some(domain_input),
             password_input: Some(password_input),
             enable_audio: match protocol {
                 RemoteDesktopProtocol::Vnc => false,
@@ -454,8 +475,32 @@ impl Shellumi {
                         .try_send_command(shellumi_remote_desktop::SessionCommand::Disconnect);
                 }
                 rd.status = RemoteDesktopStatus::Disconnected;
+                rd.error = None;
                 rd.status_message = Some("Session disconnected by user.".into());
                 rd.last_action_note = Some("Disconnected".into());
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_edit_credentials(
+        &mut self,
+        tab_idx: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.status = RemoteDesktopStatus::NotConnected;
+                rd.error = None;
+                rd.status_message = Some(format!(
+                    "Configure credentials and connect to {} via {}",
+                    rd.host_name,
+                    match rd.protocol {
+                        RemoteDesktopProtocol::Vnc => "RFB / VNC",
+                        RemoteDesktopProtocol::Rdp => "MS-RDPBCGR / RDP",
+                    }
+                ));
+                rd.last_action_note = Some("Editing credentials".into());
                 cx.notify();
             }
         }
@@ -464,6 +509,7 @@ impl Shellumi {
     pub(crate) fn remote_desktop_reconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.error = None;
                 let default_port = match rd.protocol {
                     RemoteDesktopProtocol::Vnc => 5900,
                     RemoteDesktopProtocol::Rdp => 3389,
@@ -477,6 +523,24 @@ impl Shellumi {
                         .unwrap_or(default_port);
                     (h, p)
                 };
+
+                if let Some(input) = &rd.username_input {
+                    let u = input.read(cx).value().trim().to_string();
+                    if !u.is_empty() {
+                        rd.username = Some(u);
+                    } else {
+                        rd.username = None;
+                    }
+                }
+
+                if let Some(input) = &rd.domain_input {
+                    let d = input.read(cx).value().trim().to_string();
+                    if !d.is_empty() {
+                        rd.domain = Some(d);
+                    } else {
+                        rd.domain = None;
+                    }
+                }
 
                 if let Some(input) = &rd.password_input {
                     let pwd = input.read(cx).value().trim().to_string();
@@ -620,7 +684,7 @@ impl Shellumi {
                                                 rd.last_action_note = Some(format!("Reconnecting ({attempt}/{max_attempts})"));
                                             }
                                             shellumi_remote_desktop::SessionState::Disconnected => {
-                                                if rd.status != RemoteDesktopStatus::Error {
+                                                if rd.status != RemoteDesktopStatus::Error && rd.error.is_none() {
                                                     rd.status = RemoteDesktopStatus::Disconnected;
                                                     rd.status_message = Some(format!("Disconnected from {proto_name} server"));
                                                 }

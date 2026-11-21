@@ -1206,15 +1206,40 @@ impl Shellumi {
                                             .flex()
                                             .flex_col()
                                             .gap_2()
-                                            .children(state.username.as_ref().map(|user| {
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                                    .child(format!(
-                                                        "Account: {user}{}",
-                                                        state.domain.as_ref().map(|d| format!(" (Domain: {d})")).unwrap_or_default()
-                                                    ))
-                                            }))
+                                            .children(if !is_vnc {
+                                                state.username_input.as_ref().map(|input| {
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                                .child("Username (e.g. Administrator)"),
+                                                        )
+                                                        .child(input.clone())
+                                                })
+                                            } else {
+                                                None
+                                            })
+                                            .children(if !is_vnc {
+                                                state.domain_input.as_ref().map(|input| {
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                                .child("Domain (optional)"),
+                                                        )
+                                                        .child(input.clone())
+                                                })
+                                            } else {
+                                                None
+                                            })
                                             .children(state.password_input.as_ref().map(|input| {
                                                 let is_masked = input.read(cx).is_masked();
                                                 let input_entity = input.clone();
@@ -1314,7 +1339,7 @@ impl Shellumi {
                     )
             }
             RemoteDesktopStatus::Disconnected | RemoteDesktopStatus::Error => {
-                let is_err = state.status == RemoteDesktopStatus::Error;
+                let is_err = state.status == RemoteDesktopStatus::Error || state.error.is_some();
                 div()
                     .flex_1()
                     .min_h_0()
@@ -1324,7 +1349,7 @@ impl Shellumi {
                     .bg(rgb(0x0c0f14))
                     .child(
                         div()
-                            .w(px(460.0))
+                            .w(px(520.0))
                             .p_6()
                             .rounded_xl()
                             .bg(rgb(MacTheme::SURFACE))
@@ -1369,20 +1394,45 @@ impl Shellumi {
                             )
                             .child(
                                 div()
-                                    .id(("rd-reconnect-center", tab_idx))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .mt_2()
-                                    .px_4()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(MacTheme::ACCENT_BLUE))
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.remote_desktop_reconnect(tab_idx, cx);
-                                    }))
-                                    .child("🔄 Reconnect Session"),
+                                    .child(
+                                        div()
+                                            .id(("rd-reconnect-center", tab_idx))
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.remote_desktop_reconnect(tab_idx, cx);
+                                            }))
+                                            .child("🔄 Reconnect Session"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("rd-edit-creds-center", tab_idx))
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                                            .border_1()
+                                            .border_color(rgb(MacTheme::BORDER))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.remote_desktop_edit_credentials(tab_idx, cx);
+                                            }))
+                                            .child("⚙️ Edit Credentials"),
+                                    ),
                             ),
                     )
             }

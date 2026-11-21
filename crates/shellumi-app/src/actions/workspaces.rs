@@ -368,6 +368,16 @@ impl Shellumi {
                         (sess.name.clone(), 1920, 1080, 32, false, None, None, true)
                     };
 
+                let username_input = cx.new(|cx| {
+                    TextInput::new(
+                        cx,
+                        username.as_deref().unwrap_or(""),
+                        "Username (e.g. Administrator)",
+                    )
+                });
+                let domain_input = cx.new(|cx| {
+                    TextInput::new(cx, domain.as_deref().unwrap_or(""), "Domain (optional)")
+                });
                 let password_input = cx.new(|cx| TextInput::new(cx, "", "Password…").masked());
                 let rd = RemoteDesktopState {
                     host_name: sess.name.clone(),
@@ -401,6 +411,8 @@ impl Shellumi {
                     domain,
                     tls_strict,
                     show_diagnostics: false,
+                    username_input: Some(username_input),
+                    domain_input: Some(domain_input),
                     password_input: Some(password_input),
                     enable_audio: match proto {
                         RemoteDesktopProtocol::Vnc => false,

@@ -56,15 +56,15 @@ async fn test_rdp_session_resilience_unreachable_endpoint_exhaustion() {
     let runner_task = tokio::spawn(async move { run_rdp_session(config, worker_handle, fb).await });
 
     let mut attempts = Vec::new();
-    let mut saw_disconnected = false;
+    let mut saw_error = false;
 
     while let Ok(event) = ui_handle.recv_event().await {
         match event {
             SessionEvent::StateChanged(SessionState::Reconnecting { attempt, .. }) => {
                 attempts.push(attempt);
             }
-            SessionEvent::StateChanged(SessionState::Disconnected) => {
-                saw_disconnected = true;
+            SessionEvent::StateChanged(SessionState::Error(_)) => {
+                saw_error = true;
                 break;
             }
             _ => {}
@@ -76,10 +76,7 @@ async fn test_rdp_session_resilience_unreachable_endpoint_exhaustion() {
         vec![1, 2],
         "Expected 2 reconnect attempts before exhaustion"
     );
-    assert!(
-        saw_disconnected,
-        "Expected Disconnected state after retry exhaustion"
-    );
+    assert!(saw_error, "Expected Error state after retry exhaustion");
 
     let result = runner_task.await.unwrap();
     assert!(
@@ -164,15 +161,15 @@ async fn test_rdp_session_disabled_reconnect_policy_exits_immediately() {
     let runner_task = tokio::spawn(async move { run_rdp_session(config, worker_handle, fb).await });
 
     let mut saw_reconnecting = false;
-    let mut saw_disconnected = false;
+    let mut saw_error = false;
 
     while let Ok(event) = ui_handle.recv_event().await {
         match event {
             SessionEvent::StateChanged(SessionState::Reconnecting { .. }) => {
                 saw_reconnecting = true;
             }
-            SessionEvent::StateChanged(SessionState::Disconnected) => {
-                saw_disconnected = true;
+            SessionEvent::StateChanged(SessionState::Error(_)) => {
+                saw_error = true;
                 break;
             }
             _ => {}
@@ -183,10 +180,7 @@ async fn test_rdp_session_disabled_reconnect_policy_exits_immediately() {
         !saw_reconnecting,
         "Disabled policy must never enter Reconnecting state"
     );
-    assert!(
-        saw_disconnected,
-        "Expected Disconnected state immediately on failure"
-    );
+    assert!(saw_error, "Expected Error state immediately on failure");
 
     let result = runner_task.await.unwrap();
     assert!(

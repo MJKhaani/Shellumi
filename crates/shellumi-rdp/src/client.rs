@@ -60,16 +60,29 @@ pub async fn run_rdp_session(
                 return Ok(());
             }
             Err(err) => {
-                if !policy.enabled || attempt >= policy.max_attempts {
-                    let err_msg = err.to_string();
+                let err_msg = err.to_string();
+                tracing::error!(
+                    host = %config.host,
+                    port = config.port,
+                    attempt = attempt + 1,
+                    error = %err,
+                    "RDP connection attempt failed"
+                );
+
+                // Authentication/CredSSP/Certificate errors or explicit protocol negotiation errors must not be retried blindly!
+                let is_auth_or_fatal = err_msg.contains("CredSSP")
+                    || err_msg.contains("authentication rejected")
+                    || err_msg.contains("Authentication")
+                    || err_msg.contains("Certificate")
+                    || err_msg.contains("protocol negotiation failed")
+                    || err_msg.contains("Configuration error");
+
+                if is_auth_or_fatal || !policy.enabled || attempt >= policy.max_attempts {
                     let _ = worker
                         .send_event(SessionEvent::Error(err_msg.clone()))
                         .await;
                     let _ = worker
                         .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
-                        .await;
-                    let _ = worker
-                        .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
                         .await;
                     return Err(err);
                 }
