@@ -272,7 +272,14 @@ where
     };
 
     // 3. Negotiate security and authenticate
-    if let Err(err) = negotiate_security(&mut stream, version, config.password.as_deref()).await {
+    if let Err(err) = negotiate_security(
+        &mut stream,
+        version,
+        config.username.as_deref(),
+        config.password.as_deref(),
+    )
+    .await
+    {
         let err_msg = err.to_string();
         tracing::error!(error = %err, "VNC security authentication failed");
         let _ = worker

@@ -5024,6 +5024,7 @@ checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -7411,10 +7412,15 @@ dependencies = [
 name = "shellumi-vnc"
 version = "0.0.8-alpha"
 dependencies = [
+ "aes 0.8.4",
  "async-channel 2.5.0",
  "byteorder",
  "flate2",
  "image",
+ "md-5 0.10.6",
+ "num-bigint 0.4.8",
+ "num-traits",
+ "rand 0.8.8",
  "serde",
  "shellumi-remote-desktop",
  "tempfile",

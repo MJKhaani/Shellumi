@@ -1,9 +1,16 @@
-//! RFB security types and VNCAuth DES challenge-response authentication.
+//! RFB security types, VNCAuth DES challenge-response authentication,
+//! and Apple Remote Desktop (Security Type 30) Diffie-Hellman / AES-128 authentication.
 
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::Aes128;
+use md5::{Digest, Md5};
+use num_bigint::{BigUint, RandBigInt};
+use num_traits::One;
+use rand::RngCore;
 use thiserror::Error;
 use zeroize::Zeroize;
 
-/// Standard RFB security types (RFC 6143 Section 7.2).
+/// Standard RFB security types (RFC 6143 Section 7.2) plus Apple Remote Desktop extensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SecurityType {
@@ -12,6 +19,7 @@ pub enum SecurityType {
     VncAuth = 2,
     Tight = 16,
     VeNCrypt = 19,
+    AppleRemoteDesktop = 30,
 }
 
 impl SecurityType {
@@ -21,6 +29,7 @@ impl SecurityType {
             2 => Self::VncAuth,
             16 => Self::Tight,
             19 => Self::VeNCrypt,
+            30 => Self::AppleRemoteDesktop,
             _ => Self::Invalid,
         }
     }
@@ -71,6 +80,174 @@ pub fn vnc_auth_encrypt(challenge: &[u8; 16], password: &str) -> [u8; 16] {
     des.round_keys.zeroize();
 
     response
+}
+
+// ---------------------------------------------------------------------------
+// Apple Remote Desktop (Security Type 30) Diffie-Hellman / AES-128
+// ---------------------------------------------------------------------------
+
+/// Format a single credential (username or password) into a 64-byte null-terminated
+/// buffer padded with cryptographically secure random bytes per Apple Remote Desktop RFB specification.
+pub fn ard_format_credential(value: &str, field_name: &str) -> Result<[u8; 64], SecurityError> {
+    let bytes = value.as_bytes();
+    if bytes.len() > 63 {
+        return Err(SecurityError::AuthFailed(format!(
+            "{field_name} is {} bytes, exceeds maximum 63 bytes allowed by Apple Remote Desktop",
+            bytes.len()
+        )));
+    }
+    let mut block = [0u8; 64];
+    block[..bytes.len()].copy_from_slice(bytes);
+    block[bytes.len()] = 0; // null-terminated C-string
+    let pad_start = bytes.len() + 1;
+    if pad_start < 64 {
+        rand::thread_rng().fill_bytes(&mut block[pad_start..64]);
+    }
+    Ok(block)
+}
+
+/// Parse a null-terminated credential string from a 64-byte block.
+pub fn ard_parse_credential(block: &[u8; 64]) -> Result<String, SecurityError> {
+    let null_pos = block.iter().position(|&b| b == 0).ok_or_else(|| {
+        SecurityError::AuthFailed("Missing null terminator in ARD credential".into())
+    })?;
+    std::str::from_utf8(&block[..null_pos])
+        .map(|s| s.to_string())
+        .map_err(|e| SecurityError::AuthFailed(format!("Invalid UTF-8 in ARD credential: {e}")))
+}
+
+/// Pad big-endian integer bytes to an exact target length by prepending zeros.
+pub fn pad_to_exact_len(bytes: &[u8], target_len: usize) -> Vec<u8> {
+    if bytes.len() >= target_len {
+        bytes[bytes.len() - target_len..].to_vec()
+    } else {
+        let mut padded = vec![0u8; target_len];
+        padded[target_len - bytes.len()..].copy_from_slice(bytes);
+        padded
+    }
+}
+
+/// Perform Diffie-Hellman key exchange and encrypt username/password credentials
+/// for Apple Remote Desktop (Security Type 30).
+///
+/// Returns `(ciphertext, client_pubkey_bytes)`:
+/// - `ciphertext`: 128 bytes containing AES-128-ECB encrypted username and password blocks.
+/// - `client_pubkey_bytes`: `key_len` bytes representing the client DH public key.
+pub fn ard_encrypt_credentials(
+    generator: u16,
+    key_len: usize,
+    modulus: &[u8],
+    server_pubkey: &[u8],
+    username: &str,
+    password: &str,
+) -> Result<([u8; 128], Vec<u8>), SecurityError> {
+    if !(16..=1024).contains(&key_len) {
+        return Err(SecurityError::AuthFailed(format!(
+            "Invalid DH key length from Apple VNC server: {key_len}"
+        )));
+    }
+
+    let p = BigUint::from_bytes_be(modulus);
+    let g = BigUint::from(generator);
+    let y_s = BigUint::from_bytes_be(server_pubkey);
+
+    if p <= BigUint::one() || y_s <= BigUint::one() || y_s >= p {
+        return Err(SecurityError::AuthFailed(
+            "Invalid Diffie-Hellman parameters received from Apple VNC server".into(),
+        ));
+    }
+
+    // Generate random client private key in range [2, p - 2]
+    let mut rng = rand::thread_rng();
+    let two = BigUint::from(2u32);
+    let max_priv = if p > two {
+        &p - &two
+    } else {
+        return Err(SecurityError::AuthFailed("Modulus too small".into()));
+    };
+    let x_c = rng.gen_biguint_range(&two, &max_priv);
+
+    // Compute client public key: Y_c = g^(X_c) mod p
+    let y_c = g.modpow(&x_c, &p);
+    let client_pubkey_bytes = pad_to_exact_len(&y_c.to_bytes_be(), key_len);
+
+    // Compute shared secret: K = (Y_s)^(X_c) mod p
+    let shared_secret = y_s.modpow(&x_c, &p);
+    let mut shared_secret_bytes = pad_to_exact_len(&shared_secret.to_bytes_be(), key_len);
+
+    // Derive 128-bit AES key via MD5(shared_secret)
+    let mut hasher = Md5::new();
+    hasher.update(&shared_secret_bytes);
+    let mut aes_key = hasher.finalize();
+
+    // Format username and password into 128-byte plaintext
+    let mut username_block = ard_format_credential(username, "username")?;
+    let mut password_block = ard_format_credential(password, "password")?;
+    let mut plaintext = [0u8; 128];
+    plaintext[0..64].copy_from_slice(&username_block);
+    plaintext[64..128].copy_from_slice(&password_block);
+
+    // Encrypt with AES-128-ECB
+    let cipher = Aes128::new(&aes_key);
+    let mut ciphertext = [0u8; 128];
+    ciphertext.copy_from_slice(&plaintext);
+    for chunk in ciphertext.as_chunks_mut::<16>().0 {
+        let block = aes::cipher::generic_array::GenericArray::from_mut_slice(chunk);
+        cipher.encrypt_block(block);
+    }
+
+    // Zeroize sensitive plaintexts and keys
+    username_block.zeroize();
+    password_block.zeroize();
+    plaintext.zeroize();
+    shared_secret_bytes.zeroize();
+    aes_key.zeroize();
+
+    Ok((ciphertext, client_pubkey_bytes))
+}
+
+/// Decrypt Apple Remote Desktop (Security Type 30) ciphertext using server private key.
+pub fn ard_decrypt_credentials(
+    modulus: &[u8],
+    key_len: usize,
+    server_privkey: &BigUint,
+    client_pubkey: &[u8],
+    ciphertext: &[u8; 128],
+) -> Result<(String, String), SecurityError> {
+    let p = BigUint::from_bytes_be(modulus);
+    let y_c = BigUint::from_bytes_be(client_pubkey);
+
+    let shared_secret = y_c.modpow(server_privkey, &p);
+    let mut shared_secret_bytes = pad_to_exact_len(&shared_secret.to_bytes_be(), key_len);
+
+    let mut hasher = Md5::new();
+    hasher.update(&shared_secret_bytes);
+    let mut aes_key = hasher.finalize();
+
+    let cipher = Aes128::new(&aes_key);
+    let mut plaintext = [0u8; 128];
+    plaintext.copy_from_slice(ciphertext);
+    for chunk in plaintext.as_chunks_mut::<16>().0 {
+        let block = aes::cipher::generic_array::GenericArray::from_mut_slice(chunk);
+        cipher.decrypt_block(block);
+    }
+
+    let mut user_block = [0u8; 64];
+    user_block.copy_from_slice(&plaintext[0..64]);
+    let mut pass_block = [0u8; 64];
+    pass_block.copy_from_slice(&plaintext[64..128]);
+
+    let username = ard_parse_credential(&user_block)?;
+    let password = ard_parse_credential(&pass_block)?;
+
+    // Zeroize sensitive buffers
+    plaintext.zeroize();
+    user_block.zeroize();
+    pass_block.zeroize();
+    shared_secret_bytes.zeroize();
+    aes_key.zeroize();
+
+    Ok((username, password))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,5 +548,77 @@ mod tests {
         // Ensure ciphertext is completely altered from plaintext
         assert_ne!(&resp[0..8], &challenge[0..8]);
         assert_ne!(&resp[8..16], &challenge[8..16]);
+    }
+
+    #[test]
+    fn verifies_ard_credential_formatting_and_parsing() {
+        let block = ard_format_credential("aldaleel", "username").unwrap();
+        assert_eq!(block.len(), 64);
+        assert_eq!(&block[..8], b"aldaleel");
+        assert_eq!(block[8], 0); // null terminator
+
+        let parsed = ard_parse_credential(&block).unwrap();
+        assert_eq!(parsed, "aldaleel");
+    }
+
+    #[test]
+    fn verifies_ard_credential_length_rejection() {
+        let long_str = "a".repeat(64); // exceeds 63 max bytes
+        let res = ard_format_credential(&long_str, "username");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn verifies_ard_diffie_hellman_encryption_decryption_roundtrip() {
+        // RFC 3526 MODP 2048-bit group parameters or 512-bit safe prime
+        let generator = 2u16;
+        let key_len = 64usize; // 512 bits
+
+        // Standard 512-bit prime modulus (64 bytes)
+        let p_bytes: Vec<u8> = vec![
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68,
+            0xC2, 0x34, 0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08,
+            0x8A, 0x67, 0xCC, 0x74, 0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A,
+            0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD, 0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B,
+            0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
+        ];
+
+        let p = BigUint::from_bytes_be(&p_bytes);
+        let g = BigUint::from(generator);
+
+        // Server generates private key and public key
+        let server_priv = BigUint::from(12345678901234567890u128);
+        let server_pub = g.modpow(&server_priv, &p);
+        let server_pub_bytes = pad_to_exact_len(&server_pub.to_bytes_be(), key_len);
+
+        let test_user = "aldaleel";
+        let test_pass = "qBA#5Agk";
+
+        // Client performs ARD encryption
+        let (ciphertext, client_pub_bytes) = ard_encrypt_credentials(
+            generator,
+            key_len,
+            &p_bytes,
+            &server_pub_bytes,
+            test_user,
+            test_pass,
+        )
+        .expect("Client encryption succeeded");
+
+        assert_eq!(ciphertext.len(), 128);
+        assert_eq!(client_pub_bytes.len(), key_len);
+
+        // Server decrypts ciphertext
+        let (recovered_user, recovered_pass) = ard_decrypt_credentials(
+            &p_bytes,
+            key_len,
+            &server_priv,
+            &client_pub_bytes,
+            &ciphertext,
+        )
+        .expect("Server decryption succeeded");
+
+        assert_eq!(recovered_user, test_user);
+        assert_eq!(recovered_pass, test_pass);
     }
 }

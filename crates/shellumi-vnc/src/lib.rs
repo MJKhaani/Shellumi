@@ -13,15 +13,18 @@ pub use decoder::{
     MAX_CLIPBOARD_BYTES, MAX_COMPRESSED_PAYLOAD_SIZE, MAX_RECTANGLE_DIMENSION,
 };
 pub use handshake::{
-    client_and_server_init, negotiate_security, negotiate_version, HandshakeError, RfbVersion,
-    ServerInit,
+    ard_auth_handshake, client_and_server_init, negotiate_security, negotiate_version,
+    HandshakeError, RfbVersion, ServerInit,
 };
 pub use rectangles::{
     decode_copy_rect, decode_raw_rectangle, handle_desktop_size, RectangleError, ENCODING_COPYRECT,
     ENCODING_CURSOR, ENCODING_DESKTOP_SIZE, ENCODING_HEXTILE, ENCODING_RAW, ENCODING_RRE,
     ENCODING_TIGHT, ENCODING_ZRLE,
 };
-pub use security::{vnc_auth_encrypt, SecurityError, SecurityType};
+pub use security::{
+    ard_decrypt_credentials, ard_encrypt_credentials, ard_format_credential, ard_parse_credential,
+    vnc_auth_encrypt, SecurityError, SecurityType,
+};
 pub use wire::{
     build_client_cut_text, build_framebuffer_update_request, build_key_event, build_pointer_event,
     build_set_encodings, build_set_pixel_format, client_msg, server_msg, PixelFormat,

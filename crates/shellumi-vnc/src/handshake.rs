@@ -113,10 +113,12 @@ pub async fn negotiate_version<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(agreed_version)
 }
 
-/// Negotiate security type and perform authentication (RFC 6143 Section 7.1.2 - 7.1.3).
+/// Negotiate security type and perform authentication (RFC 6143 Section 7.1.2 - 7.1.3,
+/// plus Apple Remote Desktop Security Type 30).
 pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     version: RfbVersion,
+    username: Option<&str>,
     password: Option<&str>,
 ) -> Result<SecurityType, HandshakeError> {
     let selected_type = match version {
@@ -134,21 +136,37 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
             let mut offered = vec![0u8; num_types as usize];
             stream.read_exact(&mut offered).await?;
 
-            // Prefer VncAuth if password provided, otherwise None
-            let chosen = if password.is_some() && offered.contains(&(SecurityType::VncAuth as u8)) {
+            tracing::debug!(?offered, "Server offered RFB security types");
+
+            // Preference logic:
+            // 1. If Apple Remote Desktop (Type 30) is offered and username is present, or if
+            //    Type 30 is the only available authenticated option (typical for macOS Screen Sharing),
+            //    select Apple Remote Desktop.
+            // 2. If VncAuth is offered and password is provided without username, select VncAuth.
+            // 3. If None is offered (no password needed), select None.
+            // 4. Otherwise fallback to available options or report error.
+            let chosen = if offered.contains(&(SecurityType::AppleRemoteDesktop as u8))
+                && (username.is_some() || !offered.contains(&(SecurityType::VncAuth as u8)))
+            {
+                SecurityType::AppleRemoteDesktop
+            } else if password.is_some() && offered.contains(&(SecurityType::VncAuth as u8)) {
                 SecurityType::VncAuth
             } else if offered.contains(&(SecurityType::None as u8)) {
                 SecurityType::None
+            } else if offered.contains(&(SecurityType::AppleRemoteDesktop as u8)) {
+                SecurityType::AppleRemoteDesktop
             } else if offered.contains(&(SecurityType::VncAuth as u8)) {
                 SecurityType::VncAuth
             } else {
-                let err_detail = if offered.contains(&30) || offered.contains(&33) {
-                    "macOS Screen Sharing detected: The Mac server only offered Apple Remote Desktop authentication (types 30/33). To connect using standard VNC: On the target Mac, open System Settings → General → Sharing → Screen Sharing (i) → Computer Settings… and enable 'VNC viewers may control screen with password', then enter that password in Shellumi."
+                let err_detail = if offered.contains(&33) {
+                    "macOS Screen Sharing offered proprietary Apple security type 33 without standard authentication fallback"
                 } else {
-                    "No compatible security types (server offered neither None nor VncAuth)"
+                    "No compatible security types (server offered neither None, VncAuth, nor Apple Remote Desktop)"
                 };
                 return Err(HandshakeError::AuthFailed(err_detail.into()));
             };
+
+            tracing::info!(chosen = ?chosen, "Selected RFB security type");
 
             // In RFB 3.7 and 3.8, send 1-byte chosen security type
             stream.write_u8(chosen as u8).await?;
@@ -208,6 +226,22 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
                 }
             }
         }
+        SecurityType::AppleRemoteDesktop => {
+            let user = username.ok_or_else(|| {
+                HandshakeError::AuthFailed(
+                    "macOS Screen Sharing / Apple Remote Desktop requires a username. Please enter your macOS account username and password in the session credentials."
+                        .into(),
+                )
+            })?;
+            let pass = password.ok_or_else(|| {
+                HandshakeError::AuthFailed(
+                    "macOS Screen Sharing / Apple Remote Desktop requires a password. Please enter your macOS account password in the session credentials."
+                        .into(),
+                )
+            })?;
+
+            ard_auth_handshake(stream, version, user, pass).await?;
+        }
         other => {
             return Err(HandshakeError::AuthFailed(format!(
                 "Unsupported security type: {other:?}"
@@ -216,6 +250,92 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
     }
 
     Ok(selected_type)
+}
+
+/// Perform Apple Remote Desktop (Security Type 30) Diffie-Hellman parameter exchange,
+/// credential encryption, and result validation.
+pub async fn ard_auth_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    version: RfbVersion,
+    username: &str,
+    password: &str,
+) -> Result<(), HandshakeError> {
+    tracing::info!("Starting Apple Remote Desktop (Security Type 30) Diffie-Hellman handshake");
+
+    // 1. Read generator (u16) and key length (u16)
+    let generator = stream.read_u16().await?;
+    let key_len = stream.read_u16().await? as usize;
+
+    tracing::debug!(
+        generator,
+        key_len,
+        "Received Apple Remote Desktop DH parameters from server"
+    );
+
+    if !(16..=1024).contains(&key_len) {
+        return Err(HandshakeError::AuthFailed(format!(
+            "Invalid DH key length from Apple VNC server: {key_len}"
+        )));
+    }
+
+    // 2. Read prime modulus (key_len bytes)
+    let mut modulus = vec![0u8; key_len];
+    stream.read_exact(&mut modulus).await?;
+
+    // 3. Read server public key (key_len bytes)
+    let mut server_pubkey = vec![0u8; key_len];
+    stream.read_exact(&mut server_pubkey).await?;
+
+    // 4. Encrypt credentials with Diffie-Hellman + MD5 + AES-128
+    let (ciphertext, client_pubkey) = crate::security::ard_encrypt_credentials(
+        generator,
+        key_len,
+        &modulus,
+        &server_pubkey,
+        username,
+        password,
+    )
+    .map_err(|e| HandshakeError::AuthFailed(e.to_string()))?;
+
+    // 5. Send ciphertext (128 bytes) and client public key (key_len bytes)
+    stream.write_all(&ciphertext).await?;
+    stream.write_all(&client_pubkey).await?;
+    stream.flush().await?;
+
+    tracing::debug!(
+        username = %username,
+        "Transmitted encrypted Apple Remote Desktop credentials and client DH public key"
+    );
+
+    // 6. Read SecurityResult (u32)
+    let result = stream.read_u32().await?;
+    tracing::debug!(result, "Received Apple Remote Desktop SecurityResult");
+
+    if result == 0 {
+        tracing::info!("Apple Remote Desktop authentication succeeded");
+        Ok(())
+    } else {
+        let reason = if version == RfbVersion::Rfb38 {
+            match stream.read_u32().await {
+                Ok(len) if len > 0 && len < 4096 => {
+                    let mut reason_bytes = vec![0u8; len as usize];
+                    if stream.read_exact(&mut reason_bytes).await.is_ok() {
+                        String::from_utf8_lossy(&reason_bytes).into_owned()
+                    } else {
+                        "macOS Screen Sharing rejected credentials (authentication failure)".into()
+                    }
+                }
+                _ => "macOS Screen Sharing rejected credentials (authentication failure)".into(),
+            }
+        } else {
+            "macOS Screen Sharing rejected credentials (authentication failure)".into()
+        };
+
+        tracing::error!(reason = %reason, "Apple Remote Desktop authentication failed");
+        Err(HandshakeError::AuthFailed(format!(
+            "macOS Screen Sharing authentication failed: {reason}"
+        )))
+    }
 }
 
 /// Perform ClientInit and ServerInit (RFC 6143 Section 7.3).

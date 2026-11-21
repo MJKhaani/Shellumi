@@ -120,7 +120,7 @@ async fn test_rfb_handshake_and_session_init_against_mock_server() {
     let agreed_version = negotiate_version(&mut client_stream).await.unwrap();
     assert_eq!(agreed_version, RfbVersion::Rfb38);
 
-    let sec_type = negotiate_security(&mut client_stream, agreed_version, None)
+    let sec_type = negotiate_security(&mut client_stream, agreed_version, None, None)
         .await
         .unwrap();
     assert_eq!(sec_type, SecurityType::None);
@@ -216,10 +216,88 @@ async fn test_vnc_auth_challenge_response_handshake() {
     });
 
     let agreed_version = negotiate_version(&mut client_stream).await.unwrap();
-    let sec_type = negotiate_security(&mut client_stream, agreed_version, Some("termius1"))
+    let sec_type = negotiate_security(&mut client_stream, agreed_version, None, Some("termius1"))
         .await
         .unwrap();
     assert_eq!(sec_type, SecurityType::VncAuth);
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_vnc_apple_remote_desktop_security_handshake() {
+    use num_bigint::BigUint;
+    use shellumi_vnc::security::{ard_decrypt_credentials, pad_to_exact_len};
+
+    let (mut client_stream, mut server_stream) = tokio::io::duplex(4096);
+
+    let server_task = tokio::spawn(async move {
+        // 1. Server sends macOS Screen Sharing RFB version
+        server_stream.write_all(b"RFB 003.889\n").await.unwrap();
+
+        // 2. Client responds with RFB 3.8
+        let mut client_ver = [0u8; 12];
+        server_stream.read_exact(&mut client_ver).await.unwrap();
+        assert_eq!(&client_ver, b"RFB 003.008\n");
+
+        // 3. Server offers Apple proprietary security types 30 (Apple Remote Desktop) and 33
+        server_stream.write_all(&[2, 30, 33]).await.unwrap();
+
+        // 4. Client selects SecurityType 30
+        let chosen = server_stream.read_u8().await.unwrap();
+        assert_eq!(chosen, 30);
+
+        // 5. Server sends DH parameters (generator=2, key_len=64, prime p, server_pub)
+        let generator = 2u16;
+        let key_len = 64usize;
+        let p_bytes: Vec<u8> = vec![
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68,
+            0xC2, 0x34, 0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08,
+            0x8A, 0x67, 0xCC, 0x74, 0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A,
+            0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD, 0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B,
+            0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
+        ];
+        let p = BigUint::from_bytes_be(&p_bytes);
+        let g = BigUint::from(generator);
+        let server_priv = BigUint::from(9876543210987654321u128);
+        let server_pub = g.modpow(&server_priv, &p);
+        let server_pub_bytes = pad_to_exact_len(&server_pub.to_bytes_be(), key_len);
+
+        server_stream.write_u16(generator).await.unwrap();
+        server_stream.write_u16(key_len as u16).await.unwrap();
+        server_stream.write_all(&p_bytes).await.unwrap();
+        server_stream.write_all(&server_pub_bytes).await.unwrap();
+
+        // 6. Client writes ciphertext (128 bytes) + client_pub (key_len bytes)
+        let mut ciphertext = [0u8; 128];
+        server_stream.read_exact(&mut ciphertext).await.unwrap();
+        let mut client_pub = vec![0u8; key_len];
+        server_stream.read_exact(&mut client_pub).await.unwrap();
+
+        // 7. Server decrypts credentials
+        let (recovered_user, recovered_pass) =
+            ard_decrypt_credentials(&p_bytes, key_len, &server_priv, &client_pub, &ciphertext)
+                .unwrap();
+
+        assert_eq!(recovered_user, "aldaleel");
+        assert_eq!(recovered_pass, "qBA#5Agk");
+
+        // 8. Server confirms SecurityResult = OK (0)
+        server_stream.write_all(&[0, 0, 0, 0]).await.unwrap();
+    });
+
+    let agreed_version = negotiate_version(&mut client_stream).await.unwrap();
+    assert_eq!(agreed_version, RfbVersion::Rfb38);
+
+    let sec_type = negotiate_security(
+        &mut client_stream,
+        agreed_version,
+        Some("aldaleel"),
+        Some("qBA#5Agk"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sec_type, SecurityType::AppleRemoteDesktop);
 
     server_task.await.unwrap();
 }

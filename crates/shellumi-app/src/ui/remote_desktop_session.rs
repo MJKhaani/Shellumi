@@ -1206,23 +1206,23 @@ impl Shellumi {
                                             .flex()
                                             .flex_col()
                                             .gap_2()
-                                            .children(if !is_vnc {
-                                                state.username_input.as_ref().map(|input| {
-                                                    div()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                                                .child("Username (e.g. Administrator)"),
-                                                        )
-                                                        .child(input.clone())
-                                                })
-                                            } else {
-                                                None
-                                            })
+                                            .children(state.username_input.as_ref().map(|input| {
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                            .child(if is_vnc {
+                                                                "Username (required for Apple Remote Desktop / macOS, optional for VNC)"
+                                                            } else {
+                                                                "Username (e.g. Administrator)"
+                                                            }),
+                                                    )
+                                                    .child(input.clone())
+                                            }))
                                             .children(if !is_vnc {
                                                 state.domain_input.as_ref().map(|input| {
                                                     div()
@@ -1257,7 +1257,7 @@ impl Shellumi {
                                                                     .text_xs()
                                                                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                                                     .child(if is_vnc {
-                                                                        "VNC Password (optional if server requires no auth)"
+                                                                        "Password (macOS user password or VNC password)"
                                                                     } else {
                                                                         "Password (held in memory for this session only)"
                                                                     }),

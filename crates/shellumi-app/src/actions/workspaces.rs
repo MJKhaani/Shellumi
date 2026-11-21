@@ -372,7 +372,10 @@ impl Shellumi {
                     TextInput::new(
                         cx,
                         username.as_deref().unwrap_or(""),
-                        "Username (e.g. Administrator)",
+                        match proto {
+                            RemoteDesktopProtocol::Vnc => "Username (e.g. macOS user account)",
+                            RemoteDesktopProtocol::Rdp => "Username (e.g. Administrator)",
+                        },
                     )
                 });
                 let domain_input = cx.new(|cx| {

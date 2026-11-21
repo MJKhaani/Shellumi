@@ -47,13 +47,18 @@ impl Shellumi {
                     VncConfig::new(host.destination.host(), host.destination.port().get())
                         .unwrap_or_default()
                 });
+                let user = if host.destination.username().is_empty() {
+                    None
+                } else {
+                    Some(host.destination.username().to_string())
+                };
                 (
                     format!("{}:{}", vnc_cfg.host, vnc_cfg.port),
                     vnc_cfg.width as u32,
                     vnc_cfg.height as u32,
                     vnc_cfg.color_depth,
                     vnc_cfg.view_only,
-                    None,
+                    user,
                     None,
                     true,
                     false,
@@ -91,7 +96,10 @@ impl Shellumi {
             TextInput::new(
                 cx,
                 username.as_deref().unwrap_or(""),
-                "Username (e.g. Administrator)",
+                match protocol {
+                    RemoteDesktopProtocol::Vnc => "Username (e.g. macOS user account)",
+                    RemoteDesktopProtocol::Rdp => "Username (e.g. Administrator)",
+                },
             )
         });
         let domain_input =
@@ -213,7 +221,10 @@ impl Shellumi {
             TextInput::new(
                 cx,
                 username.as_deref().unwrap_or(""),
-                "Username (e.g. Administrator)",
+                match protocol {
+                    RemoteDesktopProtocol::Vnc => "Username (e.g. macOS user account)",
+                    RemoteDesktopProtocol::Rdp => "Username (e.g. Administrator)",
+                },
             )
         });
         let domain_input = cx.new(|cx| TextInput::new(cx, "", "Domain (optional)"));
