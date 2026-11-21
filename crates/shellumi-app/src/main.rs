@@ -2752,6 +2752,8 @@ fn main() {
         eprintln!("Warning: Failed to initialize application logging: {e}");
     }
 
+    shellumi_rdp::ensure_crypto_provider_installed();
+
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,

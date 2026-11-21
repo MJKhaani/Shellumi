@@ -131,6 +131,8 @@ async fn run_rdp_session_attempt(
         .send_event(SessionEvent::StateChanged(SessionState::Connecting))
         .await;
 
+    crate::security::ensure_crypto_provider_installed();
+
     tracing::info!(
         host = %config.host,
         port = config.port,
@@ -196,6 +198,8 @@ async fn run_rdp_session_attempt(
                     return;
                 }
             };
+
+            crate::security::ensure_crypto_provider_installed();
 
             let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 rt.block_on(async move {

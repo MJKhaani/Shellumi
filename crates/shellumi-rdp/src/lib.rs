@@ -27,5 +27,8 @@ pub use microphone::{
     AudioFormatEntry, MicrophoneControlState, RdpeaiPdu, ServerRdpeaiMessage, ShellumiRdpeaiClient,
     AUDIO_INPUT_CHANNEL_NAME,
 };
-pub use security::{upgrade_tls_with_policy, CertificateError, ShellumiCertificateVerifier};
+pub use security::{
+    ensure_crypto_provider_installed, upgrade_tls_with_policy, CertificateError,
+    ShellumiCertificateVerifier,
+};
 pub use sound::{scale_pcm_16bit, ShellumiRdpsndControl, ShellumiRdpsndHandler};

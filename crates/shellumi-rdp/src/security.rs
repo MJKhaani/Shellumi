@@ -16,6 +16,16 @@ use tokio_rustls::rustls::{
 };
 use tokio_rustls::TlsConnector;
 
+/// Ensure a default process-level crypto provider is installed for rustls.
+/// In environments where both `aws-lc-rs` and `ring` are compiled in across the dependency graph,
+/// rustls requires an explicit default provider to be installed before `ClientConfig::builder()`
+/// can be called.
+pub fn ensure_crypto_provider_installed() {
+    if tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+}
+
 /// TLS certificate validation error.
 #[derive(Debug, Error)]
 pub enum CertificateError {
@@ -183,6 +193,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifies_crypto_provider_installation_enables_client_config_builder() {
+        ensure_crypto_provider_installed();
+        assert!(tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_some());
+        let _ = ClientConfig::builder();
+    }
 
     #[test]
     fn verifies_sha256_fingerprint_computation() {
