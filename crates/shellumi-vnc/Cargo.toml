@@ -15,6 +15,7 @@ byteorder = "1.5"
 flate2 = "1.0"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

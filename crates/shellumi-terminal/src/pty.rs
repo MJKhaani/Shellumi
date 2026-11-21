@@ -151,6 +151,12 @@ pub struct PtySession {
 impl PtySession {
     /// Spawns a child process in a newly allocated pseudo-terminal.
     pub fn spawn(cmd: &TerminalCommand, rows: u16, cols: u16) -> Result<Self, io::Error> {
+        tracing::debug!(
+            program = %cmd.program,
+            rows,
+            cols,
+            "Spawning PTY process"
+        );
         let pty_system = native_pty_system();
         let size = PtySize {
             rows,
@@ -159,9 +165,10 @@ impl PtySession {
             pixel_height: 0,
         };
 
-        let PtyPair { master, slave } = pty_system
-            .openpty(size)
-            .map_err(|e| io::Error::other(format!("failed to open PTY: {e}")))?;
+        let PtyPair { master, slave } = pty_system.openpty(size).map_err(|e| {
+            tracing::error!(error = %e, "Failed to open PTY pair");
+            io::Error::other(format!("failed to open PTY: {e}"))
+        })?;
 
         let program_path = resolve_command_program(&cmd.program);
         let mut builder = CommandBuilder::new(program_path);
@@ -177,13 +184,21 @@ impl PtySession {
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
 
-        let child = slave
-            .spawn_command(builder)
-            .map_err(|e| io::Error::other(format!("failed to spawn PTY child: {e}")))?;
+        let child = slave.spawn_command(builder).map_err(|e| {
+            tracing::error!(
+                program = %cmd.program,
+                error = %e,
+                "Failed to spawn PTY child"
+            );
+            io::Error::other(format!("failed to spawn PTY child: {e}"))
+        })?;
 
-        let writer = master
-            .take_writer()
-            .map_err(|e| io::Error::other(format!("failed to take PTY writer: {e}")))?;
+        let writer = master.take_writer().map_err(|e| {
+            tracing::error!(error = %e, "Failed to take PTY writer");
+            io::Error::other(format!("failed to take PTY writer: {e}"))
+        })?;
+
+        tracing::info!(program = %cmd.program, "PTY session spawned successfully");
 
         Ok(Self {
             master,
@@ -207,6 +222,7 @@ impl PtySession {
 
     /// Resizes the PTY window geometry.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), io::Error> {
+        tracing::trace!(rows, cols, "Resizing PTY window");
         self.master
             .resize(PtySize {
                 rows,
@@ -214,7 +230,10 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| io::Error::other(format!("failed to resize PTY: {e}")))
+            .map_err(|e| {
+                tracing::warn!(rows, cols, error = %e, "Failed to resize PTY");
+                io::Error::other(format!("failed to resize PTY: {e}"))
+            })
     }
 
     /// Checks if the child process has exited.

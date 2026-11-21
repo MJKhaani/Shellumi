@@ -620,8 +620,10 @@ impl Shellumi {
                                                 rd.last_action_note = Some(format!("Reconnecting ({attempt}/{max_attempts})"));
                                             }
                                             shellumi_remote_desktop::SessionState::Disconnected => {
-                                                rd.status = RemoteDesktopStatus::Disconnected;
-                                                rd.status_message = Some(format!("Disconnected from {proto_name} server"));
+                                                if rd.status != RemoteDesktopStatus::Error {
+                                                    rd.status = RemoteDesktopStatus::Disconnected;
+                                                    rd.status_message = Some(format!("Disconnected from {proto_name} server"));
+                                                }
                                             }
                                             shellumi_remote_desktop::SessionState::Error(err) => {
                                                 rd.status = RemoteDesktopStatus::Error;
@@ -731,7 +733,9 @@ impl Shellumi {
                                             }
                                         }
                                         shellumi_remote_desktop::SessionEvent::Error(err) => {
-                                            rd.error = Some(err);
+                                            rd.status = RemoteDesktopStatus::Error;
+                                            rd.error = Some(err.clone());
+                                            rd.status_message = Some(format!("Error: {err}"));
                                         }
                                         _ => {}
                                     }

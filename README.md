@@ -119,6 +119,12 @@ A capture of the running macOS desktop application:
 - **Real-Time PTY Streaming & Keystroke Forwarding:** Live terminal stdout streaming to relay and participant keystroke injection into host PTY.
 - **Desktop Control Strip:** Host control transfer (`[Grant Control]`), emergency revocation (`[⛔ Revoke to Host]`), and immediate termination (`[✕ End]`).
 
+### 📝 Cross-Platform Structured Logging
+- **Native OS Facility Integration:** Integrated with Apple Unified Logging (`os_log`) on macOS, systemd journal (`journald`) on Linux, and Windows Event Log (`Application` log) on Windows, alongside standard error (`stderr`) formatting.
+- **Privacy & Security First:** Zero telemetry; passwords, private keys, passphrase credentials, and tokens are strictly redacted (`[REDACTED]`).
+- **Configurable Filter:** Defaults to `ERROR` level across all builds to guarantee zero overhead; easily overridden via `SHELLUMI_LOG` or `RUST_LOG` environment variables (see [`docs/LOGGING.md`](docs/LOGGING.md)).
+- **Graceful Fallback:** On Windows platforms without an installer that pre-registers the event source under `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\dev.shellumi.app`, `tracing-os-layer` gracefully skips Windows Event Log writing and routes events solely to stderr.
+
 ---
 
 ## What Works in Alpha (`v0.0.8-alpha`)
@@ -139,6 +145,7 @@ A capture of the running macOS desktop application:
 | **Port Forwarding** | Save and edit local/remote/dynamic SSH tunnel rules, select SSH hosts, and launch real OpenSSH tunnel sessions. |
 | **Backups** | Encrypted AES-256-GCM local vault export and transactional restore with wrong-passphrase rollback and overwrite refusal. |
 | **Google Drive** | Zero-knowledge cloud vault synchronization over Google Drive appDataFolder via SystemHttpTransport (system curl), encrypted diffing, visual conflict resolution modal, and desktop sync panel. |
+| **Logging** | Cross-platform structured logging with Apple Unified Logging (macOS), systemd journal (Linux), Windows Event Log, and stderr fallback. Configurable via `SHELLUMI_LOG` with zero credential logging. |
 | **CLI** | Comprehensive `shellumi-cli` tool for host/group/snippet/workspace management, OpenSSH dispatch, import/export, and automated performance benchmarking. |
 
 See [GUI implementation status](docs/GUI_STATUS.md) for screen-by-screen details, [the feature matrix](docs/FEATURE_MATRIX.md) for scope, and [the roadmap](docs/ROADMAP.md) for remaining work.

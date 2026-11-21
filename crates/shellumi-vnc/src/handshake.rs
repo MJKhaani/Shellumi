@@ -142,9 +142,12 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
             } else if offered.contains(&(SecurityType::VncAuth as u8)) {
                 SecurityType::VncAuth
             } else {
-                return Err(HandshakeError::AuthFailed(
-                    "No compatible security types (server offered neither None nor VncAuth)".into(),
-                ));
+                let err_detail = if offered.contains(&30) || offered.contains(&33) {
+                    "macOS Screen Sharing detected: The Mac server only offered Apple Remote Desktop authentication (types 30/33). To connect using standard VNC: On the target Mac, open System Settings → General → Sharing → Screen Sharing (i) → Computer Settings… and enable 'VNC viewers may control screen with password', then enter that password in Shellumi."
+                } else {
+                    "No compatible security types (server offered neither None nor VncAuth)"
+                };
+                return Err(HandshakeError::AuthFailed(err_detail.into()));
             };
 
             // In RFB 3.7 and 3.8, send 1-byte chosen security type

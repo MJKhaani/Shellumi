@@ -11,6 +11,7 @@ serde_json = "1.0"
 async-channel = "2"
 thiserror = "2"
 zeroize = { version = "1.9", features = ["zeroize_derive", "serde"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

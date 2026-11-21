@@ -54,13 +54,28 @@ pub async fn run_vnc_session(
 
         // 1. Establish TCP connection with 10-second timeout
         let endpoint = config.target_endpoint();
+        tracing::info!(
+            host = %config.host,
+            port = config.port,
+            attempt = attempt,
+            "Connecting to VNC server"
+        );
         let stream_result =
             tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&endpoint)).await;
 
         let stream = match stream_result {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(stream)) => {
+                tracing::debug!(host = %config.host, port = config.port, "VNC TCP connection established");
+                stream
+            }
             Ok(Err(err)) => {
                 let err_msg = format!("Failed to connect to {endpoint}: {err}");
+                tracing::error!(
+                    host = %config.host,
+                    port = config.port,
+                    error = %err,
+                    "Failed to connect to VNC endpoint"
+                );
                 if !policy.enabled || attempt >= policy.max_attempts {
                     let _ = worker
                         .send_event(SessionEvent::Error(err_msg.clone()))
@@ -220,9 +235,13 @@ where
 {
     // 2. Negotiate protocol version
     let version = match negotiate_version(&mut stream).await {
-        Ok(v) => v,
+        Ok(v) => {
+            tracing::debug!(?v, "RFB protocol version negotiated");
+            v
+        }
         Err(err) => {
             let err_msg = err.to_string();
+            tracing::error!(error = %err, "RFB version negotiation failed");
             let _ = worker
                 .send_event(SessionEvent::Error(err_msg.clone()))
                 .await;
@@ -236,6 +255,7 @@ where
     // 3. Negotiate security and authenticate
     if let Err(err) = negotiate_security(&mut stream, version, config.password.as_deref()).await {
         let err_msg = err.to_string();
+        tracing::error!(error = %err, "VNC security authentication failed");
         let _ = worker
             .send_event(SessionEvent::Error(err_msg.clone()))
             .await;
@@ -244,12 +264,22 @@ where
             .await;
         return Err(VncClientError::Handshake(err));
     }
+    tracing::debug!("VNC security handshake completed successfully");
 
     // 4. ClientInit and ServerInit
     let server_init = match client_and_server_init(&mut stream, true).await {
-        Ok(init) => init,
+        Ok(init) => {
+            tracing::info!(
+                width = init.width,
+                height = init.height,
+                name = %init.name,
+                "VNC server initialized"
+            );
+            init
+        }
         Err(err) => {
             let err_msg = err.to_string();
+            tracing::error!(error = %err, "VNC ServerInit failed");
             let _ = worker
                 .send_event(SessionEvent::Error(err_msg.clone()))
                 .await;
@@ -294,6 +324,7 @@ where
     stream.flush().await?;
 
     // 9. Transition to Connected state
+    tracing::info!(width = width, height = height, "VNC session connected");
     let _ = worker
         .send_event(SessionEvent::StateChanged(SessionState::Connected))
         .await;

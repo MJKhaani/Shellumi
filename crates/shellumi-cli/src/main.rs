@@ -312,7 +312,11 @@ fn pkt_type_name(t: u8) -> &'static str {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if let Err(e) = shellumi_core::logging::init_cli_logging() {
+        eprintln!("Warning: Failed to initialize CLI logging: {e}");
+    }
     if let Err(error) = run().await {
+        tracing::error!(error = %error, "CLI command execution failed");
         eprintln!("{error}");
         std::process::exit(1);
     }

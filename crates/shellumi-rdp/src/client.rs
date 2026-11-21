@@ -66,6 +66,9 @@ pub async fn run_rdp_session(
                         .send_event(SessionEvent::Error(err_msg.clone()))
                         .await;
                     let _ = worker
+                        .send_event(SessionEvent::StateChanged(SessionState::Error(err_msg)))
+                        .await;
+                    let _ = worker
                         .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
                         .await;
                     return Err(err);
@@ -114,6 +117,13 @@ async fn run_rdp_session_attempt(
     let _ = worker
         .send_event(SessionEvent::StateChanged(SessionState::Connecting))
         .await;
+
+    tracing::info!(
+        host = %config.host,
+        port = config.port,
+        tls_strict = config.tls_strict,
+        "Initiating RDP connection attempt"
+    );
 
     let rdp_config = RdpClientConfig::from_session_config(config);
     let proxy = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -325,6 +335,13 @@ async fn run_rdp_session_attempt(
 
                             if !connected {
                                 connected = true;
+                                tracing::info!(
+                                    host = %config.host,
+                                    port = config.port,
+                                    width = w,
+                                    height = h,
+                                    "RDP session connected"
+                                );
                                 let _ = worker.send_event(SessionEvent::StateChanged(SessionState::Connected)).await;
                                 let _ = worker.send_event(SessionEvent::RemoteResize { width: w, height: h }).await;
                                 let _ = worker
@@ -395,6 +412,11 @@ async fn run_rdp_session_attempt(
                     },
                     None => {
                         // RDP runner task closed
+                        if !connected && failure.is_none() {
+                            failure = Some(RdpError::Connection(
+                                "RDP server closed connection (authentication rejected or protocol negotiation failed)".into(),
+                            ));
+                        }
                         break;
                     }
                 }
@@ -408,6 +430,17 @@ async fn run_rdp_session_attempt(
 
     match failure {
         Some(err) => (Err(err), connected),
-        None => (Ok(()), connected),
+        None => {
+            if !connected {
+                (
+                    Err(RdpError::Connection(
+                        "RDP session terminated before connection was established".into(),
+                    )),
+                    false,
+                )
+            } else {
+                (Ok(()), true)
+            }
+        }
     }
 }

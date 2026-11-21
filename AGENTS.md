@@ -39,6 +39,7 @@ docs/                            Architecture, roadmap, threat model, feature ma
 5. **No Telemetry or Mandatory Accounts:** The application must remain fully functional offline and locally without an account.
 6. **Verify Before Reporting:** Never claim a test passed or a feature works without compiling and running the test suite.
 7. **Authentic Remote Desktop & Protocol State:** Remote Desktop (RDP and VNC) must use native Rust protocol engines with real network I/O, authentication, and live framebuffer rendering. Never fabricate metrics (e.g. hardcoded 60 FPS or 14 ms latency), fake `Connected` states, simulated desktop canvases, or synthetic input/clipboard events. All UI telemetry must derive from live, measured protocol events.
+8. **Mandatory Logging Compliance (`docs/LOGGING.md`):** All newly written or modified code must strictly follow [`docs/LOGGING.md`](docs/LOGGING.md). Structured logging via `tracing` (`error!`, `warn!`, `info!`, `debug!`, `trace!`) must be integrated across all operations and error paths, including initialization, UI, networking, authentication, synchronization, database operations, background tasks, and error handling. Never silently swallow errors. Never log passwords, tokens, private keys, passphrase credentials, or decryption keys in plaintext; sanitize and redact sensitive fields using `shellumi_core::logging::redact_sensitive` or `Redacted<T>`.
 
 ---
 

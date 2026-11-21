@@ -13,6 +13,7 @@ pub mod group;
 pub mod identity;
 pub mod infrastructure;
 pub mod known_hosts;
+pub mod logging;
 pub mod mobile;
 pub mod palette;
 pub mod protocol;
@@ -96,6 +97,10 @@ pub use infrastructure::{
 pub use known_hosts::{
     format_known_host_entry, parse_known_hosts, verify_host_key, HostKeyMarker,
     HostKeyVerification, KnownHostEntry, KnownHostsError,
+};
+pub use logging::{
+    init_app_logging, init_cli_logging, init_logging, is_logging_initialized, redact_sensitive,
+    LoggingConfig, LoggingInitError, Redacted, REDACTED_PLACEHOLDER,
 };
 pub use mobile::{
     AccessoryBarLayout, BiometricRequirement, MobileCredentialSpec, MobileFfiBridge,

@@ -2746,7 +2746,19 @@ impl Shellumi {
 }
 
 fn main() {
+    if let Err(e) = shellumi_core::logging::init_app_logging() {
+        eprintln!("Warning: Failed to initialize application logging: {e}");
+    }
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "Shellumi desktop application started"
+    );
+
     if std::env::var("SHELLUMI_ASKPASS_MODE").as_deref() == Ok("1") {
+        tracing::debug!("Running in SHELLUMI_ASKPASS_MODE");
         std::process::exit(askpass::run());
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -2763,10 +2775,14 @@ fn main() {
             (Some(path.clone()), false, None)
         }
         _ => {
+            tracing::error!("Invalid command-line arguments: {:?}", args);
             eprintln!("Usage: shellumi-app [--hosts <database-path>]");
             std::process::exit(2);
         }
     };
+    if let Some(ref err) = startup_error {
+        tracing::error!(error = %err, "Data path initialization failed");
+    }
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx: &mut App| {
             cx.quit();

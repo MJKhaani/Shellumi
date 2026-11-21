@@ -675,6 +675,7 @@ impl OAuthCallbackListener {
             .listener
             .accept()
             .map_err(|e| SyncError::Network(e.to_string()))?;
+        let _ = stream.set_nonblocking(false);
         stream
             .set_read_timeout(Some(timeout))
             .map_err(|e| SyncError::Network(e.to_string()))?;

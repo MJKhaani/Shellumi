@@ -656,6 +656,7 @@ fn parse_tags(tags_str: &str) -> Vec<String> {
 impl HostStore {
     /// Open a local database path, or `:memory:` for an ephemeral database.
     pub async fn open(path: &str) -> Result<Self, StorageError> {
+        tracing::debug!(path, "Opening HostStore database");
         let database = Builder::new_local(path).build().await?;
         let mut connection = database.connect()?;
         connection.execute("PRAGMA foreign_keys = ON", ()).await?;
@@ -670,7 +671,19 @@ impl HostStore {
             .get(0)?;
         drop(rows);
         if !(0..=SCHEMA_VERSION).contains(&version) {
+            tracing::error!(
+                version,
+                max_version = SCHEMA_VERSION,
+                "Unsupported database schema version"
+            );
             return Err(StorageError::UnsupportedSchema(version));
+        }
+        if version < SCHEMA_VERSION {
+            tracing::info!(
+                from_version = version,
+                to_version = SCHEMA_VERSION,
+                "Applying database schema migrations"
+            );
         }
         if version == 0 {
             tx.execute(
@@ -2181,6 +2194,11 @@ impl HostStore {
             tx.execute("PRAGMA user_version = 21", ()).await?;
         }
         tx.commit().await?;
+        tracing::debug!(
+            path,
+            version = SCHEMA_VERSION,
+            "Database opened and schema verified"
+        );
         Ok(Self {
             _database: database,
             connection,

@@ -32,12 +32,13 @@ actions!(
 );
 
 pub(crate) struct TextInput {
-    focus_handle: FocusHandle,
+    focus_handle: Option<FocusHandle>,
     content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    last_unmarked: Option<(Range<usize>, String)>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
@@ -272,6 +273,86 @@ impl TextInput {
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
     }
+
+    pub(crate) fn handle_unmark_text(&mut self) {
+        if let Some(range) = self.marked_range.take() {
+            if range.start <= range.end && range.end <= self.content.len() {
+                self.last_unmarked = Some((range.clone(), self.content[range].to_string()));
+            }
+        }
+    }
+
+    pub(crate) fn handle_replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+    ) -> bool {
+        if range_utf16.is_none() && self.marked_range.is_none() {
+            if let Some((unmarked_range, ref unmarked_text)) = self.last_unmarked.take() {
+                // On macOS AppKit with NSTextInputClient, committing an IME or autocorrect composition
+                // may invoke `unmarkText` followed immediately by `insertText:replacementRange:` with the
+                // exact string that was already written to `self.content` during `setMarkedText`.
+                // If so, the text is already committed at the cursor position; do not insert it twice.
+                if unmarked_text == new_text && unmarked_range.end == self.selected_range.start {
+                    return false;
+                }
+            }
+        } else {
+            self.last_unmarked = None;
+        }
+
+        let range = range_utf16
+            .as_ref()
+            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.marked_range.take();
+        self.last_unmarked = None;
+        true
+    }
+
+    pub(crate) fn handle_replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+    ) {
+        self.last_unmarked = None;
+        let range = range_utf16
+            .as_ref()
+            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        if !new_text.is_empty() {
+            self.marked_range = Some(range.start..range.start + new_text.len());
+        } else {
+            self.marked_range = None;
+        }
+        self.selected_range = new_selected_range_utf16
+            .as_ref()
+            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+    }
+
+    pub(crate) fn masked_display_text(&self) -> String {
+        if self.content.is_empty() {
+            self.placeholder.to_string()
+        } else if self.masked {
+            "*".repeat(self.content.chars().count())
+        } else {
+            self.content.to_string()
+        }
+    }
 }
 
 impl EntityInputHandler for TextInput {
@@ -310,7 +391,7 @@ impl EntityInputHandler for TextInput {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.marked_range = None;
+        self.handle_unmark_text();
     }
 
     fn replace_text_in_range(
@@ -320,17 +401,7 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.marked_range.take();
+        let _ = self.handle_replace_text_in_range(range_utf16, new_text);
         cx.notify();
     }
 
@@ -342,26 +413,7 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        if !new_text.is_empty() {
-            self.marked_range = Some(range.start..range.start + new_text.len());
-        } else {
-            self.marked_range = None;
-        }
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
-
+        self.handle_replace_and_mark_text_in_range(range_utf16, new_text, new_selected_range_utf16);
         cx.notify();
     }
 
@@ -462,14 +514,7 @@ impl Element for TextElement {
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), hsla(0.58, 0.13, 0.60, 1.))
         } else {
-            (
-                if input.masked {
-                    "*".repeat(content.len()).into()
-                } else {
-                    content
-                },
-                style.color,
-            )
+            (SharedString::from(input.masked_display_text()), style.color)
         };
 
         let run = TextRun {
@@ -559,7 +604,12 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.input.read(cx).focus_handle.clone();
+        let focus_handle = self
+            .input
+            .read(cx)
+            .focus_handle
+            .clone()
+            .expect("FocusHandle must be present");
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
@@ -640,19 +690,39 @@ impl Render for TextInput {
 
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+        self.focus_handle
+            .clone()
+            .expect("FocusHandle must be present")
     }
 }
 
 impl TextInput {
     pub(crate) fn new(cx: &mut Context<Self>, value: &str, placeholder: &str) -> Self {
         Self {
-            focus_handle: cx.focus_handle().tab_stop(true),
+            focus_handle: Some(cx.focus_handle().tab_stop(true)),
             content: value.to_owned().into(),
             placeholder: placeholder.to_owned().into(),
             selected_range: value.len()..value.len(),
             selection_reversed: false,
             marked_range: None,
+            last_unmarked: None,
+            last_layout: None,
+            last_bounds: None,
+            is_selecting: false,
+            masked: false,
+            bare: false,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self {
+            focus_handle: None,
+            content: value.to_owned().into(),
+            placeholder: "".into(),
+            selected_range: value.len()..value.len(),
+            selection_reversed: false,
+            marked_range: None,
+            last_unmarked: None,
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
@@ -668,6 +738,13 @@ impl TextInput {
         self.masked = true;
         self
     }
+    pub(crate) fn toggle_masked(&mut self, cx: &mut Context<Self>) {
+        self.masked = !self.masked;
+        cx.notify();
+    }
+    pub(crate) fn is_masked(&self) -> bool {
+        self.masked
+    }
     pub(crate) fn value(&self) -> &str {
         &self.content
     }
@@ -675,6 +752,7 @@ impl TextInput {
         self.content = value.to_owned().into();
         self.selected_range = value.len()..value.len();
         self.marked_range = None;
+        self.last_unmarked = None;
         cx.notify();
     }
 }
@@ -701,4 +779,66 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", TabFocusNext, Some("TextInput")),
         KeyBinding::new("shift-tab", TabFocusPrev, Some("TextInput")),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ime_unmark_and_insert_deduplication() {
+        let mut input = TextInput::for_test("");
+
+        // 1. User types "a", macOS IME marks "a"
+        input.handle_replace_and_mark_text_in_range(None, "a", Some(1..1));
+        assert_eq!(input.value(), "a");
+        assert_eq!(input.marked_range, Some(0..1));
+        assert_eq!(input.selected_range, 1..1);
+
+        // 2. macOS IME unmarks "a" (commits it)
+        input.handle_unmark_text();
+        assert_eq!(input.value(), "a");
+        assert_eq!(input.marked_range, None);
+        assert_eq!(input.last_unmarked, Some((0..1, "a".to_string())));
+
+        // 3. macOS AppKit calls insertText with "a"
+        let inserted = input.handle_replace_text_in_range(None, "a");
+        assert!(!inserted, "duplicate commit of 'a' must be ignored");
+        assert_eq!(
+            input.value(),
+            "a",
+            "content must not be duplicated into 'aa'"
+        );
+        assert_eq!(input.last_unmarked, None);
+
+        // 4. Next keypress "b" normal typing
+        let inserted_b = input.handle_replace_text_in_range(None, "b");
+        assert!(inserted_b);
+        assert_eq!(input.value(), "ab");
+    }
+
+    #[test]
+    fn test_masked_display_chars_count_and_toggle() {
+        let mut input = TextInput::for_test("").masked();
+        assert_eq!(input.masked_display_text(), "");
+
+        // ASCII password
+        input.handle_replace_text_in_range(None, "secret");
+        assert_eq!(input.masked_display_text(), "******");
+        assert_eq!(input.masked_display_text().len(), 6);
+
+        // Multi-byte UTF-8 characters (e.g. Persian/Arabic: 2 bytes each in UTF-8)
+        let mut input_fa = TextInput::for_test("").masked();
+        input_fa.handle_replace_text_in_range(None, "سلام"); // 4 Persian characters, 8 bytes in UTF-8
+        assert_eq!(input_fa.content.len(), 8);
+        assert_eq!(
+            input_fa.masked_display_text(),
+            "****",
+            "Must produce 4 stars for 4 characters, not 8 stars"
+        );
+
+        // Toggle mask
+        input_fa.masked = false;
+        assert_eq!(input_fa.masked_display_text(), "سلام");
+    }
 }
