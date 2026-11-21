@@ -1392,6 +1392,72 @@ impl Shellumi {
                                         )
                                     }),
                             )
+                            .children(if let Some(err) = &state.error {
+                                if !is_vnc && (err.contains("authentication rejected") || err.contains("CredSSP")) {
+                                    Some(
+                                        div()
+                                            .w_full()
+                                            .p_2p5()
+                                            .rounded_md()
+                                            .bg(rgb(0x1e1b2e))
+                                            .border_1()
+                                            .border_color(rgb(0x352e4d))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0xbb86fc))
+                                                    .child("💡 Troubleshooting Windows NLA Authentication"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                    .child(
+                                                        "1. Passwords are required for NLA (blank passwords are prohibited by Windows policy).\n\
+                                                         2. Verify the account is permitted in Windows Settings → Remote Desktop → User accounts.\n\
+                                                         3. For a local Windows account, try setting Domain to '.' or the remote PC's computer name."
+                                                    ),
+                                            ),
+                                    )
+                                } else if is_vnc && (err.contains("Authentication rejected") || err.contains("security types")) {
+                                    Some(
+                                        div()
+                                            .w_full()
+                                            .p_2p5()
+                                            .rounded_md()
+                                            .bg(rgb(0x1e1b2e))
+                                            .border_1()
+                                            .border_color(rgb(0x352e4d))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0xbb86fc))
+                                                    .child("💡 Troubleshooting macOS Screen Sharing"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                    .child(
+                                                        "macOS default ARD authentication requires standard VNC password access.\n\
+                                                         On target Mac: System Settings → General → Sharing → Screen Sharing (i) → Computer Settings… → enable 'VNC viewers may control screen with password'."
+                                                    ),
+                                            ),
+                                    )
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            })
                             .child(
                                 div()
                                     .flex()

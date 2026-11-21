@@ -197,12 +197,24 @@ async fn run_rdp_session_attempt(
                 }
             };
 
-            rt.block_on(async move {
-                tokio::select! {
-                    _ = client.run() => {}
-                    _ = &mut stop_rx => {}
-                }
-            });
+            let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rt.block_on(async move {
+                    tokio::select! {
+                        _ = client.run() => {}
+                        _ = &mut stop_rx => {}
+                    }
+                });
+            }));
+            if let Err(panic_info) = run_res {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Non-string panic payload in RDP engine".to_string()
+                };
+                tracing::error!(panic = %msg, "RDP runner thread panicked");
+            }
         }) {
         Ok(t) => t,
         Err(e) => {
@@ -404,6 +416,7 @@ async fn run_rdp_session_attempt(
                         }
                         RdpOutputEvent::ConnectionFailure(err) => {
                             let err_msg = format!("RDP connection failed: {err}");
+                            tracing::warn!(error = %err, "IronRDP client reported connection failure");
                             sound_control.set_active(false);
                             microphone_control.set_recording(false);
                             let _ = input_sender.send(RdpInputEvent::Close);
@@ -415,6 +428,7 @@ async fn run_rdp_session_attempt(
                                 Ok(r) => format!("Session terminated gracefully: {r:?}"),
                                 Err(e) => format!("Session terminated with error: {e}"),
                             };
+                            tracing::info!(reason = %reason, "IronRDP client reported termination");
                             sound_control.set_active(false);
                             microphone_control.set_recording(false);
                             let _ = input_sender.send(RdpInputEvent::Close);
@@ -425,6 +439,7 @@ async fn run_rdp_session_attempt(
                     },
                     None => {
                         // RDP runner task closed
+                        tracing::warn!("IronRDP output event channel closed (runner exited)");
                         if !connected && failure.is_none() {
                             failure = Some(RdpError::Connection(
                                 "RDP server closed connection (authentication rejected or protocol negotiation failed)".into(),
@@ -439,7 +454,22 @@ async fn run_rdp_session_attempt(
 
     *proxy.lock().unwrap() = None;
     let _ = stop_tx.send(());
-    let _ = rdp_thread.join();
+    match rdp_thread.join() {
+        Ok(()) => {}
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Non-string thread panic payload in RDP engine".to_string()
+            };
+            tracing::error!(panic = %msg, "RDP runner thread joined with panic");
+            if failure.is_none() {
+                failure = Some(RdpError::Connection(format!("RDP engine crashed: {msg}")));
+            }
+        }
+    }
 
     match failure {
         Some(err) => (Err(err), connected),

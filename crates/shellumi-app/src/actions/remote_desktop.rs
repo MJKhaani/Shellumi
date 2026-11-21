@@ -546,6 +546,8 @@ impl Shellumi {
                     let pwd = input.read(cx).value().trim().to_string();
                     if !pwd.is_empty() {
                         rd.password = Some(pwd);
+                    } else {
+                        rd.password = None;
                     }
                 }
 
