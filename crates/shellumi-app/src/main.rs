@@ -299,6 +299,7 @@ enum HostState {
     NoDatabase,
     Loading,
     Loaded(Vec<SavedHost>),
+    MigrationRequired(String),
     Error(String),
 }
 

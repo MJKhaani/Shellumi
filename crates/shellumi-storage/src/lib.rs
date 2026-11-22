@@ -18,7 +18,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -467,6 +467,7 @@ pub struct HostStore {
     _database: Database,
     connection: Connection,
     host_vault_id: shellumi_core::VaultId,
+    db_path: Option<String>,
 }
 
 /// Restricted host-only access; this does not isolate identities, groups, or secrets.
@@ -2288,6 +2289,29 @@ impl HostStore {
 
             tx.execute("PRAGMA user_version = 21", ()).await?;
         }
+        if version < 22 {
+            let mut columns = tx.query("PRAGMA table_info(vault_contexts)", ()).await?;
+            let mut has_sync_enabled = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_sync_enabled |= name == "sync_enabled";
+            }
+            drop(columns);
+            if !has_sync_enabled {
+                tx.execute(
+                    "ALTER TABLE vault_contexts ADD COLUMN sync_enabled INTEGER NOT NULL DEFAULT 0",
+                    (),
+                )
+                .await?;
+                // Default local vault always has sync enabled
+                tx.execute(
+                    "UPDATE vault_contexts SET sync_enabled = 1 WHERE id = ?1",
+                    (LEGACY_LOCAL_VAULT_ID,),
+                )
+                .await?;
+            }
+            tx.execute("PRAGMA user_version = 22", ()).await?;
+        }
         tx.commit().await?;
         tracing::debug!(
             path,
@@ -2299,7 +2323,13 @@ impl HostStore {
             connection,
             host_vault_id: shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID)
                 .map_err(StorageError::InvalidVaultIdentity)?,
+            db_path: Some(path.to_string()),
         })
+    }
+
+    /// Returns the database path if opened with a filesystem path.
+    pub fn db_path(&self) -> Option<&str> {
+        self.db_path.as_deref()
     }
 
     /// Sets the active scoped vault ID for this store instance.
@@ -2448,6 +2478,42 @@ impl HostStore {
         } else {
             Ok(None)
         }
+    }
+
+    /// Checks whether Google Drive synchronization is enabled for a given vault context.
+    pub async fn is_vault_sync_enabled(&self, vault_id: &str) -> Result<bool, StorageError> {
+        if vault_id == LEGACY_LOCAL_VAULT_ID {
+            return Ok(true);
+        }
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT sync_enabled FROM vault_contexts WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let val: i64 = row.get(0).unwrap_or(0);
+            Ok(val > 0)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Sets whether Google Drive synchronization is enabled for a given vault context.
+    pub async fn set_vault_sync_enabled(
+        &mut self,
+        vault_id: &str,
+        enabled: bool,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_contexts SET sync_enabled = ?1 WHERE id = ?2",
+                (if enabled { 1 } else { 0 }, vault_id),
+            )
+            .await?;
+        Ok(rows > 0)
     }
 
     /// Retrieves the wrapped DEK envelope for a vault context.
@@ -2617,11 +2683,19 @@ impl HostStore {
                 .get_vault_recovery_envelope(ctx.id().as_str())
                 .await?
                 .is_some();
+            let is_sync_enabled = if ctx.id().as_str() == LEGACY_LOCAL_VAULT_ID {
+                true
+            } else {
+                self.is_vault_sync_enabled(ctx.id().as_str())
+                    .await
+                    .unwrap_or(false)
+            };
             dir.upsert(shellumi_core::VaultDirectoryEntry {
                 id: ctx.id().as_str().to_string(),
                 name,
                 location,
                 has_recovery_envelope: has_recovery,
+                sync_enabled: is_sync_enabled,
                 created_at: now,
                 updated_at: now,
             });
@@ -2677,13 +2751,13 @@ impl HostStore {
         let existing = self.list_vault_contexts().await?;
         let mut newly_registered = 0;
         for entry in directory.entries {
+            let Ok(vid) = shellumi_core::VaultId::new(&entry.id) else {
+                continue;
+            };
             if !existing
                 .iter()
                 .any(|(_, ctx)| ctx.id().as_str() == entry.id)
             {
-                let Ok(vid) = shellumi_core::VaultId::new(&entry.id) else {
-                    continue;
-                };
                 let loc = match entry.location {
                     shellumi_core::VaultDirectoryLocation::Local => {
                         shellumi_core::VaultLocation::Local
@@ -2709,7 +2783,14 @@ impl HostStore {
                 };
                 let ctx = shellumi_core::VaultContext::new(vid, loc);
                 self.register_vault_context(&entry.name, &ctx).await?;
+                if entry.sync_enabled {
+                    let _ = self.set_vault_sync_enabled(&entry.id, true).await;
+                }
                 newly_registered += 1;
+            } else if entry.id != LEGACY_LOCAL_VAULT_ID {
+                let _ = self
+                    .set_vault_sync_enabled(&entry.id, entry.sync_enabled)
+                    .await;
             }
         }
         Ok(newly_registered)
@@ -5182,7 +5263,8 @@ impl HostStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut vault = shellumi_core::SyncVault::new(format!("vault-{device_id}-{now}"), now);
+        let mut vault = shellumi_core::SyncVault::new(self.vault_id().as_str(), now);
+        vault.schema_version = 2;
 
         // Include encrypted directory describing other vaults during default-vault sync
         if self.vault_id().as_str() == LEGACY_LOCAL_VAULT_ID {
@@ -5194,8 +5276,37 @@ impl HostStore {
             }
         }
 
-        // Include key envelope for this vault if available
-        if let Ok(Some(env_str)) = self
+        // Include key envelope for this vault:
+        // Try to load primary envelope from VaultManifest on disk first
+        let manifest_opt = if let Some(ref dbp) = self.db_path {
+            let p = std::path::Path::new(dbp);
+            let parent = p.parent().unwrap_or(p);
+            let root = if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            let vid = self.vault_id().as_str();
+            let mfile = root
+                .join("vault_manifests")
+                .join(format!("{vid}.manifest.json"));
+            if mfile.exists() {
+                shellumi_core::VaultManifest::load_from_path(&mfile).ok()
+            } else {
+                let direct_mfile = std::path::PathBuf::from(format!("{dbp}.manifest"));
+                if direct_mfile.exists() {
+                    shellumi_core::VaultManifest::load_from_path(&direct_mfile).ok()
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(manifest) = manifest_opt {
+            vault.key_envelope = Some(manifest.primary_envelope);
+        } else if let Ok(Some(env_str)) = self
             .get_vault_recovery_envelope(self.vault_id().as_str())
             .await
         {
@@ -5458,6 +5569,28 @@ impl HostStore {
             if let Ok(json) = serde_json::to_string(key_env) {
                 let vid = self.vault_id().as_str().to_string();
                 let _ = self.save_vault_recovery_envelope(&vid, &json).await;
+            }
+            // Update manifest on disk if primary envelope rotated
+            if let Some(ref dbp) = self.db_path {
+                let p = std::path::Path::new(dbp);
+                let parent = p.parent().unwrap_or(p);
+                let root = if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+                    parent.parent().unwrap_or(parent)
+                } else {
+                    parent
+                };
+                let vid = self.vault_id().as_str();
+                let mfile = root
+                    .join("vault_manifests")
+                    .join(format!("{vid}.manifest.json"));
+                if mfile.exists() {
+                    if let Ok(mut manifest) = shellumi_core::VaultManifest::load_from_path(&mfile) {
+                        if manifest.primary_envelope != *key_env {
+                            manifest.primary_envelope = key_env.clone();
+                            let _ = manifest.save_to_path(&mfile);
+                        }
+                    }
+                }
             }
         }
 
@@ -5785,6 +5918,18 @@ impl HostStore {
         let import_res = store.import_vault(&dek_passphrase, sync_vault).await;
         if import_res.is_err() {
             store.import_vault(options.password, sync_vault).await?;
+        }
+
+        if options.vault_id.as_str() == LEGACY_LOCAL_VAULT_ID {
+            if let Some(ref enc_dir) = sync_vault.encrypted_directory {
+                let _ = store
+                    .import_encrypted_vault_directory(
+                        options.vault_id,
+                        Some(&recovered_dek),
+                        enc_dir,
+                    )
+                    .await;
+            }
         }
 
         Ok(store)
@@ -9453,10 +9598,13 @@ mod tests {
         // 3. Run migration with explicit user credentials
         let cred_store = shellumi_core::EphemeralCredentialStore::new();
         let rec_code = shellumi_core::VaultKey::generate_recovery_code().unwrap();
+        let mut sec_passwords = std::collections::HashMap::new();
+        sec_passwords.insert("corp-prod".to_string(), "CorpProd#Secure2026!".to_string());
         let creds = MigrationCredentials {
             default_password: Some("M@sterVault2026!".to_string()),
             default_recovery_code: Some(rec_code),
-            secondary_passwords: std::collections::HashMap::new(),
+            secondary_passwords: sec_passwords,
+            secondary_recovery_codes: std::collections::HashMap::new(),
         };
         let report = MigrationEngine::migrate_legacy_database_with_credentials(
             base_dir,
@@ -9600,6 +9748,8 @@ mod tests {
         std::fs::create_dir_all(&vaults_dir).unwrap();
         let partial_db_path = vaults_dir.join("default.db");
         std::fs::write(&partial_db_path, b"corrupted partial sqlite file").unwrap();
+        let preexisting_file = vaults_dir.join("unrelated_persisted.txt");
+        std::fs::write(&preexisting_file, b"should not be deleted").unwrap();
 
         // Verify that is_migration_needed is TRUE despite default.db existing (does not treat default.db existence as completion!)
         assert!(MigrationEngine::is_migration_needed(base_dir));
@@ -9611,6 +9761,7 @@ mod tests {
             default_password: Some("IntErrUptedP@ss123!".to_string()),
             default_recovery_code: Some(rec_code),
             secondary_passwords: std::collections::HashMap::new(),
+            secondary_recovery_codes: std::collections::HashMap::new(),
         };
 
         let report = MigrationEngine::migrate_legacy_database_with_credentials(
@@ -9626,10 +9777,15 @@ mod tests {
         assert_eq!(report.vaults_migrated, 1);
         assert_eq!(report.default_records_migrated, 2);
 
-        // 4. Verify verified activation: marker created, legacy db renamed
+        // 4. Verify verified activation: marker created, legacy db renamed, pre-existing files preserved
         assert!(vaults_dir.join(".migration_complete").exists());
         assert!(!legacy_db_path.exists());
         assert!(base_dir.join("shellumi.db.migrated").exists());
+        assert!(preexisting_file.exists());
+        assert_eq!(
+            std::fs::read(&preexisting_file).unwrap(),
+            b"should not be deleted"
+        );
         assert!(!MigrationEngine::is_migration_needed(base_dir));
 
         // 5. Open migrated default vault with decrypted key and verify records
@@ -9775,5 +9931,322 @@ mod tests {
         assert!(!raw_disk.starts_with(b"SQLite format 3\0"));
         assert!(!raw_disk.windows(15).any(|w| w == b"fin-prod-server"));
         assert!(!raw_disk.windows(9).any(|w| w == b"10.0.0.50"));
+    }
+
+    #[tokio::test]
+    async fn test_corrupted_envelope_and_mismatched_vault_rejected_on_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_db = temp.path().join("vaults").join("bad_env.db");
+        let manifests_dir = temp.path().join("vault_manifests");
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+
+        let vid = shellumi_core::VaultId::new("vlt-corrupt-001").unwrap();
+        let key = shellumi_core::VaultKey::generate().unwrap();
+        let env = key
+            .wrap_with_password(&vid, "CorrectPassword123!#")
+            .unwrap();
+
+        // 1. Corrupt the envelope ciphertext
+        let mut corrupted_env = env.clone();
+        corrupted_env.ciphertext = "AAAACorruptedCiphertextTag1234567890==".to_string();
+
+        let mut sync_vault = shellumi_core::SyncVault::new(vid.as_str(), 1);
+        sync_vault.key_envelope = Some(corrupted_env);
+
+        let opts = RestoreVaultOptions {
+            vault_id: &vid,
+            vault_name: "Corrupt Vault",
+            password: "CorrectPassword123!#",
+            target_db_path: &target_db,
+            manifests_dir: &manifests_dir,
+            cred_store: Some(&cred_store),
+            remember_in_keychain: false,
+        };
+
+        // Restoring with corrupted ciphertext MUST fail
+        let res = HostStore::restore_vault_from_sync(&sync_vault, &opts).await;
+        assert!(res.is_err());
+        assert!(
+            !target_db.exists(),
+            "Target database should not exist after failed restore"
+        );
+
+        // 2. Mismatched vault ID (AAD binding violation)
+        let other_vid = shellumi_core::VaultId::new("vlt-other-999").unwrap();
+        let other_opts = RestoreVaultOptions {
+            vault_id: &other_vid,
+            vault_name: "Other Vault",
+            password: "CorrectPassword123!#",
+            target_db_path: &target_db,
+            manifests_dir: &manifests_dir,
+            cred_store: Some(&cred_store),
+            remember_in_keychain: false,
+        };
+        let mut mismatch_sync_vault = shellumi_core::SyncVault::new(other_vid.as_str(), 1);
+        mismatch_sync_vault.key_envelope = Some(env); // env was encrypted with vid, not other_vid!
+
+        let mismatch_res =
+            HostStore::restore_vault_from_sync(&mismatch_sync_vault, &other_opts).await;
+        assert!(mismatch_res.is_err());
+        assert!(!target_db.exists());
+    }
+
+    #[tokio::test]
+    async fn test_second_device_default_and_secondary_restoration_with_registry() {
+        let temp_dev1 = tempfile::tempdir().unwrap();
+        let dev1_base = temp_dev1.path();
+        let dev1_vaults = dev1_base.join("vaults");
+        let dev1_manifests = dev1_base.join("vault_manifests");
+        std::fs::create_dir_all(&dev1_vaults).unwrap();
+        std::fs::create_dir_all(&dev1_manifests).unwrap();
+
+        let dev1_cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let default_vid = shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        let secondary_vid = shellumi_core::VaultId::new("vlt-sec-opted-in").unwrap();
+        let unshared_vid = shellumi_core::VaultId::new("vlt-unshared-local").unwrap();
+
+        let default_pwd = "DefaultMasterPassword#2026!";
+        let secondary_pwd = "SecondaryCustomPassword#2026!";
+
+        // Provision default vault
+        let (def_dek, def_env, _) = shellumi_core::VaultKeyManager::provision_new_vault(
+            &dev1_cred_store,
+            &default_vid,
+            default_pwd,
+            true,
+            None,
+        )
+        .unwrap();
+        let def_manifest = shellumi_core::VaultManifest::new(
+            default_vid.as_str().to_string(),
+            "Default Vault".into(),
+            def_env.clone(),
+            None,
+            true,
+        );
+        def_manifest
+            .save_to_path(&dev1_manifests.join(format!("{}.manifest.json", default_vid.as_str())))
+            .unwrap();
+
+        let def_db_path = dev1_vaults.join("default.db");
+        let mut def_store = HostStore::open_with_key(def_db_path.to_str().unwrap(), Some(&def_dek))
+            .await
+            .unwrap();
+
+        // Provision secondary opted-in vault
+        let (sec_dek, sec_env, _) = shellumi_core::VaultKeyManager::provision_new_vault(
+            &dev1_cred_store,
+            &secondary_vid,
+            secondary_pwd,
+            true,
+            None,
+        )
+        .unwrap();
+        let sec_manifest = shellumi_core::VaultManifest::new(
+            secondary_vid.as_str().to_string(),
+            "Sec Opted In".into(),
+            sec_env.clone(),
+            None,
+            true,
+        );
+        sec_manifest
+            .save_to_path(&dev1_manifests.join(format!("{}.manifest.json", secondary_vid.as_str())))
+            .unwrap();
+
+        let sec_db_path = dev1_vaults.join(format!("{}.db", secondary_vid.as_str()));
+        let mut sec_store = HostStore::open_with_key(sec_db_path.to_str().unwrap(), Some(&sec_dek))
+            .await
+            .unwrap();
+        sec_store.set_vault_id(secondary_vid.clone());
+        let sec_dest = SshDestination::new("192.168.10.5", "ops", 22).unwrap();
+        sec_store
+            .add("opted-in-host", &sec_dest, None, &[], None, None)
+            .await
+            .unwrap();
+
+        // Register all vaults in default.db directory
+        let mut dir = shellumi_core::VaultDirectory::new();
+        dir.upsert(shellumi_core::VaultDirectoryEntry {
+            id: default_vid.as_str().to_string(),
+            name: "Default Vault".to_string(),
+            location: shellumi_core::VaultDirectoryLocation::Local,
+            has_recovery_envelope: false,
+            sync_enabled: true,
+            created_at: 1000,
+            updated_at: 1000,
+        });
+        dir.upsert(shellumi_core::VaultDirectoryEntry {
+            id: secondary_vid.as_str().to_string(),
+            name: "Sec Opted In".to_string(),
+            location: shellumi_core::VaultDirectoryLocation::Local,
+            has_recovery_envelope: false,
+            sync_enabled: true,
+            created_at: 1000,
+            updated_at: 1000,
+        });
+        dir.upsert(shellumi_core::VaultDirectoryEntry {
+            id: unshared_vid.as_str().to_string(),
+            name: "Unshared Local".to_string(),
+            location: shellumi_core::VaultDirectoryLocation::Local,
+            has_recovery_envelope: false,
+            sync_enabled: false,
+            created_at: 1000,
+            updated_at: 1000,
+        });
+
+        let enc_env = dir.encrypt(&default_vid, &def_dek).unwrap();
+        let envelope_json = serde_json::to_string(&enc_env).unwrap();
+        def_store
+            .import_encrypted_vault_directory(&default_vid, Some(&def_dek), &envelope_json)
+            .await
+            .unwrap();
+
+        // Export snapshots for cloud
+        let def_passphrase = hex::encode(def_dek.expose_bytes());
+        let mut def_sync = def_store
+            .export_vault(&def_passphrase, "dev-1")
+            .await
+            .unwrap();
+        def_sync.key_envelope = Some(def_env);
+
+        let sec_passphrase = hex::encode(sec_dek.expose_bytes());
+        let mut sec_sync = sec_store
+            .export_vault(&sec_passphrase, "dev-1")
+            .await
+            .unwrap();
+        sec_sync.key_envelope = Some(sec_env);
+
+        // ===================================================================
+        // Device 2: Restore from cloud payloads
+        // ===================================================================
+        let temp_dev2 = tempfile::tempdir().unwrap();
+        let dev2_base = temp_dev2.path();
+        let dev2_vaults = dev2_base.join("vaults");
+        let dev2_manifests = dev2_base.join("vault_manifests");
+        let dev2_cred_store = shellumi_core::EphemeralCredentialStore::new();
+
+        // 1. Restore default vault and registry
+        let def_opts = RestoreVaultOptions {
+            vault_id: &default_vid,
+            vault_name: "Default Vault",
+            password: default_pwd,
+            target_db_path: &dev2_vaults.join("default.db"),
+            manifests_dir: &dev2_manifests,
+            cred_store: Some(&dev2_cred_store),
+            remember_in_keychain: false,
+        };
+        let dev2_def_store = HostStore::restore_vault_from_sync(&def_sync, &def_opts)
+            .await
+            .unwrap();
+
+        // Verify default directory on Device 2 has all 3 vaults
+        let restored_dir = dev2_def_store.build_vault_directory().await.unwrap();
+        assert_eq!(restored_dir.entries.len(), 3);
+        assert!(restored_dir.get(default_vid.as_str()).unwrap().sync_enabled);
+        assert!(
+            restored_dir
+                .get(secondary_vid.as_str())
+                .unwrap()
+                .sync_enabled
+        );
+        assert!(
+            !restored_dir
+                .get(unshared_vid.as_str())
+                .unwrap()
+                .sync_enabled
+        );
+
+        // 2. Restore secondary opted-in vault independently with its own password
+        let sec_opts = RestoreVaultOptions {
+            vault_id: &secondary_vid,
+            vault_name: "Sec Opted In",
+            password: secondary_pwd,
+            target_db_path: &dev2_vaults.join(format!("{}.db", secondary_vid.as_str())),
+            manifests_dir: &dev2_manifests,
+            cred_store: Some(&dev2_cred_store),
+            remember_in_keychain: false,
+        };
+        let dev2_sec_store = HostStore::restore_vault_from_sync(&sec_sync, &sec_opts)
+            .await
+            .unwrap();
+
+        let sec_hosts = dev2_sec_store.list().await.unwrap();
+        assert_eq!(sec_hosts.len(), 1);
+        assert_eq!(sec_hosts[0].name, "opted-in-host");
+
+        // 3. Verify unsynchronized vault does not have a local database on Device 2
+        let unshared_db = dev2_vaults.join(format!("{}.db", unshared_vid.as_str()));
+        assert!(
+            !unshared_db.exists(),
+            "Unshared local vault should not be restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_migration_failure_prevents_startup_without_modifying_user_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path();
+        let legacy_db_path = base_dir.join("shellumi.db");
+
+        // 1. Setup legacy database with a secondary vault
+        {
+            let mut store = HostStore::open(legacy_db_path.to_str().unwrap())
+                .await
+                .unwrap();
+            let dest = SshDestination::new("192.168.1.10", "alice", 22).unwrap();
+            store
+                .add("production-box", &dest, None, &[], None, None)
+                .await
+                .unwrap();
+            let corp_vid = shellumi_core::VaultId::new("corp-ops").unwrap();
+            let corp_ctx = shellumi_core::VaultContext::new(
+                corp_vid.clone(),
+                shellumi_core::VaultLocation::Local,
+            );
+            store
+                .register_vault_context("Corp Ops", &corp_ctx)
+                .await
+                .unwrap();
+        }
+
+        let original_bytes = std::fs::read(&legacy_db_path).unwrap();
+
+        // 2. Attempt migration without providing the secondary vault's password
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let creds = MigrationCredentials {
+            default_password: Some("ValidMasterPass#123".to_string()),
+            default_recovery_code: None,
+            secondary_passwords: std::collections::HashMap::new(), // Missing corp-ops password!
+            secondary_recovery_codes: std::collections::HashMap::new(),
+        };
+
+        let result = MigrationEngine::migrate_legacy_database_with_credentials(
+            base_dir,
+            None,
+            Some(&creds),
+            &cred_store,
+        )
+        .await;
+
+        // Must fail with MigrationRequired error
+        assert!(result.is_err());
+        let err_str = result.err().unwrap().to_string();
+        assert!(err_str.contains("MigrationRequired"));
+        assert!(err_str.contains("corp-ops"));
+
+        // 3. User data must NOT be modified
+        assert!(legacy_db_path.exists());
+        let current_bytes = std::fs::read(&legacy_db_path).unwrap();
+        assert_eq!(current_bytes, original_bytes);
+
+        // No completion marker and no .migrated file
+        assert!(!base_dir.join("shellumi.db.migrated").exists());
+        assert!(!base_dir.join("vaults").join(".migration_complete").exists());
+
+        // Migration staging directory was cleanly removed
+        assert!(!base_dir.join("vaults").join(".migration_staging").exists());
+
+        // is_migration_needed is still true, halting startup safely
+        assert!(MigrationEngine::is_migration_needed(base_dir));
     }
 }

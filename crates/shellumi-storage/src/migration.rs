@@ -5,8 +5,10 @@
 //! - `Shellumi/vaults/<vault-id>.db` (for secondary vaults, holding only their own records)
 //!
 //! Each database is encrypted with its own random 256-bit DEK using AES-256-GCM.
+//! Staged in dedicated `.migration_staging/` directory with `migration_journal.json` for crash safety.
 //! Server credentials are migrated into OS-protected credential storage (`CredentialStore`).
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -33,6 +35,30 @@ pub struct MigrationCredentials {
     pub default_password: Option<String>,
     pub default_recovery_code: Option<String>,
     pub secondary_passwords: HashMap<String, String>,
+    pub secondary_recovery_codes: HashMap<String, String>,
+}
+
+/// Persistent journal documenting progress through migration staging.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrationJournal {
+    pub started_at: u64,
+    pub legacy_db_path: PathBuf,
+    pub backup_path: PathBuf,
+    pub staged_vaults: Vec<StagedVaultMetadata>,
+    pub completed_stages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StagedVaultMetadata {
+    pub vault_id: String,
+    pub name: String,
+    pub is_default: bool,
+    pub db_filename: String,
+    pub manifest_filename: String,
+    pub host_count: usize,
+    pub snippet_count: usize,
+    pub workspace_count: usize,
+    pub identity_count: usize,
 }
 
 pub struct MigrationEngine;
@@ -76,44 +102,73 @@ impl MigrationEngine {
             });
         }
 
-        // Clean up partial files from interrupted previous migration attempt
-        let default_db_path = vaults_dir.join("default.db");
-        if default_db_path.exists() {
+        // Dedicated staging directory: NEVER touch or delete pre-existing vaults/ or vault_manifests/
+        let staging_dir = vaults_dir.join(".migration_staging");
+        if staging_dir.exists() {
             tracing::warn!(
-                "Previous database migration was interrupted before completion. Cleaning up partial vault files..."
+                staging_path = %staging_dir.display(),
+                "Previous database migration staging was interrupted. Cleaning up staging directory only..."
             );
-            if let Ok(entries) = std::fs::read_dir(&vaults_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-            }
+            let _ = std::fs::remove_dir_all(&staging_dir);
         }
 
+        let staging_vaults_dir = staging_dir.join("vaults");
+        let staging_manifests_dir = staging_dir.join("vault_manifests");
+        std::fs::create_dir_all(&staging_vaults_dir).map_err(|e| {
+            StorageError::Serialization(format!("failed to create staging vaults directory: {e}"))
+        })?;
+        std::fs::create_dir_all(&staging_manifests_dir).map_err(|e| {
+            StorageError::Serialization(format!(
+                "failed to create staging manifests directory: {e}"
+            ))
+        })?;
+
+        let res = Self::migrate_staging_internal(
+            base_dir,
+            &vaults_dir,
+            &legacy_db_path,
+            &complete_marker,
+            &staging_dir,
+            &staging_vaults_dir,
+            &staging_manifests_dir,
+            default_dek,
+            credentials,
+            cred_store,
+        )
+        .await;
+
+        if res.is_err() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+        }
+        res
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn migrate_staging_internal(
+        base_dir: &Path,
+        vaults_dir: &Path,
+        legacy_db_path: &Path,
+        complete_marker: &Path,
+        staging_dir: &Path,
+        staging_vaults_dir: &Path,
+        staging_manifests_dir: &Path,
+        default_dek: Option<&VaultKey>,
+        credentials: Option<&MigrationCredentials>,
+        cred_store: &dyn CredentialStore,
+    ) -> Result<MigrationReport, StorageError> {
         info!(
             legacy_path = %legacy_db_path.display(),
-            target_vaults = %vaults_dir.display(),
-            "Starting legacy database migration to separate encrypted vault databases"
+            staging_path = %staging_dir.display(),
+            "Starting legacy database migration in dedicated staging directory"
         );
 
-        // 1. Create directory structure
-        std::fs::create_dir_all(&vaults_dir).map_err(|e| {
-            StorageError::Serialization(format!("failed to create vaults directory: {e}"))
-        })?;
-        let manifests_dir = base_dir.join("vault_manifests");
-        std::fs::create_dir_all(&manifests_dir).map_err(|e| {
-            StorageError::Serialization(format!("failed to create vault_manifests directory: {e}"))
-        })?;
-
-        // 2. Create timestamped backup of the original database and WAL/SHM files
+        // 1. Create timestamped backup of the original database and WAL/SHM files
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let backup_path = base_dir.join(format!("shellumi.db.backup.{timestamp}"));
-        std::fs::copy(&legacy_db_path, &backup_path).map_err(|e| {
+        std::fs::copy(legacy_db_path, &backup_path).map_err(|e| {
             StorageError::Serialization(format!("failed to create legacy database backup: {e}"))
         })?;
         let legacy_wal = base_dir.join("shellumi.db-wal");
@@ -131,19 +186,32 @@ impl MigrationEngine {
             );
         }
 
+        let journal_path = staging_dir.join("migration_journal.json");
+        let mut journal = MigrationJournal {
+            started_at: timestamp,
+            legacy_db_path: legacy_db_path.to_path_buf(),
+            backup_path: backup_path.clone(),
+            staged_vaults: Vec::new(),
+            completed_stages: vec!["backup_created".to_string()],
+        };
+        let _ = std::fs::write(
+            &journal_path,
+            serde_json::to_string_pretty(&journal).unwrap_or_default(),
+        );
+
         let mut report = MigrationReport {
             legacy_db_found: true,
             backup_path: Some(backup_path),
             ..Default::default()
         };
 
-        // 3. Open the legacy database
+        // 2. Open the legacy database
         let legacy_str = legacy_db_path
             .to_str()
             .ok_or_else(|| StorageError::Serialization("invalid path encoding".into()))?;
         let legacy_store = HostStore::open(legacy_str).await?;
 
-        // 4. Resolve DEK for default vault
+        // 3. Resolve DEK for default vault
         let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         let default_key = if let Some(k) = default_dek {
@@ -153,10 +221,12 @@ impl MigrationEngine {
         } else if let Some(creds) = credentials {
             if let Some(ref pwd) = creds.default_password {
                 shellumi_core::validate_vault_password(pwd).map_err(|e| {
-                    StorageError::Serialization(format!("Password policy violation: {e}"))
+                    StorageError::Serialization(format!(
+                        "Default vault password policy violation: {e}"
+                    ))
                 })?;
                 let new_key = VaultKey::generate().map_err(|e| {
-                    StorageError::Serialization(format!("key generation error: {e}"))
+                    StorageError::Serialization(format!("default key generation error: {e}"))
                 })?;
                 let primary_env = new_key
                     .wrap_with_password(&default_vid, pwd)
@@ -178,7 +248,7 @@ impl MigrationEngine {
                     true,
                 );
                 let manifest_path =
-                    manifests_dir.join(format!("{LEGACY_LOCAL_VAULT_ID}.manifest.json"));
+                    staging_manifests_dir.join(format!("{LEGACY_LOCAL_VAULT_ID}.manifest.json"));
                 manifest
                     .save_to_path(&manifest_path)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -186,23 +256,24 @@ impl MigrationEngine {
                 new_key
             } else {
                 return Err(StorageError::Serialization(
-                    "Migration requires user credentials or an unlocked default vault key".into(),
+                    "MigrationRequired: Default vault requires an explicit user password.".into(),
                 ));
             }
         } else {
             return Err(StorageError::Serialization(
-                "Migration requires user credentials or an unlocked default vault key".into(),
+                "MigrationRequired: Default vault requires an explicit user password.".into(),
             ));
         };
 
-        // 5. Open/create encrypted default vault database
-        let default_db_str = default_db_path
+        // 4. Open/create encrypted default vault database in staging directory
+        let staged_default_db_path = staging_vaults_dir.join("default.db");
+        let staged_default_db_str = staged_default_db_path
             .to_str()
             .ok_or_else(|| StorageError::Serialization("invalid path encoding".into()))?;
         let mut default_store =
-            HostStore::open_with_key(default_db_str, Some(&default_key)).await?;
+            HostStore::open_with_key(staged_default_db_str, Some(&default_key)).await?;
 
-        // 6. Migrate Registry into default.db
+        // 5. Migrate Registry into default.db
         let contexts = legacy_store.list_vault_contexts().await?;
         for (name, ctx) in &contexts {
             default_store.register_vault_context(name, ctx).await?;
@@ -211,9 +282,14 @@ impl MigrationEngine {
         let conns = legacy_store.list_vault_server_connections().await?;
         let conns_len = conns.len();
         for mut conn in conns {
-            if conn.secure_credentials(cred_store).is_ok() {
-                report.server_credentials_migrated += 1;
-            }
+            // Move server credentials into OS-protected storage; fail securely if credential migration fails
+            conn.secure_credentials(cred_store).map_err(|e| {
+                StorageError::Serialization(format!(
+                    "Failed to move server credentials to secure credential store for connection {}: {e}",
+                    conn.id
+                ))
+            })?;
+            report.server_credentials_migrated += 1;
             default_store.save_vault_server_connection(&conn).await?;
         }
 
@@ -224,7 +300,7 @@ impl MigrationEngine {
                 .await?;
         }
 
-        // 7. Migrate default vault records
+        // 6. Migrate default vault records
         let default_hosts = legacy_store.list().await?;
         for host in &default_hosts {
             default_store
@@ -287,84 +363,76 @@ impl MigrationEngine {
         }
 
         report.vaults_migrated += 1;
+        journal.staged_vaults.push(StagedVaultMetadata {
+            vault_id: LEGACY_LOCAL_VAULT_ID.to_string(),
+            name: "Personal".to_string(),
+            is_default: true,
+            db_filename: "default.db".to_string(),
+            manifest_filename: format!("{LEGACY_LOCAL_VAULT_ID}.manifest.json"),
+            host_count: default_hosts.len(),
+            snippet_count: default_snippets.len(),
+            workspace_count: default_workspaces.len(),
+            identity_count: default_identities.len(),
+        });
+        journal
+            .completed_stages
+            .push("default_vault_staged".to_string());
+        let _ = std::fs::write(
+            &journal_path,
+            serde_json::to_string_pretty(&journal).unwrap_or_default(),
+        );
 
-        // 8. Migrate secondary vaults to separate physical databases
-        for (_name, ctx) in &contexts {
+        // 7. Migrate secondary vaults to separate physical databases
+        let mut secondary_keys: HashMap<String, VaultKey> = HashMap::new();
+        for (vname, ctx) in &contexts {
             let vid_str = ctx.id().as_str();
             if vid_str == LEGACY_LOCAL_VAULT_ID {
                 continue;
             }
 
             let sec_vid = ctx.id();
-            let sec_manifest_path = manifests_dir.join(format!("{vid_str}.manifest.json"));
-            let sec_key = if sec_manifest_path.exists() {
-                if let Ok(manifest) = VaultManifest::load_from_path(&sec_manifest_path) {
-                    VaultKeyManager::retrieve_key(cred_store, sec_vid)
-                        .ok()
-                        .flatten()
-                        .or_else(|| manifest.unlock("").ok())
+            let sec_manifest_path = staging_manifests_dir.join(format!("{vid_str}.manifest.json"));
+
+            // Require explicit user-provided password for secondary migrated vaults
+            let sec_pwd = credentials.and_then(|c| c.secondary_passwords.get(vid_str).cloned());
+            let sec_key = if let Some(ref pwd) = sec_pwd {
+                shellumi_core::validate_vault_password(pwd).map_err(|e| {
+                    StorageError::Serialization(format!(
+                        "Secondary vault '{vname}' ({vid_str}) password policy violation: {e}"
+                    ))
+                })?;
+                let k = VaultKey::generate().map_err(|e| {
+                    StorageError::Serialization(format!("secondary key generation error: {e}"))
+                })?;
+                let env = k
+                    .wrap_with_password(sec_vid, pwd)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let rec_env = if let Some(rec_code) =
+                    credentials.and_then(|c| c.secondary_recovery_codes.get(vid_str))
+                {
+                    Some(
+                        k.wrap_with_password(sec_vid, rec_code)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?,
+                    )
                 } else {
                     None
-                }
+                };
+                let manifest =
+                    VaultManifest::new(vid_str.to_string(), vname.clone(), env, rec_env, true);
+                manifest
+                    .save_to_path(&sec_manifest_path)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let _ = VaultKeyManager::provision_key(cred_store, sec_vid, &k);
+                k
             } else {
-                None
+                return Err(StorageError::Serialization(format!(
+                    "MigrationRequired: Secondary local vault '{vname}' ({vid_str}) requires an explicit user password."
+                )));
             };
 
-            let sec_key = match sec_key {
-                Some(k) => k,
-                None => {
-                    let sec_pwd = credentials
-                        .and_then(|c| c.secondary_passwords.get(vid_str).cloned())
-                        .or_else(|| credentials.and_then(|c| c.default_password.clone()));
-                    if let Some(ref pwd) = sec_pwd {
-                        let k = VaultKey::generate().map_err(|e| {
-                            StorageError::Serialization(format!(
-                                "secondary key generation error: {e}"
-                            ))
-                        })?;
-                        let env = k
-                            .wrap_with_password(sec_vid, pwd)
-                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                        let manifest = VaultManifest::new(
-                            vid_str.to_string(),
-                            vid_str.to_string(),
-                            env.clone(),
-                            None,
-                            true,
-                        );
-                        manifest
-                            .save_to_path(&sec_manifest_path)
-                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                        let _ = VaultKeyManager::provision_key(cred_store, sec_vid, &k);
-                        k
-                    } else {
-                        // Inherit from master default key so user retains full access
-                        let k = VaultKey::generate().map_err(|e| {
-                            StorageError::Serialization(format!(
-                                "secondary key generation error: {e}"
-                            ))
-                        })?;
-                        let derived_pwd = hex::encode(default_key.expose_bytes());
-                        let env = k
-                            .wrap_with_password(sec_vid, &derived_pwd)
-                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                        let manifest = VaultManifest::new(
-                            vid_str.to_string(),
-                            vid_str.to_string(),
-                            env.clone(),
-                            None,
-                            true,
-                        );
-                        manifest
-                            .save_to_path(&sec_manifest_path)
-                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                        let _ = VaultKeyManager::provision_key(cred_store, sec_vid, &k);
-                        k
-                    }
-                }
-            };
+            secondary_keys.insert(vid_str.to_string(), sec_key.clone());
 
-            let sec_db_path = vaults_dir.join(format!("{vid_str}.db"));
+            let sec_db_path = staging_vaults_dir.join(format!("{vid_str}.db"));
             let sec_db_str = sec_db_path
                 .to_str()
                 .ok_or_else(|| StorageError::Serialization("invalid path encoding".into()))?;
@@ -459,10 +527,28 @@ impl MigrationEngine {
             }
 
             report.vaults_migrated += 1;
+            journal.staged_vaults.push(StagedVaultMetadata {
+                vault_id: vid_str.to_string(),
+                name: vname.clone(),
+                is_default: false,
+                db_filename: format!("{vid_str}.db"),
+                manifest_filename: format!("{vid_str}.manifest.json"),
+                host_count: scoped_hosts.len(),
+                snippet_count: scoped_snippets.len(),
+                workspace_count: scoped_workspaces.len(),
+                identity_count: scoped_identities.len(),
+            });
+            journal
+                .completed_stages
+                .push(format!("secondary_vault_staged:{vid_str}"));
+            let _ = std::fs::write(
+                &journal_path,
+                serde_json::to_string_pretty(&journal).unwrap_or_default(),
+            );
         }
 
         // -------------------------------------------------------------------
-        // 9. Verification Phase: Verify default database counts
+        // 8. Verification Phase: Verify default database counts and cross-vault isolation
         // -------------------------------------------------------------------
         if default_store.list().await?.len() != default_hosts.len() {
             return Err(StorageError::Serialization(
@@ -495,13 +581,103 @@ impl MigrationEngine {
             ));
         }
 
-        // 10. Atomic activation: write .migration_complete marker and rename legacy database
-        std::fs::write(&complete_marker, b"verified\n").map_err(|e| {
+        drop(default_store);
+
+        // Verify that default database opens cleanly with default_key and fails with wrong key
+        let test_def = HostStore::open_with_key(staged_default_db_str, Some(&default_key)).await;
+        if test_def.is_err() {
+            return Err(StorageError::Serialization(
+                "Verification failed: unable to re-open staged default database with DEK".into(),
+            ));
+        }
+        drop(test_def);
+
+        // Verify cross-vault isolation on disk
+        for (sec_id, sec_k) in &secondary_keys {
+            let sec_p = staging_vaults_dir.join(format!("{sec_id}.db"));
+            let sec_p_str = sec_p.to_str().unwrap();
+
+            // Must open with own key
+            let test_sec = HostStore::open_with_key(sec_p_str, Some(sec_k)).await;
+            if test_sec.is_err() {
+                return Err(StorageError::Serialization(format!(
+                    "Verification failed: unable to re-open staged secondary database {sec_id} with DEK"
+                )));
+            }
+            drop(test_sec);
+
+            // Must fail when opened with default key
+            if HostStore::open_with_key(sec_p_str, Some(&default_key))
+                .await
+                .is_ok()
+            {
+                return Err(StorageError::Serialization(format!(
+                    "Verification failed: cross-vault isolation violated! Secondary database {sec_id} opened with default DEK."
+                )));
+            }
+        }
+
+        journal
+            .completed_stages
+            .push("data_integrity_verified".to_string());
+        let _ = std::fs::write(
+            &journal_path,
+            serde_json::to_string_pretty(&journal).unwrap_or_default(),
+        );
+
+        // -------------------------------------------------------------------
+        // 9. Atomic Activation: Activate staged files into final directory layout
+        // -------------------------------------------------------------------
+        std::fs::create_dir_all(vaults_dir).map_err(|e| {
+            StorageError::Serialization(format!("failed to create vaults directory: {e}"))
+        })?;
+        let manifests_dir = base_dir.join("vault_manifests");
+        std::fs::create_dir_all(&manifests_dir).map_err(|e| {
+            StorageError::Serialization(format!("failed to create vault_manifests directory: {e}"))
+        })?;
+
+        // Move all staged database files into vaults_dir
+        if let Ok(entries) = std::fs::read_dir(staging_vaults_dir) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if src.is_file() {
+                    let filename = src.file_name().unwrap();
+                    let dst = vaults_dir.join(filename);
+                    std::fs::copy(&src, &dst).map_err(|e| {
+                        StorageError::Serialization(format!(
+                            "Failed to activate vault database {}: {e}",
+                            src.display()
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        // Move all staged manifest files into manifests_dir
+        if let Ok(entries) = std::fs::read_dir(staging_manifests_dir) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if src.is_file() {
+                    let filename = src.file_name().unwrap();
+                    let dst = manifests_dir.join(filename);
+                    std::fs::copy(&src, &dst).map_err(|e| {
+                        StorageError::Serialization(format!(
+                            "Failed to activate vault manifest {}: {e}",
+                            src.display()
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        // Write .migration_complete marker in vaults_dir
+        std::fs::write(complete_marker, b"verified\n").map_err(|e| {
             StorageError::Serialization(format!("failed to write migration complete marker: {e}"))
         })?;
 
+        // Atomically rename legacy database to .migrated
         let migrated_flag_path = base_dir.join("shellumi.db.migrated");
-        std::fs::rename(&legacy_db_path, &migrated_flag_path).map_err(|e| {
+        std::fs::rename(legacy_db_path, &migrated_flag_path).map_err(|e| {
             StorageError::Serialization(format!("failed to rename legacy database: {e}"))
         })?;
         if legacy_wal.exists() {
@@ -510,6 +686,9 @@ impl MigrationEngine {
         if legacy_shm.exists() {
             let _ = std::fs::rename(&legacy_shm, base_dir.join("shellumi.db-shm.migrated"));
         }
+
+        // Clean up staging directory
+        let _ = std::fs::remove_dir_all(staging_dir);
 
         info!(
             vaults_migrated = report.vaults_migrated,

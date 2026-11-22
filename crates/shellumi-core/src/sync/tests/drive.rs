@@ -176,11 +176,14 @@ fn verifies_execute_cloud_vault_sync_orchestration() {
     impl HttpTransport for TestMockTransport {
         fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
             if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
-                let has_file = self.uploaded.lock().unwrap().is_some();
-                let files_json = if has_file {
-                    r#"{"files":[{"id":"drive_file_1","name":"shellumi_vault.json","mimeType":"application/json"}]}"#
+                let up = self.uploaded.lock().unwrap();
+                let files_json = if let Some(ref v) = *up {
+                    let fname = drive_vault_filename(&v.vault_id);
+                    format!(
+                        r#"{{"files":[{{"id":"drive_file_1","name":"{fname}","mimeType":"application/json"}}]}}"#
+                    )
                 } else {
-                    r#"{"files":[]}"#
+                    r#"{"files":[]}"#.to_string()
                 };
                 Ok(HttpResponse::new(200, files_json))
             } else if req.method == "POST" && req.url.contains("uploadType=multipart") {
@@ -283,4 +286,357 @@ fn verifies_execute_cloud_vault_sync_orchestration() {
         }
         _ => panic!("expected success for local update"),
     }
+}
+
+#[test]
+fn verifies_multi_vault_google_drive_separation_and_non_overlapping_files() {
+    use crate::{VaultId, VaultKey};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct MultiVaultMockTransport {
+        files: Mutex<HashMap<String, SyncVault>>,
+    }
+
+    impl HttpTransport for MultiVaultMockTransport {
+        fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
+            let mut store = self.files.lock().unwrap();
+            if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
+                let file_list: Vec<String> = store
+                    .keys()
+                    .map(|name| {
+                        format!(
+                            r#"{{"id":"id_{name}","name":"{name}","mimeType":"application/json"}}"#
+                        )
+                    })
+                    .collect();
+                let json = format!(r#"{{"files":[{}]}}"#, file_list.join(","));
+                Ok(HttpResponse::new(200, json))
+            } else if req.method == "POST" && req.url.contains("uploadType=multipart") {
+                let body_str = String::from_utf8_lossy(&req.body);
+                // Extract filename
+                let name_start = body_str.find("\"name\":\"").unwrap() + 8;
+                let name_end = body_str[name_start..].find('"').unwrap() + name_start;
+                let filename = body_str[name_start..name_end].to_string();
+
+                let marker = "Content-Type: application/json\r\n\r\n";
+                let idx = body_str.find(marker).unwrap();
+                let json_part = &body_str[idx + marker.len()..];
+                let end = json_part.find("\r\n--").unwrap();
+                let vault = SyncVault::from_json(&json_part[..end]).unwrap();
+
+                store.insert(filename.clone(), vault);
+                let resp_json = format!(
+                    r#"{{"id":"id_{filename}","name":"{filename}","mimeType":"application/json"}}"#
+                );
+                Ok(HttpResponse::new(200, resp_json))
+            } else if req.method == "GET" && req.url.contains("?alt=media") {
+                let file_id = req
+                    .url
+                    .split("/files/")
+                    .nth(1)
+                    .unwrap()
+                    .split('?')
+                    .next()
+                    .unwrap();
+                let filename = file_id.strip_prefix("id_").unwrap();
+                let vault = store.get(filename).unwrap();
+                Ok(HttpResponse::new(
+                    200,
+                    vault.to_json().unwrap().into_bytes(),
+                ))
+            } else if req.method == "PATCH" {
+                let file_id = req
+                    .url
+                    .split("/files/")
+                    .nth(1)
+                    .unwrap()
+                    .split('?')
+                    .next()
+                    .unwrap();
+                let filename = file_id.strip_prefix("id_").unwrap();
+                let vault = SyncVault::from_json(req.body_str().unwrap()).unwrap();
+                store.insert(filename.to_string(), vault);
+                Ok(HttpResponse::new(200, b"".to_vec()))
+            } else {
+                Err(SyncError::Http(404, "not found".into()))
+            }
+        }
+    }
+
+    let transport = MultiVaultMockTransport {
+        files: Mutex::new(HashMap::new()),
+    };
+    let client = GoogleDriveSyncClient::new(transport, "test_client_id");
+
+    // 1. Vault Alpha (default vault)
+    let vid_alpha = "legacy-local";
+    let key_alpha = VaultKey::generate().unwrap();
+    let pwd_alpha = "AlphaPass#2026!";
+    let env_alpha = key_alpha
+        .wrap_with_password(&VaultId::new(vid_alpha).unwrap(), pwd_alpha)
+        .unwrap();
+
+    let mut vault_alpha = SyncVault::new(vid_alpha, 1000);
+    vault_alpha.key_envelope = Some(env_alpha.clone());
+    let host_a = TestHost {
+        name: "Alpha-Server".into(),
+        hostname: "alpha.local".into(),
+        port: 22,
+    };
+    let env_ha =
+        encrypt_entity_with_iterations(pwd_alpha, "host", "host_a", &host_a, 2000).unwrap();
+    vault_alpha.records.push(SyncRecord {
+        entity_type: SyncEntityType::Host,
+        object_id: "host_a".into(),
+        version: 1,
+        updated_at: 1000,
+        device_id: "dev_a".into(),
+        deleted: false,
+        envelope: Some(env_ha),
+    });
+
+    let res_a = execute_cloud_vault_sync(&client, "token", &vault_alpha, pwd_alpha, None).unwrap();
+    assert!(matches!(res_a, SyncCycleResult::Success { .. }));
+
+    // 2. Vault Beta (secondary local vault)
+    let vid_beta = "vlt-finance-99";
+    let key_beta = VaultKey::generate().unwrap();
+    let pwd_beta = "BetaPass#2026!";
+    let env_beta = key_beta
+        .wrap_with_password(&VaultId::new(vid_beta).unwrap(), pwd_beta)
+        .unwrap();
+
+    let mut vault_beta = SyncVault::new(vid_beta, 2000);
+    vault_beta.key_envelope = Some(env_beta.clone());
+    let host_b = TestHost {
+        name: "Beta-Database".into(),
+        hostname: "beta.local".into(),
+        port: 5432,
+    };
+    let env_hb = encrypt_entity_with_iterations(pwd_beta, "host", "host_b", &host_b, 2000).unwrap();
+    vault_beta.records.push(SyncRecord {
+        entity_type: SyncEntityType::Host,
+        object_id: "host_b".into(),
+        version: 1,
+        updated_at: 2000,
+        device_id: "dev_b".into(),
+        deleted: false,
+        envelope: Some(env_hb),
+    });
+
+    let res_b = execute_cloud_vault_sync(&client, "token", &vault_beta, pwd_beta, None).unwrap();
+    assert!(matches!(res_b, SyncCycleResult::Success { .. }));
+
+    // 3. Verify separation on Google Drive: two distinct files exist
+    let files = client.list_vault_files("token").unwrap();
+    assert_eq!(files.len(), 2);
+    let alpha_file = files
+        .iter()
+        .find(|f| f.name == "shellumi_vault_legacy-local.json");
+    let beta_file = files
+        .iter()
+        .find(|f| f.name == "shellumi_vault_vlt-finance-99.json");
+    assert!(
+        alpha_file.is_some(),
+        "Default vault snapshot must exist independently"
+    );
+    assert!(
+        beta_file.is_some(),
+        "Secondary vault snapshot must exist independently"
+    );
+
+    // 4. Download and verify neither overwrote the other and wrapped DEKs are distinct
+    let dl_alpha = client
+        .download_vault("token", &alpha_file.unwrap().id)
+        .unwrap();
+    let dl_beta = client
+        .download_vault("token", &beta_file.unwrap().id)
+        .unwrap();
+
+    assert_eq!(dl_alpha.vault_id, "legacy-local");
+    assert_eq!(dl_alpha.records.len(), 1);
+    assert_eq!(dl_alpha.records[0].object_id, "host_a");
+    assert_eq!(
+        dl_alpha.key_envelope.unwrap().ciphertext,
+        env_alpha.ciphertext
+    );
+
+    assert_eq!(dl_beta.vault_id, "vlt-finance-99");
+    assert_eq!(dl_beta.records.len(), 1);
+    assert_eq!(dl_beta.records[0].object_id, "host_b");
+    assert_eq!(
+        dl_beta.key_envelope.unwrap().ciphertext,
+        env_beta.ciphertext
+    );
+
+    // 5. Test list_drive_vault_ids
+    let available_ids = list_drive_vault_ids(&files);
+    assert!(available_ids.contains(&"legacy-local".to_string()));
+    assert!(available_ids.contains(&"vlt-finance-99".to_string()));
+}
+
+#[test]
+fn verifies_interrupted_drive_operations_do_not_corrupt_existing_snapshot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    struct FlakyMockTransport {
+        should_fail: AtomicBool,
+        saved_vault: Mutex<Option<SyncVault>>,
+    }
+
+    impl HttpTransport for FlakyMockTransport {
+        fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
+            if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
+                let lock = self.saved_vault.lock().unwrap();
+                let files_json = if lock.is_some() {
+                    r#"{"files":[{"id":"snap_1","name":"shellumi_vault_vlt-safe.json","mimeType":"application/json"}]}"#
+                } else {
+                    r#"{"files":[]}"#
+                };
+                Ok(HttpResponse::new(200, files_json))
+            } else if req.method == "POST" && req.url.contains("uploadType=multipart") {
+                let body_str = String::from_utf8_lossy(&req.body);
+                let marker = "Content-Type: application/json\r\n\r\n";
+                let idx = body_str.find(marker).unwrap();
+                let json_part = &body_str[idx + marker.len()..];
+                let end = json_part.find("\r\n--").unwrap();
+                let vault = SyncVault::from_json(&json_part[..end]).unwrap();
+                *self.saved_vault.lock().unwrap() = Some(vault);
+                Ok(HttpResponse::new(
+                    200,
+                    r#"{"id":"snap_1","name":"shellumi_vault_vlt-safe.json","mimeType":"application/json"}"#,
+                ))
+            } else if req.method == "GET" && req.url.contains("snap_1?alt=media") {
+                let vault = self.saved_vault.lock().unwrap().clone().unwrap();
+                Ok(HttpResponse::new(
+                    200,
+                    vault.to_json().unwrap().into_bytes(),
+                ))
+            } else if req.method == "PATCH" {
+                if self.should_fail.load(Ordering::SeqCst) {
+                    return Err(SyncError::Http(
+                        503,
+                        "Service Unavailable (Interrupted)".into(),
+                    ));
+                }
+                let vault = SyncVault::from_json(req.body_str().unwrap()).unwrap();
+                *self.saved_vault.lock().unwrap() = Some(vault);
+                Ok(HttpResponse::new(200, b"".to_vec()))
+            } else {
+                Err(SyncError::Http(404, "not found".into()))
+            }
+        }
+    }
+
+    let transport = FlakyMockTransport {
+        should_fail: AtomicBool::new(false),
+        saved_vault: Mutex::new(None),
+    };
+    let client = GoogleDriveSyncClient::new(transport, "test_client");
+
+    use crate::{VaultId, VaultKey};
+    let vid = "vlt-safe";
+    let pwd = "SafePassword#123";
+    let key = VaultKey::generate().unwrap();
+    let env = key
+        .wrap_with_password(&VaultId::new(vid).unwrap(), pwd)
+        .unwrap();
+
+    let mut vault = SyncVault::new(vid, 1000);
+    vault.key_envelope = Some(env.clone());
+
+    // Initial upload
+    let res1 = execute_cloud_vault_sync(&client, "token", &vault, pwd, None).unwrap();
+    assert!(matches!(res1, SyncCycleResult::Success { .. }));
+
+    // Prepare update
+    let host = TestHost {
+        name: "Safe Node".into(),
+        hostname: "node.safe".into(),
+        port: 22,
+    };
+    let henvelope = encrypt_entity_with_iterations(pwd, "host", "h1", &host, 2000).unwrap();
+    vault.records.push(SyncRecord {
+        entity_type: SyncEntityType::Host,
+        object_id: "h1".into(),
+        version: 1,
+        updated_at: 1500,
+        device_id: "dev".into(),
+        deleted: false,
+        envelope: Some(henvelope),
+    });
+
+    // Simulate network interruption on upload
+    client.transport().should_fail.store(true, Ordering::SeqCst);
+    let failed_res = execute_cloud_vault_sync(&client, "token", &vault, pwd, None);
+    assert!(
+        failed_res.is_err(),
+        "Interrupted operation must report error"
+    );
+
+    // Existing snapshot on Drive remains intact (unmodified initial upload)
+    let current_dl = client.download_vault("token", "snap_1").unwrap();
+    assert_eq!(current_dl.records.len(), 0);
+    assert_eq!(current_dl.key_envelope.unwrap().ciphertext, env.ciphertext);
+
+    // Retry succeeds cleanly
+    client
+        .transport()
+        .should_fail
+        .store(false, Ordering::SeqCst);
+    let retry_res = execute_cloud_vault_sync(&client, "token", &vault, pwd, None).unwrap();
+    assert!(matches!(retry_res, SyncCycleResult::Success { .. }));
+
+    let updated_dl = client.download_vault("token", "snap_1").unwrap();
+    assert_eq!(updated_dl.records.len(), 1);
+    assert_eq!(updated_dl.records[0].object_id, "h1");
+}
+
+#[test]
+fn verifies_password_change_updates_and_syncs_wrapped_dek_envelope() {
+    use crate::{VaultId, VaultKey, VaultManifest};
+    let vid = "vlt-rot";
+    let vid_obj = VaultId::new(vid).unwrap();
+    let dek = VaultKey::generate().unwrap();
+
+    let old_pwd = "OldPassword#123";
+    let new_pwd = "NewPassword#456";
+
+    let mut manifest = VaultManifest::new(
+        vid.to_string(),
+        "Rotating Vault".to_string(),
+        dek.wrap_with_password(&vid_obj, old_pwd).unwrap(),
+        None,
+        false,
+    );
+    assert_eq!(
+        manifest.unlock(old_pwd).unwrap().expose_bytes(),
+        dek.expose_bytes()
+    );
+
+    // Rotate password
+    manifest.change_password(&dek, new_pwd).unwrap();
+    assert!(
+        manifest.unlock(old_pwd).is_err(),
+        "Old password must be rejected"
+    );
+    assert_eq!(
+        manifest.unlock(new_pwd).unwrap().expose_bytes(),
+        dek.expose_bytes()
+    );
+
+    // Sync vault receives updated primary envelope
+    let mut sync_vault = SyncVault::new(vid, 1000);
+    sync_vault.key_envelope = Some(manifest.primary_envelope.clone());
+
+    // Verify recovery on second device using new password and envelope only
+    let recovered = VaultKey::unwrap_with_password(
+        &vid_obj,
+        new_pwd,
+        sync_vault.key_envelope.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.expose_bytes(), dek.expose_bytes());
 }

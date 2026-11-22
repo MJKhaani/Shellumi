@@ -30,6 +30,8 @@ pub struct VaultDirectoryEntry {
     pub name: String,
     pub location: VaultDirectoryLocation,
     pub has_recovery_envelope: bool,
+    #[serde(default)]
+    pub sync_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -106,6 +108,7 @@ mod tests {
             name: "Personal".to_string(),
             location: VaultDirectoryLocation::Local,
             has_recovery_envelope: false,
+            sync_enabled: true,
             created_at: 1000,
             updated_at: 1000,
         });
@@ -118,6 +121,7 @@ mod tests {
                 server_vault_id: "srv-vault-99".to_string(),
             },
             has_recovery_envelope: true,
+            sync_enabled: false,
             created_at: 2000,
             updated_at: 2000,
         });

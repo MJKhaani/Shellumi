@@ -335,6 +335,18 @@ impl Shellumi {
                         return Err(format!("Failed to register vault context: {e}"));
                     }
 
+                    if let Ok(env_json) = serde_json::to_string(&primary_env) {
+                        let _ = new_store
+                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                            .await;
+                        let _ = reg_store
+                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                            .await;
+                    }
+                    let _ = reg_store
+                        .set_vault_sync_enabled(local_vault_id.as_str(), true)
+                        .await;
+
                     Ok::<_, String>((
                         vault_name,
                         local_vault_id.as_str().to_string(),
@@ -606,6 +618,9 @@ impl Shellumi {
                     new_store.set_vault_id(local_vault_id.clone());
 
                     if let Ok(env_json) = serde_json::to_string(&primary_env) {
+                        let _ = new_store
+                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                            .await;
                         if let Err(e) = reg_store
                             .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
                             .await
@@ -615,6 +630,9 @@ impl Shellumi {
                             return Err(e.to_string());
                         }
                     }
+                    let _ = reg_store
+                        .set_vault_sync_enabled(local_vault_id.as_str(), true)
+                        .await;
 
                     let sync_state = VaultSyncStateRecord {
                         vault_id: local_vault_id.as_str().to_string(),

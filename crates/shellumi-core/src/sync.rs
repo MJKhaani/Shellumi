@@ -1667,8 +1667,55 @@ pub fn parse_token_refresh_response(
     ))
 }
 
+/// Legacy filename for Shellumi's single vault snapshot (retained for backward compatibility).
+pub const DRIVE_LEGACY_APPDATA_FILENAME: &str = "shellumi_vault.json";
+
 /// Standard filename for Shellumi's encrypted vault snapshot in the Google Drive appdata folder.
 pub const DRIVE_APPDATA_FILENAME: &str = "shellumi_vault.json";
+
+/// Computes the dedicated Google Drive AppData filename for a given vault ID.
+pub fn drive_vault_filename(vault_id: &str) -> String {
+    format!("shellumi_vault_{vault_id}.json")
+}
+
+/// Matches the Google Drive remote file for a specific vault ID, supporting backward compatibility
+/// with legacy `shellumi_vault.json` for the default vault.
+pub fn find_drive_vault_file<'a>(
+    files: &'a [DriveFileMetadata],
+    vault_id: &str,
+) -> Option<&'a DriveFileMetadata> {
+    let expected = drive_vault_filename(vault_id);
+    if let Some(f) = files.iter().find(|f| f.name == expected) {
+        return Some(f);
+    }
+    // Backward compatibility: If looking for default vault, check legacy filename
+    if vault_id == "legacy-local" || vault_id == "default" {
+        files
+            .iter()
+            .find(|f| f.name == DRIVE_LEGACY_APPDATA_FILENAME)
+    } else {
+        None
+    }
+}
+
+/// Lists all vault IDs that have available snapshots in the Google Drive Application Data folder.
+pub fn list_drive_vault_ids(files: &[DriveFileMetadata]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for f in files {
+        if f.name == DRIVE_LEGACY_APPDATA_FILENAME {
+            if !ids.iter().any(|id| id == "legacy-local") {
+                ids.push("legacy-local".to_string());
+            }
+        } else if let Some(stripped) = f.name.strip_prefix("shellumi_vault_") {
+            if let Some(vid) = stripped.strip_suffix(".json") {
+                if !ids.iter().any(|id| id == vid) {
+                    ids.push(vid.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
 
 /// Builds an HTTP GET request to list files in the Google Drive Application Data folder.
 pub fn build_list_appdata_files_request(access_token: &str) -> HttpRequest {
@@ -1865,10 +1912,13 @@ pub struct SyncExecutionReport {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<EncryptedEnvelope>,
 }
 
 /// Result of evaluating or executing an end-to-end sync cycle.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum SyncCycleResult {
     /// Both sides are already identical.
     AlreadySynchronized,
@@ -1993,6 +2043,7 @@ pub fn execute_sync_cycle(
             "Sync complete: {local_applied} local updated, {remote_uploaded} remote updated, {conflict_idx} conflicts resolved"
         ),
         encrypted_directory: None,
+        key_envelope: None,
     };
 
     SyncCycleResult::Success {
@@ -2076,13 +2127,19 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
         vault: &SyncVault,
         boundary: &str,
     ) -> Result<DriveFileMetadata, SyncError> {
+        let filename = drive_vault_filename(&vault.vault_id);
+        self.upload_vault_with_filename(access_token, &filename, vault, boundary)
+    }
+
+    pub fn upload_vault_with_filename(
+        &self,
+        access_token: &str,
+        filename: &str,
+        vault: &SyncVault,
+        boundary: &str,
+    ) -> Result<DriveFileMetadata, SyncError> {
         let json = vault.to_json()?;
-        let req = build_multipart_upload_request(
-            access_token,
-            DRIVE_APPDATA_FILENAME,
-            json.as_bytes(),
-            boundary,
-        );
+        let req = build_multipart_upload_request(access_token, filename, json.as_bytes(), boundary);
         let resp = self.transport.send(req)?;
         parse_upload_file_response(&resp)
     }
@@ -2128,9 +2185,9 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
     resolutions: Option<&[ConflictResolutionChoice]>,
 ) -> Result<SyncCycleResult, SyncError> {
     let files = client.list_vault_files(access_token)?;
-    let remote_file = files.into_iter().find(|f| f.name == DRIVE_APPDATA_FILENAME);
+    let remote_file = find_drive_vault_file(&files, &local_vault.vault_id);
 
-    let remote_vault = if let Some(ref rf) = remote_file {
+    let remote_vault = if let Some(rf) = remote_file {
         Some(client.download_vault(access_token, &rf.id)?)
     } else {
         None
@@ -2142,7 +2199,7 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
         .unwrap_or(&[]);
     let plan = plan_sync_cycle(
         &local_vault.records,
-        remote_file.as_ref(),
+        remote_file,
         remote_vault.as_ref(),
         Some(passphrase),
     );
@@ -2162,6 +2219,7 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
                         local_vault.records.len()
                     ),
                     encrypted_directory: local_vault.encrypted_directory.clone(),
+                    key_envelope: local_vault.key_envelope.clone(),
                 },
                 merged_records: local_vault.records.clone(),
             })
@@ -2171,6 +2229,7 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
             let remote_dir = remote_vault
                 .as_ref()
                 .and_then(|v| v.encrypted_directory.clone());
+            let remote_env = remote_vault.as_ref().and_then(|v| v.key_envelope.clone());
             Ok(SyncCycleResult::Success {
                 report: SyncExecutionReport {
                     local_updated: records.len(),
@@ -2182,6 +2241,7 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
                         records.len()
                     ),
                     encrypted_directory: remote_dir,
+                    key_envelope: remote_env,
                 },
                 merged_records: records,
             })
@@ -2206,18 +2266,24 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
                         .as_ref()
                         .and_then(|v| v.encrypted_directory.clone())
                 });
+                let synced_envelope = local_vault
+                    .key_envelope
+                    .clone()
+                    .or_else(|| remote_vault.as_ref().and_then(|v| v.key_envelope.clone()));
                 report.encrypted_directory = synced_directory.clone();
+                report.key_envelope = synced_envelope.clone();
 
                 if report.remote_updated > 0 {
                     let mut updated_vault = local_vault.clone();
                     updated_vault.records = merged_records.clone();
                     updated_vault.encrypted_directory = synced_directory;
+                    updated_vault.key_envelope = synced_envelope;
                     updated_vault.updated_at = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
 
-                    if let Some(ref rf) = remote_file {
+                    if let Some(rf) = remote_file {
                         client.update_vault(access_token, &rf.id, &updated_vault)?;
                     } else {
                         let boundary = "SHELLUMI_BOUNDARY_CLOUD_SYNC_MERGE";

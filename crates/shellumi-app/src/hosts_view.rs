@@ -741,6 +741,9 @@ impl Shellumi {
         if filtered.is_empty() {
             let message = match &self.hosts {
                 HostState::Loading => "Loading hosts…".to_string(),
+                HostState::MigrationRequired(msg) => {
+                    format!("Legacy data detected: {msg}. Please complete migration to access your vaults.")
+                }
                 HostState::Error(error) => format!("Could not load hosts: {error}"),
                 HostState::NoDatabase => "Host storage is unavailable.".to_string(),
                 HostState::Loaded(hosts) if hosts.is_empty() => {

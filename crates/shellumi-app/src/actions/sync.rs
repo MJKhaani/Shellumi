@@ -128,9 +128,11 @@ impl Shellumi {
                         let mut write_store = HostStore::open_with_key(&path, active_key.as_ref())
                             .await
                             .map_err(|e| e.to_string())?;
-                        let mut merged_vault = SyncVault::new("cloud-vault", 0);
+                        let mut merged_vault = SyncVault::new(&local_vault.vault_id, 0);
                         merged_vault.records = merged_records;
                         merged_vault.encrypted_directory = report.encrypted_directory.clone();
+                        merged_vault.key_envelope =
+                            report.key_envelope.or(local_vault.key_envelope);
                         write_store
                             .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
@@ -231,6 +233,7 @@ impl Shellumi {
             std::env::var("SHELLUMI_DEVICE_ID").unwrap_or_else(|_| "desktop-app".to_string());
         let active_key = self.active_vault_key();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_vault_id = self.active_vault_id.clone();
 
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
@@ -243,6 +246,13 @@ impl Shellumi {
                 let store = HostStore::open_with_key(&path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                if !store
+                    .is_vault_sync_enabled(&active_vault_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Ok((None, 0));
+                }
                 // Refresh encrypted vault directory if default vault key is available
                 if let Ok(dir) = store.build_vault_directory().await {
                     if let Ok(default_vid) =
@@ -282,9 +292,11 @@ impl Shellumi {
                         let mut write_store = HostStore::open_with_key(&path, active_key.as_ref())
                             .await
                             .map_err(|e| e.to_string())?;
-                        let mut merged_vault = SyncVault::new("cloud-vault", 0);
+                        let mut merged_vault = SyncVault::new(&local_vault.vault_id, 0);
                         merged_vault.records = merged_records;
                         merged_vault.encrypted_directory = report.encrypted_directory.clone();
+                        merged_vault.key_envelope =
+                            report.key_envelope.or(local_vault.key_envelope);
                         let summary = write_store
                             .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await

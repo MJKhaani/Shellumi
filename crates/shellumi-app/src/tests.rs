@@ -2358,6 +2358,7 @@ fn test_client_side_directory_sync_envelope_and_palette_commands() {
         name: "Personal".to_string(),
         location: VaultDirectoryLocation::Local,
         has_recovery_envelope: false,
+        sync_enabled: true,
         created_at: 1000,
         updated_at: 1000,
     });
@@ -2369,6 +2370,7 @@ fn test_client_side_directory_sync_envelope_and_palette_commands() {
             server_vault_id: "corp-srv-vault".to_string(),
         },
         has_recovery_envelope: true,
+        sync_enabled: false,
         created_at: 1000,
         updated_at: 1000,
     });
@@ -2391,6 +2393,7 @@ fn test_client_side_directory_sync_envelope_and_palette_commands() {
         duration_ms: 15,
         message: "Sync OK".to_string(),
         encrypted_directory: restored_vault.encrypted_directory,
+        key_envelope: None,
     };
     assert!(report.encrypted_directory.is_some());
 
@@ -2457,4 +2460,105 @@ fn verifies_resolve_icon_path_finds_or_extracts_icons() {
             hover_path
         );
     }
+}
+
+#[tokio::test]
+async fn test_keychain_disabled_vault_unlock_and_sync_with_in_memory_keys() {
+    use shellumi_core::{
+        EphemeralCredentialStore, SshDestination, VaultId, VaultKey, VaultKeyManager, VaultManifest,
+    };
+    use shellumi_storage::HostStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let base_dir = temp.path();
+    let vaults_dir = base_dir.join("vaults");
+    let manifests_dir = base_dir.join("vault_manifests");
+    std::fs::create_dir_all(&vaults_dir).unwrap();
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    let vault_id = VaultId::new("vlt-inmemory-01").unwrap();
+    let user_pass = "Mem0rySecretPass#2026!";
+    let cred_store = EphemeralCredentialStore::new();
+
+    // 1. Provision new vault with remember_in_keychain = false
+    let (dek, primary_env, _rec_env) = VaultKeyManager::provision_new_vault(
+        &cred_store,
+        &vault_id,
+        user_pass,
+        false, // Do NOT store in Keychain!
+        None,
+    )
+    .unwrap();
+
+    // Verify key was NOT stored in cred_store
+    let key_in_store = VaultKeyManager::retrieve_key(&cred_store, &vault_id).unwrap();
+    assert!(
+        key_in_store.is_none(),
+        "Key must NOT be persisted in credential store when remember_in_keychain is false"
+    );
+
+    // Save manifest
+    let manifest = VaultManifest::new(
+        vault_id.as_str().to_string(),
+        "In-Memory Vault".to_string(),
+        primary_env.clone(),
+        None,
+        false,
+    );
+    let manifest_path = manifests_dir.join(format!("{}.manifest.json", vault_id.as_str()));
+    manifest.save_to_path(&manifest_path).unwrap();
+
+    // 2. Open database strictly using in-memory DEK
+    let db_path = vaults_dir.join(format!("{}.db", vault_id.as_str()));
+    let mut store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&dek))
+        .await
+        .unwrap();
+    store.set_vault_id(vault_id.clone());
+
+    let dest = SshDestination::new("10.10.10.1", "root", 22).unwrap();
+    store
+        .add("in-memory-host", &dest, None, &[], None, None)
+        .await
+        .unwrap();
+
+    // 3. Export vault for synchronization: export attaches envelope and encrypts records
+    let passphrase = hex::encode(dek.expose_bytes());
+    let mut sync_vault = store.export_vault(&passphrase, "client-app").await.unwrap();
+    sync_vault.key_envelope = Some(primary_env.clone());
+
+    assert_eq!(sync_vault.vault_id, "vlt-inmemory-01");
+    assert!(sync_vault.key_envelope.is_some());
+    assert_eq!(sync_vault.records.len(), 1);
+
+    // 4. Drop store and memory key (simulating vault lock)
+    drop(store);
+    drop(dek);
+
+    // Opening without key must fail
+    assert!(HostStore::open_with_key(db_path.to_str().unwrap(), None)
+        .await
+        .is_err());
+
+    // 5. Unlock strictly from manifest using user password (reconstructing DEK in memory)
+    let loaded_manifest = VaultManifest::load_from_path(&manifest_path).unwrap();
+    assert!(!loaded_manifest.remember_in_keychain);
+    let unlocked_dek =
+        VaultKey::unwrap_with_password(&vault_id, user_pass, &loaded_manifest.primary_envelope)
+            .unwrap();
+
+    // Database opens successfully with reconstructed in-memory key
+    let mut unlocked_store =
+        HostStore::open_with_key(db_path.to_str().unwrap(), Some(&unlocked_dek))
+            .await
+            .unwrap();
+    unlocked_store.set_vault_id(vault_id.clone());
+
+    let hosts = unlocked_store.list().await.unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].name, "in-memory-host");
+
+    // Credential store still remains empty
+    assert!(VaultKeyManager::retrieve_key(&cred_store, &vault_id)
+        .unwrap()
+        .is_none());
 }

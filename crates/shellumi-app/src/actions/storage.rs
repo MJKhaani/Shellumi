@@ -76,12 +76,20 @@ impl Shellumi {
 
             // Run migration from legacy shellumi.db if needed
             let cred_store = shellumi_core::default_credential_store();
-            let _ = shellumi_storage::MigrationEngine::migrate_legacy_database_if_needed(
-                base_dir,
-                default_key.as_ref(),
-                &*cred_store,
-            )
-            .await;
+            if shellumi_storage::MigrationEngine::is_migration_needed(base_dir) {
+                if default_key.is_none() {
+                    return Err(
+                        "MigrationRequired: Legacy data detected. Migration requires vault credentials.".to_string(),
+                    );
+                }
+                shellumi_storage::MigrationEngine::migrate_legacy_database_if_needed(
+                    base_dir,
+                    default_key.as_ref(),
+                    &*cred_store,
+                )
+                .await
+                .map_err(|e| format!("MigrationRequired: {e}"))?;
+            }
 
             if create_parent {
                 data_path::prepare_parent(std::path::Path::new(&path))?;
@@ -140,14 +148,18 @@ impl Shellumi {
                         app.load_vault_list(cx);
                     }
                     Err(error) => {
-                        app.hosts = HostState::Error(error.clone());
-                        if error.contains("encryption")
-                            || error.contains("key")
-                            || error.contains("locked")
-                        {
-                            let vid = app.active_vault_id.clone();
-                            let vname = app.active_vault.clone();
-                            app.open_unlock_vault_modal(vid, vname, cx);
+                        if error.starts_with("MigrationRequired:") {
+                            app.hosts = HostState::MigrationRequired(error.clone());
+                        } else {
+                            app.hosts = HostState::Error(error.clone());
+                            if error.contains("encryption")
+                                || error.contains("key")
+                                || error.contains("locked")
+                            {
+                                let vid = app.active_vault_id.clone();
+                                let vname = app.active_vault.clone();
+                                app.open_unlock_vault_modal(vid, vname, cx);
+                            }
                         }
                     }
                 }
