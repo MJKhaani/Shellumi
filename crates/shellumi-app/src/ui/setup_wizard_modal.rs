@@ -281,6 +281,11 @@ impl Shellumi {
                 }
             }
             SetupStep::ReviewAndFinish | SetupStep::Completed => {
+                let finish_label = if wizard.is_busy {
+                    "Finalizing Setup…"
+                } else {
+                    "Finish & Launch Shellumi"
+                };
                 right_actions = right_actions.child(
                     div()
                         .id("wizard-finish-btn")
@@ -296,7 +301,7 @@ impl Shellumi {
                         .on_click(cx.listener(|app, _, _, cx| {
                             app.wizard_finish(cx);
                         }))
-                        .child("Finish & Launch Shellumi"),
+                        .child(finish_label),
                 );
             }
             _ => {}

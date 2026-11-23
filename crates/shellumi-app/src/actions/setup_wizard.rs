@@ -22,8 +22,117 @@ use shellumi_storage::VaultServerConnectionRecord;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Helper to ensure directory durability where supported (e.g. fsync on directory inode on Unix).
+pub(crate) fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+}
+
+/// Fallback publication using a transaction-owned temporary file in `dest_dir`.
+/// Copies from `staged` into a temporary file in `dest_dir`, verifies full copy integrity and fsyncs,
+/// and then atomically publishes to `target` using `persist_noclobber` (atomic create-only).
+/// Never exposes a partially copied file at `target`. If any error occurs, the temporary file
+/// is unlinked and deleted automatically, and `target` remains untouched.
+pub(crate) fn publish_database_fallback_tempfile(
+    staged: &Path,
+    target: &Path,
+) -> Result<(), String> {
+    if target.exists() {
+        return Err(
+            "Target database path already exists; aborting to protect existing data.".into(),
+        );
+    }
+    let dest_dir = target
+        .parent()
+        .ok_or_else(|| "Target database path has no parent directory".to_string())?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|err| format!("Failed to create destination directory: {err}"))?;
+
+    let staged_meta = std::fs::metadata(staged)
+        .map_err(|err| format!("Failed to inspect staged database: {err}"))?;
+    let staged_len = staged_meta.len();
+
+    // 1. Create transaction-owned temporary file in the destination directory.
+    let mut tmp_file = tempfile::Builder::new()
+        .prefix(".tmp_pub_")
+        .suffix(".tmp")
+        .tempfile_in(dest_dir)
+        .map_err(|err| {
+            format!("Failed to create temporary transaction file in destination directory: {err}")
+        })?;
+
+    // 2. Open staged database and copy into temporary file
+    let mut src_file = std::fs::File::open(staged)
+        .map_err(|err| format!("Failed to open staged database: {err}"))?;
+
+    let copied_bytes = std::io::copy(&mut src_file, tmp_file.as_file_mut()).map_err(|err| {
+        // tmp_file is unlinked on drop when returning Err
+        format!("Failed to copy staged database to temporary file: {err}")
+    })?;
+
+    // 3. Flush and sync temporary file data to storage
+    tmp_file
+        .as_file()
+        .sync_all()
+        .map_err(|err| format!("Failed to sync temporary database: {err}"))?;
+
+    // 4. Verify copy integrity before attempting publication
+    if copied_bytes != staged_len {
+        return Err(format!(
+            "Partial copy detected: expected {staged_len} bytes, wrote {copied_bytes} bytes"
+        ));
+    }
+    let tmp_meta_len = tmp_file
+        .as_file()
+        .metadata()
+        .map_err(|err| format!("Failed to inspect temporary file metadata: {err}"))?
+        .len();
+    if tmp_meta_len != staged_len {
+        return Err(format!(
+            "Integrity verification failed: staged size {staged_len} != temporary file size {tmp_meta_len}"
+        ));
+    }
+
+    // 5. Atomically publish to target with create-only semantics (persist_noclobber)
+    match tmp_file.persist_noclobber(target) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(staged);
+            sync_dir(dest_dir);
+            if let Some(sp) = staged.parent() {
+                if sp != dest_dir {
+                    sync_dir(sp);
+                }
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // NamedTempFile inside err is dropped here and automatically unlinks the temporary file.
+            if err.error.kind() == std::io::ErrorKind::AlreadyExists {
+                Err(format!(
+                    "Destination database already exists: {}",
+                    err.error
+                ))
+            } else {
+                Err(format!(
+                    "Failed to atomically publish database with create-only semantics: {}",
+                    err.error
+                ))
+            }
+        }
+    }
+}
+
 /// Atomically publishes a staged database file to the target path using strictly create-only semantics.
 /// Fails if the destination already exists. Never overwrites or truncates existing files.
+/// Never exposes a partial database at the target path.
 /// Removes the staged file upon success.
 pub(crate) fn publish_database_create_only(staged: &Path, target: &Path) -> Result<(), String> {
     if target.exists() {
@@ -31,36 +140,57 @@ pub(crate) fn publish_database_create_only(staged: &Path, target: &Path) -> Resu
             "Target database path already exists; aborting to protect existing data.".into(),
         );
     }
+    let dest_dir = target
+        .parent()
+        .ok_or_else(|| "Target database path has no parent directory".to_string())?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|err| format!("Failed to create destination directory: {err}"))?;
 
+    let staged_meta = std::fs::metadata(staged)
+        .map_err(|err| format!("Failed to inspect staged database: {err}"))?;
+    let _staged_len = staged_meta.len();
+
+    // Try atomic create-only hard link first (instantaneous directory entry link on same filesystem)
     match std::fs::hard_link(staged, target) {
         Ok(()) => {
             let _ = std::fs::remove_file(staged);
+            sync_dir(dest_dir);
+            if let Some(sp) = staged.parent() {
+                if sp != dest_dir {
+                    sync_dir(sp);
+                }
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(format!("Destination database already exists: {e}"))
         }
         Err(_) => {
-            // Strictly create-only copy fallback for filesystems without hardlink support.
-            // create_new(true) fails at OS kernel level if the file already exists (O_CREAT | O_EXCL).
-            // NEVER use std::fs::rename as it silently replaces existing files on POSIX.
-            let mut dest_file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(target)
-                .map_err(|err| {
-                    format!("Destination database already exists or cannot be created: {err}")
-                })?;
-            let mut src_file = std::fs::File::open(staged)
-                .map_err(|err| format!("Failed to open staged database: {err}"))?;
-            std::io::copy(&mut src_file, &mut dest_file)
-                .map_err(|err| format!("Failed to copy staged database: {err}"))?;
-            dest_file
-                .sync_all()
-                .map_err(|err| format!("Failed to sync destination database: {err}"))?;
-            let _ = std::fs::remove_file(staged);
-            Ok(())
+            // Fallback for cross-filesystem links or filesystems without hardlink support:
+            // Use transaction-owned temporary file in destination directory with atomic create-only publication.
+            publish_database_fallback_tempfile(staged, target)
         }
+    }
+}
+
+impl SetupWizardModalState {
+    /// Applies a transactional mutation to the setup state:
+    /// Clones `self.state`, executes `mutate(&mut cloned)`, persists the clone to disk,
+    /// and only updates `self.state` on successful persistence.
+    ///
+    /// If persistence fails, `self.state` retains its previous in-memory state and step,
+    /// and an actionable error is returned.
+    pub(crate) fn transition_state<F>(&mut self, mutate: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut shellumi_core::setup::SetupState),
+    {
+        let mut cloned = self.state.clone();
+        mutate(&mut cloned);
+        cloned
+            .save(&self.base_dir)
+            .map_err(|e| format!("Failed to persist setup state: {e}"))?;
+        self.state = cloned;
+        Ok(())
     }
 }
 
@@ -228,16 +358,14 @@ impl Shellumi {
                     return;
                 }
             }
-            wizard.state.mode = mode;
-            wizard.state.current_step = SetupStep::DefaultVault;
-            let base_dir = wizard.base_dir.clone();
-            if let Err(e) = wizard.state.save(&base_dir) {
-                wizard.error = Some(format!("Failed to persist setup state: {e}"));
-                cx.notify();
-                return;
-            }
             wizard.error = None;
             wizard.status_message = None;
+            if let Err(e) = wizard.transition_state(|state| {
+                state.mode = mode;
+                state.current_step = SetupStep::DefaultVault;
+            }) {
+                wizard.error = Some(e);
+            }
             cx.notify();
         }
     }
@@ -254,11 +382,10 @@ impl Shellumi {
                 SetupStep::ReviewAndFinish => SetupStep::AdditionalVaults,
                 _ => SetupStep::Welcome,
             };
-            wizard.state.current_step = prev;
-            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                wizard.error = Some(format!("Failed to persist setup state: {e}"));
-                cx.notify();
-                return;
+            if let Err(e) = wizard.transition_state(|state| {
+                state.current_step = prev;
+            }) {
+                wizard.error = Some(e);
             }
             cx.notify();
         }
@@ -287,9 +414,10 @@ impl Shellumi {
 
             wizard.error = None;
             wizard.status_message = None;
-            wizard.state.current_step = next;
-            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+            if let Err(e) = wizard.transition_state(|state| {
+                state.current_step = next;
+            }) {
+                wizard.error = Some(e);
                 cx.notify();
                 return;
             }
@@ -308,7 +436,10 @@ impl Shellumi {
     pub(crate) fn wizard_toggle_keychain(&mut self, cx: &mut Context<Self>) {
         if let Some(wizard) = &mut self.setup_wizard_modal {
             wizard.remember_in_keychain = !wizard.remember_in_keychain;
-            wizard.state.remember_in_keychain = wizard.remember_in_keychain;
+            let remember = wizard.remember_in_keychain;
+            let _ = wizard.transition_state(|state| {
+                state.remember_in_keychain = remember;
+            });
             cx.notify();
         }
     }
@@ -317,7 +448,10 @@ impl Shellumi {
     pub(crate) fn wizard_toggle_recovery_confirmed(&mut self, cx: &mut Context<Self>) {
         if let Some(wizard) = &mut self.setup_wizard_modal {
             wizard.recovery_code_confirmed = !wizard.recovery_code_confirmed;
-            wizard.state.recovery_code_confirmed = wizard.recovery_code_confirmed;
+            let confirmed = wizard.recovery_code_confirmed;
+            let _ = wizard.transition_state(|state| {
+                state.recovery_code_confirmed = confirmed;
+            });
             cx.notify();
         }
     }
@@ -488,28 +622,32 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((recovery_code, key)) => {
-                            wizard.default_recovery_code = Some(recovery_code);
-                            wizard.state.default_vault_created = true;
-                            if !wizard
-                                .state
-                                .configured_vaults
-                                .iter()
-                                .any(|v| v.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                            {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
-                                    name: "Default Vault".to_string(),
-                                    is_default: true,
-                                    is_remote: false,
-                                    sync_enabled: false,
-                                    server_url: None,
-                                });
-                            }
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                            let transition_res = wizard.transition_state(|state| {
+                                state.default_vault_created = true;
+                                if let Some(existing) = state
+                                    .configured_vaults
+                                    .iter_mut()
+                                    .find(|v| v.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                                {
+                                    existing.name = "Default Vault".to_string();
+                                    existing.is_default = true;
+                                } else {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+                                        name: "Default Vault".to_string(),
+                                        is_default: true,
+                                        is_remote: false,
+                                        sync_enabled: false,
+                                        server_url: None,
+                                    });
+                                }
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
                                 cx.notify();
                                 return;
                             }
+                            wizard.default_recovery_code = Some(recovery_code);
                             app.active_vault_keys.insert(
                                 shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
                                 key,
@@ -605,29 +743,32 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((key, dir)) => {
-                            app.active_vault_keys
-                                .insert(shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(), key);
-                            wizard.state.default_vault_created = true;
-                            wizard.state.configured_vaults.clear();
-                            for entry in dir.entries {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: entry.id.clone(),
-                                    name: entry.name,
-                                    is_default: entry.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID,
-                                    is_remote: matches!(
-                                        entry.location,
-                                        shellumi_core::VaultDirectoryLocation::Remote { .. }
-                                    ),
-                                    sync_enabled: entry.sync_enabled,
-                                    server_url: None,
-                                });
-                            }
-                            wizard.state.current_step = SetupStep::GoogleDrive;
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                            let transition_res = wizard.transition_state(|state| {
+                                state.default_vault_created = true;
+                                state.configured_vaults.clear();
+                                for entry in dir.entries {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: entry.id.clone(),
+                                        name: entry.name,
+                                        is_default: entry.id
+                                            == shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                                        is_remote: matches!(
+                                            entry.location,
+                                            shellumi_core::VaultDirectoryLocation::Remote { .. }
+                                        ),
+                                        sync_enabled: entry.sync_enabled,
+                                        server_url: None,
+                                    });
+                                }
+                                state.current_step = SetupStep::GoogleDrive;
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
                                 cx.notify();
                                 return;
                             }
+                            app.active_vault_keys
+                                .insert(shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(), key);
                             wizard.status_message =
                                 Some("Default vault unlocked successfully!".to_string());
                         }
@@ -735,21 +876,25 @@ impl Shellumi {
             cx.notify();
             return;
         }
-        wizard.state.recovery_code_confirmed = true;
-        if wizard.state.google_drive_connected {
-            wizard.state.current_step = SetupStep::AdditionalVaults;
-            wizard.status_message =
-                Some("Recovery code confirmed. Proceeding to additional vaults.".into());
+        let next_step = if wizard.state.google_drive_connected {
+            SetupStep::AdditionalVaults
         } else {
-            wizard.state.current_step = SetupStep::GoogleDrive;
-            wizard.status_message =
-                Some("Recovery code confirmed. Proceeding to Google Drive setup.".into());
-        }
-        let base_dir = wizard.base_dir.clone();
-        if let Err(e) = wizard.state.save(&base_dir) {
-            wizard.error = Some(format!("Failed to persist setup progress: {e}"));
-            cx.notify();
-            return;
+            SetupStep::GoogleDrive
+        };
+        wizard.error = None;
+        if let Err(e) = wizard.transition_state(|state| {
+            state.recovery_code_confirmed = true;
+            state.current_step = next_step;
+        }) {
+            wizard.error = Some(e);
+            wizard.recovery_code_confirmed = false;
+        } else {
+            wizard.interrupted_recovery_code = false;
+            wizard.status_message = Some(if next_step == SetupStep::AdditionalVaults {
+                "Recovery code confirmed. Proceeding to additional vaults.".into()
+            } else {
+                "Recovery code confirmed. Proceeding to Google Drive setup.".into()
+            });
         }
         cx.notify();
     }
@@ -928,35 +1073,37 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((key, dir, rec_code)) => {
+                            let transition_res = wizard.transition_state(|state| {
+                                state.default_vault_created = true;
+                                state.recovery_code_confirmed = false;
+                                state.google_drive_connected = true;
+                                state.google_drive_sync_enabled = true;
+                                state.configured_vaults.clear();
+                                for entry in dir.entries {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: entry.id.clone(),
+                                        name: entry.name,
+                                        is_default: entry.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                                        is_remote: matches!(
+                                            entry.location,
+                                            shellumi_core::VaultDirectoryLocation::Remote { .. }
+                                        ),
+                                        sync_enabled: entry.sync_enabled,
+                                        server_url: None,
+                                    });
+                                }
+                                state.current_step = SetupStep::DefaultVault;
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
+                                cx.notify();
+                                return;
+                            }
                             app.active_vault_keys
                                 .insert(shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(), key);
                             wizard.default_recovery_code = Some(rec_code);
                             wizard.recovery_code_confirmed = false;
-                            wizard.state.default_vault_created = true;
-                            wizard.state.recovery_code_confirmed = false;
-                            wizard.state.google_drive_connected = true;
                             wizard.sync_default_opt_in = true;
-                            wizard.state.google_drive_sync_enabled = true;
-                            wizard.state.configured_vaults.clear();
-                            for entry in dir.entries {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: entry.id.clone(),
-                                    name: entry.name,
-                                    is_default: entry.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID,
-                                    is_remote: matches!(
-                                        entry.location,
-                                        shellumi_core::VaultDirectoryLocation::Remote { .. }
-                                    ),
-                                    sync_enabled: entry.sync_enabled,
-                                    server_url: None,
-                                });
-                            }
-                            wizard.state.current_step = SetupStep::DefaultVault;
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
-                                cx.notify();
-                                return;
-                            }
                             wizard.status_message = Some(
                                 "Default vault restored from Google Drive! Please safely save your new recovery code below and check the confirmation box."
                                     .into(),
@@ -1029,31 +1176,35 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok(key) => {
+                            let transition_res = wizard.transition_state(|state| {
+                                state.default_vault_created = true;
+                                if let Some(existing) = state
+                                    .configured_vaults
+                                    .iter_mut()
+                                    .find(|v| v.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                                {
+                                    existing.name = "Default Vault (Migrated)".to_string();
+                                    existing.is_default = true;
+                                } else {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+                                        name: "Default Vault (Migrated)".to_string(),
+                                        is_default: true,
+                                        is_remote: false,
+                                        sync_enabled: false,
+                                        server_url: None,
+                                    });
+                                }
+                                state.current_step = SetupStep::GoogleDrive;
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
+                                cx.notify();
+                                return;
+                            }
                             if let Some(k) = key {
                                 app.active_vault_keys
                                     .insert(shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(), k);
-                            }
-                            wizard.state.default_vault_created = true;
-                            if !wizard
-                                .state
-                                .configured_vaults
-                                .iter()
-                                .any(|v| v.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                            {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
-                                    name: "Default Vault (Migrated)".to_string(),
-                                    is_default: true,
-                                    is_remote: false,
-                                    sync_enabled: false,
-                                    server_url: None,
-                                });
-                            }
-                            wizard.state.current_step = SetupStep::GoogleDrive;
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
-                                cx.notify();
-                                return;
                             }
                             wizard.status_message = Some(
                                 "Legacy database successfully migrated to encrypted vaults!"
@@ -1182,15 +1333,17 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((auth_url, _bundle, discovered, snapshots)) => {
-                            wizard.google_auth_url = Some(auth_url);
-                            wizard.state.google_drive_connected = true;
-                            wizard.cloud_vaults = discovered;
-                            wizard.cloud_snapshots = snapshots;
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                            let transition_res = wizard.transition_state(|state| {
+                                state.google_drive_connected = true;
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
                                 cx.notify();
                                 return;
                             }
+                            wizard.google_auth_url = Some(auth_url);
+                            wizard.cloud_vaults = discovered;
+                            wizard.cloud_snapshots = snapshots;
                             wizard.status_message = Some(format!(
                                 "Google Drive authenticated successfully! Discovered {} cloud vault(s).",
                                 wizard.cloud_vaults.len()
@@ -1276,8 +1429,9 @@ impl Shellumi {
                         Ok((summaries, snapshots)) => {
                             wizard.cloud_vaults = summaries;
                             wizard.cloud_snapshots = snapshots;
-                            wizard.state.google_drive_connected = true;
-                            let _ = wizard.state.save(&wizard.base_dir);
+                            let _ = wizard.transition_state(|state| {
+                                state.google_drive_connected = true;
+                            });
                             wizard.status_message = Some(format!(
                                 "Found {} cloud vault snapshot(s) in Google Drive.",
                                 wizard.cloud_vaults.len()
@@ -1298,7 +1452,10 @@ impl Shellumi {
     pub(crate) fn wizard_toggle_drive_opt_in(&mut self, cx: &mut Context<Self>) {
         if let Some(wizard) = &mut self.setup_wizard_modal {
             wizard.sync_default_opt_in = !wizard.sync_default_opt_in;
-            wizard.state.google_drive_sync_enabled = wizard.sync_default_opt_in;
+            let opt_in = wizard.sync_default_opt_in;
+            let _ = wizard.transition_state(|state| {
+                state.google_drive_sync_enabled = opt_in;
+            });
             cx.notify();
         }
     }
@@ -1492,23 +1649,30 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((vid, vname, rec_code, key, sync_in)) => {
-                            wizard.sec_recovery_code = Some(rec_code);
-                            app.active_vault_keys.insert(vid.clone(), key);
-                            if !wizard.state.configured_vaults.iter().any(|v| v.id == vid) {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: vid,
-                                    name: vname,
-                                    is_default: false,
-                                    is_remote: false,
-                                    sync_enabled: sync_in,
-                                    server_url: None,
-                                });
-                            }
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                            let transition_res = wizard.transition_state(|state| {
+                                if let Some(existing) =
+                                    state.configured_vaults.iter_mut().find(|v| v.id == vid)
+                                {
+                                    existing.name = vname.clone();
+                                    existing.sync_enabled = sync_in;
+                                } else {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: vid.clone(),
+                                        name: vname,
+                                        is_default: false,
+                                        is_remote: false,
+                                        sync_enabled: sync_in,
+                                        server_url: None,
+                                    });
+                                }
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
                                 cx.notify();
                                 return;
                             }
+                            wizard.sec_recovery_code = Some(rec_code);
+                            app.active_vault_keys.insert(vid, key);
                             wizard.status_message = Some(
                                 "Secondary vault created! Please save its recovery code."
                                     .to_string(),
@@ -1676,24 +1840,30 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((vid, key, rec_code)) => {
-                            app.active_vault_keys.insert(vid.clone(), key);
-                            wizard.sec_recovery_code = Some(rec_code);
-                            wizard.sec_recovery_confirmed = false;
-                            if !wizard.state.configured_vaults.iter().any(|v| v.id == vid) {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: vid.clone(),
-                                    name: vid.clone(),
-                                    is_default: false,
-                                    is_remote: false,
-                                    sync_enabled: true,
-                                    server_url: None,
-                                });
-                            }
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                            let transition_res = wizard.transition_state(|state| {
+                                if let Some(existing) =
+                                    state.configured_vaults.iter_mut().find(|v| v.id == vid)
+                                {
+                                    existing.sync_enabled = true;
+                                } else {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: vid.clone(),
+                                        name: vid.clone(),
+                                        is_default: false,
+                                        is_remote: false,
+                                        sync_enabled: true,
+                                        server_url: None,
+                                    });
+                                }
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
                                 cx.notify();
                                 return;
                             }
+                            app.active_vault_keys.insert(vid.clone(), key);
+                            wizard.sec_recovery_code = Some(rec_code);
+                            wizard.sec_recovery_confirmed = false;
                             wizard.status_message = Some(format!(
                                 "Vault '{vid}' successfully restored from Google Drive! Please safely save its new recovery code below."
                             ));
@@ -1912,18 +2082,25 @@ impl Shellumi {
                     wizard.is_busy = false;
                     match result {
                         Ok((vid, vname, url)) => {
-                            if !wizard.state.configured_vaults.iter().any(|v| v.id == vid) {
-                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
-                                    id: vid,
-                                    name: vname,
-                                    is_default: false,
-                                    is_remote: true,
-                                    sync_enabled: false,
-                                    server_url: Some(url),
-                                });
-                            }
-                            if let Err(e) = wizard.state.save(&wizard.base_dir) {
-                                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                            let transition_res = wizard.transition_state(|state| {
+                                if let Some(existing) =
+                                    state.configured_vaults.iter_mut().find(|v| v.id == vid)
+                                {
+                                    existing.name = vname.clone();
+                                    existing.server_url = Some(url.clone());
+                                } else {
+                                    state.configured_vaults.push(ConfiguredVaultSummary {
+                                        id: vid,
+                                        name: vname,
+                                        is_default: false,
+                                        is_remote: true,
+                                        sync_enabled: false,
+                                        server_url: Some(url),
+                                    });
+                                }
+                            });
+                            if let Err(e) = transition_res {
+                                wizard.error = Some(e);
                                 cx.notify();
                                 return;
                             }
@@ -1941,12 +2118,15 @@ impl Shellumi {
         .detach();
     }
 
-    /// Finalizes setup after verification, marks state completed, and opens Shellumi.
+    /// Finalizes setup after coordinated verification and opt-in persistence, marks state completed, and opens Shellumi.
     pub(crate) fn wizard_finish(&mut self, cx: &mut Context<Self>) {
         let key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let Some(wizard) = &mut self.setup_wizard_modal else {
             return;
         };
+        if wizard.is_busy {
+            return;
+        }
 
         let report = verify_setup_integrity(&wizard.base_dir, key.as_ref());
         if !report.is_success() {
@@ -1959,39 +2139,121 @@ impl Shellumi {
             return;
         }
 
-        // Apply Google Drive sync opt-in for default vault if selected
-        if wizard.sync_default_opt_in {
-            let base_dir = wizard.base_dir.clone();
-            let def_key = key.clone();
-            cx.background_executor()
-                .spawn(async move {
-                    let vaults_dir = base_dir.join("vaults");
-                    let db_path = vaults_dir.join("default.db");
-                    if let Ok(mut store) =
-                        HostStore::open_with_key(db_path.to_str().unwrap(), def_key.as_ref()).await
-                    {
-                        let _ = store
-                            .set_vault_sync_enabled(shellumi_storage::LEGACY_LOCAL_VAULT_ID, true)
-                            .await;
-                    }
-                })
-                .detach();
-        }
-
-        // Mark setup completed permanently
-        let base_dir = wizard.base_dir.clone();
-        if let Err(e) = wizard.state.mark_completed(&base_dir) {
-            wizard.error = Some(format!("Failed to persist setup completion: {e}"));
-            cx.notify();
-            return;
-        }
-
-        // Dismiss wizard modal and boot Shellumi with active vault
-        self.active_vault_id = wizard.state.active_vault_id.clone();
-        self.setup_wizard_modal = None;
-
-        self.load_vault_list(cx);
-        self.start_storage(false, cx);
+        wizard.is_busy = true;
+        wizard.error = None;
+        wizard.status_message = Some(
+            "Finalizing setup, verifying database integrity, and persisting preferences…"
+                .to_string(),
+        );
         cx.notify();
+
+        let base_dir = wizard.base_dir.clone();
+        let def_key = key.clone();
+        // Synchronization is enabled only if user explicitly opted in AND Google Drive is connected
+        let target_sync_enabled = wizard.sync_default_opt_in && wizard.state.google_drive_connected;
+
+        let task = cx.background_executor().spawn(async move {
+            let vaults_dir = base_dir.join("vaults");
+            let db_path = vaults_dir.join("default.db");
+            let db_str = db_path
+                .to_str()
+                .ok_or_else(|| "Invalid default database path encoding".to_string())?;
+
+            // 1. Open default encrypted registry with active DEK
+            let mut store = HostStore::open_with_key(db_str, def_key.as_ref())
+                .await
+                .map_err(|e| format!("Failed to open registry database: {e}"))?;
+
+            // 2. Persist Google Drive opt-in state for default vault (handles both enable and disable)
+            store
+                .set_vault_sync_enabled(
+                    shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                    target_sync_enabled,
+                )
+                .await
+                .map_err(|e| format!("Failed to persist Google Drive opt-in setting: {e}"))?;
+
+            // 3. Verify read-back from registry
+            let is_sync_enabled = store
+                .is_vault_sync_enabled(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                .await
+                .map_err(|e| format!("Failed to verify vault sync status: {e}"))?;
+            if is_sync_enabled != target_sync_enabled {
+                return Err(
+                    "Vault sync status verification failed: read-back did not match requested state."
+                        .into(),
+                );
+            }
+
+            drop(store);
+
+            // 4. Run final integrity check before completing setup
+            let final_report = verify_setup_integrity(&base_dir, def_key.as_ref());
+            if !final_report.is_success() {
+                return Err(format!(
+                    "Final integrity verification failed: {}",
+                    final_report.errors.join("; ")
+                ));
+            }
+
+            Ok::<_, String>(target_sync_enabled)
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                let Some(wizard) = &mut app.setup_wizard_modal else {
+                    return;
+                };
+                wizard.is_busy = false;
+                match result {
+                    Err(err) => {
+                        wizard.error = Some(err);
+                        cx.notify();
+                    }
+                    Ok(sync_enabled) => {
+                        // Persist completion marker transactionally only after all operations succeed
+                        let finish_res = wizard.transition_state(|state| {
+                            state.google_drive_sync_enabled = sync_enabled;
+                            if let Some(v) = state
+                                .configured_vaults
+                                .iter_mut()
+                                .find(|v| v.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                            {
+                                v.sync_enabled = sync_enabled;
+                            }
+                            state.completed = true;
+                            state.current_step = SetupStep::Completed;
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            state.completed_at = Some(now);
+                        });
+
+                        if let Err(e) = finish_res {
+                            wizard.error = Some(format!("Failed to persist setup completion: {e}"));
+                            cx.notify();
+                            return;
+                        }
+
+                        tracing::info!(
+                            completed_at = wizard.state.completed_at,
+                            active_vault = %wizard.state.active_vault_id,
+                            "First-run setup wizard successfully completed and persisted"
+                        );
+
+                        // Dismiss wizard modal and boot Shellumi with active vault
+                        app.active_vault_id = wizard.state.active_vault_id.clone();
+                        app.setup_wizard_modal = None;
+
+                        app.load_vault_list(cx);
+                        app.start_storage(false, cx);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 }

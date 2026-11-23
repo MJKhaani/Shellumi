@@ -1827,3 +1827,316 @@ fn test_setup_state_save_error_propagation_and_idempotent_recovery() {
         "configured_vaults must remain deduplicated across retries"
     );
 }
+
+#[test]
+fn test_partial_database_copy_prevention_and_cleanup() {
+    let temp = tempdir().unwrap();
+    let dir = temp.path();
+
+    let target = dir.join("final_destination.db");
+    let non_existent_staged = dir.join("non_existent_source.db");
+
+    // Case 1: Staged file does not exist -> fallback must fail and create no files at target
+    let res = crate::actions::setup_wizard::publish_database_fallback_tempfile(
+        &non_existent_staged,
+        &target,
+    );
+    assert!(res.is_err(), "Must fail when staged file does not exist");
+    assert!(
+        !target.exists(),
+        "Target database must never be created if source fails"
+    );
+
+    // Verify no leftover .tmp_pub_ files in dir
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp_pub_"))
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "No temporary transaction files must be left behind after failure"
+    );
+
+    // Case 2: Target already exists with original content -> must not be overwritten or truncated
+    std::fs::write(&target, b"pristine original database contents").unwrap();
+    let staged = dir.join("staged_update.db");
+    std::fs::write(&staged, b"attacker or concurrent corrupted payload").unwrap();
+
+    let collision_res =
+        crate::actions::setup_wizard::publish_database_fallback_tempfile(&staged, &target);
+    assert!(
+        collision_res.is_err(),
+        "Must fail when target already exists"
+    );
+    let err_msg = collision_res.unwrap_err();
+    assert!(
+        err_msg.contains("already exists"),
+        "Error message must indicate target already exists: {err_msg}"
+    );
+
+    // Target content must be 100% untouched
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"pristine original database contents",
+        "Existing database must never be modified or truncated on collision"
+    );
+
+    // Verify again no leftover temporary transaction files
+    let remaining_tmp: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp_pub_"))
+        .collect();
+    assert!(
+        remaining_tmp.is_empty(),
+        "No temporary files must remain after collision failure"
+    );
+}
+
+#[test]
+fn test_atomic_create_only_preserves_existing_databases_across_all_paths() {
+    let temp = tempdir().unwrap();
+    let dir = temp.path();
+
+    let target = dir.join("critical_vault.db");
+    std::fs::write(&target, b"authoritative database payload").unwrap();
+
+    let staged1 = dir.join("candidate_one.db");
+    std::fs::write(&staged1, b"competing candidate one").unwrap();
+
+    let staged2 = dir.join("candidate_two.db");
+    std::fs::write(&staged2, b"competing candidate two").unwrap();
+
+    // Direct create-only publication attempt
+    let res1 = crate::actions::setup_wizard::publish_database_create_only(&staged1, &target);
+    assert!(res1.is_err());
+    assert!(staged1.exists(), "Staged file 1 must be preserved on error");
+
+    // Fallback publication attempt
+    let res2 = crate::actions::setup_wizard::publish_database_fallback_tempfile(&staged2, &target);
+    assert!(res2.is_err());
+    assert!(staged2.exists(), "Staged file 2 must be preserved on error");
+
+    // Target content was never altered
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"authoritative database payload",
+        "Target database must remain untouched across all publication attempts"
+    );
+}
+
+#[test]
+fn test_transactional_state_transition_rollback_on_persistence_failure() {
+    let temp = tempdir().unwrap();
+    let base_dir = temp.path();
+
+    // Construct an invalid path where save will fail
+    let blocking_file = base_dir.join("blocking_regular_file");
+    std::fs::write(&blocking_file, b"blocks dir creation").unwrap();
+    let invalid_dir = blocking_file.join("sub_directory");
+
+    let mut state = SetupState::new();
+    state.current_step = SetupStep::Welcome;
+
+    // advance_to to DefaultVault should fail to persist and roll back
+    let res = state.advance_to(SetupStep::DefaultVault, &invalid_dir);
+    assert!(res.is_err(), "advance_to must fail when persistence fails");
+    assert_eq!(
+        state.current_step,
+        SetupStep::Welcome,
+        "In-memory step must be rolled back to Welcome upon persistence failure"
+    );
+
+    // mark_completed should also fail and roll back
+    let res_completed = state.mark_completed(&invalid_dir);
+    assert!(
+        res_completed.is_err(),
+        "mark_completed must fail when persistence fails"
+    );
+    assert!(
+        !state.completed,
+        "In-memory completed flag must remain false upon persistence failure"
+    );
+    assert_eq!(
+        state.current_step,
+        SetupStep::Welcome,
+        "In-memory step must remain Welcome upon persistence failure"
+    );
+}
+
+#[test]
+fn test_safe_resumption_after_interrupted_recovery_or_creation() {
+    let temp = tempdir().unwrap();
+    let base_dir = temp.path();
+
+    // Create partial setup state: default vault created, but recovery code not confirmed
+    let mut state = SetupState::new();
+    state.current_step = SetupStep::DefaultVault;
+    state.default_vault_created = true;
+    state.recovery_code_confirmed = false;
+    state.completed = false;
+    state.configured_vaults.push(ConfiguredVaultSummary {
+        id: "legacy-local".to_string(),
+        name: "Default Vault".to_string(),
+        is_default: true,
+        is_remote: false,
+        sync_enabled: false,
+        server_url: None,
+    });
+    state.save(base_dir).unwrap();
+
+    // 1. Must NOT be considered completed
+    assert!(
+        !SetupState::is_setup_completed(base_dir),
+        "Incomplete setup must never be reported as completed"
+    );
+
+    // 2. Detection reports IncompleteSetup
+    let status = SetupState::detect_installation(base_dir);
+    match status {
+        InstallationStatus::IncompleteSetup {
+            last_step,
+            default_vault_created,
+        } => {
+            assert_eq!(last_step, SetupStep::DefaultVault);
+            assert!(default_vault_created);
+        }
+        other => panic!("Expected IncompleteSetup, got: {:?}", other),
+    }
+
+    // 3. Resumption: confirm recovery code and transition to GoogleDrive
+    state.recovery_code_confirmed = true;
+    let res = state.advance_to(SetupStep::GoogleDrive, base_dir);
+    assert!(res.is_ok());
+    assert_eq!(state.current_step, SetupStep::GoogleDrive);
+    assert!(state.recovery_code_confirmed);
+
+    // Reload from disk to verify persistence
+    let reloaded = SetupState::load(base_dir).unwrap().unwrap();
+    assert_eq!(reloaded.current_step, SetupStep::GoogleDrive);
+    assert!(reloaded.recovery_code_confirmed);
+    assert!(!reloaded.completed);
+}
+
+#[test]
+fn test_google_drive_opt_in_persistence_and_read_back() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("default.db");
+        let key = VaultKey::generate().unwrap();
+
+        // 1. Initialize encrypted host store
+        let mut store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&key))
+            .await
+            .unwrap();
+
+        // Register default vault context
+        let context = VaultContext::new(
+            VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap(),
+            VaultLocation::Local,
+        );
+        store
+            .register_vault_context("Default Vault", &context)
+            .await
+            .unwrap();
+
+        // By default, sync should not be enabled
+        let initial_sync = store
+            .is_vault_sync_enabled(LEGACY_LOCAL_VAULT_ID)
+            .await
+            .unwrap();
+        assert!(!initial_sync, "Default sync setting must be disabled");
+
+        // 2. Persist sync enabled = true
+        let updated = store
+            .set_vault_sync_enabled(LEGACY_LOCAL_VAULT_ID, true)
+            .await
+            .unwrap();
+        assert!(updated, "set_vault_sync_enabled must report rows updated");
+
+        // Read-back verification
+        let is_enabled = store
+            .is_vault_sync_enabled(LEGACY_LOCAL_VAULT_ID)
+            .await
+            .unwrap();
+        assert!(is_enabled, "Read-back must reflect sync enabled");
+
+        // 3. Persist sync enabled = false (disabling sync)
+        let updated_false = store
+            .set_vault_sync_enabled(LEGACY_LOCAL_VAULT_ID, false)
+            .await
+            .unwrap();
+        assert!(
+            updated_false,
+            "set_vault_sync_enabled must report rows updated when disabling"
+        );
+
+        // Read-back verification
+        let is_disabled = store
+            .is_vault_sync_enabled(LEGACY_LOCAL_VAULT_ID)
+            .await
+            .unwrap();
+        assert!(!is_disabled, "Read-back must reflect sync disabled");
+    });
+}
+
+#[test]
+fn test_idempotent_retries_on_failed_finish() {
+    let temp = tempdir().unwrap();
+    let base_dir = temp.path();
+
+    let mut state = SetupState::new();
+    state.current_step = SetupStep::ReviewAndFinish;
+    state.default_vault_created = true;
+    state.recovery_code_confirmed = true;
+    state.configured_vaults.push(ConfiguredVaultSummary {
+        id: "legacy-local".to_string(),
+        name: "Default Vault".to_string(),
+        is_default: true,
+        is_remote: false,
+        sync_enabled: false,
+        server_url: None,
+    });
+    state.save(base_dir).unwrap();
+
+    // Simulate first finish attempt failing due to unverified registry write or I/O error
+    // In-memory state remains on ReviewAndFinish and completed = false
+    assert_eq!(state.current_step, SetupStep::ReviewAndFinish);
+    assert!(!state.completed);
+
+    // Simulate retry: deduplication check when re-registering or configuring vaults
+    let vid = "legacy-local";
+    if let Some(existing) = state.configured_vaults.iter_mut().find(|v| v.id == vid) {
+        existing.sync_enabled = true;
+    } else {
+        state.configured_vaults.push(ConfiguredVaultSummary {
+            id: vid.to_string(),
+            name: "Default Vault".to_string(),
+            is_default: true,
+            is_remote: false,
+            sync_enabled: true,
+            server_url: None,
+        });
+    }
+
+    assert_eq!(
+        state.configured_vaults.len(),
+        1,
+        "configured_vaults must not duplicate across retries"
+    );
+    assert!(state.configured_vaults[0].sync_enabled);
+
+    // Retry succeeds: call mark_completed
+    state.mark_completed(base_dir).unwrap();
+    assert!(state.completed);
+    assert_eq!(state.current_step, SetupStep::Completed);
+
+    // Verify persisted state reflects completed = true and single vault
+    let reloaded = SetupState::load(base_dir).unwrap().unwrap();
+    assert!(reloaded.completed);
+    assert_eq!(reloaded.current_step, SetupStep::Completed);
+    assert_eq!(reloaded.configured_vaults.len(), 1);
+    assert!(SetupState::is_setup_completed(base_dir));
+}

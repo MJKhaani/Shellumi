@@ -252,27 +252,32 @@ impl SetupState {
         Ok(())
     }
 
-    /// Advances the current step and persists the state.
+    /// Advances the current step and persists the state transactionally.
     pub fn advance_to(&mut self, next: SetupStep, base_dir: &Path) -> Result<(), SetupError> {
-        self.current_step = next;
-        self.save(base_dir)
+        let mut cloned = self.clone();
+        cloned.current_step = next;
+        cloned.save(base_dir)?;
+        *self = cloned;
+        Ok(())
     }
 
-    /// Marks the setup wizard as successfully completed and persists the state.
+    /// Marks the setup wizard as successfully completed and persists the state transactionally.
     pub fn mark_completed(&mut self, base_dir: &Path) -> Result<(), SetupError> {
-        self.completed = true;
-        self.current_step = SetupStep::Completed;
+        let mut cloned = self.clone();
+        cloned.completed = true;
+        cloned.current_step = SetupStep::Completed;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.completed_at = Some(now);
-        self.save(base_dir)?;
+        cloned.completed_at = Some(now);
+        cloned.save(base_dir)?;
         tracing::info!(
             completed_at = now,
-            active_vault = %self.active_vault_id,
+            active_vault = %cloned.active_vault_id,
             "First-run setup wizard successfully completed and persisted"
         );
+        *self = cloned;
         Ok(())
     }
 

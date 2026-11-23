@@ -354,5 +354,39 @@ Automated coverage in `crates/shellumi-app/src/tests/setup_wizard.rs` exercises 
    - Removed hardcoded production client IDs.
    - On token refresh failure, `OAuthTokenBundle::resolve_valid_token()` strictly returns an actionable authentication error and refuses to treat an expired access token as valid.
 
+### Setup Wizard Reliability, Partial Publication Prevention, Transactional State, and Awaited Opt-In (2026-11-23)
+
+1. **Prevent Partial Database Publication**:
+   - Upgraded `publish_database_create_only()` to guarantee that databases are never exposed at their final paths in a partially copied state.
+   - For filesystems requiring a fallback (e.g., cross-filesystem `EXDEV`), allocates a transaction-owned temporary file in the destination directory (`publish_database_fallback_tempfile()`).
+   - Copies the full database into the temp file, flushes and syncs to disk (`sync_all()`), and verifies that the copied byte count and metadata length exactly match the source.
+   - Publishes atomically using create-only semantics (`persist_noclobber`, which invokes `renameat_with(..., NOREPLACE)` on macOS/Linux and non-replacing move on Windows).
+   - If publication fails or collisions occur, RAII drop deletes the transaction-owned temporary file, leaving the destination pristine and untouched.
+   - Enforces directory durability where supported via `sync_dir()`.
+
+2. **Transactional Wizard State Transitions**:
+   - Implemented `SetupWizardModalState::transition_state()` which clones the current in-memory state, applies mutations to the clone, persists the clone to disk via `SetupState::save()`, and only updates the in-memory state upon confirmed persistence.
+   - Applied across all navigation (`wizard_select_mode`, `wizard_prev_step`, `wizard_advance_to_step`), recovery confirmation, default vault creation, unlocking, migration, cloud restoration, Google Drive authentication, secondary vault creation/restoration, and server connections.
+   - When state persistence fails, the in-memory step is preserved and an actionable error is surfaced in the UI.
+   - Enforced idempotent upsert across `configured_vaults` preventing duplicate vault registrations across retries or restarts.
+   - Made `advance_to()` and `mark_completed()` on `SetupState` in `shellumi-core` transactional as well.
+
+3. **Coordinated & Awaited Google Drive Opt-In Persistence**:
+   - Refactored `wizard_finish()` into a coordinated, awaited background task.
+   - Opens the default encrypted registry with the active DEK, persists the user's explicit Google Drive opt-in preference via `HostStore::set_vault_sync_enabled()`, and performs read-back verification via `HostStore::is_vault_sync_enabled()`.
+   - Handles both enabling and disabling sync (including when skipping Google Drive).
+   - Runs pre-finish and post-persistence cryptographic integrity checks before calling `mark_completed()`.
+   - If persistence, read-back, or integrity checks fail, keeps the wizard modal open, displays the actionable error, and permits safe idempotent retries without corrupting database state.
+
+4. **Automated Verification & Test Suite Expansion**:
+   - Added fault-injection and regression unit tests covering:
+     - Prevention of partial databases and RAII cleanup on copy/source failures.
+     - Collision rejection across all publication paths without truncating existing files.
+     - State-save rollback on failure retaining previous step.
+     - Safe resumption after interrupted recovery or creation.
+     - Google Drive opt-in enabled and disabled persistence with read-back verification.
+     - Idempotent finish retries.
+   - All 44 unit tests in `shellumi-app`, 240 tests in `shellumi-core`, 86 tests in `shellumi-storage`, and 38 tests in `shellumi-cli` pass. Zero clippy warnings with `-D warnings` and compliant formatting.
+
 
 
