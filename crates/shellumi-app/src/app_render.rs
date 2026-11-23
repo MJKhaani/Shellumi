@@ -169,6 +169,9 @@ impl Render for Shellumi {
             }))
             .on_action(cx.listener(|app, _: &OpenShortcutsHelp, window, cx| {
                 app.navigate_page("Settings", window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &RunSetupWizard, _, cx| {
+                app.open_setup_wizard(cx);
             }));
 
         root = root.child(self.render_unified_top_bar(cx));
@@ -1329,6 +1332,9 @@ impl Render for Shellumi {
                 }
                 if let Some(modal) = &self.unlock_vault_modal {
                     result = result.child(self.render_unlock_vault_modal(modal, cx));
+                }
+                if let Some(modal) = &self.setup_wizard_modal {
+                    result = result.child(self.render_setup_wizard_modal(modal, cx));
                 }
                 return result;
             }

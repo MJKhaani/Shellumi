@@ -290,3 +290,17 @@ rollback tests passed after the final preservation guard. See
 [implementation and verification details](sync-migration-review-progress.md).
 The next acceptance work remains credential/transport validation on Windows/Linux
 and isolated SSH/Drive environments from the engineering increments above.
+
+## Native GPUI First-Run Setup Wizard (2026-11-23)
+
+A complete native GPUI first-run setup wizard (`shellumi-app` and `shellumi-core::setup`) guides new and returning users through initialization, legacy migration, encrypted multi-vault provisioning, user-facing Google Drive zero-knowledge OAuth synchronization, and Shellumi Server enrollment.
+
+Key capabilities:
+1. **Welcome & Installation Detection**: Automatically inspects base data directory to classify installation state (`Fresh`, `IncompleteSetup`, `LegacyDatabase`, or `ExistingVaults`). Never overwrites or silently reinitializes existing user data.
+2. **Encrypted Default Vault**: Creates mandatory encrypted `default.db` with user-selected strong password, random CSPRNG DEK, Argon2id wrapped-key manifest (`legacy-local.manifest.json`), and 32-character formatted emergency recovery code requiring explicit confirmation of safe storage. Offers optional OS Keychain remembering (disabled by default). Supports direct password/recovery code unlocking and legacy database (`shellumi.db`) migration.
+3. **Google Drive Sync & Zero-Knowledge PKCE**: Seamless user-facing OAuth 2.0 PKCE flow with ephemeral loopback listener (`http://127.0.0.1:{port}/callback`) and native system browser opening. Securely saves OAuth token bundles in credential storage without requiring environment variables. Provides explicit opt-in/consent checkboxes per vault, ensuring zero data is uploaded without consent.
+4. **Additional Vaults**: Multi-vault creation and restoration supporting Local Vaults (independent password, DEK, recovery code, and Drive opt-in) and Corporate/Shellumi Server connection (URL, authentication, device keypair generation, challenge signing, device enrollment, and secure credential storage). Preserves un-synced vault references and maintains complete isolation between Google Drive and Shellumi Server.
+5. **Review & Finish**: Pre-finish cryptographic and database integrity verification (`verify_setup_integrity`) confirming encryption headers, manifest validity, unlock capabilities, and vault registry counts. Atomically persists `.setup_state.json` via `.setup_state.tmp` ensuring crash-safe, resumable onboarding that never reappears unless requested via `--setup-wizard` CLI flag or the App/Help menu.
+
+Automated coverage in `crates/shellumi-app/src/tests/setup_wizard.rs` exercises fresh installation detection and default vault creation, recovery code confirmation, interrupted crash-safe resumption, Google Drive PKCE exchange, legacy migration routing, Shellumi Server enrollment, independent secondary vaults, and skipped optional flows.
+

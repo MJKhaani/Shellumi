@@ -1254,6 +1254,9 @@ impl Shellumi {
         if let Some(modal) = &self.unlock_vault_modal {
             result = result.child(self.render_unlock_vault_modal(modal, cx));
         }
+        if let Some(modal) = &self.setup_wizard_modal {
+            result = result.child(self.render_setup_wizard_modal(modal, cx));
+        }
         if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
             result = result.child(dropdown);
         }

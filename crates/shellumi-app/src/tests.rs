@@ -2,6 +2,7 @@ mod collaboration;
 mod infrastructure;
 mod multi_window;
 mod real_server_verification;
+mod setup_wizard;
 mod sftp;
 mod sync;
 

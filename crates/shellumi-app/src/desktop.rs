@@ -1110,6 +1110,9 @@ impl Shellumi {
         if let Some(modal) = &self.identity_modal {
             root = root.child(self.render_identity_modal(modal, cx));
         }
+        if let Some(modal) = &self.setup_wizard_modal {
+            root = root.child(self.render_setup_wizard_modal(modal, cx));
+        }
         root
     }
 }

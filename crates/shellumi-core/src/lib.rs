@@ -22,6 +22,7 @@ pub mod palette;
 pub mod protocol;
 pub mod recording;
 pub mod server;
+pub mod setup;
 pub mod sftp;
 pub mod snippet;
 pub mod ssh_config;
@@ -135,6 +136,10 @@ pub fn discover_serial_ports() -> Vec<String> {
 pub use recording::{
     format_duration_hms, CastPlaybackEngine, PlaybackFrame, PlaybackSpeed, PlaybackStatus,
     SessionRecordingMetadata, SessionRecordingSummary, SessionRedactor,
+};
+pub use setup::{
+    verify_setup_integrity, ConfiguredVaultSummary, InstallationStatus, SetupError, SetupState,
+    SetupStep, SetupVerificationReport, SetupWizardMode, SETUP_STATE_FILE, SETUP_STATE_TMP_FILE,
 };
 pub use sftp::{
     format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,

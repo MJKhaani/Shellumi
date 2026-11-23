@@ -125,6 +125,7 @@ actions!(
         BringAllToFront,
         OpenShortcutsHelp,
         OpenVaultInNewWindow,
+        RunSetupWizard,
     ]
 );
 
@@ -473,6 +474,56 @@ pub(crate) struct UnlockVaultModalState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdditionalVaultsTab {
+    CreateLocal,
+    RestoreLocal,
+    ConnectServer,
+}
+
+pub(crate) struct SetupWizardModalState {
+    pub(crate) state: shellumi_core::setup::SetupState,
+    pub(crate) installation_status: shellumi_core::setup::InstallationStatus,
+    pub(crate) base_dir: std::path::PathBuf,
+    // Step 2: Default Vault inputs
+    pub(crate) default_password_input: Entity<TextInput>,
+    pub(crate) default_password_confirm_input: Entity<TextInput>,
+    pub(crate) default_recovery_code: Option<String>,
+    pub(crate) recovery_code_confirmed: bool,
+    pub(crate) remember_in_keychain: bool,
+    pub(crate) legacy_password_input: Entity<TextInput>,
+    pub(crate) existing_unlock_input: Entity<TextInput>,
+    pub(crate) unlock_with_recovery_code: bool,
+    // Step 3: Google Drive inputs
+    pub(crate) google_client_id_input: Entity<TextInput>,
+    pub(crate) is_connecting_google: bool,
+    pub(crate) google_auth_url: Option<String>,
+    pub(crate) cloud_snapshots: Vec<shellumi_core::SyncVault>,
+    pub(crate) is_fetching_snapshots: bool,
+    pub(crate) sync_default_opt_in: bool,
+    // Step 4: Additional Vaults inputs
+    pub(crate) additional_tab: AdditionalVaultsTab,
+    pub(crate) sec_vault_name_input: Entity<TextInput>,
+    pub(crate) sec_vault_password_input: Entity<TextInput>,
+    pub(crate) sec_vault_password_confirm_input: Entity<TextInput>,
+    pub(crate) sec_vault_keychain: bool,
+    pub(crate) sec_vault_drive_opt_in: bool,
+    pub(crate) sec_recovery_code: Option<String>,
+    pub(crate) sec_recovery_confirmed: bool,
+    // Step 4: Server inputs
+    pub(crate) server_url_input: Entity<TextInput>,
+    pub(crate) server_user_input: Entity<TextInput>,
+    pub(crate) server_pass_input: Entity<TextInput>,
+    pub(crate) server_device_name_input: Entity<TextInput>,
+    pub(crate) is_testing_server: bool,
+    // Step 5: Verification Report
+    pub(crate) verification_report: Option<shellumi_core::setup::SetupVerificationReport>,
+    // Common
+    pub(crate) is_busy: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) status_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MobileViewportPreset {
     IPhone15Pro,
     IPadPro11,
@@ -640,6 +691,7 @@ struct Shellumi {
     tunnel_modal: Option<TunnelModalState>,
     create_vault_modal: Option<CreateVaultModalState>,
     unlock_vault_modal: Option<UnlockVaultModalState>,
+    pub(crate) setup_wizard_modal: Option<SetupWizardModalState>,
     sidebar_visible: bool,
     sidebar_collapsed: bool,
     vault_dropdown_open: bool,
@@ -1059,6 +1111,7 @@ impl Shellumi {
             tunnel_modal: None,
             create_vault_modal: None,
             unlock_vault_modal: None,
+            setup_wizard_modal: None,
             sidebar_visible: true,
             sidebar_collapsed: false,
             vault_dropdown_open: false,
@@ -2790,23 +2843,70 @@ fn main() {
         "Shellumi desktop application started"
     );
 
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let (database, create_parent, startup_error) = match args.as_slice() {
-        [] => match data_path::default_data_file().and_then(|path| {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut force_wizard = false;
+    let mut custom_hosts = None;
+    let mut arg_error = false;
+
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--setup-wizard" | "--setup" => {
+                force_wizard = true;
+            }
+            "--hosts" => {
+                if let Some(path) = iter.next() {
+                    if !path.is_empty() && path != ":memory:" {
+                        custom_hosts = Some(path);
+                    } else {
+                        arg_error = true;
+                    }
+                } else {
+                    arg_error = true;
+                }
+            }
+            _ => {
+                arg_error = true;
+            }
+        }
+    }
+
+    if arg_error {
+        tracing::error!("Invalid command-line arguments");
+        eprintln!("Usage: shellumi-app [--setup-wizard] [--hosts <database-path>]");
+        std::process::exit(2);
+    }
+
+    let (database, create_parent, startup_error) = if let Some(path) = custom_hosts {
+        (Some(path), false, None)
+    } else {
+        match data_path::default_data_file().and_then(|path| {
             path.to_str()
                 .map(str::to_owned)
                 .ok_or_else(|| "The Shellumi data path is not valid UTF-8.".to_owned())
         }) {
             Ok(path) => (Some(path), true, None),
             Err(error) => (None, false, Some(error)),
-        },
-        [flag, path] if flag == "--hosts" && !path.is_empty() && path != ":memory:" => {
-            (Some(path.clone()), false, None)
         }
-        _ => {
-            tracing::error!("Invalid command-line arguments: {:?}", args);
-            eprintln!("Usage: shellumi-app [--hosts <database-path>]");
-            std::process::exit(2);
+    };
+
+    let should_run_wizard = force_wizard || {
+        if let Some(ref db_path) = database {
+            let base_path = std::path::Path::new(db_path);
+            let base_dir = if base_path.is_dir() {
+                base_path
+            } else if let Some(parent) = base_path.parent() {
+                if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+                    parent.parent().unwrap_or(parent)
+                } else {
+                    parent
+                }
+            } else {
+                std::path::Path::new(".")
+            };
+            !shellumi_core::setup::SetupState::is_setup_completed(base_dir)
+        } else {
+            false
         }
     };
     if let Some(ref err) = startup_error {
@@ -2834,6 +2934,7 @@ fn main() {
                     MenuItem::action("About Shellumi", AboutApp),
                     MenuItem::separator(),
                     MenuItem::action("Vaults", OpenVaultsMenu),
+                    MenuItem::action("Setup Wizard…", RunSetupWizard),
                     MenuItem::action("SFTP", OpenSftpMenu),
                     MenuItem::action("Settings…", OpenSettingsMenu),
                     MenuItem::separator(),
@@ -2869,7 +2970,11 @@ fn main() {
             },
             Menu {
                 name: "Help".into(),
-                items: vec![MenuItem::action("Keyboard Shortcuts", OpenShortcutsHelp)],
+                items: vec![
+                    MenuItem::action("Keyboard Shortcuts", OpenShortcutsHelp),
+                    MenuItem::separator(),
+                    MenuItem::action("Run Setup Wizard…", RunSetupWizard),
+                ],
             },
         ]);
 
@@ -2993,6 +3098,8 @@ fn main() {
                     if let Some(error) = startup_error {
                         app.hosts = HostState::Error(error);
                         cx.notify();
+                    } else if should_run_wizard {
+                        app.open_setup_wizard(cx);
                     } else {
                         app.start_storage(create_parent, cx);
                     }
