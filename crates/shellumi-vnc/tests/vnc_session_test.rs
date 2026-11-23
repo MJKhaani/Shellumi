@@ -694,6 +694,7 @@ async fn test_vnc_session_reconnect_cancellation_by_user() {
         client_res.is_ok(),
         "Session should exit Ok(()) on cancellation"
     );
+    server_task.abort();
     let _ = server_task.await;
 }
 
