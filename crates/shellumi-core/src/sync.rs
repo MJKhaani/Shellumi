@@ -834,6 +834,8 @@ pub struct OAuthTokenBundle {
     pub expires_in: Option<u64>,
     pub scope: Option<String>,
     pub acquired_at: u64,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 impl OAuthTokenBundle {
@@ -851,7 +853,14 @@ impl OAuthTokenBundle {
             expires_in,
             scope,
             acquired_at,
+            client_id: None,
         }
+    }
+
+    /// Attaches an OAuth client ID to this token bundle.
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
     }
 
     /// Checks if the token is expired given a unix timestamp in seconds, with a 60-second grace window.
@@ -873,6 +882,9 @@ impl OAuthTokenBundle {
         store
             .set_secret(OAUTH_TOKEN_SERVICE, OAUTH_TOKEN_ACCOUNT, &json)
             .map_err(|e| SyncError::Api(format!("failed to store OAuth token: {e}")))?;
+        if let Some(ref cid) = self.client_id {
+            let _ = Self::save_client_id(store, cid);
+        }
         Ok(())
     }
 
@@ -882,9 +894,15 @@ impl OAuthTokenBundle {
     ) -> Result<Option<Self>, SyncError> {
         match store.get_secret(OAUTH_TOKEN_SERVICE, OAUTH_TOKEN_ACCOUNT) {
             Ok(Some(secret)) => {
-                let bundle = serde_json::from_str(secret.expose_secret()).map_err(|e| {
-                    SyncError::Deserialization(format!("corrupted OAuth token: {e}"))
-                })?;
+                let mut bundle: Self =
+                    serde_json::from_str(secret.expose_secret()).map_err(|e| {
+                        SyncError::Deserialization(format!("corrupted OAuth token: {e}"))
+                    })?;
+                if bundle.client_id.is_none() {
+                    if let Ok(Some(cid)) = Self::load_client_id(store) {
+                        bundle.client_id = Some(cid);
+                    }
+                }
                 Ok(Some(bundle))
             }
             Ok(None) => Ok(None),
@@ -892,10 +910,68 @@ impl OAuthTokenBundle {
         }
     }
 
+    /// Persists the active Google OAuth client ID into the credential store.
+    pub fn save_client_id(
+        store: &dyn crate::credential::CredentialStore,
+        client_id: &str,
+    ) -> Result<(), SyncError> {
+        let trimmed = client_id.trim();
+        if trimmed.is_empty() {
+            return Err(SyncError::Api("OAuth client ID cannot be empty".into()));
+        }
+        store
+            .set_secret(OAUTH_TOKEN_SERVICE, OAUTH_CLIENT_ID_ACCOUNT, trimmed)
+            .map_err(|e| SyncError::Api(format!("failed to store OAuth client ID: {e}")))?;
+        Ok(())
+    }
+
+    /// Loads the persisted Google OAuth client ID from the credential store.
+    pub fn load_client_id(
+        store: &dyn crate::credential::CredentialStore,
+    ) -> Result<Option<String>, SyncError> {
+        match store.get_secret(OAUTH_TOKEN_SERVICE, OAUTH_CLIENT_ID_ACCOUNT) {
+            Ok(Some(s)) => {
+                let val = s.expose_secret().trim().to_string();
+                if !val.is_empty() {
+                    return Ok(Some(val));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(SyncError::Api(format!(
+                    "failed to load OAuth client ID: {e}"
+                )))
+            }
+        }
+
+        // Fallback: check token bundle if client_id is embedded
+        if let Ok(Some(secret)) = store.get_secret(OAUTH_TOKEN_SERVICE, OAUTH_TOKEN_ACCOUNT) {
+            if let Ok(bundle) = serde_json::from_str::<Self>(secret.expose_secret()) {
+                if let Some(cid) = bundle.client_id {
+                    let trimmed = cid.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Ok(Some(trimmed));
+                    }
+                }
+            }
+        }
+
+        // Optional environment variable fallback
+        if let Ok(env_cid) = std::env::var("SHELLUMI_GOOGLE_CLIENT_ID") {
+            let trimmed = env_cid.trim().to_string();
+            if !trimmed.is_empty() {
+                return Ok(Some(trimmed));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Deletes the persisted token bundle from the provided secure credential store.
     pub fn delete_from_store(
         store: &dyn crate::credential::CredentialStore,
     ) -> Result<bool, SyncError> {
+        let _ = store.delete_secret(OAUTH_TOKEN_SERVICE, OAUTH_CLIENT_ID_ACCOUNT);
         store
             .delete_secret(OAUTH_TOKEN_SERVICE, OAUTH_TOKEN_ACCOUNT)
             .map_err(|e| SyncError::Api(format!("failed to delete OAuth token: {e}")))
@@ -904,6 +980,7 @@ impl OAuthTokenBundle {
     /// Resolves an active Google Drive OAuth access token from the credential store.
     /// If the token is expired and a refresh token is present, automatically refreshes it,
     /// persists the refreshed bundle into the credential store, and returns the fresh access token.
+    /// On refresh failure, never returns an expired token as valid, returning an actionable error instead.
     /// Also supports automatic migration from legacy credential store key `org.shellumi.sync / gdrive_oauth_token`.
     pub fn resolve_valid_token<T: HttpTransport>(
         store: &dyn crate::credential::CredentialStore,
@@ -911,17 +988,36 @@ impl OAuthTokenBundle {
         current_time: u64,
     ) -> Result<String, SyncError> {
         if let Some(bundle) = Self::load_from_store(store)? {
-            if bundle.is_expired(current_time) && bundle.refresh_token.is_some() {
-                match client.refresh_token(&bundle, current_time) {
-                    Ok(refreshed) => {
-                        let _ = refreshed.save_to_store(store);
-                        tracing::info!("Google Drive OAuth access token was expired and refreshed successfully");
-                        return Ok(refreshed.access_token);
+            if bundle.is_expired(current_time) {
+                if let Some(ref _refresh) = bundle.refresh_token {
+                    match client.refresh_token(&bundle, current_time) {
+                        Ok(mut refreshed) => {
+                            if refreshed.client_id.is_none() {
+                                refreshed.client_id = bundle.client_id.clone();
+                            }
+                            let _ = refreshed.save_to_store(store);
+                            tracing::info!(
+                                "Google Drive OAuth access token was expired and refreshed successfully"
+                            );
+                            return Ok(refreshed.access_token);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to refresh expired Google Drive OAuth token; refusing to use expired token"
+                            );
+                            return Err(SyncError::Api(format!(
+                                "Google Drive authentication token has expired and refresh failed: {e}. Please re-authenticate in Settings or the Setup Wizard."
+                            )));
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to refresh expired OAuth token; attempting existing access token");
-                        return Ok(bundle.access_token);
-                    }
+                } else {
+                    tracing::error!(
+                        "Google Drive OAuth token has expired and no refresh token is available"
+                    );
+                    return Err(SyncError::Api(
+                        "Google Drive authentication token has expired and cannot be refreshed. Please re-authenticate in Settings or the Setup Wizard.".into(),
+                    ));
                 }
             }
             return Ok(bundle.access_token);
@@ -963,6 +1059,9 @@ pub const OAUTH_TOKEN_SERVICE: &str = "shellumi.sync.google";
 
 /// Account identifier used when storing OAuth token bundles in the platform credential store.
 pub const OAUTH_TOKEN_ACCOUNT: &str = "oauth_token_bundle";
+
+/// Account identifier used when storing the OAuth client ID in the platform credential store.
+pub const OAUTH_CLIENT_ID_ACCOUNT: &str = "oauth_client_id";
 
 /// Comparison status between local and remote sync records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

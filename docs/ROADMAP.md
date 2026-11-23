@@ -327,4 +327,32 @@ Automated coverage in `crates/shellumi-app/src/tests/setup_wizard.rs` exercises 
    - Provisioning error-handling guarantees that only files conclusively owned by the current transaction are removed, never deleting or truncating existing databases or manifests.
    - Destination path collisions in cloud restoration are strictly rejected without modifying existing files.
 
+### Authenticated Cloud Revisions, Recovery Confirmation, and Overwrite Protection (2026-11-23)
+
+1. **Authenticated Google Drive Restoration via Current Revisions**:
+   - Replaced arbitrary cached snapshot selection with `download_current_vault()` across default and secondary cloud restore workflows.
+   - Authenticates complete immutable publication DAG histories, verifies HMAC signatures and parent links, selects the current valid HEAD revision, and rejects stale, tampered, disconnected, or conflicting histories.
+   - Refuses to silently restore outdated password envelopes when concurrent forks or conflicting heads exist.
+
+2. **Recovery Codes on Cloud Restoration**:
+   - Automatically generates a new secure emergency recovery code for every vault restored from Google Drive.
+   - Wraps the recovered DEK with the fresh recovery code, persists the recovery envelope to the manifest, displays the code in the UI, and enforces mandatory user confirmation before advancing.
+   - Resilient against interruptions: if setup is interrupted before confirmation, re-entry requires unlocking with password and confirming recovery without recreating or overwriting the restored vault.
+
+3. **Strict Create-Only File Publication Without Destructive Renames**:
+   - Implemented `publish_database_create_only()`: uses `hard_link()` with a strictly create-only (`create_new(true)` / `O_CREAT | O_EXCL`) copy fallback for filesystems lacking hardlink support.
+   - Completely eliminated `std::fs::rename()` fallback, preventing silent overwriting or truncation of existing database files.
+   - Failure cleanup strictly removes only transaction-owned staging artifacts.
+
+4. **Resilient Interrupted Setup Recovery & Idempotency**:
+   - Replaced all silently ignored `SetupState::save()` error paths with proper error propagation and UI error reporting.
+   - Persists state checkpoints prior to notifying the UI.
+   - Enforced deduplication in `configured_vaults` ensuring repeated wizard actions or retries are strictly idempotent.
+
+5. **Configurable Google OAuth Client ID & Actionable Refresh Errors**:
+   - Persists and reuses the user's Google OAuth client ID across initial authentication, automatic token refresh, and normal background synchronization.
+   - Removed hardcoded production client IDs.
+   - On token refresh failure, `OAuthTokenBundle::resolve_valid_token()` strictly returns an actionable authentication error and refuses to treat an expired access token as valid.
+
+
 

@@ -559,10 +559,9 @@ impl Shellumi {
             return view;
         }
 
-        if wizard.state.mode == SetupWizardMode::NewSetup {
-            if let Some(recovery_code) = &wizard.default_recovery_code {
-                // Recovery Code Generated Display
-                view = view.child(
+        if let Some(recovery_code) = &wizard.default_recovery_code {
+            // Recovery Code Generated Display
+            view = view.child(
                     div()
                         .p_3()
                         .rounded_lg()
@@ -599,102 +598,109 @@ impl Shellumi {
                         ),
                 );
 
-                // Confirmation checkbox
-                let confirmed = wizard.recovery_code_confirmed;
-                view = view.child(
-                    div()
-                        .id("wizard-recovery-confirm-checkbox")
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .cursor_pointer()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.wizard_toggle_recovery_confirmed(cx);
-                        }))
-                        .child(
-                            div()
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(if confirmed {
-                                    rgb(MacTheme::SUCCESS)
-                                } else {
-                                    rgb(MacTheme::SEPARATOR)
-                                })
-                                .bg(if confirmed {
-                                    rgb(MacTheme::SUCCESS)
-                                } else {
-                                    rgb(MacTheme::INPUT_BG)
-                                })
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .text_color(rgb(0x101317))
-                                .child(if confirmed { "✓" } else { "" }),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                .child("I have safely backed up my emergency recovery code"),
-                        ),
-                );
-
-                if confirmed {
-                    view = view.child(
+            // Confirmation checkbox
+            let confirmed = wizard.recovery_code_confirmed;
+            view = view.child(
+                div()
+                    .id("wizard-recovery-confirm-checkbox")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.wizard_toggle_recovery_confirmed(cx);
+                    }))
+                    .child(
                         div()
-                            .id("wizard-confirm-recovery-btn")
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(MacTheme::SUCCESS))
-                            .text_color(rgb(0x101317))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if confirmed {
+                                rgb(MacTheme::SUCCESS)
+                            } else {
+                                rgb(MacTheme::SEPARATOR)
+                            })
+                            .bg(if confirmed {
+                                rgb(MacTheme::SUCCESS)
+                            } else {
+                                rgb(MacTheme::INPUT_BG)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x38e562)))
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.wizard_confirm_recovery_code(cx);
-                            }))
-                            .child("Confirm & Continue to Google Drive →"),
-                    );
-                }
-            } else {
-                // Password Inputs for New Vault
+                            .text_color(rgb(0x101317))
+                            .child(if confirmed { "✓" } else { "" }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("I have safely backed up my emergency recovery code"),
+                    ),
+            );
+
+            if confirmed {
                 view = view.child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child("Choose a Strong Vault Password:"),
-                        )
-                        .child(wizard.default_password_input.clone()),
+                        .id("wizard-confirm-recovery-btn")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(MacTheme::SUCCESS))
+                        .text_color(rgb(0x101317))
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0x38e562)))
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.wizard_confirm_recovery_code(cx);
+                        }))
+                        .child(if wizard.state.google_drive_connected {
+                            "Confirm & Continue →"
+                        } else {
+                            "Confirm & Continue to Google Drive →"
+                        }),
                 );
+            }
+            return view;
+        }
 
-                view = view.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                .child("Confirm Vault Password:"),
-                        )
-                        .child(wizard.default_password_confirm_input.clone()),
-                );
+        if wizard.state.mode == SetupWizardMode::NewSetup {
+            // Password Inputs for New Vault
+            view = view.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Choose a Strong Vault Password:"),
+                    )
+                    .child(wizard.default_password_input.clone()),
+            );
 
-                // Optional Keychain Checkbox (disabled by default)
-                let keychain_checked = wizard.remember_in_keychain;
-                view = view.child(
+            view = view.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("Confirm Vault Password:"),
+                    )
+                    .child(wizard.default_password_confirm_input.clone()),
+            );
+
+            // Optional Keychain Checkbox (disabled by default)
+            let keychain_checked = wizard.remember_in_keychain;
+            view = view.child(
                     div()
                         .id("wizard-keychain-checkbox")
                         .flex()
@@ -737,25 +743,24 @@ impl Shellumi {
                         ),
                 );
 
-                // Action button
-                view = view.child(
-                    div()
-                        .id("wizard-generate-default-vault-btn")
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(MacTheme::ACCENT_BLUE))
-                        .text_color(rgb(0xffffff))
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.wizard_create_default_vault(cx);
-                        }))
-                        .child("Generate Encrypted Vault & Recovery Code"),
-                );
-            }
+            // Action button
+            view = view.child(
+                div()
+                    .id("wizard-generate-default-vault-btn")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(MacTheme::ACCENT_BLUE))
+                    .text_color(rgb(0xffffff))
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.wizard_create_default_vault(cx);
+                    }))
+                    .child("Generate Encrypted Vault & Recovery Code"),
+            );
         } else {
             // Restore Setup Mode: Choice between Google Drive Cloud Restore vs Local Vault Unlock
             let is_gdrive = wizard.restore_with_google_drive;
@@ -1751,6 +1756,73 @@ impl Shellumi {
                     );
 
                     form = form.child(cloud_sec_list);
+                }
+
+                if let Some(rec_code) = &wizard.sec_recovery_code {
+                    let sec_rec_confirmed = wizard.sec_recovery_confirmed;
+                    form = form
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_md()
+                                .bg(rgb(0x1a2e1a))
+                                .border_1()
+                                .border_color(rgb(0x38e562))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x38e562))
+                                        .child("Restored Vault Recovery Code"),
+                                )
+                                .child(
+                                    div()
+                                        .font_family("Courier New")
+                                        .text_sm()
+                                        .text_color(rgb(0xffffff))
+                                        .child(rec_code.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("sec-vault-rec-confirm-checkbox-restore")
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.wizard_toggle_sec_recovery_confirmed(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(16.0))
+                                        .h(px(16.0))
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(MacTheme::SEPARATOR))
+                                        .bg(if sec_rec_confirmed {
+                                            rgb(MacTheme::ACCENT_BLUE)
+                                        } else {
+                                            rgb(MacTheme::INPUT_BG)
+                                        })
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_xs()
+                                        .child(if sec_rec_confirmed { "✓" } else { "" }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .child(
+                                        "I have safely recorded this secondary vault recovery code",
+                                    ),
+                                ),
+                        );
                 }
 
                 form = form.child(

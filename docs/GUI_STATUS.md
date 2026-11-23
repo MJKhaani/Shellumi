@@ -209,3 +209,18 @@ are tracked in [the release guide](development/releases.md).
 The repaired [release run](https://github.com/MJKhaani/Shellumi/actions/runs/42269432654) passed every native build/package job and
 published all 15 assets. Checksums and source/helper provenance were verified.
 This establishes distribution availability, not additional GUI/runtime acceptance.
+
+## Native GPUI First-Run Setup Wizard
+
+The desktop application includes a native GPUI first-run setup wizard (`shellumi-app`), guiding users through onboarding, multi-vault encryption, Google Drive synchronization, Shellumi Server connections, and recovery code verification.
+
+### Capabilities & Security Guarantees
+- **Installation State Detection**: Distinguishes fresh installations, incomplete setups, legacy database migrations, and existing vaults without modifying existing files.
+- **Authenticated Cloud Restoration**: Employs `download_current_vault()` to traverse immutable publication histories, verify HMAC signatures, follow parent revision pointers, and reject stale or conflicting cloud forks.
+- **Emergency Recovery Codes**: Restored vaults generate a fresh recovery code, wrap the recovered DEK into the manifest, and enforce explicit user confirmation before advancing.
+- **Create-Only Atomic Publication**: `publish_database_create_only()` eliminates destructive `rename()` operations, utilizing `create_new(true)` (`O_CREAT | O_EXCL`) to guarantee existing databases are never truncated or overwritten.
+- **Configurable OAuth Client ID**: Persists and reuses custom Google OAuth Client IDs across authentication, token refresh, and background synchronization, failing closed on expired tokens.
+
+### Automated Test Coverage
+The setup wizard integration suite (`crates/shellumi-app/src/tests/setup_wizard.rs`) contains 19 automated tests verifying fresh installation detection, default vault creation, recovery code confirmation, keychain-disabled operation, Google Drive PKCE authentication, second-device restoration, independent secondary vaults, server enrollment, skipped optional steps, interrupted setup resumption, multiple immutable Drive publications, concurrent conflict rejection, create-only atomic publication, and token refresh error handling.
+

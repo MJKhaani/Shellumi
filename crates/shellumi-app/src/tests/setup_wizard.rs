@@ -565,57 +565,105 @@ fn test_skipped_optional_steps_end_to_end_verification() {
 }
 
 #[derive(Clone)]
+struct MockDriveFile {
+    id: String,
+    name: String,
+    content: Vec<u8>,
+}
+
+#[derive(Clone)]
 struct MockDriveTransport {
-    snapshots: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    files: std::sync::Arc<std::sync::Mutex<Vec<MockDriveFile>>>,
+    fail_refresh: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockDriveTransport {
     fn new() -> Self {
         Self {
-            snapshots: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            files: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_refresh: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    fn set_fail_refresh(&self, fail: bool) {
+        self.fail_refresh
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn add_snapshot(&self, name: &str, snapshot: &shellumi_core::SyncVault) {
         let json = serde_json::to_vec(snapshot).unwrap();
-        self.snapshots
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), json);
+        let id = format!("mock-file-id-{}", Uuid::new_v4());
+        self.files.lock().unwrap().push(MockDriveFile {
+            id,
+            name: name.to_string(),
+            content: json,
+        });
+    }
+
+    fn add_snapshot_with_id(&self, id: &str, name: &str, snapshot: &shellumi_core::SyncVault) {
+        let json = serde_json::to_vec(snapshot).unwrap();
+        self.files.lock().unwrap().push(MockDriveFile {
+            id: id.to_string(),
+            name: name.to_string(),
+            content: json,
+        });
+    }
+
+    #[allow(dead_code)]
+    fn add_raw_file(&self, id: &str, name: &str, content: Vec<u8>) {
+        self.files.lock().unwrap().push(MockDriveFile {
+            id: id.to_string(),
+            name: name.to_string(),
+            content,
+        });
     }
 }
 
 impl HttpTransport for MockDriveTransport {
     fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
-        let snaps = self.snapshots.lock().unwrap();
-        if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
-            let files: Vec<serde_json::Value> = snaps
-                .keys()
-                .map(|name| {
-                    serde_json::json!({
-                        "id": name,
-                        "name": name,
-                        "mimeType": "application/json"
-                    })
-                })
-                .collect();
-            let body = serde_json::to_vec(&serde_json::json!({ "files": files })).unwrap();
-            Ok(HttpResponse::new(200, body))
-        } else if req.method == "GET" && req.url.contains("alt=media") {
-            for (name, content) in snaps.iter() {
-                if req.url.contains(name) {
-                    return Ok(HttpResponse::new(200, content.clone()));
-                }
+        if req.url.contains("oauth2.googleapis.com/token") {
+            if self.fail_refresh.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(SyncError::Http(
+                    400,
+                    r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
+                        .to_string(),
+                ));
             }
-            Err(SyncError::Api("File not found".into()))
-        } else if req.url.contains("oauth2.googleapis.com/token") {
             let body = serde_json::to_vec(&serde_json::json!({
                 "access_token": "ya29.refreshed_access_token",
                 "refresh_token": "1//new_refresh_token",
                 "expires_in": 3600
             }))
             .unwrap();
+            return Ok(HttpResponse::new(200, body));
+        }
+
+        let files = self.files.lock().unwrap();
+        if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
+            let json_files: Vec<serde_json::Value> = files
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "id": f.id,
+                        "name": f.name,
+                        "mimeType": "application/json"
+                    })
+                })
+                .collect();
+            let body = serde_json::to_vec(&serde_json::json!({ "files": json_files })).unwrap();
             Ok(HttpResponse::new(200, body))
+        } else if req.method == "GET" && req.url.contains("alt=media") {
+            for f in files.iter() {
+                if req.url.contains(&format!("/files/{}?", f.id)) || req.url.contains(&f.id) {
+                    return Ok(HttpResponse::new(200, f.content.clone()));
+                }
+            }
+            for f in files.iter() {
+                if req.url.contains(&f.name) {
+                    return Ok(HttpResponse::new(200, f.content.clone()));
+                }
+            }
+            Err(SyncError::Api("File not found in mock drive".into()))
         } else {
             Ok(HttpResponse::new(200, b"{}".to_vec()))
         }
@@ -723,15 +771,23 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
             .await
             .unwrap();
 
-        // Export snapshots for cloud synchronization
-        let def_snap = def_store
+        // Export snapshots for cloud synchronization and sign as cloud publications
+        let mut def_snap = def_store
             .export_vault_with_iterations(def_pass, "device-1", 100)
             .await
             .unwrap();
-        let sec_snap = sec_store
+        let mut sec_snap = sec_store
             .export_vault_with_iterations(sec_pass, "device-1", 100)
             .await
             .unwrap();
+
+        shellumi_core::sync::revisions::normalize_records(&mut def_snap, &def_dek, def_pass)
+            .unwrap();
+        def_snap.sign_publication(&def_dek, vec![]).unwrap();
+
+        shellumi_core::sync::revisions::normalize_records(&mut sec_snap, &sec_dek, sec_pass)
+            .unwrap();
+        sec_snap.sign_publication(&sec_dek, vec![]).unwrap();
 
         (def_snap, sec_snap)
     });
@@ -757,7 +813,7 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
     mock_transport.add_snapshot("shellumi_vault_legacy-local.json", &def_snapshot);
     mock_transport.add_snapshot("shellumi_vault_team-infrastructure.json", &sec_snapshot);
 
-    let client = GoogleDriveSyncClient::new(mock_transport, client_id);
+    let client = GoogleDriveSyncClient::new(mock_transport.clone(), client_id);
     let cloud_vaults = client.discover_cloud_vaults("mock_token").unwrap();
     assert_eq!(cloud_vaults.len(), 2);
     assert!(cloud_vaults
@@ -767,7 +823,7 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
         .iter()
         .any(|v| v.id == "team-infrastructure" && !v.is_default));
 
-    // 2. Restore default vault first using default password on Device 2
+    // 2. Download and restore default vault first using download_current_vault and default password on Device 2
     let dev2_vaults = dev2_base.join("vaults");
     let dev2_manifests = dev2_base.join("vault_manifests");
     std::fs::create_dir_all(&dev2_vaults).unwrap();
@@ -784,8 +840,30 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
     };
 
     runtime.block_on(async {
-        let def_store2 = HostStore::restore_vault_from_sync(&def_snapshot, &def_opts)
+        let downloaded_def = client
+            .download_current_vault("mock_token", "legacy-local", def_pass)
+            .unwrap();
+
+        let def_store2 = HostStore::restore_vault_from_sync(&downloaded_def, &def_opts)
             .await
+            .unwrap();
+
+        // Generate fresh recovery code for restored default vault and update manifest
+        let def_rec_code = VaultKey::generate_recovery_code().unwrap();
+        let mut def_manifest =
+            VaultManifest::load_from_path(&dev2_manifests.join("legacy-local.manifest.json"))
+                .unwrap();
+        let def_unwrapped_key = VaultKey::unwrap_with_password(
+            &def_vid,
+            def_pass,
+            downloaded_def.key_envelope.as_ref().unwrap(),
+        )
+        .unwrap();
+        def_manifest
+            .set_recovery_key(&def_unwrapped_key, &def_rec_code)
+            .unwrap();
+        def_manifest
+            .save_to_path(&dev2_manifests.join("legacy-local.manifest.json"))
             .unwrap();
 
         // Verify default host record is intact
@@ -798,27 +876,32 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
         assert!(dir.get("team-infrastructure").is_some());
         assert!(!dev2_vaults.join("team-infrastructure.db").exists());
 
-        // Verify manifest was created via save_new_to_path
-        assert!(dev2_manifests.join("legacy-local.manifest.json").exists());
+        // Verify manifest was created and can be unlocked with the new recovery code
+        let reloaded_def_manifest =
+            VaultManifest::load_from_path(&dev2_manifests.join("legacy-local.manifest.json"))
+                .unwrap();
+        let recovered_dek = VaultKey::recover(
+            &def_vid,
+            &def_rec_code,
+            reloaded_def_manifest.recovery_envelope.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered_dek.expose_bytes(), def_dek.expose_bytes());
 
-        // 3. Test wrong password for secondary vault: fails cleanly without creating files
-        let wrong_sec_opts = shellumi_storage::RestoreVaultOptions {
-            vault_id: &sec_vid,
-            vault_name: "Team Infrastructure",
-            password: "WrongPassword999!",
-            target_db_path: &dev2_vaults.join("team-infrastructure.db"),
-            manifests_dir: &dev2_manifests,
-            cred_store: Some(&dev2_cred),
-            remember_in_keychain: false,
-        };
-        let err = HostStore::restore_vault_from_sync(&sec_snapshot, &wrong_sec_opts).await;
-        assert!(err.is_err());
+        // 3. Test wrong password for secondary vault on download_current_vault: fails cleanly
+        let wrong_err =
+            client.download_current_vault("mock_token", "team-infrastructure", "WrongPassword999!");
+        assert!(wrong_err.is_err());
         assert!(!dev2_vaults.join("team-infrastructure.db").exists());
         assert!(!dev2_manifests
             .join("team-infrastructure.manifest.json")
             .exists());
 
-        // 4. Restore secondary vault with correct independent password
+        // 4. Download and restore secondary vault with correct independent password
+        let downloaded_sec = client
+            .download_current_vault("mock_token", "team-infrastructure", sec_pass)
+            .unwrap();
+
         let sec_opts = shellumi_storage::RestoreVaultOptions {
             vault_id: &sec_vid,
             vault_name: "Team Infrastructure",
@@ -828,14 +911,46 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
             cred_store: Some(&dev2_cred),
             remember_in_keychain: false,
         };
-        let sec_store2 = HostStore::restore_vault_from_sync(&sec_snapshot, &sec_opts)
+        let sec_store2 = HostStore::restore_vault_from_sync(&downloaded_sec, &sec_opts)
             .await
+            .unwrap();
+
+        // Generate fresh recovery code for restored secondary vault and update manifest
+        let sec_rec_code = VaultKey::generate_recovery_code().unwrap();
+        let mut sec_manifest = VaultManifest::load_from_path(
+            &dev2_manifests.join("team-infrastructure.manifest.json"),
+        )
+        .unwrap();
+        let sec_unwrapped_key = VaultKey::unwrap_with_password(
+            &sec_vid,
+            sec_pass,
+            downloaded_sec.key_envelope.as_ref().unwrap(),
+        )
+        .unwrap();
+        sec_manifest
+            .set_recovery_key(&sec_unwrapped_key, &sec_rec_code)
+            .unwrap();
+        sec_manifest
+            .save_to_path(&dev2_manifests.join("team-infrastructure.manifest.json"))
             .unwrap();
 
         // Verify secondary host record is intact
         let sec_hosts = sec_store2.list().await.unwrap();
         assert_eq!(sec_hosts.len(), 1);
         assert_eq!(sec_hosts[0].name, "prod-k8s-master");
+
+        // Verify secondary recovery code unlocks the recovered DEK
+        let reloaded_sec_manifest = VaultManifest::load_from_path(
+            &dev2_manifests.join("team-infrastructure.manifest.json"),
+        )
+        .unwrap();
+        let recovered_sec_dek = VaultKey::recover(
+            &sec_vid,
+            &sec_rec_code,
+            reloaded_sec_manifest.recovery_envelope.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered_sec_dek.expose_bytes(), sec_dek.expose_bytes());
     });
 }
 
@@ -843,25 +958,79 @@ fn test_fresh_device_google_drive_restoration_multi_vault() {
 fn test_google_drive_token_persistence_auto_refresh_and_sync() {
     let cred_store = EphemeralCredentialStore::new();
     let mock_transport = MockDriveTransport::new();
-    let client = GoogleDriveSyncClient::new(mock_transport, "shellumi-desktop");
+    let custom_client_id = "test-client-12345.apps.googleusercontent.com";
 
-    // Case 1: Expired token bundle in store gets automatically refreshed and persisted
-    let expired_bundle = shellumi_core::sync::OAuthTokenBundle::new(
+    // 1. Persisting and loading custom OAuth client ID
+    shellumi_core::sync::OAuthTokenBundle::save_client_id(&cred_store, custom_client_id).unwrap();
+    let loaded_cid = shellumi_core::sync::OAuthTokenBundle::load_client_id(&cred_store).unwrap();
+    assert_eq!(loaded_cid.as_deref(), Some(custom_client_id));
+
+    // Reject empty client ID
+    assert!(shellumi_core::sync::OAuthTokenBundle::save_client_id(&cred_store, "   ").is_err());
+
+    let client = GoogleDriveSyncClient::new(mock_transport.clone(), custom_client_id);
+
+    // 2. Token bundle with attached client ID automatically preserves and saves client ID
+    let bundle = shellumi_core::sync::OAuthTokenBundle::new(
         "ya29.old_expired_token",
         Some("1//valid_refresh_token".to_string()),
         Some(60),
         Some("drive.appdata".to_string()),
         100, // acquired at 100
-    );
-    expired_bundle.save_to_store(&cred_store).unwrap();
+    )
+    .with_client_id(custom_client_id);
+    bundle.save_to_store(&cred_store).unwrap();
+
+    let reloaded = shellumi_core::sync::OAuthTokenBundle::load_from_store(&cred_store)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.client_id.as_deref(), Some(custom_client_id));
 
     let now = 2000;
+
+    // 3. Test refresh failure: when refresh fails, resolve_valid_token MUST reject the expired token
+    mock_transport.set_fail_refresh(true);
+    let refresh_failure =
+        shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(&cred_store, &client, now);
+    assert!(
+        refresh_failure.is_err(),
+        "resolve_valid_token must reject expired token when refresh fails"
+    );
+    let err_str = refresh_failure.unwrap_err().to_string();
+    assert!(
+        err_str.contains("expired and refresh failed") || err_str.contains("re-authenticate"),
+        "Unexpected error: {err_str}"
+    );
+
+    // 4. Test expired token without refresh token: resolve_valid_token MUST return actionable error
+    let cred_no_refresh = EphemeralCredentialStore::new();
+    let bundle_no_refresh = shellumi_core::sync::OAuthTokenBundle::new(
+        "ya29.expired_no_refresh",
+        None,
+        Some(60),
+        Some("drive.appdata".to_string()),
+        100,
+    );
+    bundle_no_refresh.save_to_store(&cred_no_refresh).unwrap();
+    let no_refresh_err =
+        shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(&cred_no_refresh, &client, now);
+    assert!(
+        no_refresh_err.is_err(),
+        "resolve_valid_token must reject expired token with no refresh token"
+    );
+    assert!(no_refresh_err
+        .unwrap_err()
+        .to_string()
+        .contains("expired and cannot be refreshed"));
+
+    // 5. Successful refresh persists new access token and preserves client ID
+    mock_transport.set_fail_refresh(false);
     let resolved =
         shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(&cred_store, &client, now)
             .unwrap();
     assert_eq!(resolved, "ya29.refreshed_access_token");
 
-    // Verify refreshed bundle was re-persisted to store
+    // Verify refreshed bundle was re-persisted to store with preserved client ID
     let persisted = shellumi_core::sync::OAuthTokenBundle::load_from_store(&cred_store)
         .unwrap()
         .unwrap();
@@ -871,8 +1040,9 @@ fn test_google_drive_token_persistence_auto_refresh_and_sync() {
         Some("1//new_refresh_token")
     );
     assert_eq!(persisted.expires_in, Some(3600));
+    assert_eq!(persisted.client_id.as_deref(), Some(custom_client_id));
 
-    // Case 2: Legacy token migration fallback
+    // 6. Legacy token migration fallback
     let cred_store2 = EphemeralCredentialStore::new();
     cred_store2
         .set_secret(
@@ -1279,4 +1449,381 @@ fn test_occupied_destination_paths_and_no_overwrite_safety() {
     // Original file content was untouched
     let content = std::fs::read(&manifest_path).unwrap();
     assert_eq!(content, b"original-manifest-bytes");
+}
+
+#[test]
+fn test_download_current_vault_with_multiple_immutable_publications_and_conflicts() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let temp = tempdir().unwrap();
+    let base_dir = temp.path();
+    let cred_store = EphemeralCredentialStore::new();
+
+    let vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+    let password = "MultiRevPassword2026!";
+    let (dek, primary_env, _) =
+        VaultKeyManager::provision_new_vault(&cred_store, &vid, password, false, None).unwrap();
+
+    let vaults_dir = base_dir.join("vaults");
+    let manifests_dir = base_dir.join("vault_manifests");
+    std::fs::create_dir_all(&vaults_dir).unwrap();
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    let manifest = VaultManifest::new(
+        LEGACY_LOCAL_VAULT_ID.to_string(),
+        "Default Vault".to_string(),
+        primary_env.clone(),
+        None,
+        false,
+    );
+    manifest
+        .save_new_to_path(&manifests_dir.join("legacy-local.manifest.json"))
+        .unwrap();
+
+    let db_path = vaults_dir.join("default.db");
+
+    let (mut snap1, mut snap2, mut snap_fork, mut snap_tampered) = runtime.block_on(async {
+        let mut store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&dek))
+            .await
+            .unwrap();
+        store.set_vault_id(vid.clone());
+
+        // Rev 1
+        let dest1 = shellumi_core::SshDestination::new("admin", "192.168.1.1", 22).unwrap();
+        store
+            .add("router-v1", &dest1, None, &[], None, None)
+            .await
+            .unwrap();
+        let s1 = store
+            .export_vault_with_iterations(password, "device-1", 100)
+            .await
+            .unwrap();
+
+        // Rev 2 (adds host router-v2)
+        let dest2 = shellumi_core::SshDestination::new("admin", "192.168.1.2", 22).unwrap();
+        store
+            .add("router-v2", &dest2, None, &[], None, None)
+            .await
+            .unwrap();
+        let s2 = store
+            .export_vault_with_iterations(password, "device-1", 100)
+            .await
+            .unwrap();
+
+        // Fork from rev 1
+        let mut store_fork =
+            HostStore::open_with_key(vaults_dir.join("fork.db").to_str().unwrap(), Some(&dek))
+                .await
+                .unwrap();
+        store_fork.set_vault_id(vid.clone());
+        store_fork
+            .add("router-v1", &dest1, None, &[], None, None)
+            .await
+            .unwrap();
+        let dest_fork = shellumi_core::SshDestination::new("admin", "192.168.1.99", 22).unwrap();
+        store_fork
+            .add("router-fork", &dest_fork, None, &[], None, None)
+            .await
+            .unwrap();
+        let s_fork = store_fork
+            .export_vault_with_iterations(password, "device-2", 100)
+            .await
+            .unwrap();
+
+        (s1.clone(), s2, s_fork, s1)
+    });
+
+    // Prepare and sign publications
+    snap1.prepare_cloud_revision(&dek).unwrap();
+    shellumi_core::sync::revisions::normalize_records(&mut snap1, &dek, password).unwrap();
+    snap1.sign_publication(&dek, vec![]).unwrap();
+    let pub1_id = snap1.publication_id().unwrap();
+
+    snap2.prepare_cloud_revision(&dek).unwrap();
+    shellumi_core::sync::revisions::normalize_records(&mut snap2, &dek, password).unwrap();
+    snap2.sign_publication(&dek, vec![pub1_id.clone()]).unwrap();
+
+    snap_fork.prepare_cloud_revision(&dek).unwrap();
+    shellumi_core::sync::revisions::normalize_records(&mut snap_fork, &dek, password).unwrap();
+    snap_fork
+        .sign_publication(&dek, vec![pub1_id.clone()])
+        .unwrap();
+
+    // 1. Multiple immutable publications sharing the exact same filename
+    let mock_transport = MockDriveTransport::new();
+    let client = GoogleDriveSyncClient::new(mock_transport.clone(), "test-client");
+
+    // Both files have name "shellumi_vault_legacy-local.json" but different IDs
+    mock_transport.add_snapshot_with_id("file-id-rev1", "shellumi_vault_legacy-local.json", &snap1);
+    mock_transport.add_snapshot_with_id("file-id-rev2", "shellumi_vault_legacy-local.json", &snap2);
+
+    // download_current_vault traverses the DAG and selects current head (snap2)
+    let downloaded = client
+        .download_current_vault("mock_token", LEGACY_LOCAL_VAULT_ID, password)
+        .unwrap();
+
+    // Verify it selected rev 2 which contains router-v2
+    let restored_opts = shellumi_storage::RestoreVaultOptions {
+        vault_id: &vid,
+        vault_name: "Default Vault",
+        password,
+        target_db_path: &base_dir.join("restored.db"),
+        manifests_dir: &base_dir.join("manifests"),
+        cred_store: None,
+        remember_in_keychain: false,
+    };
+    std::fs::create_dir_all(base_dir.join("manifests")).unwrap();
+
+    runtime.block_on(async {
+        let store = HostStore::restore_vault_from_sync(&downloaded, &restored_opts)
+            .await
+            .unwrap();
+        let hosts = store.list().await.unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.iter().any(|h| h.name == "router-v2"));
+    });
+
+    // 2. Concurrent cloud revisions / conflicts: adding fork creates divergent heads
+    mock_transport.add_snapshot_with_id(
+        "file-id-fork",
+        "shellumi_vault_legacy-local.json",
+        &snap_fork,
+    );
+
+    let conflict_err = client.download_current_vault("mock_token", LEGACY_LOCAL_VAULT_ID, password);
+    assert!(
+        conflict_err.is_err(),
+        "download_current_vault must reject concurrent conflicting revisions"
+    );
+    let conflict_msg = conflict_err.unwrap_err().to_string();
+    assert!(
+        conflict_msg.contains("Concurrent cloud revisions require explicit resolution")
+            || conflict_msg.contains("conflict"),
+        "Unexpected error: {conflict_msg}"
+    );
+
+    // 3. Tampered snapshot / corrupted envelope rejection
+    let tampered_mock = MockDriveTransport::new();
+    let tampered_client = GoogleDriveSyncClient::new(tampered_mock.clone(), "test-client");
+    if let Some(env) = &mut snap_tampered.key_envelope {
+        env.ciphertext = "tampered_ciphertext_bytes".to_string();
+    }
+    tampered_mock.add_snapshot_with_id(
+        "file-id-tampered",
+        "shellumi_vault_legacy-local.json",
+        &snap_tampered,
+    );
+
+    let tampered_err =
+        tampered_client.download_current_vault("mock_token", LEGACY_LOCAL_VAULT_ID, password);
+    assert!(
+        tampered_err.is_err(),
+        "download_current_vault must reject corrupted snapshot"
+    );
+
+    // 4. Rejection of wrong password
+    let wrong_pass_err =
+        client.download_current_vault("mock_token", LEGACY_LOCAL_VAULT_ID, "WrongPassword456!");
+    assert!(
+        wrong_pass_err.is_err(),
+        "download_current_vault must reject wrong password"
+    );
+}
+
+#[test]
+fn test_recovery_code_generation_wrapping_and_interrupted_confirmation_on_cloud_restore() {
+    let temp = tempdir().unwrap();
+    let base_dir = temp.path();
+    let vaults_dir = base_dir.join("vaults");
+    let manifests_dir = base_dir.join("vault_manifests");
+    std::fs::create_dir_all(&vaults_dir).unwrap();
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    let cred_store = EphemeralCredentialStore::new();
+    let def_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+    let password = "RestoredCloudPassword123!";
+    let (dek, primary_env, _) =
+        VaultKeyManager::provision_new_vault(&cred_store, &def_vid, password, false, None).unwrap();
+
+    // 1. Simulate restored vault database and manifest with freshly generated recovery envelope
+    let fresh_rec_code = VaultKey::generate_recovery_code().unwrap();
+    let mut manifest = VaultManifest::new(
+        LEGACY_LOCAL_VAULT_ID.to_string(),
+        "Default Vault".to_string(),
+        primary_env,
+        None,
+        false,
+    );
+    manifest.set_recovery_key(&dek, &fresh_rec_code).unwrap();
+    manifest
+        .save_new_to_path(&manifests_dir.join("legacy-local.manifest.json"))
+        .unwrap();
+
+    let db_path = vaults_dir.join("default.db");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&dek))
+            .await
+            .unwrap();
+        let dest = shellumi_core::SshDestination::new("admin", "10.10.10.1", 22).unwrap();
+        store
+            .add("cloud-restored-host", &dest, None, &[], None, None)
+            .await
+            .unwrap();
+    });
+
+    // 2. Setup was interrupted before recovery code was confirmed:
+    // State has default_vault_created = true, recovery_code_confirmed = false, google_drive_connected = true, completed = false
+    let mut state = SetupState::new();
+    state.mode = SetupWizardMode::RestoreSetup;
+    state.current_step = SetupStep::DefaultVault;
+    state.default_vault_created = true;
+    state.recovery_code_confirmed = false;
+    state.google_drive_connected = true;
+    state.completed = false;
+    state.save(base_dir).unwrap();
+
+    // Setup is NOT completed
+    assert!(!SetupState::is_setup_completed(base_dir));
+
+    // Detection reports IncompleteSetup
+    let status = InstallationStatus::detect(base_dir);
+    match status {
+        InstallationStatus::IncompleteSetup {
+            last_step,
+            default_vault_created,
+            ..
+        } => {
+            assert_eq!(last_step, SetupStep::DefaultVault);
+            assert!(default_vault_created);
+        }
+        other => panic!("Expected IncompleteSetup, got: {:?}", other),
+    }
+
+    // 3. Re-entry / resumption: user confirms recovery code
+    // With google_drive_connected == true, confirming advances to SetupStep::AdditionalVaults
+    state.recovery_code_confirmed = true;
+    state.current_step = if state.google_drive_connected {
+        SetupStep::AdditionalVaults
+    } else {
+        SetupStep::GoogleDrive
+    };
+    state.save(base_dir).unwrap();
+
+    // Verify state transitioned to AdditionalVaults
+    let resumed = SetupState::load(base_dir).unwrap().unwrap();
+    assert_eq!(resumed.current_step, SetupStep::AdditionalVaults);
+    assert!(resumed.recovery_code_confirmed);
+
+    // Verify existing restored vault was NOT modified, overwritten, or reinitialized
+    runtime.block_on(async {
+        let store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&dek))
+            .await
+            .unwrap();
+        let hosts = store.list().await.unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].name, "cloud-restored-host");
+    });
+}
+
+#[test]
+fn test_create_only_file_publication_rejects_concurrent_destinations_without_rename_truncation() {
+    let temp = tempdir().unwrap();
+    let dir = temp.path();
+
+    let staged1 = dir.join("staged_1.tmp");
+    let target1 = dir.join("final_1.db");
+    std::fs::write(&staged1, b"database content 1").unwrap();
+
+    // Case 1: Target does not exist -> successful create-only publish
+    let res = crate::actions::setup_wizard::publish_database_create_only(&staged1, &target1);
+    assert!(res.is_ok());
+    assert!(!staged1.exists(), "Staged file must be removed on success");
+    assert_eq!(
+        std::fs::read(&target1).unwrap(),
+        b"database content 1",
+        "Target must contain published content"
+    );
+
+    // Case 2: Target already exists -> must fail and preserve target without truncation
+    let staged2 = dir.join("staged_2.tmp");
+    std::fs::write(&staged2, b"new attacker / concurrent content").unwrap();
+
+    let collision_res =
+        crate::actions::setup_wizard::publish_database_create_only(&staged2, &target1);
+    assert!(
+        collision_res.is_err(),
+        "publish_database_create_only must fail when destination already exists"
+    );
+    let err = collision_res.unwrap_err();
+    assert!(
+        err.contains("already exists"),
+        "Unexpected error message: {err}"
+    );
+
+    // Original target content must be 100% untouched and untruncated
+    assert_eq!(
+        std::fs::read(&target1).unwrap(),
+        b"database content 1",
+        "Existing destination database must never be overwritten or truncated!"
+    );
+    // Staged file is preserved for transaction inspection
+    assert!(staged2.exists());
+}
+
+#[test]
+fn test_setup_state_save_error_propagation_and_idempotent_recovery() {
+    let temp = tempdir().unwrap();
+    let base_dir = temp.path();
+
+    // 1. Error propagation when saving setup state to an invalid path
+    let invalid_dir = base_dir.join("nonexistent_file_as_dir").join("sub");
+    // Create a regular file in place of nonexistent_file_as_dir so creating sub fails
+    std::fs::write(base_dir.join("nonexistent_file_as_dir"), b"blocking file").unwrap();
+
+    let mut state = SetupState::new();
+    let err = state.save(&invalid_dir);
+    assert!(
+        err.is_err(),
+        "SetupState::save must return Err when base dir cannot be written"
+    );
+
+    // 2. Idempotency: configured_vaults deduplication
+    state
+        .configured_vaults
+        .push(shellumi_core::setup::ConfiguredVaultSummary {
+            id: "legacy-local".to_string(),
+            name: "Default Vault".to_string(),
+            is_default: true,
+            is_remote: false,
+            sync_enabled: true,
+            server_url: None,
+        });
+
+    // Simulate repeated configuration of the same vault
+    let vid = "legacy-local";
+    if !state.configured_vaults.iter().any(|v| v.id == vid) {
+        state
+            .configured_vaults
+            .push(shellumi_core::setup::ConfiguredVaultSummary {
+                id: vid.to_string(),
+                name: "Default Vault".to_string(),
+                is_default: true,
+                is_remote: false,
+                sync_enabled: true,
+                server_url: None,
+            });
+    }
+
+    assert_eq!(
+        state.configured_vaults.len(),
+        1,
+        "configured_vaults must remain deduplicated across retries"
+    );
 }

@@ -62,9 +62,21 @@ impl Shellumi {
         };
 
         let cred_store = shellumi_core::default_credential_store();
+        let client_id = match shellumi_core::sync::OAuthTokenBundle::load_client_id(
+            cred_store.as_ref(),
+        ) {
+            Ok(Some(cid)) => cid,
+            _ => {
+                self.sync_status = AppSyncStatus::Error(
+                    "Google Drive OAuth Client ID is not configured. Please connect Google Drive in the Setup Wizard or Settings.".into(),
+                );
+                cx.notify();
+                return;
+            }
+        };
         let client = shellumi_core::GoogleDriveSyncClient::new(
             shellumi_core::SystemHttpTransport::new(),
-            "shellumi-desktop",
+            &client_id,
         );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -108,6 +120,7 @@ impl Shellumi {
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
 
+        let client_id_async = client_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -151,7 +164,7 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let client =
-                    GoogleDriveSyncClient::new(SystemHttpTransport::default(), "shellumi-desktop");
+                    GoogleDriveSyncClient::new(SystemHttpTransport::default(), &client_id_async);
                 let cycle_result = shellumi_core::execute_cloud_vault_sync_bound(
                     &client,
                     &token,
@@ -277,9 +290,21 @@ impl Shellumi {
         };
 
         let cred_store = shellumi_core::default_credential_store();
+        let client_id = match shellumi_core::sync::OAuthTokenBundle::load_client_id(
+            cred_store.as_ref(),
+        ) {
+            Ok(Some(cid)) => cid,
+            _ => {
+                self.sync_status = AppSyncStatus::Error(
+                    "Google Drive OAuth Client ID is not configured. Please connect Google Drive in the Setup Wizard or Settings.".into(),
+                );
+                cx.notify();
+                return;
+            }
+        };
         let client = shellumi_core::GoogleDriveSyncClient::new(
             shellumi_core::SystemHttpTransport::new(),
-            "shellumi-desktop",
+            &client_id,
         );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -329,6 +354,7 @@ impl Shellumi {
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
 
+        let client_id_async = client_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -360,7 +386,7 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let client =
-                    GoogleDriveSyncClient::new(SystemHttpTransport::default(), "shellumi-desktop");
+                    GoogleDriveSyncClient::new(SystemHttpTransport::default(), &client_id_async);
                 let cycle_result = execute_cloud_vault_sync(
                     &client,
                     &token,
