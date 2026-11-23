@@ -510,6 +510,55 @@ impl Shellumi {
                 ),
         );
 
+        // Interrupted Setup Recovery Code Confirmation State
+        if wizard.interrupted_recovery_code {
+            view = view.child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgb(MacTheme::INPUT_BG))
+                    .border_1()
+                    .border_color(rgb(MacTheme::WARNING))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MacTheme::WARNING))
+                            .child("⚠ Interrupted Setup: Emergency Recovery Code Confirmation Required"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child(
+                                "Your vault was initialized in a previous session, but setup was interrupted before you backed up your recovery code. To prevent permanent lockouts, please enter your vault password below to unlock your vault and establish a confirmed recovery code before proceeding."
+                            ),
+                    )
+                    .child(wizard.existing_unlock_input.clone())
+                    .child(
+                        div()
+                            .id("wizard-unlock-confirm-recovery-btn")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.wizard_unlock_to_confirm_recovery_code(cx);
+                            }))
+                            .child("Unlock Vault & View Recovery Code"),
+                    ),
+            );
+            return view;
+        }
+
         if wizard.state.mode == SetupWizardMode::NewSetup {
             if let Some(recovery_code) = &wizard.default_recovery_code {
                 // Recovery Code Generated Display
@@ -593,6 +642,26 @@ impl Shellumi {
                                 .child("I have safely backed up my emergency recovery code"),
                         ),
                 );
+
+                if confirmed {
+                    view = view.child(
+                        div()
+                            .id("wizard-confirm-recovery-btn")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SUCCESS))
+                            .text_color(rgb(0x101317))
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x38e562)))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.wizard_confirm_recovery_code(cx);
+                            }))
+                            .child("Confirm & Continue to Google Drive →"),
+                    );
+                }
             } else {
                 // Password Inputs for New Vault
                 view = view.child(
@@ -688,40 +757,88 @@ impl Shellumi {
                 );
             }
         } else {
-            // Restore Setup Mode
-            match &wizard.installation_status {
-                InstallationStatus::LegacyDatabase { path } => {
+            // Restore Setup Mode: Choice between Google Drive Cloud Restore vs Local Vault Unlock
+            let is_gdrive = wizard.restore_with_google_drive;
+
+            view = view.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("wizard-restore-source-gdrive")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(if is_gdrive {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SEPARATOR_SUBTLE)
+                            })
+                            .text_color(if is_gdrive {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.wizard_set_restore_source(true, cx);
+                            }))
+                            .child("☁ Google Drive Cloud Restore"),
+                    )
+                    .child(
+                        div()
+                            .id("wizard-restore-source-local")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(if !is_gdrive {
+                                rgb(MacTheme::ACCENT_BLUE)
+                            } else {
+                                rgb(MacTheme::SEPARATOR_SUBTLE)
+                            })
+                            .text_color(if !is_gdrive {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(MacTheme::TEXT_PRIMARY)
+                            })
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.wizard_set_restore_source(false, cx);
+                            }))
+                            .child("💻 Local Vault Unlock / Migration"),
+                    ),
+            );
+
+            if is_gdrive {
+                // Cloud restoration branch
+                if !wizard.state.google_drive_connected {
                     view = view.child(
                         div()
                             .p_3()
                             .rounded_lg()
                             .bg(rgb(MacTheme::INPUT_BG))
                             .border_1()
-                            .border_color(rgb(MacTheme::ACCENT_BLUE))
+                            .border_color(rgb(MacTheme::SEPARATOR))
                             .flex()
                             .flex_col()
                             .gap_2()
                             .child(
                                 div()
                                     .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                    .child("Legacy Database Migration"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
                                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child(format!(
-                                        "Shellumi detected an unmigrated database at {path}. Migration will convert your data into isolated physical encrypted vaults."
-                                    )),
+                                    .child(
+                                        "Connect to your Google Drive to discover encrypted cloud vault snapshots without needing keys or keychain items from your other device.",
+                                    ),
                             )
-                            .child(wizard.legacy_password_input.clone())
                             .child(
                                 div()
-                                    .id("wizard-migrate-legacy-btn")
+                                    .id("wizard-connect-google-drive-restore-btn")
                                     .px_3()
-                                    .py_1()
+                                    .py_2()
                                     .rounded_md()
                                     .bg(rgb(MacTheme::ACCENT_BLUE))
                                     .text_color(rgb(0xffffff))
@@ -730,61 +847,98 @@ impl Shellumi {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
-                                        app.wizard_migrate_legacy(cx);
+                                        app.wizard_connect_google_drive(cx);
                                     }))
-                                    .child("Migrate Legacy Database"),
+                                    .child(if wizard.is_connecting_google {
+                                        "Connecting in browser…"
+                                    } else {
+                                        "Connect Google Drive to Discover Cloud Vaults"
+                                    }),
                             ),
                     );
-                }
-                _ => {
-                    // Unlock Existing Local Default Vault
-                    let is_recovery = wizard.unlock_with_recovery_code;
-                    view = view.child(
+                } else {
+                    let mut cloud_card = div()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::INPUT_BG))
+                        .border_1()
+                        .border_color(rgb(MacTheme::SUCCESS))
+                        .flex()
+                        .flex_col()
+                        .gap_2();
+
+                    cloud_card = cloud_card.child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .justify_between()
                             .child(
                                 div()
-                                    .id("wizard-unlock-password-tab")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(if !is_recovery {
-                                        rgb(MacTheme::ACCENT_BLUE)
-                                    } else {
-                                        rgb(MacTheme::SEPARATOR_SUBTLE)
-                                    })
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .text_xs()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.wizard_toggle_unlock_mode(cx);
-                                    }))
-                                    .child("Password"),
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::SUCCESS))
+                                    .child(format!(
+                                        "✓ Google Drive Connected ({} cloud snapshot(s) discovered)",
+                                        wizard.cloud_vaults.len()
+                                    )),
                             )
                             .child(
                                 div()
-                                    .id("wizard-unlock-recovery-tab")
+                                    .id("wizard-refresh-cloud-vaults-btn")
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(if is_recovery {
-                                        rgb(MacTheme::ACCENT_BLUE)
-                                    } else {
-                                        rgb(MacTheme::SEPARATOR_SUBTLE)
-                                    })
+                                    .bg(rgb(MacTheme::SEPARATOR_SUBTLE))
                                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .text_xs()
                                     .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
-                                        app.wizard_toggle_unlock_mode(cx);
+                                        app.wizard_fetch_cloud_vaults(cx);
                                     }))
-                                    .child("Recovery Code"),
+                                    .child("Refresh"),
                             ),
                     );
 
-                    view = view.child(
+                    for cv in &wizard.cloud_vaults {
+                        let is_def = cv.is_default || cv.id == "default" || cv.id == "legacy-local";
+                        cloud_card = cloud_card.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .p_2()
+                                .rounded_md()
+                                .bg(if is_def {
+                                    rgba(0x0a84ff18)
+                                } else {
+                                    rgb(MacTheme::SURFACE_HOVER)
+                                })
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .child(format!("{} (Vault ID: {})", cv.name, cv.id)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if is_def {
+                                            rgb(MacTheme::ACCENT_BLUE)
+                                        } else {
+                                            rgb(MacTheme::TEXT_TERTIARY)
+                                        })
+                                        .child(if is_def {
+                                            "Default Vault Target"
+                                        } else {
+                                            "Secondary Vault"
+                                        }),
+                                ),
+                        );
+                    }
+
+                    cloud_card = cloud_card.child(
                         div()
                             .flex()
                             .flex_col()
@@ -793,20 +947,59 @@ impl Shellumi {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child(if is_recovery {
-                                        "Enter your 32-character recovery code:"
-                                    } else {
-                                        "Enter your default vault password:"
-                                    }),
+                                    .child("Enter Default Vault Password:"),
                             )
-                            .child(wizard.existing_unlock_input.clone()),
+                            .child(wizard.cloud_vault_password_input.clone()),
                     );
 
-                    view = view.child(
+                    // Optional Keychain Checkbox
+                    let keychain_checked = wizard.remember_in_keychain;
+                    cloud_card = cloud_card.child(
                         div()
-                            .id("wizard-unlock-existing-btn")
+                            .id("wizard-cloud-restore-keychain-checkbox")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.wizard_toggle_keychain(cx);
+                            }))
+                            .child(
+                                div()
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(if keychain_checked {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::SEPARATOR)
+                                    })
+                                    .bg(if keychain_checked {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .text_color(rgb(0xffffff))
+                                    .child(if keychain_checked { "✓" } else { "" }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child("Remember DEK in OS Keychain (disabled by default)"),
+                            ),
+                    );
+
+                    cloud_card = cloud_card.child(
+                        div()
+                            .id("wizard-restore-cloud-default-btn")
                             .px_3()
-                            .py_1()
+                            .py_2()
                             .rounded_md()
                             .bg(rgb(MacTheme::ACCENT_BLUE))
                             .text_color(rgb(0xffffff))
@@ -815,10 +1008,146 @@ impl Shellumi {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.wizard_unlock_existing_vault(cx);
+                                app.wizard_restore_cloud_default_vault(cx);
                             }))
-                            .child("Unlock Default Vault"),
+                            .child("Restore Default Vault from Google Drive"),
                     );
+
+                    view = view.child(cloud_card);
+                }
+            } else {
+                // Local unlock / migration branch
+                match &wizard.installation_status {
+                    InstallationStatus::LegacyDatabase { path } => {
+                        view = view.child(
+                            div()
+                                .p_3()
+                                .rounded_lg()
+                                .bg(rgb(MacTheme::INPUT_BG))
+                                .border_1()
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                        .child("Legacy Database Migration"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(format!(
+                                            "Shellumi detected an unmigrated database at {path}. Migration will convert your data into isolated physical encrypted vaults."
+                                        )),
+                                )
+                                .child(wizard.legacy_password_input.clone())
+                                .child(
+                                    div()
+                                        .id("wizard-migrate-legacy-btn")
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(MacTheme::ACCENT_BLUE))
+                                        .text_color(rgb(0xffffff))
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.wizard_migrate_legacy(cx);
+                                        }))
+                                        .child("Migrate Legacy Database"),
+                                ),
+                        );
+                    }
+                    _ => {
+                        // Unlock Existing Local Default Vault
+                        let is_recovery = wizard.unlock_with_recovery_code;
+                        view = view.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("wizard-unlock-password-tab")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(if !is_recovery {
+                                            rgb(MacTheme::ACCENT_BLUE)
+                                        } else {
+                                            rgb(MacTheme::SEPARATOR_SUBTLE)
+                                        })
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.wizard_toggle_unlock_mode(cx);
+                                        }))
+                                        .child("Password"),
+                                )
+                                .child(
+                                    div()
+                                        .id("wizard-unlock-recovery-tab")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(if is_recovery {
+                                            rgb(MacTheme::ACCENT_BLUE)
+                                        } else {
+                                            rgb(MacTheme::SEPARATOR_SUBTLE)
+                                        })
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.wizard_toggle_unlock_mode(cx);
+                                        }))
+                                        .child("Recovery Code"),
+                                ),
+                        );
+
+                        view = view.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child(if is_recovery {
+                                            "Enter your 32-character recovery code:"
+                                        } else {
+                                            "Enter your default vault password:"
+                                        }),
+                                )
+                                .child(wizard.existing_unlock_input.clone()),
+                        );
+
+                        view = view.child(
+                            div()
+                                .id("wizard-unlock-existing-btn")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(MacTheme::ACCENT_BLUE))
+                                .text_color(rgb(0xffffff))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.wizard_unlock_existing_vault(cx);
+                                }))
+                                .child("Unlock Default Vault"),
+                        );
+                    }
                 }
             }
         }
@@ -1292,7 +1621,144 @@ impl Shellumi {
                     div()
                         .text_xs()
                         .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child("Restore an independently encrypted local vault using its name and password or recovery code."),
+                        .child("Restore an independently encrypted vault from Google Drive snapshots or existing local files using its individual password."),
+                );
+
+                if wizard.state.google_drive_connected && !wizard.cloud_vaults.is_empty() {
+                    let mut cloud_sec_list = div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::ACCENT_BLUE))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                        .child("Discovered Cloud Vaults (Google Drive):"),
+                                )
+                                .child(
+                                    div()
+                                        .id("wizard-refresh-sec-cloud-vaults-btn")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(MacTheme::SEPARATOR_SUBTLE))
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.wizard_fetch_cloud_vaults(cx);
+                                        }))
+                                        .child("Refresh"),
+                                ),
+                        );
+
+                    for cv in &wizard.cloud_vaults {
+                        let is_configured =
+                            wizard.state.configured_vaults.iter().any(|v| v.id == cv.id)
+                                || cv.id == "default"
+                                || cv.id == "legacy-local";
+
+                        let vault_id = cv.id.clone();
+                        let vault_name = cv.name.clone();
+
+                        let mut item = div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(MacTheme::SURFACE_HOVER))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                            .child(format!("{vault_name} ({vault_id})")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                            .child(format!("{} records", cv.record_count)),
+                                    ),
+                            );
+
+                        if is_configured {
+                            item = item.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::SUCCESS))
+                                    .child("✓ Configured"),
+                            );
+                        } else {
+                            let vid_for_click = vault_id.clone();
+                            item = item.child(
+                                div()
+                                    .id(gpui::SharedString::from(format!(
+                                        "restore-cloud-sec-{vid_for_click}"
+                                    )))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
+                                    .text_color(rgb(0xffffff))
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.wizard_restore_cloud_secondary_vault(
+                                            vid_for_click.clone(),
+                                            cx,
+                                        );
+                                    }))
+                                    .child("Restore Vault"),
+                            );
+                        }
+
+                        cloud_sec_list = cloud_sec_list.child(item);
+                    }
+
+                    cloud_sec_list = cloud_sec_list.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .mt_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("Password for selected cloud vault:"),
+                            )
+                            .child(wizard.cloud_vault_password_input.clone()),
+                    );
+
+                    form = form.child(cloud_sec_list);
+                }
+
+                form = form.child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                        .child("Or Restore Local Vault from file:"),
                 );
 
                 form = form.child(host_form_field(

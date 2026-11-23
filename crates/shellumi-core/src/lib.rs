@@ -138,8 +138,9 @@ pub use recording::{
     SessionRecordingMetadata, SessionRecordingSummary, SessionRedactor,
 };
 pub use setup::{
-    verify_setup_integrity, ConfiguredVaultSummary, InstallationStatus, SetupError, SetupState,
-    SetupStep, SetupVerificationReport, SetupWizardMode, SETUP_STATE_FILE, SETUP_STATE_TMP_FILE,
+    verify_setup_integrity, CloudVaultSummary, ConfiguredVaultSummary, InstallationStatus,
+    SetupError, SetupState, SetupStep, SetupVerificationReport, SetupWizardMode, SETUP_STATE_FILE,
+    SETUP_STATE_TMP_FILE,
 };
 pub use sftp::{
     format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,

@@ -62,22 +62,28 @@ impl Shellumi {
         };
 
         let cred_store = shellumi_core::default_credential_store();
-        let token = cred_store
-            .get_secret("org.shellumi.sync", "gdrive_oauth_token")
-            .ok()
-            .flatten()
-            .map(|s| s.expose_secret().to_string())
-            .or_else(|| std::env::var("SHELLUMI_GDRIVE_TOKEN").ok())
-            .or_else(|| std::env::var("GOOGLE_DRIVE_TOKEN").ok())
-            .unwrap_or_default();
-
-        if token.trim().is_empty() {
-            self.sync_status = AppSyncStatus::Error(
-                "Google Drive OAuth token not found. Please authenticate with Google Drive.".into(),
-            );
-            cx.notify();
-            return;
-        }
+        let client = shellumi_core::GoogleDriveSyncClient::new(
+            shellumi_core::SystemHttpTransport::new(),
+            "shellumi-desktop",
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let token = match shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(
+            cred_store.as_ref(),
+            &client,
+            now,
+        ) {
+            Ok(tok) => tok,
+            Err(e) => {
+                self.sync_status = AppSyncStatus::Error(format!(
+                    "Google Drive OAuth error: {e}. Please authenticate with Google Drive."
+                ));
+                cx.notify();
+                return;
+            }
+        };
 
         let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
             Ok(value) if value.chars().count() >= 8 => shellumi_core::SecretString::new(value),
@@ -271,23 +277,28 @@ impl Shellumi {
         };
 
         let cred_store = shellumi_core::default_credential_store();
-        let token = cred_store
-            .get_secret("org.shellumi.sync", "gdrive_oauth_token")
-            .ok()
-            .flatten()
-            .map(|s| s.expose_secret().to_string())
-            .or_else(|| std::env::var("SHELLUMI_GDRIVE_TOKEN").ok())
-            .or_else(|| std::env::var("GOOGLE_DRIVE_TOKEN").ok())
-            .unwrap_or_default();
-
-        if token.trim().is_empty() {
-            self.sync_status = AppSyncStatus::Error(
-                "Google Drive OAuth token not found. Please authenticate with Google Drive in Settings or configure your credentials."
-                    .into(),
-            );
-            cx.notify();
-            return;
-        }
+        let client = shellumi_core::GoogleDriveSyncClient::new(
+            shellumi_core::SystemHttpTransport::new(),
+            "shellumi-desktop",
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let token = match shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(
+            cred_store.as_ref(),
+            &client,
+            now,
+        ) {
+            Ok(tok) => tok,
+            Err(e) => {
+                self.sync_status = AppSyncStatus::Error(format!(
+                    "Google Drive OAuth error: {e}. Please authenticate with Google Drive in Settings or the Setup Wizard."
+                ));
+                cx.notify();
+                return;
+            }
+        };
 
         let passphrase = match std::env::var("SHELLUMI_VAULT_PASSPHRASE") {
             Ok(value) if value.chars().count() >= 8 => shellumi_core::SecretString::new(value),

@@ -118,6 +118,17 @@ pub struct ConfiguredVaultSummary {
     pub server_url: Option<String>,
 }
 
+/// Summary of a cloud vault discovered in Google Drive without exposing decrypted payloads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudVaultSummary {
+    pub id: String,
+    pub name: String,
+    pub updated_at: u64,
+    pub record_count: usize,
+    pub has_key_envelope: bool,
+    pub is_default: bool,
+}
+
 /// Errors produced during wizard state tracking or verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SetupError {
@@ -268,13 +279,19 @@ impl SetupState {
     /// Detects the installation status of the given base directory.
     pub fn detect_installation(base_dir: &Path) -> InstallationStatus {
         // 1. Check for incomplete setup state first
-        if let Ok(Some(state)) = Self::load(base_dir) {
-            if !state.completed {
-                return InstallationStatus::IncompleteSetup {
-                    last_step: state.current_step,
-                    default_vault_created: state.default_vault_created,
-                };
+        match Self::load(base_dir) {
+            Ok(Some(state)) => {
+                if !state.completed {
+                    return InstallationStatus::IncompleteSetup {
+                        last_step: state.current_step,
+                        default_vault_created: state.default_vault_created,
+                    };
+                }
             }
+            Err(e) => {
+                tracing::warn!(error = %e, "Corrupted setup state encountered in detect_installation");
+            }
+            Ok(None) => {}
         }
 
         // 2. Check for legacy unmigrated database
@@ -292,7 +309,11 @@ impl SetupState {
         // 3. Check for existing encrypted vaults
         let vaults_dir = base_dir.join("vaults");
         let default_db = vaults_dir.join("default.db");
-        let manifests_dir = base_dir.join("vault_manifests");
+        let manifests_dir = if base_dir.join("vault_manifests").exists() {
+            base_dir.join("vault_manifests")
+        } else {
+            base_dir.join("manifests")
+        };
         let default_manifest = manifests_dir.join("legacy-local.manifest.json");
         let alt_manifest = manifests_dir.join("default.manifest.json");
 
@@ -327,25 +348,55 @@ impl SetupState {
 
     /// Checks if setup has been completed and should not be displayed again.
     pub fn is_setup_completed(base_dir: &Path) -> bool {
-        if let Ok(Some(state)) = Self::load(base_dir) {
-            if state.completed {
-                return true;
+        match Self::load(base_dir) {
+            Ok(Some(state)) => {
+                // If a setup state file exists, its `completed` flag is authoritative!
+                // If `completed == false`, setup is incomplete, and must NEVER be treated as completed.
+                state.completed
+            }
+            Ok(None) => {
+                // If no state file exists, but default.db and manifest exist and are non-empty,
+                // it's an existing pre-wizard completed installation.
+                let default_db = base_dir.join("vaults").join("default.db");
+                let default_manifest = base_dir
+                    .join("vault_manifests")
+                    .join("legacy-local.manifest.json");
+                let alt_manifest = base_dir
+                    .join("vault_manifests")
+                    .join("default.manifest.json");
+                let legacy_manifest = base_dir
+                    .join("manifests")
+                    .join("legacy-local.manifest.json");
+                let db_valid = default_db.exists()
+                    && fs::metadata(&default_db)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false);
+                let manifest_valid =
+                    default_manifest.exists() || alt_manifest.exists() || legacy_manifest.exists();
+                db_valid && manifest_valid
+            }
+            Err(e) => {
+                // Corrupted setup state file detected: inspect existing encrypted databases and manifests
+                tracing::warn!(error = %e, "Corrupted setup state file detected; checking vault presence");
+                let default_db = base_dir.join("vaults").join("default.db");
+                let default_manifest = base_dir
+                    .join("vault_manifests")
+                    .join("legacy-local.manifest.json");
+                let alt_manifest = base_dir
+                    .join("vault_manifests")
+                    .join("default.manifest.json");
+                let legacy_manifest = base_dir
+                    .join("manifests")
+                    .join("legacy-local.manifest.json");
+                let db_valid = default_db.exists()
+                    && fs::metadata(&default_db)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false);
+                let manifest_valid =
+                    default_manifest.exists() || alt_manifest.exists() || legacy_manifest.exists();
+                db_valid && manifest_valid
             }
         }
-        // If no state file exists, but default.db and manifest exist and are non-empty,
-        // it's an existing pre-wizard completed installation.
-        let default_db = base_dir.join("vaults").join("default.db");
-        let default_manifest = base_dir
-            .join("vault_manifests")
-            .join("legacy-local.manifest.json");
-        if default_db.exists() && default_manifest.exists() {
-            if let Ok(meta) = fs::metadata(&default_db) {
-                if meta.len() > 0 {
-                    return true;
-                }
-            }
-        }
-        false
     }
 }
 

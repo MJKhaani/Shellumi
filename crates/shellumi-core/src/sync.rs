@@ -900,6 +900,62 @@ impl OAuthTokenBundle {
             .delete_secret(OAUTH_TOKEN_SERVICE, OAUTH_TOKEN_ACCOUNT)
             .map_err(|e| SyncError::Api(format!("failed to delete OAuth token: {e}")))
     }
+
+    /// Resolves an active Google Drive OAuth access token from the credential store.
+    /// If the token is expired and a refresh token is present, automatically refreshes it,
+    /// persists the refreshed bundle into the credential store, and returns the fresh access token.
+    /// Also supports automatic migration from legacy credential store key `org.shellumi.sync / gdrive_oauth_token`.
+    pub fn resolve_valid_token<T: HttpTransport>(
+        store: &dyn crate::credential::CredentialStore,
+        client: &GoogleDriveSyncClient<T>,
+        current_time: u64,
+    ) -> Result<String, SyncError> {
+        if let Some(bundle) = Self::load_from_store(store)? {
+            if bundle.is_expired(current_time) && bundle.refresh_token.is_some() {
+                match client.refresh_token(&bundle, current_time) {
+                    Ok(refreshed) => {
+                        let _ = refreshed.save_to_store(store);
+                        tracing::info!("Google Drive OAuth access token was expired and refreshed successfully");
+                        return Ok(refreshed.access_token);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to refresh expired OAuth token; attempting existing access token");
+                        return Ok(bundle.access_token);
+                    }
+                }
+            }
+            return Ok(bundle.access_token);
+        }
+
+        // Backward compatibility fallback: check legacy store key
+        if let Ok(Some(secret)) = store.get_secret("org.shellumi.sync", "gdrive_oauth_token") {
+            let token = secret.expose_secret().to_string();
+            if !token.trim().is_empty() {
+                let bundle = Self::new(
+                    token.clone(),
+                    None,
+                    Some(3600),
+                    Some("https://www.googleapis.com/auth/drive.appdata".into()),
+                    current_time,
+                );
+                let _ = bundle.save_to_store(store);
+                return Ok(token);
+            }
+        }
+
+        // Optional environment variable fallback (not required)
+        if let Ok(token) =
+            std::env::var("SHELLUMI_GDRIVE_TOKEN").or_else(|_| std::env::var("GOOGLE_DRIVE_TOKEN"))
+        {
+            if !token.trim().is_empty() {
+                return Ok(token);
+            }
+        }
+
+        Err(SyncError::Api(
+            "Google Drive OAuth token not found. Please authenticate with Google Drive in the Setup Wizard or Settings.".into(),
+        ))
+    }
 }
 
 /// Service name used when storing OAuth token bundles in the platform credential store.
@@ -2310,6 +2366,73 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
             ));
         }
         Ok(())
+    }
+
+    /// Discovers available cloud vaults in the Google Drive AppData folder without exposing encrypted contents.
+    pub fn discover_cloud_vaults(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<crate::setup::CloudVaultSummary>, SyncError> {
+        let files = self.list_vault_files(access_token)?;
+        let mut summaries = Vec::new();
+        let mut seen_vaults = std::collections::BTreeSet::new();
+
+        for file in &files {
+            let is_default_file = file.name == DRIVE_LEGACY_APPDATA_FILENAME
+                || file.name == DRIVE_APPDATA_FILENAME
+                || file.name == "shellumi_vault_legacy-local.json"
+                || file.name == "shellumi_vault_default.json";
+
+            let (vault_id, is_default) = if is_default_file {
+                ("legacy-local".to_string(), true)
+            } else if let Some(stripped) = file
+                .name
+                .strip_prefix("shellumi_vault_")
+                .and_then(|s| s.strip_suffix(".json"))
+            {
+                (
+                    stripped.to_string(),
+                    stripped == "legacy-local" || stripped == "default",
+                )
+            } else {
+                continue;
+            };
+
+            if !seen_vaults.insert(vault_id.clone()) {
+                continue;
+            }
+
+            // Download snapshot to inspect public metadata (vault_id, record count, envelope presence)
+            match self.download_vault(access_token, &file.id) {
+                Ok(snapshot) => {
+                    let name = if is_default {
+                        "Default Vault".to_string()
+                    } else {
+                        format!("Vault {}", snapshot.vault_id)
+                    };
+                    summaries.push(crate::setup::CloudVaultSummary {
+                        id: snapshot.vault_id,
+                        name,
+                        updated_at: snapshot.updated_at,
+                        record_count: snapshot.records.len(),
+                        has_key_envelope: snapshot.key_envelope.is_some(),
+                        is_default,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(vault_id = %vault_id, error = %e, "Failed to inspect cloud vault snapshot metadata");
+                }
+            }
+        }
+
+        // Sort so that the default vault appears first, followed by others alphabetically
+        summaries.sort_by(|a, b| {
+            b.is_default
+                .cmp(&a.is_default)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        Ok(summaries)
     }
 }
 

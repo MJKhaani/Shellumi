@@ -493,11 +493,15 @@ pub(crate) struct SetupWizardModalState {
     pub(crate) legacy_password_input: Entity<TextInput>,
     pub(crate) existing_unlock_input: Entity<TextInput>,
     pub(crate) unlock_with_recovery_code: bool,
+    pub(crate) restore_with_google_drive: bool,
+    pub(crate) interrupted_recovery_code: bool,
     // Step 3: Google Drive inputs
     pub(crate) google_client_id_input: Entity<TextInput>,
     pub(crate) is_connecting_google: bool,
     pub(crate) google_auth_url: Option<String>,
     pub(crate) cloud_snapshots: Vec<shellumi_core::SyncVault>,
+    pub(crate) cloud_vaults: Vec<shellumi_core::CloudVaultSummary>,
+    pub(crate) cloud_vault_password_input: Entity<TextInput>,
     pub(crate) is_fetching_snapshots: bool,
     pub(crate) sync_default_opt_in: bool,
     // Step 4: Additional Vaults inputs

@@ -277,6 +277,55 @@ impl VaultManifest {
         tracing::debug!(vault_id=%self.vault_id,"Saved portable manifest with revision checks");
         Ok(())
     }
+
+    /// Atomically save manifest to a NEW disk path using create-only semantics (`create_new`).
+    /// Refuses to overwrite or truncate an existing manifest file at `path`.
+    pub fn save_new_to_path(&self, path: &Path) -> Result<(), SyncError> {
+        if path.exists() {
+            return Err(SyncError::Api(format!(
+                "Manifest destination already exists at {}",
+                path.display()
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = self.to_json()?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                SyncError::Api(format!(
+                    "Manifest destination already exists at {}",
+                    path.display()
+                ))
+            } else {
+                SyncError::Io(e.to_string())
+            }
+        })?;
+        use std::io::Write;
+        if let Err(e) = file
+            .write_all(json.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
+            let _ = fs::remove_file(path);
+            return Err(SyncError::from(e));
+        }
+        drop(file);
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            if let Ok(parent_file) = fs::File::open(parent) {
+                let _ = parent_file.sync_all();
+            }
+        }
+        tracing::debug!(vault_id=%self.vault_id, path=%path.display(), "Created new portable manifest with create-only semantics");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

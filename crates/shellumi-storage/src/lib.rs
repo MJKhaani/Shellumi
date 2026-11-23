@@ -6053,7 +6053,7 @@ impl HostStore {
             options.remember_in_keychain,
         );
         manifest.key_revision = sync_vault.cloud_state.as_ref().map(|s| s.key.clone());
-        manifest.save_to_path(&manifest_path).map_err(|e| {
+        manifest.save_new_to_path(&manifest_path).map_err(|e| {
             StorageError::Serialization(format!("Failed to save restored vault manifest: {e}"))
         })?;
 
@@ -6083,6 +6083,23 @@ impl HostStore {
         let import_res = store.import_vault(&dek_passphrase, sync_vault).await;
         if import_res.is_err() {
             store.import_vault(options.password, sync_vault).await?;
+        }
+
+        if let Some(ref enc_dir_json) = sync_vault.encrypted_directory {
+            if options.vault_id.as_str() == LEGACY_LOCAL_VAULT_ID
+                || options.vault_id.as_str() == "default"
+            {
+                if let Err(e) = store
+                    .import_encrypted_vault_directory(
+                        options.vault_id,
+                        Some(&recovered_dek),
+                        enc_dir_json,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to import encrypted vault directory during restore");
+                }
+            }
         }
 
         Ok(store)

@@ -304,3 +304,27 @@ Key capabilities:
 
 Automated coverage in `crates/shellumi-app/src/tests/setup_wizard.rs` exercises fresh installation detection and default vault creation, recovery code confirmation, interrupted crash-safe resumption, Google Drive PKCE exchange, legacy migration routing, Shellumi Server enrollment, independent secondary vaults, and skipped optional flows.
 
+### First-Run Setup Wizard Hardening & Complete Cloud Restoration (2026-11-23)
+
+1. **Complete Google Drive Restoration**:
+   - Integrated OAuth 2.0 PKCE with background sync, standardizing on credential store key `shellumi.sync.google / oauth_token_bundle` with automatic access token refresh, secure re-persistence, and legacy key migration. Removed all requirements for environment variables.
+   - Enabled early Google Drive authentication during "Restore Existing Setup" prior to creating or unlocking a local vault.
+   - Cloud discovery (`GoogleDriveSyncClient::discover_cloud_vaults`) enumerates cloud snapshots with metadata (IDs, names, record counts, key envelope indicators) without exposing ciphertext contents.
+   - Authenticated restoration (`HostStore::restore_vault_from_sync`) restores the default vault first using its password, recovering the DEK from the cloud key envelope, provisioning `vaults/default.db`, creating the portable manifest, and importing the multi-vault directory (`encrypted_directory`).
+   - Supports selecting and restoring individual secondary vaults independently with their specific passwords. Unrestored/unsynchronized vault references in the directory are cleanly preserved without generating empty databases.
+   - Robust fault-tolerance against wrong passwords, corrupted snapshots, conflicting revisions, and occupied destinations.
+
+2. **Interrupted Setup Recovery & Safe Re-entry**:
+   - Fixed `SetupState::is_setup_completed()`: if a setup state exists with `completed = false`, it is strictly considered incomplete regardless of database presence.
+   - Resumes onboarding from the last verified step upon application restart.
+   - If setup is interrupted after default vault creation but prior to recovery code confirmation, requires the user to unlock the vault and acknowledge/confirm recovery credentials before continuing, preventing silent vault recreation.
+   - Full support for explicit wizard reopening via `--setup-wizard` or application menu without restarting destructive initialization.
+   - Corrupted or invalid `.setup_state.json` safely inspects physical database headers and manifests instead of assuming fresh installation.
+
+3. **Protection Against Overwrites and Data Loss**:
+   - Pre-flight checks inspect target paths, manifests, and registry entries prior to provisioning.
+   - Enforced create-only file operations (`create_new(true)`) and atomic staging (`.staged_{uuid}.db`) across all database and manifest generation paths (`save_new_to_path`).
+   - Provisioning error-handling guarantees that only files conclusively owned by the current transaction are removed, never deleting or truncating existing databases or manifests.
+   - Destination path collisions in cloud restoration are strictly rejected without modifying existing files.
+
+

@@ -36,9 +36,26 @@ impl Shellumi {
         let loaded_state = SetupState::load(&base_dir).ok().flatten();
         let mut state = loaded_state.unwrap_or_default();
 
-        // If resuming an incomplete setup, resume at that step; otherwise start at Welcome
-        if let InstallationStatus::IncompleteSetup { last_step, .. } = &installation_status {
+        let is_completed = SetupState::is_setup_completed(&base_dir);
+        let has_existing_vaults = matches!(
+            installation_status,
+            InstallationStatus::ExistingVaults { .. }
+        );
+
+        let mut interrupted_recovery = false;
+        if let InstallationStatus::IncompleteSetup {
+            last_step,
+            default_vault_created,
+        } = &installation_status
+        {
             state.current_step = *last_step;
+            if *default_vault_created && !state.recovery_code_confirmed {
+                interrupted_recovery = true;
+            }
+        } else if is_completed || has_existing_vaults {
+            // Re-entry on existing setup: safely route away from destructive initialization
+            state.mode = SetupWizardMode::RestoreSetup;
+            state.current_step = SetupStep::Welcome;
         }
 
         let default_password = cx.new(|cx| {
@@ -55,6 +72,9 @@ impl Shellumi {
             cx.new(|cx| TextInput::new(cx, "", "Legacy vault password (if encrypted)").masked());
         let existing_unlock =
             cx.new(|cx| TextInput::new(cx, "", "Vault password or recovery code").masked());
+        let cloud_vault_password = cx.new(|cx| {
+            TextInput::new(cx, "", "Password used for this vault on originating device").masked()
+        });
 
         let google_client_id = cx.new(|cx| {
             TextInput::new(
@@ -105,10 +125,14 @@ impl Shellumi {
             legacy_password_input: legacy_password,
             existing_unlock_input: existing_unlock,
             unlock_with_recovery_code: false,
+            restore_with_google_drive: true,
+            interrupted_recovery_code: interrupted_recovery,
             google_client_id_input: google_client_id,
             is_connecting_google: false,
             google_auth_url: None,
             cloud_snapshots: Vec::new(),
+            cloud_vaults: Vec::new(),
+            cloud_vault_password_input: cloud_vault_password,
             is_fetching_snapshots: false,
             sync_default_opt_in: false,
             additional_tab: AdditionalVaultsTab::CreateLocal,
@@ -136,10 +160,33 @@ impl Shellumi {
     /// Selects the wizard mode (NewSetup vs RestoreSetup) and advances to DefaultVault step.
     pub(crate) fn wizard_select_mode(&mut self, mode: SetupWizardMode, cx: &mut Context<Self>) {
         if let Some(wizard) = &mut self.setup_wizard_modal {
+            if mode == SetupWizardMode::NewSetup {
+                let default_db = wizard.base_dir.join("vaults").join("default.db");
+                let default_manifest = wizard
+                    .base_dir
+                    .join("vault_manifests")
+                    .join("legacy-local.manifest.json");
+                let alt_manifest = wizard
+                    .base_dir
+                    .join("vault_manifests")
+                    .join("default.manifest.json");
+                if default_db.exists() || default_manifest.exists() || alt_manifest.exists() {
+                    wizard.error = Some(
+                        "An encrypted default vault or manifest already exists. Overwrite is blocked to protect your data. Please choose Restore Existing Setup to unlock or add vaults."
+                            .into(),
+                    );
+                    cx.notify();
+                    return;
+                }
+            }
             wizard.state.mode = mode;
-            let _ = wizard.state.save(&wizard.base_dir);
             wizard.state.current_step = SetupStep::DefaultVault;
-            let _ = wizard.state.save(&wizard.base_dir);
+            let base_dir = wizard.base_dir.clone();
+            if let Err(e) = wizard.state.save(&base_dir) {
+                wizard.error = Some(format!("Failed to persist setup state: {e}"));
+                cx.notify();
+                return;
+            }
             wizard.error = None;
             wizard.status_message = None;
             cx.notify();
@@ -213,11 +260,33 @@ impl Shellumi {
         }
     }
 
-    /// Generates and creates the encrypted default vault.
+    /// Sets whether to restore from Google Drive or local unlock in Restore mode.
+    pub(crate) fn wizard_set_restore_source(&mut self, use_drive: bool, cx: &mut Context<Self>) {
+        if let Some(wizard) = &mut self.setup_wizard_modal {
+            wizard.restore_with_google_drive = use_drive;
+            cx.notify();
+        }
+    }
+
+    /// Generates and creates the encrypted default vault with create-only and staged provisioning guarantees.
     pub(crate) fn wizard_create_default_vault(&mut self, cx: &mut Context<Self>) {
         let Some(wizard) = &mut self.setup_wizard_modal else {
             return;
         };
+
+        // Safety Guard: Never overwrite existing default database or manifests
+        let default_db = wizard.base_dir.join("vaults").join("default.db");
+        let manifests_dir = wizard.base_dir.join("vault_manifests");
+        let manifest_path = manifests_dir.join("legacy-local.manifest.json");
+        let alt_manifest = manifests_dir.join("default.manifest.json");
+        if default_db.exists() || manifest_path.exists() || alt_manifest.exists() {
+            wizard.error = Some(
+                "An encrypted default vault or manifest already exists. Fresh creation is disabled to protect existing data. Please unlock or restore your vault."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
 
         let password = wizard
             .default_password_input
@@ -262,6 +331,20 @@ impl Shellumi {
             let default_vid =
                 VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID).map_err(|e| e.to_string())?;
 
+            let manifests_dir = base_dir.join("vault_manifests");
+            data_path::prepare_parent(&manifests_dir.join("placeholder"))?;
+            let manifest_path =
+                manifests_dir.join(format!("{}.manifest.json", default_vid.as_str()));
+
+            let vaults_dir = base_dir.join("vaults");
+            data_path::prepare_parent(&vaults_dir.join("placeholder"))?;
+            let db_path = vaults_dir.join("default.db");
+
+            // Secondary double-check: verify paths do not exist
+            if db_path.exists() || manifest_path.exists() {
+                return Err("Default vault database or manifest already exists; creation aborted to protect data.".into());
+            }
+
             // 1. Provision random DEK and emergency recovery code
             let cred_store = shellumi_core::default_credential_store();
             let recovery_code = VaultKey::generate_recovery_code().map_err(|e| e.to_string())?;
@@ -274,11 +357,7 @@ impl Shellumi {
             )
             .map_err(|e| e.to_string())?;
 
-            // 2. Persist wrapped key manifest BEFORE creating database
-            let manifests_dir = base_dir.join("vault_manifests");
-            data_path::prepare_parent(&manifests_dir.join("placeholder"))?;
-            let manifest_path =
-                manifests_dir.join(format!("{}.manifest.json", default_vid.as_str()));
+            // 2. Persist wrapped key manifest using create-only semantics (`save_new_to_path`)
             let manifest = shellumi_core::VaultManifest::new(
                 default_vid.as_str().to_string(),
                 "Default Vault".to_string(),
@@ -287,22 +366,20 @@ impl Shellumi {
                 remember_in_keychain,
             );
             manifest
-                .save_to_path(&manifest_path)
+                .save_new_to_path(&manifest_path)
                 .map_err(|e| format!("Failed to write vault manifest: {e}"))?;
 
-            // 3. Create encrypted database default.db
-            let vaults_dir = base_dir.join("vaults");
-            data_path::prepare_parent(&vaults_dir.join("placeholder"))?;
-            let db_path = vaults_dir.join("default.db");
-            let db_str = db_path
+            // 3. Staged provisioning: initialize in temporary staged file
+            let staged_db_path = vaults_dir.join(format!(".staged_{}.db", uuid::Uuid::new_v4()));
+            let staged_str = staged_db_path
                 .to_str()
                 .ok_or_else(|| "Invalid UTF-8 database path".to_string())?;
 
-            let mut store = match HostStore::open_with_key(db_str, Some(&key)).await {
+            let mut store = match HostStore::open_with_key(staged_str, Some(&key)).await {
                 Ok(s) => s,
                 Err(err) => {
                     let _ = std::fs::remove_file(&manifest_path);
-                    let _ = std::fs::remove_file(&db_path);
+                    let _ = std::fs::remove_file(&staged_db_path);
                     return Err(format!("Failed to initialize encrypted database: {err}"));
                 }
             };
@@ -310,15 +387,40 @@ impl Shellumi {
 
             // 4. Register default vault in registry
             let context = VaultContext::new(default_vid.clone(), VaultLocation::Local);
-            store
-                .register_vault_context("Default Vault", &context)
-                .await
-                .map_err(|e| format!("Failed to register default vault context: {e}"))?;
+            if let Err(e) = store.register_vault_context("Default Vault", &context).await {
+                drop(store);
+                let _ = std::fs::remove_file(&manifest_path);
+                let _ = std::fs::remove_file(&staged_db_path);
+                return Err(format!("Failed to register default vault context: {e}"));
+            }
 
             if let Ok(env_json) = serde_json::to_string(&primary_env) {
                 let _ = store
                     .save_vault_recovery_envelope(default_vid.as_str(), &env_json)
                     .await;
+            }
+            drop(store);
+
+            // 5. Activate staged database to target path (create-only)
+            if db_path.exists() {
+                let _ = std::fs::remove_file(&manifest_path);
+                let _ = std::fs::remove_file(&staged_db_path);
+                return Err("Target default.db was created by another process; aborting.".into());
+            }
+
+            if let Err(e) = std::fs::hard_link(&staged_db_path, &db_path) {
+                if db_path.exists() {
+                    let _ = std::fs::remove_file(&manifest_path);
+                    let _ = std::fs::remove_file(&staged_db_path);
+                    return Err(format!("Destination default.db already exists: {e}"));
+                }
+                if let Err(rename_err) = std::fs::rename(&staged_db_path, &db_path) {
+                    let _ = std::fs::remove_file(&manifest_path);
+                    let _ = std::fs::remove_file(&staged_db_path);
+                    return Err(format!("Failed to activate default.db: {rename_err}"));
+                }
+            } else {
+                let _ = std::fs::remove_file(&staged_db_path);
             }
 
             Ok::<_, String>((recovery_code, key))
@@ -459,6 +561,294 @@ impl Shellumi {
                                 Some("Default vault unlocked successfully!".to_string());
                             wizard.state.current_step = SetupStep::GoogleDrive;
                             let _ = wizard.state.save(&wizard.base_dir);
+                        }
+                        Err(e) => {
+                            wizard.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Unlocks an existing default vault to view and confirm emergency recovery credentials if setup was interrupted.
+    pub(crate) fn wizard_unlock_to_confirm_recovery_code(&mut self, cx: &mut Context<Self>) {
+        let Some(wizard) = &mut self.setup_wizard_modal else {
+            return;
+        };
+
+        let password = wizard
+            .existing_unlock_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if password.is_empty() {
+            wizard.error =
+                Some("Please enter your vault password to confirm recovery credentials.".into());
+            cx.notify();
+            return;
+        }
+
+        wizard.is_busy = true;
+        wizard.error = None;
+        wizard.status_message = Some("Verifying vault password and recovering credentials…".into());
+        cx.notify();
+
+        let base_dir = wizard.base_dir.clone();
+        let default_vid = VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID).unwrap();
+
+        let task = cx.background_executor().spawn(async move {
+            let manifests_dir = base_dir.join("vault_manifests");
+            let manifest_path =
+                manifests_dir.join(format!("{}.manifest.json", default_vid.as_str()));
+            let mut manifest = shellumi_core::VaultManifest::load_from_path(&manifest_path)
+                .map_err(|e| format!("Failed to load manifest: {e}"))?;
+
+            let key =
+                VaultKey::unwrap_with_password(&default_vid, &password, &manifest.primary_envelope)
+                    .map_err(|_| {
+                        "Incorrect password for this vault. Please try again.".to_string()
+                    })?;
+
+            // Generate a fresh recovery code and update manifest
+            let recovery_code = VaultKey::generate_recovery_code().map_err(|e| e.to_string())?;
+            manifest
+                .set_recovery_key(&key, &recovery_code)
+                .map_err(|e| format!("Failed to record recovery code: {e}"))?;
+            manifest
+                .save_to_path(&manifest_path)
+                .map_err(|e| format!("Failed to update manifest: {e}"))?;
+
+            Ok::<_, String>((key, recovery_code))
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(wizard) = &mut app.setup_wizard_modal {
+                    wizard.is_busy = false;
+                    match result {
+                        Ok((key, recovery_code)) => {
+                            app.active_vault_keys.insert(
+                                shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(),
+                                key,
+                            );
+                            wizard.default_recovery_code = Some(recovery_code);
+                            wizard.interrupted_recovery_code = false;
+                            wizard.status_message = Some(
+                                "Vault unlocked! Please safely record your emergency recovery code and check the confirmation box below.".into(),
+                            );
+                        }
+                        Err(e) => {
+                            wizard.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Confirms that the emergency recovery code has been saved, advancing to the Google Drive step.
+    pub(crate) fn wizard_confirm_recovery_code(&mut self, cx: &mut Context<Self>) {
+        let Some(wizard) = &mut self.setup_wizard_modal else {
+            return;
+        };
+        if !wizard.recovery_code_confirmed {
+            wizard.error = Some(
+                "You must check the confirmation box indicating you have saved your emergency recovery code before continuing."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        wizard.state.recovery_code_confirmed = true;
+        wizard.state.current_step = SetupStep::GoogleDrive;
+        let base_dir = wizard.base_dir.clone();
+        if let Err(e) = wizard.state.save(&base_dir) {
+            wizard.error = Some(format!("Failed to persist setup progress: {e}"));
+            cx.notify();
+            return;
+        }
+        wizard.status_message =
+            Some("Recovery code confirmed. Proceeding to Google Drive setup.".into());
+        cx.notify();
+    }
+
+    /// Restores the default vault from Google Drive using the user password.
+    pub(crate) fn wizard_restore_cloud_default_vault(&mut self, cx: &mut Context<Self>) {
+        let Some(wizard) = &mut self.setup_wizard_modal else {
+            return;
+        };
+
+        let password = wizard
+            .cloud_vault_password_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if password.is_empty() {
+            wizard.error =
+                Some("Please enter your vault password to restore from Google Drive.".into());
+            cx.notify();
+            return;
+        }
+
+        let remember_in_keychain = wizard.remember_in_keychain;
+        let base_dir = wizard.base_dir.clone();
+        let vaults_dir = base_dir.join("vaults");
+        let manifests_dir = base_dir.join("vault_manifests");
+        let default_db_path = vaults_dir.join("default.db");
+        let default_manifest_path = manifests_dir.join("legacy-local.manifest.json");
+
+        // Guard against overwriting existing local data
+        if default_db_path.exists() || default_manifest_path.exists() {
+            wizard.error = Some(
+                "Local default vault database or manifest already exists. Restoration rejected to protect existing data. Please unlock your existing vault instead."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+
+        wizard.is_busy = true;
+        wizard.error = None;
+        wizard.status_message =
+            Some("Downloading cloud default vault snapshot and decrypting DEK envelope…".into());
+        cx.notify();
+
+        let client_id = wizard
+            .google_client_id_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let client_id = if client_id.is_empty() {
+            "shellumi-desktop".to_string()
+        } else {
+            client_id
+        };
+
+        let cached_snapshot = wizard
+            .cloud_snapshots
+            .iter()
+            .find(|s| s.vault_id == "legacy-local" || s.vault_id == "default")
+            .cloned();
+
+        let task = cx.background_executor().spawn(async move {
+            let cred_store = shellumi_core::default_credential_store();
+            let client = GoogleDriveSyncClient::new(
+                SystemHttpTransport::new(),
+                &client_id,
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // 1. Get valid access token
+            let access_token = shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(
+                cred_store.as_ref(),
+                &client,
+                now,
+            )
+            .map_err(|e| format!("Google Drive authentication error: {e}"))?;
+
+            // 2. Obtain default vault snapshot (cached or download fresh)
+            let snapshot = if let Some(snap) = cached_snapshot {
+                snap
+            } else {
+                let files = client
+                    .list_vault_files(&access_token)
+                    .map_err(|e| format!("Failed to list cloud files: {e}"))?;
+                let file = shellumi_core::sync::find_drive_vault_file(&files, "legacy-local")
+                    .ok_or_else(|| {
+                        "No default vault snapshot found in Google Drive AppData.".to_string()
+                    })?;
+                client
+                    .download_vault(&access_token, &file.id)
+                    .map_err(|e| format!("Failed to download cloud snapshot: {e}"))?
+            };
+
+            // 3. Restore vault using user password and HostStore::restore_vault_from_sync
+            let default_vid = VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                .map_err(|e| e.to_string())?;
+
+            let options = shellumi_storage::RestoreVaultOptions {
+                vault_id: &default_vid,
+                vault_name: "Default Vault",
+                password: &password,
+                target_db_path: &default_db_path,
+                manifests_dir: &manifests_dir,
+                cred_store: if remember_in_keychain {
+                    Some(cred_store.as_ref())
+                } else {
+                    None
+                },
+                remember_in_keychain,
+            };
+
+            let store = HostStore::restore_vault_from_sync(&snapshot, &options)
+                .await
+                .map_err(|e| match e {
+                    shellumi_storage::StorageError::Serialization(msg)
+                        if msg.contains("Failed to unwrap DEK") =>
+                    {
+                        "Incorrect password for this cloud vault. Please check your password and try again.".to_string()
+                    }
+                    other => format!("Restoration failed: {other}"),
+                })?;
+
+            // Recover DEK for active memory state
+            let envelope = snapshot.key_envelope.as_ref().ok_or_else(|| {
+                "Missing key_envelope in cloud snapshot".to_string()
+            })?;
+            let recovered_dek = VaultKey::unwrap_with_password(&default_vid, &password, envelope)
+                .map_err(|e| format!("DEK unwrap failed: {e}"))?;
+
+            let dir = store.build_vault_directory().await.unwrap_or_default();
+
+            Ok::<_, String>((recovered_dek, dir))
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(wizard) = &mut app.setup_wizard_modal {
+                    wizard.is_busy = false;
+                    match result {
+                        Ok((key, dir)) => {
+                            app.active_vault_keys
+                                .insert(shellumi_storage::LEGACY_LOCAL_VAULT_ID.to_string(), key);
+                            wizard.state.default_vault_created = true;
+                            wizard.state.recovery_code_confirmed = true;
+                            wizard.state.google_drive_connected = true;
+                            wizard.sync_default_opt_in = true;
+                            wizard.state.google_drive_sync_enabled = true;
+                            wizard.state.configured_vaults.clear();
+                            for entry in dir.entries {
+                                wizard.state.configured_vaults.push(ConfiguredVaultSummary {
+                                    id: entry.id.clone(),
+                                    name: entry.name,
+                                    is_default: entry.id == shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                                    is_remote: matches!(
+                                        entry.location,
+                                        shellumi_core::VaultDirectoryLocation::Remote { .. }
+                                    ),
+                                    sync_enabled: entry.sync_enabled,
+                                    server_url: None,
+                                });
+                            }
+                            wizard.state.current_step = SetupStep::AdditionalVaults;
+                            let _ = wizard.state.save(&wizard.base_dir);
+                            wizard.status_message = Some(
+                                "Default vault and registry successfully restored from Google Drive!"
+                                    .into(),
+                            );
                         }
                         Err(e) => {
                             wizard.error = Some(e);
@@ -627,7 +1017,25 @@ impl Shellumi {
                 .save_to_store(cred_store.as_ref())
                 .map_err(|e| format!("Failed to save OAuth credentials to Keychain: {e}"))?;
 
-            Ok::<_, String>((auth_url, bundle))
+            // Discover available cloud vaults
+            let discovered = client
+                .discover_cloud_vaults(&bundle.access_token)
+                .unwrap_or_default();
+
+            // Cache snapshots
+            let files = client
+                .list_vault_files(&bundle.access_token)
+                .unwrap_or_default();
+            let mut snapshots = Vec::new();
+            for file in files {
+                if file.name.starts_with("shellumi_vault") {
+                    if let Ok(snap) = client.download_vault(&bundle.access_token, &file.id) {
+                        snapshots.push(snap);
+                    }
+                }
+            }
+
+            Ok::<_, String>((auth_url, bundle, discovered, snapshots))
         });
 
         cx.spawn(async move |app, cx| {
@@ -637,14 +1045,103 @@ impl Shellumi {
                     wizard.is_connecting_google = false;
                     wizard.is_busy = false;
                     match result {
-                        Ok((auth_url, _bundle)) => {
+                        Ok((auth_url, _bundle, discovered, snapshots)) => {
                             wizard.google_auth_url = Some(auth_url);
                             wizard.state.google_drive_connected = true;
+                            wizard.cloud_vaults = discovered;
+                            wizard.cloud_snapshots = snapshots;
                             let _ = wizard.state.save(&wizard.base_dir);
-                            wizard.status_message = Some(
-                                "Google Drive authenticated successfully! Credentials stored securely."
-                                    .to_string(),
-                            );
+                            wizard.status_message = Some(format!(
+                                "Google Drive authenticated successfully! Discovered {} cloud vault(s).",
+                                wizard.cloud_vaults.len()
+                            ));
+                        }
+                        Err(e) => {
+                            wizard.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Fetches and refreshes available cloud vault snapshots from Google Drive AppData folder.
+    pub(crate) fn wizard_fetch_cloud_vaults(&mut self, cx: &mut Context<Self>) {
+        let Some(wizard) = &mut self.setup_wizard_modal else {
+            return;
+        };
+
+        let client_id = wizard
+            .google_client_id_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let client_id = if client_id.is_empty() {
+            "shellumi-desktop".to_string()
+        } else {
+            client_id
+        };
+
+        wizard.is_fetching_snapshots = true;
+        wizard.is_busy = true;
+        wizard.error = None;
+        wizard.status_message =
+            Some("Scanning Google Drive AppData folder for vault snapshots…".into());
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let cred_store = shellumi_core::default_credential_store();
+            let client = GoogleDriveSyncClient::new(SystemHttpTransport::new(), &client_id);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let token = shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(
+                cred_store.as_ref(),
+                &client,
+                now,
+            )
+            .map_err(|e| format!("Google Drive authentication required: {e}"))?;
+
+            let summaries = client
+                .discover_cloud_vaults(&token)
+                .map_err(|e| format!("Failed to discover cloud vaults: {e}"))?;
+
+            let files = client
+                .list_vault_files(&token)
+                .map_err(|e| format!("Failed to list vault files: {e}"))?;
+            let mut snapshots = Vec::new();
+            for file in files {
+                if file.name.starts_with("shellumi_vault") {
+                    if let Ok(snap) = client.download_vault(&token, &file.id) {
+                        snapshots.push(snap);
+                    }
+                }
+            }
+
+            Ok::<_, String>((summaries, snapshots))
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(wizard) = &mut app.setup_wizard_modal {
+                    wizard.is_fetching_snapshots = false;
+                    wizard.is_busy = false;
+                    match result {
+                        Ok((summaries, snapshots)) => {
+                            wizard.cloud_vaults = summaries;
+                            wizard.cloud_snapshots = snapshots;
+                            wizard.state.google_drive_connected = true;
+                            let _ = wizard.state.save(&wizard.base_dir);
+                            wizard.status_message = Some(format!(
+                                "Found {} cloud vault snapshot(s) in Google Drive.",
+                                wizard.cloud_vaults.len()
+                            ));
                         }
                         Err(e) => {
                             wizard.error = Some(e);
@@ -779,7 +1276,7 @@ impl Shellumi {
             )
             .map_err(|e| e.to_string())?;
 
-            // Write manifest
+            // 2. Persist wrapped key manifest with create-only semantics (`save_new_to_path`)
             let manifests_dir = base_dir.join("vault_manifests");
             let manifest_path = manifests_dir.join(format!("{}.manifest.json", vault_id.as_str()));
             let manifest = shellumi_core::VaultManifest::new(
@@ -790,27 +1287,53 @@ impl Shellumi {
                 remember_in_keychain,
             );
             manifest
-                .save_to_path(&manifest_path)
+                .save_new_to_path(&manifest_path)
                 .map_err(|e| format!("Failed to write manifest: {e}"))?;
 
-            // Initialize separate physical database
+            // 3. Staged provisioning of separate physical database
             let vaults_dir = base_dir.join("vaults");
             let db_path = vaults_dir.join(format!("{}.db", vault_id.as_str()));
-            let db_str = db_path
+            let staged_db_path = vaults_dir.join(format!(".staged_{}.db", uuid::Uuid::new_v4()));
+            let staged_str = staged_db_path
                 .to_str()
                 .ok_or_else(|| "Invalid UTF-8 database path".to_string())?;
 
-            let mut sec_store = match HostStore::open_with_key(db_str, Some(&key)).await {
+            let mut sec_store = match HostStore::open_with_key(staged_str, Some(&key)).await {
                 Ok(s) => s,
                 Err(err) => {
                     let _ = std::fs::remove_file(&manifest_path);
-                    let _ = std::fs::remove_file(&db_path);
+                    let _ = std::fs::remove_file(&staged_db_path);
                     return Err(format!("Failed to open new encrypted database: {err}"));
                 }
             };
             sec_store.set_vault_id(vault_id.clone());
+            drop(sec_store);
 
-            // Register in default registry
+            // 4. Activate staged database to target path (create-only)
+            if db_path.exists() {
+                let _ = std::fs::remove_file(&manifest_path);
+                let _ = std::fs::remove_file(&staged_db_path);
+                return Err(
+                    "Target database path already exists; aborting to protect data.".into(),
+                );
+            }
+
+            if let Err(e) = std::fs::hard_link(&staged_db_path, &db_path) {
+                if db_path.exists() {
+                    let _ = std::fs::remove_file(&manifest_path);
+                    let _ = std::fs::remove_file(&staged_db_path);
+                    return Err(format!("Destination already exists: {e}"));
+                }
+                if let Err(rename_err) = std::fs::rename(&staged_db_path, &db_path) {
+                    let _ = std::fs::remove_file(&manifest_path);
+                    let _ = std::fs::remove_file(&staged_db_path);
+                    return Err(format!("Failed to activate database: {rename_err}"));
+                }
+            } else {
+                let _ = std::fs::remove_file(&staged_db_path);
+            }
+
+            // 5. Register in default registry
             let reg_path = vaults_dir.join("default.db");
             let mut reg_store =
                 match HostStore::open_with_key(reg_path.to_str().unwrap(), default_key.as_ref())
@@ -861,6 +1384,173 @@ impl Shellumi {
                                 "Secondary vault created! Please save its recovery code."
                                     .to_string(),
                             );
+                        }
+                        Err(e) => {
+                            wizard.error = Some(e);
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Restores an additional secondary vault from Google Drive using its individual password.
+    pub(crate) fn wizard_restore_cloud_secondary_vault(
+        &mut self,
+        vault_id_str: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(wizard) = &mut self.setup_wizard_modal else {
+            return;
+        };
+
+        let password = wizard
+            .cloud_vault_password_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if password.is_empty() {
+            wizard.error = Some(format!(
+                "Please enter the password for vault '{vault_id_str}'."
+            ));
+            cx.notify();
+            return;
+        }
+
+        let remember_in_keychain = wizard.sec_vault_keychain;
+        let base_dir = wizard.base_dir.clone();
+        let vaults_dir = base_dir.join("vaults");
+        let manifests_dir = base_dir.join("vault_manifests");
+        let db_path = vaults_dir.join(format!("{vault_id_str}.db"));
+        let manifest_path = manifests_dir.join(format!("{vault_id_str}.manifest.json"));
+
+        if db_path.exists() || manifest_path.exists() {
+            wizard.error = Some(format!(
+                "Destination files for vault '{vault_id_str}' already exist locally. Overwrite rejected to protect data."
+            ));
+            cx.notify();
+            return;
+        }
+
+        wizard.is_busy = true;
+        wizard.error = None;
+        wizard.status_message = Some(format!(
+            "Restoring cloud vault '{vault_id_str}' from Google Drive…"
+        ));
+        cx.notify();
+
+        let client_id = wizard
+            .google_client_id_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let client_id = if client_id.is_empty() {
+            "shellumi-desktop".to_string()
+        } else {
+            client_id
+        };
+
+        let cached_snapshot = wizard
+            .cloud_snapshots
+            .iter()
+            .find(|s| s.vault_id == vault_id_str)
+            .cloned();
+
+        let task = cx.background_executor().spawn(async move {
+            let vid = VaultId::new(&vault_id_str).map_err(|e| e.to_string())?;
+            let cred_store = shellumi_core::default_credential_store();
+            let client = GoogleDriveSyncClient::new(SystemHttpTransport::new(), &client_id);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let access_token = shellumi_core::sync::OAuthTokenBundle::resolve_valid_token(
+                cred_store.as_ref(),
+                &client,
+                now,
+            )
+            .map_err(|e| format!("Google Drive authentication error: {e}"))?;
+
+            let snapshot = if let Some(snap) = cached_snapshot {
+                snap
+            } else {
+                let files = client
+                    .list_vault_files(&access_token)
+                    .map_err(|e| format!("Failed to list cloud files: {e}"))?;
+                let file = shellumi_core::sync::find_drive_vault_file(&files, vid.as_str())
+                    .ok_or_else(|| {
+                        format!(
+                            "No snapshot found for vault '{}' in Google Drive.",
+                            vid.as_str()
+                        )
+                    })?;
+                client
+                    .download_vault(&access_token, &file.id)
+                    .map_err(|e| format!("Failed to download cloud snapshot: {e}"))?
+            };
+
+            let options = shellumi_storage::RestoreVaultOptions {
+                vault_id: &vid,
+                vault_name: &vault_id_str,
+                password: &password,
+                target_db_path: &db_path,
+                manifests_dir: &manifests_dir,
+                cred_store: if remember_in_keychain {
+                    Some(cred_store.as_ref())
+                } else {
+                    None
+                },
+                remember_in_keychain,
+            };
+
+            let _store = HostStore::restore_vault_from_sync(&snapshot, &options)
+                .await
+                .map_err(|e| match e {
+                    shellumi_storage::StorageError::Serialization(msg)
+                        if msg.contains("Failed to unwrap DEK") =>
+                    {
+                        format!(
+                            "Incorrect password for vault '{vault_id_str}'. Please check password."
+                        )
+                    }
+                    other => format!("Restoration failed: {other}"),
+                })?;
+
+            let envelope = snapshot
+                .key_envelope
+                .as_ref()
+                .ok_or_else(|| "Missing key_envelope in cloud snapshot".to_string())?;
+            let key = VaultKey::unwrap_with_password(&vid, &password, envelope)
+                .map_err(|e| format!("DEK unwrap failed: {e}"))?;
+
+            Ok::<_, String>((vault_id_str, key))
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(wizard) = &mut app.setup_wizard_modal {
+                    wizard.is_busy = false;
+                    match result {
+                        Ok((vid, key)) => {
+                            app.active_vault_keys.insert(vid.clone(), key);
+                            wizard.state.configured_vaults.push(ConfiguredVaultSummary {
+                                id: vid.clone(),
+                                name: vid.clone(),
+                                is_default: false,
+                                is_remote: false,
+                                sync_enabled: true,
+                                server_url: None,
+                            });
+                            let _ = wizard.state.save(&wizard.base_dir);
+                            wizard.status_message = Some(format!(
+                                "Vault '{vid}' successfully restored from Google Drive!"
+                            ));
                         }
                         Err(e) => {
                             wizard.error = Some(e);

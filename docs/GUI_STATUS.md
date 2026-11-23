@@ -48,8 +48,10 @@ authenticated, encrypted E2EE relay with single-writer lease token fencing.
 
 Isolated macOS identity/SFTP transport acceptance passed with an encrypted key.
 GUI interaction, real password/MFA, Drive-account acceptance and native credential
-access tests on Windows/Linux remain. First-run setup wizard and user-facing Google Drive
-OAuth 2.0 PKCE account onboarding are fully integrated into GPUI.
+access tests on Windows/Linux remain. The native GPUI first-run setup wizard features complete
+multi-vault Google Drive cloud restoration with zero-knowledge PKCE authentication, automatic token
+refresh, crash-safe interrupted setup resumption, recovery-code confirmation guards, explicit non-destructive
+wizard re-entry, and create-only transactional provisioning protecting existing vault data.
 
 Full theme/language switching, launch-at-login integration, all prototype
 subdialogs, screen-reader accessibility and non-macOS visual verification are
