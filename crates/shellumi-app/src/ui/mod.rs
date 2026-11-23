@@ -1,6 +1,9 @@
 //! Focused UI renderers for dialogs and session views.
 use super::*;
 
+pub(crate) mod components;
+pub(crate) mod layout;
+
 mod batch_modal;
 mod command_palette;
 pub(crate) mod conflict_diff;

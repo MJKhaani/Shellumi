@@ -1,0 +1,18 @@
+#![allow(dead_code, unused_imports)]
+//! Shared UI primitives, design tokens, and standard components.
+
+pub mod button;
+pub mod form;
+pub mod inspector_shell;
+pub mod popover;
+pub mod safety_alert;
+pub mod status;
+
+pub use button::{AppButton, ButtonSize, ButtonVariant, IconButton};
+pub use form::{form_field, form_section, inline_notice, toggle_switch, validation_message};
+pub use inspector_shell::InspectorShell;
+pub use popover::{action_menu, MenuItem, PopoverAnchor};
+pub use safety_alert::{
+    alert_backdrop, alert_dialog, delete_confirmation_alert, unsaved_changes_guard_alert,
+};
+pub use status::{empty_state, error_state, status_indicator, StatusKind};
