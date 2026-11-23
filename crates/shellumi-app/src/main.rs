@@ -2759,8 +2759,24 @@ impl Shellumi {
 }
 
 fn main() {
-    if let Err(e) = shellumi_core::logging::init_app_logging() {
+    let askpass_mode = std::env::var("SHELLUMI_ASKPASS_MODE").as_deref() == Ok("1");
+    let mut logging = shellumi_core::logging::LoggingConfig::for_app();
+    if askpass_mode {
+        // OpenSSH treats the helper's streams as a credential protocol. Keep
+        // structured diagnostics in the native log even with verbose filters.
+        logging.enable_stderr = false;
+        logging.category = "askpass".into();
+    }
+    if let Err(e) = shellumi_core::logging::init_logging(&logging) {
+        if askpass_mode {
+            std::process::exit(1);
+        }
         eprintln!("Warning: Failed to initialize application logging: {e}");
+    }
+
+    if askpass_mode {
+        tracing::debug!("Running OpenSSH credential helper");
+        std::process::exit(askpass::run());
     }
 
     shellumi_rdp::ensure_crypto_provider_installed();
@@ -2772,10 +2788,6 @@ fn main() {
         "Shellumi desktop application started"
     );
 
-    if std::env::var("SHELLUMI_ASKPASS_MODE").as_deref() == Ok("1") {
-        tracing::debug!("Running in SHELLUMI_ASKPASS_MODE");
-        std::process::exit(askpass::run());
-    }
     let args: Vec<_> = std::env::args().skip(1).collect();
     let (database, create_parent, startup_error) = match args.as_slice() {
         [] => match data_path::default_data_file().and_then(|path| {

@@ -261,6 +261,48 @@ fn verifies_execute_cloud_vault_sync_orchestration() {
         execute_cloud_vault_sync(&client, "fake_token", &local_vault, passphrase, None).unwrap();
     assert_eq!(res2, SyncCycleResult::AlreadySynchronized);
 
+    // A differing wrapped key must never be silently selected or uploaded.
+    let remote_envelope =
+        encrypt_entity_with_iterations(passphrase, "key", "vault_key", &host, 2_000).unwrap();
+    let local_envelope =
+        encrypt_entity_with_iterations(passphrase, "key", "vault_key", &host, 2_000).unwrap();
+    client
+        .transport
+        .uploaded
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .key_envelope = Some(remote_envelope.clone());
+    local_vault.key_envelope = Some(local_envelope);
+    assert_eq!(
+        execute_cloud_vault_sync(&client, "fake_token", &local_vault, passphrase, None),
+        Err(SyncError::Api(
+            "Vault key envelopes differ; synchronization stopped to protect password recovery"
+                .into()
+        ))
+    );
+    assert_eq!(
+        client
+            .transport
+            .uploaded
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .key_envelope,
+        Some(remote_envelope)
+    );
+    client
+        .transport
+        .uploaded
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .key_envelope = None;
+    local_vault.key_envelope = None;
+
     // 3. Local update -> upload updates
     let updated_host = TestHost {
         name: "Cloud Bastion Renamed".into(),

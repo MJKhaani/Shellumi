@@ -4,6 +4,7 @@ fn helper(prompt: &str, kind: &str, secret: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_shellumi-app"))
         .arg(prompt)
         .env("SHELLUMI_ASKPASS_MODE", "1")
+        .env("SHELLUMI_LOG", "trace")
         .env("SHELLUMI_ASKPASS_TARGET", "deploy@example.test")
         .env("SHELLUMI_ASKPASS_KEY", "/keys/test key")
         .env(

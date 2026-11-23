@@ -2193,6 +2193,21 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
         None
     };
 
+    // There is no shared envelope revision or conditional Drive write yet. Refuse
+    // to choose between different envelopes: either one may be the only usable
+    // password for the current vault. Record-level conflict choices cannot
+    // safely resolve this independent key-recovery conflict.
+    if let Some(remote) = remote_vault.as_ref() {
+        if let (Some(local), Some(remote)) = (&local_vault.key_envelope, &remote.key_envelope) {
+            if local != remote {
+                tracing::warn!(vault_id = %local_vault.vault_id, "Vault key envelopes differ; refusing synchronization");
+                return Err(SyncError::Api(
+                    "Vault key envelopes differ; synchronization stopped to protect password recovery".into(),
+                ));
+            }
+        }
+    }
+
     let remote_records = remote_vault
         .as_ref()
         .map(|v| v.records.as_slice())

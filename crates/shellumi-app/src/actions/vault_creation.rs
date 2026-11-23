@@ -343,9 +343,6 @@ impl Shellumi {
                             .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
                             .await;
                     }
-                    let _ = reg_store
-                        .set_vault_sync_enabled(local_vault_id.as_str(), true)
-                        .await;
 
                     Ok::<_, String>((
                         vault_name,
@@ -630,9 +627,6 @@ impl Shellumi {
                             return Err(e.to_string());
                         }
                     }
-                    let _ = reg_store
-                        .set_vault_sync_enabled(local_vault_id.as_str(), true)
-                        .await;
 
                     let sync_state = VaultSyncStateRecord {
                         vault_id: local_vault_id.as_str().to_string(),

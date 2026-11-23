@@ -124,6 +124,12 @@ impl LoggingConfig {
     /// Resolve the effective `EnvFilter` based on explicit config, environment variables,
     /// and the fallback default level (`ERROR`).
     pub fn resolve_env_filter(&self) -> EnvFilter {
+        let shellumi_log = std::env::var("SHELLUMI_LOG").ok();
+        let rust_log = std::env::var("RUST_LOG").ok();
+        self.resolve_filter(shellumi_log.as_deref(), rust_log.as_deref())
+    }
+
+    fn resolve_filter(&self, shellumi_log: Option<&str>, rust_log: Option<&str>) -> EnvFilter {
         // 1. Explicit programmatic filter
         if let Some(ref custom) = self.env_filter {
             if let Ok(filter) = EnvFilter::try_new(custom) {
@@ -132,7 +138,7 @@ impl LoggingConfig {
         }
 
         // 2. SHELLUMI_LOG environment variable
-        if let Ok(env_val) = std::env::var("SHELLUMI_LOG") {
+        if let Some(env_val) = shellumi_log {
             let trimmed = env_val.trim();
             if !trimmed.is_empty() {
                 if let Ok(filter) = EnvFilter::try_new(trimmed) {
@@ -142,7 +148,7 @@ impl LoggingConfig {
         }
 
         // 3. RUST_LOG environment variable fallback
-        if let Ok(env_val) = std::env::var("RUST_LOG") {
+        if let Some(env_val) = rust_log {
             let trimmed = env_val.trim();
             if !trimmed.is_empty() {
                 if let Ok(filter) = EnvFilter::try_new(trimmed) {
@@ -253,9 +259,38 @@ mod tests {
         assert_eq!(config.default_level, LevelFilter::ERROR);
 
         // Without env vars, the filter string must resolve to error
-        let filter = config.resolve_env_filter();
+        let filter = config.resolve_filter(None, None);
         let filter_str = filter.to_string();
         assert_eq!(filter_str, "error");
+    }
+
+    #[test]
+    fn test_environment_filter_precedence_without_mutating_process_environment() {
+        let config = LoggingConfig::default();
+        assert_eq!(
+            config
+                .resolve_filter(Some("debug"), Some("trace"))
+                .to_string(),
+            "debug"
+        );
+        assert_eq!(
+            config.resolve_filter(Some("  "), Some("warn")).to_string(),
+            "warn"
+        );
+        assert_eq!(
+            config.resolve_filter(None, Some("info")).to_string(),
+            "info"
+        );
+        let custom = LoggingConfig {
+            env_filter: Some("error".into()),
+            ..config
+        };
+        assert_eq!(
+            custom
+                .resolve_filter(Some("debug"), Some("trace"))
+                .to_string(),
+            "error"
+        );
     }
 
     #[test]

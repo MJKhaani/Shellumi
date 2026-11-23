@@ -7420,6 +7420,7 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "ring",
+ "same-file",
  "serde",
  "serde_json",
  "shellumi-core",

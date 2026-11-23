@@ -185,6 +185,57 @@ impl Shellumi {
         .detach();
     }
 
+    pub(crate) fn set_active_vault_drive_opt_in(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.desktop.busy || self.is_active_vault_remote() {
+            return;
+        }
+        let Some(path) = self.registry_db_path() else {
+            self.desktop.message = Some("Vault registry is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        let Some(key) = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID) else {
+            self.desktop.message =
+                Some("Unlock the default vault to change Google Drive consent.".into());
+            cx.notify();
+            return;
+        };
+        let vault_id = self.active_vault_id.clone();
+        let name = self.active_vault.clone();
+        self.desktop.busy = true;
+        self.desktop.message = None;
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread().build().map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut registry = HostStore::open_with_key(&path, Some(&key)).await.map_err(|e| e.to_string())?;
+                if !registry.set_vault_sync_enabled(&vault_id, enabled).await.map_err(|e| e.to_string())? {
+                    return Err("Active vault is missing from the default registry.".to_string());
+                }
+                tracing::info!(vault_id = %vault_id, enabled, "Saved explicit Google Drive synchronization consent");
+                Ok(())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                app.desktop.busy = false;
+                app.desktop.message = Some(match result {
+                    Ok(()) => format!(
+                        "Google Drive synchronization {} for {name}.",
+                        if enabled { "enabled" } else { "disabled" }
+                    ),
+                    Err(error) => {
+                        tracing::error!(error = %error, "Could not save Google Drive consent");
+                        error
+                    }
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn trigger_sync(&mut self, cx: &mut Context<Self>) {
         if self.is_active_vault_remote() {
             self.sync_active_vault(cx);
@@ -234,6 +285,11 @@ impl Shellumi {
         let active_key = self.active_vault_key();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let active_vault_id = self.active_vault_id.clone();
+        let Some(registry_path) = self.registry_db_path() else {
+            self.sync_status = AppSyncStatus::Error("Vault registry not available.".into());
+            cx.notify();
+            return;
+        };
 
         self.sync_status = AppSyncStatus::Syncing;
         cx.notify();
@@ -243,31 +299,27 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if !store
+                let scoped_id = shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?;
+                store.set_vault_id(scoped_id.clone());
+                let registry = HostStore::open_with_key(&registry_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| format!("Failed to open vault registry: {e}"))?;
+                if !registry
                     .is_vault_sync_enabled(&active_vault_id)
                     .await
-                    .unwrap_or(false)
+                    .map_err(|e| format!("Failed to read vault synchronization setting: {e}"))?
                 {
-                    return Ok((None, 0));
+                    tracing::info!(vault_id = %active_vault_id, "Google Drive synchronization is disabled for vault");
+                    return Err("Google Drive synchronization is disabled for this vault. Enable it in Settings → Synchronization before syncing.".to_string());
                 }
-                // Refresh encrypted vault directory if default vault key is available
-                if let Ok(dir) = store.build_vault_directory().await {
-                    if let Ok(default_vid) =
-                        shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                    {
-                        if let Some(ref key) = default_key {
-                            let mut wstore = HostStore::open_with_key(&path, active_key.as_ref())
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            let _ = wstore
-                                .save_vault_directory_from_model(&default_vid, key, &dir)
-                                .await;
-                        }
-                    }
-                }
+                let directory = registry.build_vault_directory().await.map_err(|e| e.to_string())?;
+                let default_vid = shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID).map_err(|e| e.to_string())?;
+                let key = default_key.as_ref().ok_or("Unlock the default vault registry before synchronizing.")?;
+                let mut directory_store = HostStore::open_with_key(&registry_path, Some(key)).await.map_err(|e| e.to_string())?;
+                directory_store.save_vault_directory_from_model(&default_vid, key, &directory).await.map_err(|e| e.to_string())?;
                 let local_vault = store
                     .export_vault(passphrase.expose_secret(), &device_id)
                     .await
@@ -292,6 +344,7 @@ impl Shellumi {
                         let mut write_store = HostStore::open_with_key(&path, active_key.as_ref())
                             .await
                             .map_err(|e| e.to_string())?;
+                        write_store.set_vault_id(scoped_id.clone());
                         let mut merged_vault = SyncVault::new(&local_vault.vault_id, 0);
                         merged_vault.records = merged_records;
                         merged_vault.encrypted_directory = report.encrypted_directory.clone();

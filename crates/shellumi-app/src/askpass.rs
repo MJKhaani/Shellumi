@@ -91,9 +91,14 @@ pub(super) fn run() -> i32 {
             .map_err(|_| "Could not supply credential.")?;
         Ok(())
     }
-    if invoke().is_ok() {
-        0
-    } else {
-        1
+    match invoke() {
+        Ok(()) => {
+            tracing::debug!("OpenSSH credential helper completed");
+            0
+        }
+        Err(reason) => {
+            tracing::warn!(reason, "OpenSSH credential helper rejected request");
+            1
+        }
     }
 }

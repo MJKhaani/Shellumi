@@ -250,6 +250,19 @@ impl Shellumi {
                     .child(muted(
                         "Direct client-side synchronization using system curl to your private Google Drive appDataFolder. Compatible with local and offline vaults.",
                     ));
+                if !is_remote {
+                    content = content.child(row(
+                        "Google Drive consent for this vault",
+                        "Enable to permit uploads of this vault's encrypted data. New vaults are disabled until you enable them.".into(),
+                        div().flex().gap_2()
+                            .child(button("enable-drive-for-vault", "Enable Google Drive").on_click(cx.listener(|app, _, _, cx| app.set_active_vault_drive_opt_in(true, cx))))
+                            .child(button("disable-drive-for-vault", "Disable Google Drive").on_click(cx.listener(|app, _, _, cx| app.set_active_vault_drive_opt_in(false, cx))))
+                            .into_any_element(),
+                    ));
+                }
+                if let Some(message) = &self.desktop.message {
+                    content = content.child(muted(message.clone()));
+                }
             }
             "Keyboard Shortcuts" => {
                 for (name, key) in [

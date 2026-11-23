@@ -2303,12 +2303,6 @@ impl HostStore {
                     (),
                 )
                 .await?;
-                // Default local vault always has sync enabled
-                tx.execute(
-                    "UPDATE vault_contexts SET sync_enabled = 1 WHERE id = ?1",
-                    (LEGACY_LOCAL_VAULT_ID,),
-                )
-                .await?;
             }
             tx.execute("PRAGMA user_version = 22", ()).await?;
         }
@@ -2482,9 +2476,6 @@ impl HostStore {
 
     /// Checks whether Google Drive synchronization is enabled for a given vault context.
     pub async fn is_vault_sync_enabled(&self, vault_id: &str) -> Result<bool, StorageError> {
-        if vault_id == LEGACY_LOCAL_VAULT_ID {
-            return Ok(true);
-        }
         let mut rows = self
             .connection
             .query(
@@ -2493,7 +2484,7 @@ impl HostStore {
             )
             .await?;
         if let Some(row) = rows.next().await? {
-            let val: i64 = row.get(0).unwrap_or(0);
+            let val: i64 = row.get(0)?;
             Ok(val > 0)
         } else {
             Ok(false)
@@ -2683,13 +2674,7 @@ impl HostStore {
                 .get_vault_recovery_envelope(ctx.id().as_str())
                 .await?
                 .is_some();
-            let is_sync_enabled = if ctx.id().as_str() == LEGACY_LOCAL_VAULT_ID {
-                true
-            } else {
-                self.is_vault_sync_enabled(ctx.id().as_str())
-                    .await
-                    .unwrap_or(false)
-            };
+            let is_sync_enabled = self.is_vault_sync_enabled(ctx.id().as_str()).await?;
             dir.upsert(shellumi_core::VaultDirectoryEntry {
                 id: ctx.id().as_str().to_string(),
                 name,
@@ -2771,7 +2756,10 @@ impl HostStore {
                         else {
                             continue;
                         };
-                        let _ = self.register_vault_server(&srv_conn).await;
+                        self.connection.execute(
+                            "INSERT INTO vault_server_connections (id) VALUES (?1) ON CONFLICT(id) DO NOTHING",
+                            (srv_conn.as_str(),),
+                        ).await?;
                         let Ok(srv_vid) = shellumi_core::VaultId::new(&server_vault_id) else {
                             continue;
                         };
@@ -2783,15 +2771,10 @@ impl HostStore {
                 };
                 let ctx = shellumi_core::VaultContext::new(vid, loc);
                 self.register_vault_context(&entry.name, &ctx).await?;
-                if entry.sync_enabled {
-                    let _ = self.set_vault_sync_enabled(&entry.id, true).await;
-                }
                 newly_registered += 1;
-            } else if entry.id != LEGACY_LOCAL_VAULT_ID {
-                let _ = self
-                    .set_vault_sync_enabled(&entry.id, entry.sync_enabled)
-                    .await;
             }
+            self.set_vault_sync_enabled(&entry.id, entry.sync_enabled)
+                .await?;
         }
         Ok(newly_registered)
     }
@@ -9623,9 +9606,8 @@ mod tests {
         assert_eq!(report.default_records_migrated, 1);
         assert_eq!(report.secondary_records_migrated, 1);
 
-        // 4. Legacy database was atomically renamed to .migrated and completion marker was created
-        assert!(!legacy_db_path.exists());
-        assert!(base_dir.join("shellumi.db.migrated").exists());
+        // 4. Legacy database remains available alongside the completed migration.
+        assert!(legacy_db_path.exists());
         assert!(base_dir.join("vaults").join(".migration_complete").exists());
 
         // 5. Separate physical encrypted databases exist
@@ -9764,45 +9746,25 @@ mod tests {
             secondary_recovery_codes: std::collections::HashMap::new(),
         };
 
-        let report = MigrationEngine::migrate_legacy_database_with_credentials(
+        let result = MigrationEngine::migrate_legacy_database_with_credentials(
             base_dir,
             None,
             Some(&creds),
             &cred_store,
         )
-        .await
-        .unwrap();
-
-        assert!(report.legacy_db_found);
-        assert_eq!(report.vaults_migrated, 1);
-        assert_eq!(report.default_records_migrated, 2);
-
-        // 4. Verify verified activation: marker created, legacy db renamed, pre-existing files preserved
-        assert!(vaults_dir.join(".migration_complete").exists());
-        assert!(!legacy_db_path.exists());
-        assert!(base_dir.join("shellumi.db.migrated").exists());
-        assert!(preexisting_file.exists());
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&partial_db_path).unwrap(),
+            b"corrupted partial sqlite file"
+        );
         assert_eq!(
             std::fs::read(&preexisting_file).unwrap(),
             b"should not be deleted"
         );
-        assert!(!MigrationEngine::is_migration_needed(base_dir));
-
-        // 5. Open migrated default vault with decrypted key and verify records
-        let default_vid = shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
-        let default_key = shellumi_core::VaultKeyManager::retrieve_key(&cred_store, &default_vid)
-            .unwrap()
-            .unwrap();
-        let def_store =
-            HostStore::open_with_key(partial_db_path.to_str().unwrap(), Some(&default_key))
-                .await
-                .unwrap();
-        let hosts = def_store.list().await.unwrap();
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].name, "interrupted-test-host");
-        let snippets = def_store.list_snippets().await.unwrap();
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].name, "test-snippet");
+        assert!(legacy_db_path.exists());
+        assert!(!vaults_dir.join(".migration_complete").exists());
+        assert!(vaults_dir.join(".migration_staging").exists());
     }
 
     #[tokio::test]
@@ -10243,10 +10205,50 @@ mod tests {
         assert!(!base_dir.join("shellumi.db.migrated").exists());
         assert!(!base_dir.join("vaults").join(".migration_complete").exists());
 
-        // Migration staging directory was cleanly removed
-        assert!(!base_dir.join("vaults").join(".migration_staging").exists());
+        // Preserve staging for recovery and diagnosis.
+        assert!(base_dir.join("vaults").join(".migration_staging").exists());
 
         // is_migration_needed is still true, halting startup safely
         assert!(MigrationEngine::is_migration_needed(base_dir));
+    }
+
+    #[tokio::test]
+    async fn migration_preserves_record_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shellumi.db");
+        let store = HostStore::open(path.to_str().unwrap()).await.unwrap();
+        store.connection.execute(
+            "INSERT INTO hosts(id, name, hostname, username, port) VALUES (42, 'server', 'example.org', 'user', 22)",
+            (),
+        ).await.unwrap();
+        drop(store);
+        let credentials = MigrationCredentials {
+            default_password: Some("StrongPassword123!".into()),
+            ..Default::default()
+        };
+        let secrets = shellumi_core::EphemeralCredentialStore::new();
+        let result = MigrationEngine::migrate_legacy_database_with_credentials(
+            dir.path(),
+            None,
+            Some(&credentials),
+            &secrets,
+        )
+        .await;
+        result.unwrap();
+        assert!(path.exists());
+        assert!(dir.path().join("vaults/.migration_complete").exists());
+        let source = HostStore::open(path.to_str().unwrap()).await.unwrap();
+        assert_eq!(source.list().await.unwrap()[0].id, 42);
+        let vid = shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+        let key = shellumi_core::VaultKeyManager::retrieve_key(&secrets, &vid)
+            .unwrap()
+            .unwrap();
+        let target = HostStore::open_with_key(
+            dir.path().join("vaults/default.db").to_str().unwrap(),
+            Some(&key),
+        )
+        .await
+        .unwrap();
+        assert_eq!(target.list().await.unwrap()[0].id, 42);
     }
 }

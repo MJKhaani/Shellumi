@@ -265,3 +265,25 @@ The source tag's suite remains 318 tests; main has 321 after packaging regressio
 See [release operations](development/releases.md). The [repaired workflow](https://github.com/MJKhaani/Shellumi/actions/runs/42269432654) passed all four native jobs and published 15 assets.
 Checksum entries, GitHub asset digests and source/helper provenance were verified.
 Abandoned-transfer recovery remains the next app increment.
+
+## Vault migration recovery follow-up (2026-11-23)
+
+Legacy migration now retains a verified source/WAL backup, preserves row identities
+and server synchronization metadata, resumes journaled staging and create-only
+activation, and rolls back only files proven to belong to the migration. Completion
+requires verified activation and secure key finalization. Deterministic interruption
+coverage includes backup, table copying, verification, manifest/key persistence,
+activation, rollback and completion publication. Existing vault databases,
+credentials and manifests are never replaced to make recovery succeed.
+
+Per-vault Drive consent is persisted in the encrypted default registry; new vaults
+remain local-only until explicitly enabled in settings. Secondary exports/imports use the
+secondary vault identity. Differing Drive key envelopes fail closed; envelope
+revisioning and metadata-only cloud convergence are still a separate increment.
+
+Verification: formatting and workspace Clippy passed; the workspace suite passed
+571 tests with three pre-existing OpenSSH fixture tests ignored. Seven focused
+rollback tests passed after the final preservation guard. See
+[implementation and verification details](sync-migration-review-progress.md).
+The next acceptance work remains credential/transport validation on Windows/Linux
+and isolated SSH/Drive environments from the engineering increments above.
