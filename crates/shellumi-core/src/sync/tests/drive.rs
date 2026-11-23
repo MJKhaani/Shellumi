@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../../../tests/support/drive.rs"]
+mod immutable_drive;
 
 #[test]
 fn verifies_google_drive_request_builders_and_parsers() {
@@ -166,62 +168,7 @@ fn verifies_google_drive_sync_client_workflow_with_mock_transport() {
 
 #[test]
 fn verifies_execute_cloud_vault_sync_orchestration() {
-    use std::sync::Mutex;
-
-    struct TestMockTransport {
-        uploaded: Mutex<Option<SyncVault>>,
-        updated: Mutex<Option<SyncVault>>,
-    }
-
-    impl HttpTransport for TestMockTransport {
-        fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
-            if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
-                let up = self.uploaded.lock().unwrap();
-                let files_json = if let Some(ref v) = *up {
-                    let fname = drive_vault_filename(&v.vault_id);
-                    format!(
-                        r#"{{"files":[{{"id":"drive_file_1","name":"{fname}","mimeType":"application/json"}}]}}"#
-                    )
-                } else {
-                    r#"{"files":[]}"#.to_string()
-                };
-                Ok(HttpResponse::new(200, files_json))
-            } else if req.method == "POST" && req.url.contains("uploadType=multipart") {
-                let body_str = String::from_utf8_lossy(&req.body);
-                let marker = "Content-Type: application/json\r\n\r\n";
-                if let Some(idx) = body_str.find(marker) {
-                    let json_part = &body_str[idx + marker.len()..];
-                    if let Some(end) = json_part.find("\r\n--") {
-                        let vault = SyncVault::from_json(&json_part[..end]).unwrap();
-                        *self.uploaded.lock().unwrap() = Some(vault);
-                    }
-                }
-                Ok(HttpResponse::new(
-                    200,
-                    r#"{"id":"drive_file_1","name":"shellumi_vault.json","mimeType":"application/json"}"#,
-                ))
-            } else if req.method == "GET" && req.url.contains("drive_file_1?alt=media") {
-                let vault = self.uploaded.lock().unwrap().clone().unwrap();
-                Ok(HttpResponse::new(
-                    200,
-                    vault.to_json().unwrap().into_bytes(),
-                ))
-            } else if req.method == "PATCH" && req.url.contains("drive_file_1") {
-                let vault = SyncVault::from_json(req.body_str().unwrap()).unwrap();
-                *self.uploaded.lock().unwrap() = Some(vault.clone());
-                *self.updated.lock().unwrap() = Some(vault);
-                Ok(HttpResponse::new(200, b"".to_vec()))
-            } else {
-                Err(SyncError::Http(404, "not found".into()))
-            }
-        }
-    }
-
-    let transport = TestMockTransport {
-        uploaded: Mutex::new(None),
-        updated: Mutex::new(None),
-    };
-    let client = GoogleDriveSyncClient::new(transport, "test_client_id");
+    let client = GoogleDriveSyncClient::new(immutable_drive::Drive::default(), "test_client_id");
 
     let mut local_vault = SyncVault::new("local_vault_1", 1000);
     let host = TestHost {
@@ -252,6 +199,7 @@ fn verifies_execute_cloud_vault_sync_orchestration() {
         } => {
             assert_eq!(report.remote_updated, 1);
             assert_eq!(merged_records.len(), 1);
+            local_vault = report.synchronized_vault(&local_vault, merged_records);
         }
         _ => panic!("expected success for initial upload"),
     }
@@ -261,46 +209,14 @@ fn verifies_execute_cloud_vault_sync_orchestration() {
         execute_cloud_vault_sync(&client, "fake_token", &local_vault, passphrase, None).unwrap();
     assert_eq!(res2, SyncCycleResult::AlreadySynchronized);
 
-    // A differing wrapped key must never be silently selected or uploaded.
-    let remote_envelope =
-        encrypt_entity_with_iterations(passphrase, "key", "vault_key", &host, 2_000).unwrap();
-    let local_envelope =
-        encrypt_entity_with_iterations(passphrase, "key", "vault_key", &host, 2_000).unwrap();
-    client
-        .transport
-        .uploaded
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .key_envelope = Some(remote_envelope.clone());
-    local_vault.key_envelope = Some(local_envelope);
-    assert_eq!(
-        execute_cloud_vault_sync(&client, "fake_token", &local_vault, passphrase, None),
-        Err(SyncError::Api(
-            "Vault key envelopes differ; synchronization stopped to protect password recovery"
-                .into()
-        ))
+    // Invalid or foreign wrapped keys cannot be published.
+    let before = client.transport.0.lock().unwrap().files.clone();
+    local_vault.key_envelope =
+        Some(encrypt_entity_with_iterations(passphrase, "key", "vault_key", &host, 2000).unwrap());
+    assert!(
+        execute_cloud_vault_sync(&client, "fake_token", &local_vault, passphrase, None).is_err()
     );
-    assert_eq!(
-        client
-            .transport
-            .uploaded
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .key_envelope,
-        Some(remote_envelope)
-    );
-    client
-        .transport
-        .uploaded
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .key_envelope = None;
+    assert_eq!(client.transport.0.lock().unwrap().files, before);
     local_vault.key_envelope = None;
 
     // 3. Local update -> upload updates
@@ -333,83 +249,7 @@ fn verifies_execute_cloud_vault_sync_orchestration() {
 #[test]
 fn verifies_multi_vault_google_drive_separation_and_non_overlapping_files() {
     use crate::{VaultId, VaultKey};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    struct MultiVaultMockTransport {
-        files: Mutex<HashMap<String, SyncVault>>,
-    }
-
-    impl HttpTransport for MultiVaultMockTransport {
-        fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
-            let mut store = self.files.lock().unwrap();
-            if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
-                let file_list: Vec<String> = store
-                    .keys()
-                    .map(|name| {
-                        format!(
-                            r#"{{"id":"id_{name}","name":"{name}","mimeType":"application/json"}}"#
-                        )
-                    })
-                    .collect();
-                let json = format!(r#"{{"files":[{}]}}"#, file_list.join(","));
-                Ok(HttpResponse::new(200, json))
-            } else if req.method == "POST" && req.url.contains("uploadType=multipart") {
-                let body_str = String::from_utf8_lossy(&req.body);
-                // Extract filename
-                let name_start = body_str.find("\"name\":\"").unwrap() + 8;
-                let name_end = body_str[name_start..].find('"').unwrap() + name_start;
-                let filename = body_str[name_start..name_end].to_string();
-
-                let marker = "Content-Type: application/json\r\n\r\n";
-                let idx = body_str.find(marker).unwrap();
-                let json_part = &body_str[idx + marker.len()..];
-                let end = json_part.find("\r\n--").unwrap();
-                let vault = SyncVault::from_json(&json_part[..end]).unwrap();
-
-                store.insert(filename.clone(), vault);
-                let resp_json = format!(
-                    r#"{{"id":"id_{filename}","name":"{filename}","mimeType":"application/json"}}"#
-                );
-                Ok(HttpResponse::new(200, resp_json))
-            } else if req.method == "GET" && req.url.contains("?alt=media") {
-                let file_id = req
-                    .url
-                    .split("/files/")
-                    .nth(1)
-                    .unwrap()
-                    .split('?')
-                    .next()
-                    .unwrap();
-                let filename = file_id.strip_prefix("id_").unwrap();
-                let vault = store.get(filename).unwrap();
-                Ok(HttpResponse::new(
-                    200,
-                    vault.to_json().unwrap().into_bytes(),
-                ))
-            } else if req.method == "PATCH" {
-                let file_id = req
-                    .url
-                    .split("/files/")
-                    .nth(1)
-                    .unwrap()
-                    .split('?')
-                    .next()
-                    .unwrap();
-                let filename = file_id.strip_prefix("id_").unwrap();
-                let vault = SyncVault::from_json(req.body_str().unwrap()).unwrap();
-                store.insert(filename.to_string(), vault);
-                Ok(HttpResponse::new(200, b"".to_vec()))
-            } else {
-                Err(SyncError::Http(404, "not found".into()))
-            }
-        }
-    }
-
-    let transport = MultiVaultMockTransport {
-        files: Mutex::new(HashMap::new()),
-    };
-    let client = GoogleDriveSyncClient::new(transport, "test_client_id");
+    let client = GoogleDriveSyncClient::new(immutable_drive::Drive::default(), "test_client_id");
 
     // 1. Vault Alpha (default vault)
     let vid_alpha = "legacy-local";
@@ -520,63 +360,7 @@ fn verifies_multi_vault_google_drive_separation_and_non_overlapping_files() {
 
 #[test]
 fn verifies_interrupted_drive_operations_do_not_corrupt_existing_snapshot() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-
-    struct FlakyMockTransport {
-        should_fail: AtomicBool,
-        saved_vault: Mutex<Option<SyncVault>>,
-    }
-
-    impl HttpTransport for FlakyMockTransport {
-        fn send(&self, req: HttpRequest) -> Result<HttpResponse, SyncError> {
-            if req.method == "GET" && req.url.contains("spaces=appDataFolder") {
-                let lock = self.saved_vault.lock().unwrap();
-                let files_json = if lock.is_some() {
-                    r#"{"files":[{"id":"snap_1","name":"shellumi_vault_vlt-safe.json","mimeType":"application/json"}]}"#
-                } else {
-                    r#"{"files":[]}"#
-                };
-                Ok(HttpResponse::new(200, files_json))
-            } else if req.method == "POST" && req.url.contains("uploadType=multipart") {
-                let body_str = String::from_utf8_lossy(&req.body);
-                let marker = "Content-Type: application/json\r\n\r\n";
-                let idx = body_str.find(marker).unwrap();
-                let json_part = &body_str[idx + marker.len()..];
-                let end = json_part.find("\r\n--").unwrap();
-                let vault = SyncVault::from_json(&json_part[..end]).unwrap();
-                *self.saved_vault.lock().unwrap() = Some(vault);
-                Ok(HttpResponse::new(
-                    200,
-                    r#"{"id":"snap_1","name":"shellumi_vault_vlt-safe.json","mimeType":"application/json"}"#,
-                ))
-            } else if req.method == "GET" && req.url.contains("snap_1?alt=media") {
-                let vault = self.saved_vault.lock().unwrap().clone().unwrap();
-                Ok(HttpResponse::new(
-                    200,
-                    vault.to_json().unwrap().into_bytes(),
-                ))
-            } else if req.method == "PATCH" {
-                if self.should_fail.load(Ordering::SeqCst) {
-                    return Err(SyncError::Http(
-                        503,
-                        "Service Unavailable (Interrupted)".into(),
-                    ));
-                }
-                let vault = SyncVault::from_json(req.body_str().unwrap()).unwrap();
-                *self.saved_vault.lock().unwrap() = Some(vault);
-                Ok(HttpResponse::new(200, b"".to_vec()))
-            } else {
-                Err(SyncError::Http(404, "not found".into()))
-            }
-        }
-    }
-
-    let transport = FlakyMockTransport {
-        should_fail: AtomicBool::new(false),
-        saved_vault: Mutex::new(None),
-    };
-    let client = GoogleDriveSyncClient::new(transport, "test_client");
+    let client = GoogleDriveSyncClient::new(immutable_drive::Drive::default(), "test_client");
 
     use crate::{VaultId, VaultKey};
     let vid = "vlt-safe";
@@ -591,7 +375,14 @@ fn verifies_interrupted_drive_operations_do_not_corrupt_existing_snapshot() {
 
     // Initial upload
     let res1 = execute_cloud_vault_sync(&client, "token", &vault, pwd, None).unwrap();
-    assert!(matches!(res1, SyncCycleResult::Success { .. }));
+    assert!(matches!(&res1, SyncCycleResult::Success { .. }));
+    if let SyncCycleResult::Success {
+        report,
+        merged_records,
+    } = res1
+    {
+        vault = report.synchronized_vault(&vault, merged_records);
+    }
 
     // Prepare update
     let host = TestHost {
@@ -611,7 +402,7 @@ fn verifies_interrupted_drive_operations_do_not_corrupt_existing_snapshot() {
     });
 
     // Simulate network interruption on upload
-    client.transport().should_fail.store(true, Ordering::SeqCst);
+    client.transport().0.lock().unwrap().fail_upload = true;
     let failed_res = execute_cloud_vault_sync(&client, "token", &vault, pwd, None);
     assert!(
         failed_res.is_err(),
@@ -619,19 +410,16 @@ fn verifies_interrupted_drive_operations_do_not_corrupt_existing_snapshot() {
     );
 
     // Existing snapshot on Drive remains intact (unmodified initial upload)
-    let current_dl = client.download_vault("token", "snap_1").unwrap();
+    let current_dl = client.download_vault("token", "file-1").unwrap();
     assert_eq!(current_dl.records.len(), 0);
     assert_eq!(current_dl.key_envelope.unwrap().ciphertext, env.ciphertext);
 
     // Retry succeeds cleanly
-    client
-        .transport()
-        .should_fail
-        .store(false, Ordering::SeqCst);
+    client.transport().0.lock().unwrap().fail_upload = false;
     let retry_res = execute_cloud_vault_sync(&client, "token", &vault, pwd, None).unwrap();
     assert!(matches!(retry_res, SyncCycleResult::Success { .. }));
 
-    let updated_dl = client.download_vault("token", "snap_1").unwrap();
+    let updated_dl = client.download_current_vault("token", vid, pwd).unwrap();
     assert_eq!(updated_dl.records.len(), 1);
     assert_eq!(updated_dl.records[0].object_id, "h1");
 }

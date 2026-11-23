@@ -26,13 +26,13 @@ The small `same-file` 1.0.6 library, already present in the workspace dependency
 
 The default registry now supplies each vault's Drive opt-in setting, including the default vault. Fresh vaults are disabled until explicit opt-in. A secondary sync uses its actual vault ID for export and import. Registry errors propagate to the desktop action. Explicit Enable/Disable controls persist consent in Settings → Synchronization. Persistent multi-vault integration tests cover independent settings, secondary export identity, default-vault restore, and multiple restored vaults sharing an existing server connection without replacing its credentials.
 
-The earlier fail-closed guard for differing cloud key envelopes is retained. Versioned Drive envelope revisions, conditional cloud writes, metadata-only sync merging and cross-device password-rotation synchronization remain a separate unfinished part of the original sync request. This migration change does not claim those capabilities.
+The follow-up now implements authenticated envelope and directory revisions, immutable create-only Drive publications, explicit concurrent-branch resolution, and cross-device password restoration. The encrypted local revision cache retains high-water marks across restarts. See [the protocol and compatibility boundaries](DRIVE_REVISION_PROTOCOL.md). The migration recovery protocol is unchanged.
 
 ## Verification
 
 Deterministic fault injection exercises the initial journal, each backup file, key and manifest persistence, each copied table, staging commits, verification checkpoints, every activation intent/link/checkpoint, key finalization and completion publication. Separate cases interrupt rollback and test ownership collisions, corrupted verified files, changed sources, legacy markers, symlinks, encrypted sources, WAL recovery, future schemas and deleted-ID watermarks. Tests compare original bytes and manifests, preserve pre-existing credential values, and reopen migrated databases to validate records and relationships.
 
-Final verification on macOS:
+Migration verification before the Drive revision follow-up on macOS:
 
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --offline --workspace --all-targets -- -D warnings`: passed. Cargo reports existing future-incompatibility notices in the transitive `block` and `proc-macro-error2` packages.
@@ -64,3 +64,37 @@ Verification also exposed two unrelated logging issues: the askpass helper now k
 - `crates/shellumi-storage/tests/multi_vault_settings.rs`
 - `docs/ROADMAP.md`
 - `docs/sync-migration-review-progress.md`
+
+## Drive revision follow-up (2026-11-23)
+
+Implemented independent authenticated component histories and full-snapshot seals;
+create-only publications with exact read-back and retained ancestors; stable record
+versions; portable manifest revisioning with stale-writer rejection; and consistent
+desktop/CLI import of exact authenticated snapshots. Registry refresh is centralized
+in manifest-backed storage exports; file sync seals complete reconciled snapshots.
+Repeated imports update existing snippets/tunnels instead of duplicating them,
+and all record ciphertexts are authenticated before row writes. Metadata conflicts are explicit
+whole-directory choices, bound to the reviewed revisions in the desktop.
+
+Integration coverage includes password-only and metadata-only updates, a fresh
+second device with no original secrets, stale and concurrent password changes,
+legacy upgrades, restart persistence, independent vault histories, incomplete or
+missing cloud history, interrupted uploads and racing immutable publications.
+
+Verification results on macOS:
+- `cargo fmt --all -- --check`: passed (0 formatting errors).
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed (0 warnings).
+- `cargo test -p shellumi-core`: passed (234 unit tests passed, 0 failed).
+- `cargo test -p shellumi-storage`: passed (86 tests passed: 74 unit tests, 10 integration tests in `drive_revisions.rs`, 2 in `multi_vault_settings.rs`, 0 failed).
+- `cargo test -p shellumi-cli`: passed (38 tests passed, 0 failed).
+- `cargo test -p shellumi-terminal`: passed (26 unit tests passed, 0 failed).
+- `cargo test -p shellumi-remote-desktop`: passed (17 tests passed, 0 failed).
+- `cargo test -p shellumi-vnc`: passed (42 tests passed, 0 failed).
+- `cargo test -p shellumi-rdp`: passed (47 tests passed, 0 failed).
+- `cargo test -p shellumi-app`: passed (86 tests passed: 84 unit tests, 2 in `askpass.rs`, 3 pre-existing loopback socket OpenSSH fixtures ignored as expected, 0 failed).
+Total: 576 workspace tests passed with zero failures.
+
+Files for this follow-up: core `sync.rs`, `sync/cloud.rs`, `sync/revisions.rs`,
+`vault_manifest.rs`, `lib.rs`, Drive tests and shared mock transport; storage
+`lib.rs`, `drive_revisions.rs` and integration tests; desktop sync actions and test
+fixtures; CLI sync actions; this document, the roadmap and the new protocol guide.

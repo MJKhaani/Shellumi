@@ -1,7 +1,9 @@
 //! Local Turso storage. Credentials are never stored in this database.
 pub mod desktop;
+mod drive_revisions;
 pub mod migration;
 pub mod server_sync;
+use base64::Engine;
 pub use migration::{MigrationCredentials, MigrationEngine, MigrationReport};
 pub use server_sync::{
     PendingMutationRecord, ServerSyncEngine, ServerSyncReport, VaultServerConnectionRecord,
@@ -2612,7 +2614,7 @@ impl HostStore {
 
     /// Saves an encrypted vault directory envelope.
     pub async fn save_encrypted_vault_directory(
-        &mut self,
+        &self,
         id: &str,
         encrypted_data: &str,
     ) -> Result<(), StorageError> {
@@ -2654,6 +2656,16 @@ impl HostStore {
         &self,
     ) -> Result<shellumi_core::VaultDirectory, StorageError> {
         let contexts = self.list_vault_contexts().await?;
+        let known_flags: std::collections::BTreeMap<String, bool> = self
+            .get_encrypted_vault_directory("drive_registry_recovery_flags")
+            .await?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|e| {
+                    StorageError::Serialization(format!("Invalid registry recovery metadata: {e}"))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2670,10 +2682,31 @@ impl HostStore {
                     server_vault_id: server_vault_id.as_str().to_string(),
                 },
             };
-            let has_recovery = self
-                .get_vault_recovery_envelope(ctx.id().as_str())
-                .await?
-                .is_some();
+            let portable_envelope = if let Some(db) = &self.db_path {
+                let path = shellumi_core::VaultManifest::manifest_path_for_vault(
+                    std::path::Path::new(db),
+                    ctx.id(),
+                );
+                if path.exists() {
+                    let manifest = shellumi_core::VaultManifest::load_from_path(&path)?;
+                    if manifest.vault_id != ctx.id().as_str() {
+                        return Err(StorageError::Serialization(
+                            "Registry manifest ownership mismatch".into(),
+                        ));
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let has_recovery = portable_envelope
+                || known_flags.get(ctx.id().as_str()).copied().unwrap_or(false)
+                || self
+                    .get_vault_recovery_envelope(ctx.id().as_str())
+                    .await?
+                    .is_some();
             let is_sync_enabled = self.is_vault_sync_enabled(ctx.id().as_str()).await?;
             dir.upsert(shellumi_core::VaultDirectoryEntry {
                 id: ctx.id().as_str().to_string(),
@@ -2690,11 +2723,37 @@ impl HostStore {
 
     /// Encrypts and persists the vault directory under the default local vault's key.
     pub async fn save_vault_directory_from_model(
-        &mut self,
+        &self,
         default_vault_id: &shellumi_core::VaultId,
         default_vault_key: &shellumi_core::VaultKey,
         directory: &shellumi_core::VaultDirectory,
     ) -> Result<String, StorageError> {
+        fn canonical(
+            mut directory: shellumi_core::VaultDirectory,
+        ) -> shellumi_core::VaultDirectory {
+            directory.entries.sort_by(|a, b| a.id.cmp(&b.id));
+            for entry in &mut directory.entries {
+                entry.created_at = 0;
+                entry.updated_at = 0;
+            }
+            directory
+        }
+        if let Some(saved) = self
+            .get_encrypted_vault_directory("primary_directory")
+            .await?
+        {
+            let envelope = serde_json::from_str(&saved).map_err(|e| {
+                StorageError::Serialization(format!("Corrupt existing vault directory: {e}"))
+            })?;
+            let previous = shellumi_core::VaultDirectory::decrypt(
+                default_vault_id,
+                default_vault_key,
+                &envelope,
+            )?;
+            if canonical(previous) == canonical(directory.clone()) {
+                return Ok(saved);
+            }
+        }
         let envelope = directory
             .encrypt(default_vault_id, default_vault_key)
             .map_err(|e| {
@@ -2718,15 +2777,15 @@ impl HostStore {
         default_vault_key: Option<&shellumi_core::VaultKey>,
         envelope_json: &str,
     ) -> Result<usize, StorageError> {
-        self.save_encrypted_vault_directory("primary_directory", envelope_json)
-            .await?;
         let envelope: shellumi_core::sync::EncryptedEnvelope = serde_json::from_str(envelope_json)
             .map_err(|e| {
                 StorageError::Serialization(format!("Corrupt vault directory envelope: {e}"))
             })?;
 
         let Some(key) = default_vault_key else {
-            return Ok(0);
+            return Err(StorageError::Serialization(
+                "Default vault key is required to validate imported directory".into(),
+            ));
         };
         let directory = shellumi_core::VaultDirectory::decrypt(default_vault_id, key, &envelope)
             .map_err(|e| {
@@ -2735,47 +2794,56 @@ impl HostStore {
 
         let existing = self.list_vault_contexts().await?;
         let mut newly_registered = 0;
+        let mut known_flags: std::collections::BTreeMap<String, bool> = self
+            .get_encrypted_vault_directory("drive_registry_recovery_flags")
+            .await?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|e| {
+                    StorageError::Serialization(format!("Invalid registry recovery metadata: {e}"))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
         for entry in directory.entries {
-            let Ok(vid) = shellumi_core::VaultId::new(&entry.id) else {
-                continue;
+            known_flags.insert(entry.id.clone(), entry.has_recovery_envelope);
+            let vid = shellumi_core::VaultId::new(&entry.id)
+                .map_err(StorageError::InvalidVaultIdentity)?;
+            let loc = match entry.location {
+                shellumi_core::VaultDirectoryLocation::Local => shellumi_core::VaultLocation::Local,
+                shellumi_core::VaultDirectoryLocation::Remote {
+                    server_connection_id,
+                    server_vault_id,
+                } => {
+                    let server = shellumi_core::ServerConnectionId::new(server_connection_id)
+                        .map_err(StorageError::InvalidVaultIdentity)?;
+                    let server_vault_id = shellumi_core::VaultId::new(server_vault_id)
+                        .map_err(StorageError::InvalidVaultIdentity)?;
+                    self.connection.execute("INSERT INTO vault_server_connections(id) VALUES (?1) ON CONFLICT(id) DO NOTHING",(server.as_str(),)).await?;
+                    shellumi_core::VaultLocation::Remote {
+                        server,
+                        server_vault_id,
+                    }
+                }
             };
+            let context = shellumi_core::VaultContext::new(vid, loc);
+            self.register_vault_context(&entry.name, &context).await?;
+            self.set_vault_sync_enabled(&entry.id, entry.sync_enabled)
+                .await?;
             if !existing
                 .iter()
                 .any(|(_, ctx)| ctx.id().as_str() == entry.id)
             {
-                let loc = match entry.location {
-                    shellumi_core::VaultDirectoryLocation::Local => {
-                        shellumi_core::VaultLocation::Local
-                    }
-                    shellumi_core::VaultDirectoryLocation::Remote {
-                        server_connection_id,
-                        server_vault_id,
-                    } => {
-                        let Ok(srv_conn) =
-                            shellumi_core::ServerConnectionId::new(&server_connection_id)
-                        else {
-                            continue;
-                        };
-                        self.connection.execute(
-                            "INSERT INTO vault_server_connections (id) VALUES (?1) ON CONFLICT(id) DO NOTHING",
-                            (srv_conn.as_str(),),
-                        ).await?;
-                        let Ok(srv_vid) = shellumi_core::VaultId::new(&server_vault_id) else {
-                            continue;
-                        };
-                        shellumi_core::VaultLocation::Remote {
-                            server: srv_conn,
-                            server_vault_id: srv_vid,
-                        }
-                    }
-                };
-                let ctx = shellumi_core::VaultContext::new(vid, loc);
-                self.register_vault_context(&entry.name, &ctx).await?;
                 newly_registered += 1;
             }
-            self.set_vault_sync_enabled(&entry.id, entry.sync_enabled)
-                .await?;
         }
+        self.save_encrypted_vault_directory(
+            "drive_registry_recovery_flags",
+            &serde_json::to_string(&known_flags)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?,
+        )
+        .await?;
+        self.save_encrypted_vault_directory("primary_directory", envelope_json)
+            .await?;
         Ok(newly_registered)
     }
 
@@ -5251,12 +5319,9 @@ impl HostStore {
 
         // Include encrypted directory describing other vaults during default-vault sync
         if self.vault_id().as_str() == LEGACY_LOCAL_VAULT_ID {
-            if let Ok(Some(enc_dir)) = self
+            vault.encrypted_directory = self
                 .get_encrypted_vault_directory("primary_directory")
-                .await
-            {
-                vault.encrypted_directory = Some(enc_dir);
-            }
+                .await?;
         }
 
         // Include key envelope for this vault:
@@ -5274,11 +5339,11 @@ impl HostStore {
                 .join("vault_manifests")
                 .join(format!("{vid}.manifest.json"));
             if mfile.exists() {
-                shellumi_core::VaultManifest::load_from_path(&mfile).ok()
+                Some(shellumi_core::VaultManifest::load_from_path(&mfile)?)
             } else {
                 let direct_mfile = std::path::PathBuf::from(format!("{dbp}.manifest"));
                 if direct_mfile.exists() {
-                    shellumi_core::VaultManifest::load_from_path(&direct_mfile).ok()
+                    Some(shellumi_core::VaultManifest::load_from_path(&direct_mfile)?)
                 } else {
                     None
                 }
@@ -5287,15 +5352,15 @@ impl HostStore {
             None
         };
 
-        if let Some(manifest) = manifest_opt {
-            vault.key_envelope = Some(manifest.primary_envelope);
-        } else if let Ok(Some(env_str)) = self
+        if let Some(ref manifest) = manifest_opt {
+            vault.key_envelope = Some(manifest.primary_envelope.clone());
+        } else if let Some(env_str) = self
             .get_vault_recovery_envelope(self.vault_id().as_str())
-            .await
+            .await?
         {
-            if let Ok(env) = serde_json::from_str::<shellumi_core::EncryptedEnvelope>(&env_str) {
-                vault.key_envelope = Some(env);
-            }
+            vault.key_envelope = Some(serde_json::from_str(&env_str).map_err(|e| {
+                StorageError::Serialization(format!("Invalid saved key envelope: {e}"))
+            })?);
         }
 
         // Export identities
@@ -5508,7 +5573,8 @@ impl HostStore {
         }
 
         // Export cloud providers
-        if let Ok(providers) = self.list_cloud_providers().await {
+        {
+            let providers = self.list_cloud_providers().await?;
             for prov in &providers {
                 let envelope = shellumi_core::encrypt_entity_with_iterations(
                     passphrase,
@@ -5528,7 +5594,9 @@ impl HostStore {
             }
         }
 
-        let _ = self.archive_snapshot(&vault.vault_id, &vault, 3).await;
+        self.prepare_drive_export(&mut vault, passphrase, manifest_opt.as_ref())
+            .await?;
+        self.archive_snapshot(&vault.vault_id, &vault, 3).await?;
         Ok(vault)
     }
 
@@ -5538,44 +5606,23 @@ impl HostStore {
         passphrase: &str,
         vault: &shellumi_core::SyncVault,
     ) -> Result<ImportVaultSummary, StorageError> {
+        let revision_key = self.validate_drive_import(vault, passphrase).await?;
+        let encoded_key = revision_key
+            .as_ref()
+            .map(|key| base64::engine::general_purpose::STANDARD.encode(key.expose_bytes()));
+        // Authenticate every payload before writing any rows or replacing metadata.
+        for record in vault.records.iter().filter(|record| !record.deleted) {
+            let envelope = record.envelope.as_ref().ok_or_else(|| {
+                StorageError::Serialization("Live sync record has no ciphertext".into())
+            })?;
+            let payload_password = if envelope.salt.is_empty() && envelope.kdf_iterations == 0 {
+                encoded_key.as_deref().unwrap_or(passphrase)
+            } else {
+                passphrase
+            };
+            shellumi_core::decrypt_entity::<serde_json::Value>(payload_password, envelope)?;
+        }
         let mut summary = ImportVaultSummary::default();
-
-        // Restore encrypted vault directory envelope if present in sync payload
-        if let Some(enc_dir) = &vault.encrypted_directory {
-            let _ = self
-                .save_encrypted_vault_directory("primary_directory", enc_dir)
-                .await;
-        }
-
-        // Restore key envelope if present in sync payload
-        if let Some(key_env) = &vault.key_envelope {
-            if let Ok(json) = serde_json::to_string(key_env) {
-                let vid = self.vault_id().as_str().to_string();
-                let _ = self.save_vault_recovery_envelope(&vid, &json).await;
-            }
-            // Update manifest on disk if primary envelope rotated
-            if let Some(ref dbp) = self.db_path {
-                let p = std::path::Path::new(dbp);
-                let parent = p.parent().unwrap_or(p);
-                let root = if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
-                    parent.parent().unwrap_or(parent)
-                } else {
-                    parent
-                };
-                let vid = self.vault_id().as_str();
-                let mfile = root
-                    .join("vault_manifests")
-                    .join(format!("{vid}.manifest.json"));
-                if mfile.exists() {
-                    if let Ok(mut manifest) = shellumi_core::VaultManifest::load_from_path(&mfile) {
-                        if manifest.primary_envelope != *key_env {
-                            manifest.primary_envelope = key_env.clone();
-                            let _ = manifest.save_to_path(&mfile);
-                        }
-                    }
-                }
-            }
-        }
 
         for record in &vault.records {
             if record.deleted {
@@ -5585,6 +5632,11 @@ impl HostStore {
                 continue;
             };
 
+            let passphrase = if envelope.salt.is_empty() && envelope.kdf_iterations == 0 {
+                encoded_key.as_deref().unwrap_or(passphrase)
+            } else {
+                passphrase
+            };
             match record.entity_type {
                 shellumi_core::SyncEntityType::Group => {
                     match shellumi_core::decrypt_entity::<SyncGroupPayload>(passphrase, envelope) {
@@ -5598,9 +5650,9 @@ impl HostStore {
                             .map_err(StorageError::InvalidGroup)?;
 
                             if self.get_group(&group.name).await?.is_some() {
-                                let _ = self.update_group(&group).await;
+                                self.update_group(&group).await?;
                             } else {
-                                let _ = self.add_group(&group).await;
+                                self.add_group(&group).await?;
                             }
                             summary.groups_imported += 1;
                         }
@@ -5620,32 +5672,30 @@ impl HostStore {
                                 let existing = self.search(&payload.name).await?;
                                 let matched = existing.iter().find(|h| h.name == payload.name);
                                 if let Some(m) = matched {
-                                    let _ = self
-                                        .update_with_protocol(
-                                            m.id,
-                                            &payload.name,
-                                            &dest,
-                                            payload.group_name.as_deref(),
-                                            &payload.tags,
-                                            payload.jump_host.as_deref(),
-                                            payload.startup_snippet_id,
-                                            &payload.protocol,
-                                            payload.protocol_config.as_deref(),
-                                        )
-                                        .await;
+                                    self.update_with_protocol(
+                                        m.id,
+                                        &payload.name,
+                                        &dest,
+                                        payload.group_name.as_deref(),
+                                        &payload.tags,
+                                        payload.jump_host.as_deref(),
+                                        payload.startup_snippet_id,
+                                        &payload.protocol,
+                                        payload.protocol_config.as_deref(),
+                                    )
+                                    .await?;
                                 } else {
-                                    let _ = self
-                                        .add_with_protocol(
-                                            &payload.name,
-                                            &dest,
-                                            payload.group_name.as_deref(),
-                                            &payload.tags,
-                                            payload.jump_host.as_deref(),
-                                            payload.startup_snippet_id,
-                                            &payload.protocol,
-                                            payload.protocol_config.as_deref(),
-                                        )
-                                        .await;
+                                    self.add_with_protocol(
+                                        &payload.name,
+                                        &dest,
+                                        payload.group_name.as_deref(),
+                                        &payload.tags,
+                                        payload.jump_host.as_deref(),
+                                        payload.startup_snippet_id,
+                                        &payload.protocol,
+                                        payload.protocol_config.as_deref(),
+                                    )
+                                    .await?;
                                 }
                                 summary.hosts_imported += 1;
                             }
@@ -5687,9 +5737,24 @@ impl HostStore {
                                     _ => None,
                                 };
                             if let Some(Ok(rule)) = rule_res {
-                                let _ = self
-                                    .add_tunnel(&payload.name, None, &rule, payload.auto_start)
-                                    .await;
+                                if let Some(existing) = self
+                                    .list_tunnels()
+                                    .await?
+                                    .iter()
+                                    .find(|tunnel| tunnel.name == payload.name)
+                                {
+                                    self.update_tunnel(
+                                        existing.id,
+                                        &payload.name,
+                                        existing.host_id,
+                                        &rule,
+                                        payload.auto_start,
+                                    )
+                                    .await?;
+                                } else {
+                                    self.add_tunnel(&payload.name, None, &rule, payload.auto_start)
+                                        .await?;
+                                }
                                 summary.tunnels_imported += 1;
                             }
                         }
@@ -5708,7 +5773,16 @@ impl HostStore {
                                 payload.description,
                                 &payload.tags,
                             ) {
-                                let _ = self.add_snippet(&snippet).await;
+                                if let Some(existing) = self
+                                    .list_snippets()
+                                    .await?
+                                    .iter()
+                                    .find(|saved| saved.name == snippet.name)
+                                {
+                                    self.update_snippet(existing.id, &snippet).await?;
+                                } else {
+                                    self.add_snippet(&snippet).await?;
+                                }
                                 summary.snippets_imported += 1;
                             }
                         }
@@ -5724,26 +5798,24 @@ impl HostStore {
                         Ok(payload) => {
                             let existing = self.list_workspaces().await?;
                             if let Some(target) = existing.iter().find(|w| w.name == payload.name) {
-                                let _ = self
-                                    .update_workspace(
-                                        target.id,
-                                        &payload.name,
-                                        payload.description.as_deref(),
-                                        &payload.layout,
-                                        &payload.sessions,
-                                        &payload.tags,
-                                    )
-                                    .await;
+                                self.update_workspace(
+                                    target.id,
+                                    &payload.name,
+                                    payload.description.as_deref(),
+                                    &payload.layout,
+                                    &payload.sessions,
+                                    &payload.tags,
+                                )
+                                .await?;
                             } else {
-                                let _ = self
-                                    .add_workspace(
-                                        &payload.name,
-                                        payload.description.as_deref(),
-                                        &payload.layout,
-                                        &payload.sessions,
-                                        &payload.tags,
-                                    )
-                                    .await;
+                                self.add_workspace(
+                                    &payload.name,
+                                    payload.description.as_deref(),
+                                    &payload.layout,
+                                    &payload.sessions,
+                                    &payload.tags,
+                                )
+                                .await?;
                             }
                             summary.workspaces_imported += 1;
                         }
@@ -5756,7 +5828,7 @@ impl HostStore {
                     match shellumi_core::decrypt_entity::<SharedVault>(passphrase, envelope) {
                         Ok(vault) => {
                             if self.get_shared_vault(&vault.id).await?.is_none() {
-                                let _ = self.create_shared_vault(&vault).await;
+                                self.create_shared_vault(&vault).await?;
                             }
                             summary.shared_vaults_imported += 1;
                         }
@@ -5769,7 +5841,7 @@ impl HostStore {
                     match shellumi_core::decrypt_entity::<TeamMember>(passphrase, envelope) {
                         Ok(member) => {
                             if self.get_team_member(&member.id).await?.is_none() {
-                                let _ = self.add_team_member(&member).await;
+                                self.add_team_member(&member).await?;
                             }
                             summary.team_members_imported += 1;
                         }
@@ -5782,7 +5854,16 @@ impl HostStore {
                     match shellumi_core::decrypt_entity::<SharingAuditRecord>(passphrase, envelope)
                     {
                         Ok(audit) => {
-                            let _ = self.log_audit_event(&audit).await;
+                            let mut existing = self
+                                .connection
+                                .query(
+                                    "SELECT id FROM sharing_audit_log WHERE id=?1",
+                                    (audit.id.as_str(),),
+                                )
+                                .await?;
+                            if existing.next().await?.is_none() {
+                                self.log_audit_event(&audit).await?;
+                            }
                         }
                         Err(e) => summary
                             .errors
@@ -5794,7 +5875,7 @@ impl HostStore {
                     {
                         Ok(provider) => {
                             if self.get_cloud_provider(&provider.id).await?.is_none() {
-                                let _ = self.create_cloud_provider(&provider).await;
+                                self.create_cloud_provider(&provider).await?;
                             }
                             summary.cloud_providers_imported += 1;
                         }
@@ -5822,9 +5903,9 @@ impl HostStore {
                                 if let Ok(Some(existing)) =
                                     self.get_identity_by_name(&new_id.name).await
                                 {
-                                    let _ = self.update_identity(existing.id, &new_id).await;
+                                    self.update_identity(existing.id, &new_id).await?;
                                 } else {
-                                    let _ = self.create_identity(&new_id).await;
+                                    self.create_identity(&new_id).await?;
                                 }
                             }
                         }
@@ -5836,7 +5917,76 @@ impl HostStore {
             }
         }
 
-        let _ = self.archive_snapshot(&vault.vault_id, vault, 3).await;
+        if !summary.errors.is_empty() {
+            return Err(StorageError::Serialization(format!(
+                "Sync import rejected {} invalid record payloads",
+                summary.errors.len()
+            )));
+        }
+        // Restore encrypted vault directory envelope if present in sync payload
+        if let Some(enc_dir) = &vault.encrypted_directory {
+            if self.vault_id().as_str() == LEGACY_LOCAL_VAULT_ID {
+                if let Some(key) = revision_key.as_ref() {
+                    self.import_encrypted_vault_directory(
+                        &self.vault_id().clone(),
+                        Some(key),
+                        enc_dir,
+                    )
+                    .await?;
+                } else {
+                    self.save_encrypted_vault_directory("primary_directory", enc_dir)
+                        .await?;
+                }
+            } else {
+                return Err(StorageError::Serialization(
+                    "Secondary vault cannot replace the default directory".into(),
+                ));
+            }
+        }
+
+        // Restore key envelope if present in sync payload
+        if let Some(key_env) = &vault.key_envelope {
+            {
+                let json = serde_json::to_string(key_env)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let vid = self.vault_id().as_str().to_string();
+                self.save_vault_recovery_envelope(&vid, &json).await?;
+            }
+            // Update manifest on disk if primary envelope rotated
+            if let Some(ref dbp) = self.db_path {
+                let p = std::path::Path::new(dbp);
+                let parent = p.parent().unwrap_or(p);
+                let root = if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
+                    parent.parent().unwrap_or(parent)
+                } else {
+                    parent
+                };
+                let vid = self.vault_id().as_str();
+                let mfile = root
+                    .join("vault_manifests")
+                    .join(format!("{vid}.manifest.json"));
+                if mfile.exists() {
+                    {
+                        let mut manifest = shellumi_core::VaultManifest::load_from_path(&mfile)?;
+                        if manifest.primary_envelope != *key_env
+                            || manifest.key_revision
+                                != vault.cloud_state.as_ref().map(|s| s.key.clone())
+                        {
+                            manifest.primary_envelope = key_env.clone();
+                            manifest.key_revision =
+                                vault.cloud_state.as_ref().map(|s| s.key.clone());
+                            manifest.save_to_path(&mfile)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.archive_snapshot(&vault.vault_id, vault, 3).await?;
+        if summary.errors.is_empty() {
+            self.finish_drive_import(vault, passphrase, revision_key.as_ref())
+                .await?;
+        }
         Ok(summary)
     }
 
@@ -5861,35 +6011,67 @@ impl HostStore {
         )
         .map_err(|e| StorageError::Serialization(format!("Failed to unwrap DEK: {e}")))?;
 
+        if sync_vault.vault_id != options.vault_id.as_str() {
+            return Err(StorageError::Serialization(
+                "Restore vault ownership mismatch".into(),
+            ));
+        }
+        if sync_vault.cloud_state.is_some() {
+            sync_vault.validate_cloud_revision(&recovered_dek, false)?;
+        }
+        if sync_vault
+            .cloud_state
+            .as_ref()
+            .is_some_and(|state| state.publication.is_none())
+        {
+            return Err(StorageError::Serialization(
+                "Unsigned cloud revision cannot be restored".into(),
+            ));
+        }
+        let mut verified_records = sync_vault.clone();
+        shellumi_core::sync::revisions::normalize_records(
+            &mut verified_records,
+            &recovered_dek,
+            options.password,
+        )?;
         std::fs::create_dir_all(options.manifests_dir).map_err(|e| {
             StorageError::Serialization(format!("Failed to create manifests dir: {e}"))
         })?;
         let manifest_path = options
             .manifests_dir
             .join(format!("{}.manifest.json", options.vault_id.as_str()));
-        let manifest = shellumi_core::VaultManifest::new(
+        if options.target_db_path.exists() || manifest_path.exists() {
+            return Err(StorageError::Serialization(
+                "Restore destination already exists; choose a fresh vault path".into(),
+            ));
+        }
+        let mut manifest = shellumi_core::VaultManifest::new(
             options.vault_id.as_str().to_string(),
             options.vault_name.to_string(),
             envelope.clone(),
             None,
             options.remember_in_keychain,
         );
+        manifest.key_revision = sync_vault.cloud_state.as_ref().map(|s| s.key.clone());
         manifest.save_to_path(&manifest_path).map_err(|e| {
             StorageError::Serialization(format!("Failed to save restored vault manifest: {e}"))
         })?;
 
         if options.remember_in_keychain {
             if let Some(cs) = options.cred_store {
-                let _ = shellumi_core::VaultKeyManager::provision_key(
-                    cs,
-                    options.vault_id,
-                    &recovered_dek,
-                );
+                shellumi_core::VaultKeyManager::provision_key(cs, options.vault_id, &recovered_dek)
+                    .map_err(|e| {
+                        StorageError::Serialization(format!(
+                            "Failed to provision restored vault key: {e}"
+                        ))
+                    })?;
             }
         }
 
         if let Some(parent) = options.target_db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| {
+                StorageError::Serialization(format!("Failed to create restore directory: {e}"))
+            })?;
         }
         let target_str = options.target_db_path.to_str().ok_or_else(|| {
             StorageError::Serialization("Invalid target database path encoding".into())
@@ -5901,18 +6083,6 @@ impl HostStore {
         let import_res = store.import_vault(&dek_passphrase, sync_vault).await;
         if import_res.is_err() {
             store.import_vault(options.password, sync_vault).await?;
-        }
-
-        if options.vault_id.as_str() == LEGACY_LOCAL_VAULT_ID {
-            if let Some(ref enc_dir) = sync_vault.encrypted_directory {
-                let _ = store
-                    .import_encrypted_vault_directory(
-                        options.vault_id,
-                        Some(&recovered_dek),
-                        enc_dir,
-                    )
-                    .await;
-            }
         }
 
         Ok(store)
@@ -7949,12 +8119,12 @@ mod tests {
 
         // Verify failed import with wrong passphrase
         let mut store_c = HostStore::open(":memory:").await.unwrap();
-        let wrong_summary = store_c
+        assert!(store_c
             .import_vault("wrong-passphrase", &parsed_vault)
             .await
-            .unwrap();
-        assert_eq!(wrong_summary.hosts_imported, 0);
-        assert_eq!(wrong_summary.errors.len(), 4);
+            .is_err());
+        assert!(store_c.list().await.unwrap().is_empty());
+        assert!(store_c.list_groups().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -9368,7 +9538,7 @@ mod tests {
             }
 
             let sync_vault = store
-                .export_vault_with_iterations("sync-passphrase-12", "device-x", 1000)
+                .export_vault_with_iterations(new_pwd, "device-x", 1000)
                 .await
                 .unwrap();
             assert!(
@@ -9790,6 +9960,19 @@ mod tests {
         )
         .unwrap();
 
+        let dev1_manifests = temp_dev1.path().join("vault_manifests");
+        std::fs::create_dir_all(&dev1_manifests).unwrap();
+        let manifest = shellumi_core::VaultManifest::new(
+            vault_id.as_str().to_string(),
+            "Finance Vault".into(),
+            primary_env.clone(),
+            _rec_env.clone(),
+            true,
+        );
+        manifest
+            .save_to_path(&dev1_manifests.join(format!("{}.manifest.json", vault_id.as_str())))
+            .unwrap();
+
         let mut dev1_store = HostStore::open_with_key(dev1_db_path.to_str().unwrap(), Some(&dek))
             .await
             .unwrap();
@@ -9818,11 +10001,10 @@ mod tests {
         dev1_store.add_snippet(&snip).await.unwrap();
 
         let dek_passphrase = hex::encode(dek.expose_bytes());
-        let mut sync_vault = dev1_store
+        let sync_vault = dev1_store
             .export_vault(&dek_passphrase, "device-1-uuid")
             .await
             .unwrap();
-        sync_vault.key_envelope = Some(primary_env.clone());
 
         // Verify sync_vault payload contents
         assert!(sync_vault.key_envelope.is_some());

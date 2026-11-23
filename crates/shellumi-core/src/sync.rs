@@ -5,10 +5,14 @@
 //! data to prevent ciphertext transposition, sync conflict detection, and OAuth 2.0
 //! PKCE challenge helpers for Google Drive synchronization.
 
+mod cloud;
 mod http_transport;
+pub mod revisions;
+pub use cloud::{execute_snapshot_sync, CloudConflictResolution};
 #[cfg(test)]
 use http_transport::curl_private_config;
 pub use http_transport::{parse_raw_http_response, SystemHttpTransport};
+pub use revisions::{CloudState, RevisionHistory};
 
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -600,6 +604,8 @@ pub struct SyncVault {
     pub encrypted_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_envelope: Option<EncryptedEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_state: Option<CloudState>,
 }
 
 impl SyncVault {
@@ -612,6 +618,7 @@ impl SyncVault {
             records: Vec::new(),
             encrypted_directory: None,
             key_envelope: None,
+            cloud_state: None,
         }
     }
 
@@ -1205,6 +1212,8 @@ pub struct ConflictItemView {
     pub local_raw_json: Option<String>,
     #[serde(default)]
     pub remote_raw_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_context: Option<String>,
 }
 
 impl ConflictItemView {
@@ -1230,6 +1239,7 @@ impl ConflictItemView {
             remote_summary: remote_summary.into(),
             local_raw_json: None,
             remote_raw_json: None,
+            revision_context: None,
         }
     }
 
@@ -1287,6 +1297,7 @@ pub fn build_conflict_item_views(
                     remote_summary: format_record_summary(passphrase, rem),
                     local_raw_json,
                     remote_raw_json,
+                    revision_context: None,
                 });
             }
         }
@@ -1719,7 +1730,7 @@ pub fn list_drive_vault_ids(files: &[DriveFileMetadata]) -> Vec<String> {
 
 /// Builds an HTTP GET request to list files in the Google Drive Application Data folder.
 pub fn build_list_appdata_files_request(access_token: &str) -> HttpRequest {
-    let url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name,mimeType,modifiedTime,size)";
+    let url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=nextPageToken,incompleteSearch,files(id,name,mimeType,modifiedTime,size)";
     HttpRequest::get(url).with_header("Authorization", format!("Bearer {access_token}"))
 }
 
@@ -1841,13 +1852,46 @@ pub enum SyncPlan {
     },
 }
 
+/// Planning accepts full vaults for independent metadata/envelope detection.
+/// Record-only callers retain their existing API for non-cloud synchronization.
+pub trait SyncPlanningInput {
+    fn planning_records(&self) -> &[SyncRecord];
+    fn planning_vault(&self) -> Option<&SyncVault> {
+        None
+    }
+}
+impl SyncPlanningInput for SyncVault {
+    fn planning_records(&self) -> &[SyncRecord] {
+        &self.records
+    }
+    fn planning_vault(&self) -> Option<&SyncVault> {
+        Some(self)
+    }
+}
+impl SyncPlanningInput for [SyncRecord] {
+    fn planning_records(&self) -> &[SyncRecord] {
+        self
+    }
+}
+impl SyncPlanningInput for Vec<SyncRecord> {
+    fn planning_records(&self) -> &[SyncRecord] {
+        self
+    }
+}
+impl<const N: usize> SyncPlanningInput for [SyncRecord; N] {
+    fn planning_records(&self) -> &[SyncRecord] {
+        self
+    }
+}
+
 /// Evaluates local records against remote Drive files and remote snapshot to compute a safe sync plan.
-pub fn plan_sync_cycle(
-    local_records: &[SyncRecord],
+pub fn plan_sync_cycle<L: SyncPlanningInput + ?Sized>(
+    local: &L,
     remote_file: Option<&DriveFileMetadata>,
     remote_vault: Option<&SyncVault>,
     passphrase: Option<&str>,
 ) -> SyncPlan {
+    let local_records = local.planning_records();
     let Some(remote_meta) = remote_file else {
         return SyncPlan::UploadInitial;
     };
@@ -1869,6 +1913,39 @@ pub fn plan_sync_cycle(
     let mut conflicts = Vec::new();
     let mut local_newer = false;
     let mut remote_newer = false;
+
+    if let Some(local_vault) = local.planning_vault() {
+        for (name, same, left, right) in [
+            (
+                "key",
+                local_vault.key_envelope == remote_vault.key_envelope,
+                local_vault.cloud_state.as_ref().map(|s| &s.key),
+                remote_vault.cloud_state.as_ref().map(|s| &s.key),
+            ),
+            (
+                "metadata",
+                local_vault.encrypted_directory == remote_vault.encrypted_directory,
+                local_vault.cloud_state.as_ref().map(|s| &s.metadata),
+                remote_vault.cloud_state.as_ref().map(|s| &s.metadata),
+            ),
+        ] {
+            match (left, right) {
+                (Some(left), Some(right)) if left.head == right.head && same => {}
+                (Some(left), Some(right))
+                    if left.head != right.head && left.contains(&right.head) =>
+                {
+                    local_newer = true
+                }
+                (Some(left), Some(right))
+                    if left.head != right.head && right.contains(&left.head) =>
+                {
+                    remote_newer = true
+                }
+                (None, None) if same => {}
+                _ => conflicts.push(format!("vault:{name}")),
+            }
+        }
+    }
 
     for d in diffs {
         match d.status {
@@ -1914,6 +1991,30 @@ pub struct SyncExecutionReport {
     pub encrypted_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_envelope: Option<EncryptedEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_state: Option<CloudState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Box<SyncVault>>,
+}
+
+impl SyncExecutionReport {
+    pub fn synchronized_vault(&self, base: &SyncVault, records: Vec<SyncRecord>) -> SyncVault {
+        if let Some(snapshot) = &self.snapshot {
+            return (**snapshot).clone();
+        }
+        let mut vault = base.clone();
+        vault.records = records;
+        vault.encrypted_directory = self.encrypted_directory.clone();
+        vault.key_envelope = self
+            .key_envelope
+            .clone()
+            .or_else(|| base.key_envelope.clone());
+        vault.cloud_state = self.cloud_state.clone();
+        vault
+    }
+    pub fn has_local_changes(&self) -> bool {
+        self.local_updated > 0 || self.snapshot.is_some()
+    }
 }
 
 /// Result of evaluating or executing an end-to-end sync cycle.
@@ -2044,6 +2145,8 @@ pub fn execute_sync_cycle(
         ),
         encrypted_directory: None,
         key_envelope: None,
+        cloud_state: None,
+        snapshot: None,
     };
 
     SyncCycleResult::Success {
@@ -2103,9 +2206,44 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
         &self,
         access_token: &str,
     ) -> Result<Vec<DriveFileMetadata>, SyncError> {
-        let req = build_list_appdata_files_request(access_token);
-        let resp = self.transport.send(req)?;
-        parse_list_files_response(&resp)
+        let mut files = Vec::new();
+        let mut page = None::<String>;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let mut request = build_list_appdata_files_request(access_token);
+            request.url.push_str("&pageSize=1000");
+            if let Some(token) = &page {
+                request
+                    .url
+                    .push_str(&format!("&pageToken={}", url_encode(token)));
+            }
+            let response = self.transport.send(request)?;
+            files.extend(parse_list_files_response(&response)?);
+            #[derive(Deserialize)]
+            struct Pagination {
+                #[serde(rename = "nextPageToken")]
+                next: Option<String>,
+                #[serde(rename = "incompleteSearch", default)]
+                incomplete: bool,
+            }
+            let pagination: Pagination = serde_json::from_slice(&response.body)
+                .map_err(|e| SyncError::Deserialization(e.to_string()))?;
+            if pagination.incomplete {
+                return Err(SyncError::Api("Drive returned an incomplete history listing; retry without changing local state".into()));
+            }
+            match pagination.next {
+                Some(token) if !token.is_empty() && seen.insert(token.clone()) => {
+                    page = Some(token)
+                }
+                Some(_) => {
+                    return Err(SyncError::Api(
+                        "Drive history pagination did not advance".into(),
+                    ))
+                }
+                None => break,
+            }
+        }
+        Ok(files)
     }
 
     pub fn download_vault(
@@ -2175,7 +2313,6 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
     }
 }
 
-/// Helper to find the delimiter between HTTP header and body in raw stream output.
 /// Orchestrates an end-to-end cloud vault synchronization cycle against Google Drive Application Data folder.
 pub fn execute_cloud_vault_sync<T: HttpTransport>(
     client: &GoogleDriveSyncClient<T>,
@@ -2184,131 +2321,27 @@ pub fn execute_cloud_vault_sync<T: HttpTransport>(
     passphrase: &str,
     resolutions: Option<&[ConflictResolutionChoice]>,
 ) -> Result<SyncCycleResult, SyncError> {
-    let files = client.list_vault_files(access_token)?;
-    let remote_file = find_drive_vault_file(&files, &local_vault.vault_id);
+    tracing::debug!(vault_id=%local_vault.vault_id, "Starting authenticated cloud synchronization");
+    cloud::execute(client, access_token, local_vault, passphrase, resolutions)
+        .inspect_err(|_| tracing::warn!(vault_id=%local_vault.vault_id, "Cloud synchronization failed; local recovery state retained"))
+}
 
-    let remote_vault = if let Some(rf) = remote_file {
-        Some(client.download_vault(access_token, &rf.id)?)
-    } else {
-        None
-    };
-
-    // There is no shared envelope revision or conditional Drive write yet. Refuse
-    // to choose between different envelopes: either one may be the only usable
-    // password for the current vault. Record-level conflict choices cannot
-    // safely resolve this independent key-recovery conflict.
-    if let Some(remote) = remote_vault.as_ref() {
-        if let (Some(local), Some(remote)) = (&local_vault.key_envelope, &remote.key_envelope) {
-            if local != remote {
-                tracing::warn!(vault_id = %local_vault.vault_id, "Vault key envelopes differ; refusing synchronization");
-                return Err(SyncError::Api(
-                    "Vault key envelopes differ; synchronization stopped to protect password recovery".into(),
-                ));
-            }
-        }
-    }
-
-    let remote_records = remote_vault
-        .as_ref()
-        .map(|v| v.records.as_slice())
-        .unwrap_or(&[]);
-    let plan = plan_sync_cycle(
-        &local_vault.records,
-        remote_file,
-        remote_vault.as_ref(),
-        Some(passphrase),
-    );
-
-    match plan {
-        SyncPlan::UploadInitial => {
-            let boundary = "SHELLUMI_BOUNDARY_CLOUD_SYNC_INIT";
-            let _ = client.upload_vault(access_token, local_vault, boundary)?;
-            Ok(SyncCycleResult::Success {
-                report: SyncExecutionReport {
-                    local_updated: 0,
-                    remote_updated: local_vault.records.len(),
-                    conflicts_resolved: 0,
-                    duration_ms: 1,
-                    message: format!(
-                        "Initial cloud vault uploaded with {} records",
-                        local_vault.records.len()
-                    ),
-                    encrypted_directory: local_vault.encrypted_directory.clone(),
-                    key_envelope: local_vault.key_envelope.clone(),
-                },
-                merged_records: local_vault.records.clone(),
-            })
-        }
-        SyncPlan::DownloadInitial { .. } => {
-            let records = remote_records.to_vec();
-            let remote_dir = remote_vault
-                .as_ref()
-                .and_then(|v| v.encrypted_directory.clone());
-            let remote_env = remote_vault.as_ref().and_then(|v| v.key_envelope.clone());
-            Ok(SyncCycleResult::Success {
-                report: SyncExecutionReport {
-                    local_updated: records.len(),
-                    remote_updated: 0,
-                    conflicts_resolved: 0,
-                    duration_ms: 1,
-                    message: format!(
-                        "Initial cloud vault downloaded with {} records",
-                        records.len()
-                    ),
-                    encrypted_directory: remote_dir,
-                    key_envelope: remote_env,
-                },
-                merged_records: records,
-            })
-        }
-        SyncPlan::AlreadySynchronized => Ok(SyncCycleResult::AlreadySynchronized),
-        SyncPlan::ApplyRemoteUpdates { .. }
-        | SyncPlan::UploadLocalUpdates { .. }
-        | SyncPlan::ConflictDetected { .. } => {
-            let mut sync_res = execute_sync_cycle(
-                &local_vault.records,
-                remote_records,
-                passphrase,
-                resolutions,
-            );
-            if let SyncCycleResult::Success {
-                ref mut report,
-                ref merged_records,
-            } = sync_res
-            {
-                let synced_directory = local_vault.encrypted_directory.clone().or_else(|| {
-                    remote_vault
-                        .as_ref()
-                        .and_then(|v| v.encrypted_directory.clone())
-                });
-                let synced_envelope = local_vault
-                    .key_envelope
-                    .clone()
-                    .or_else(|| remote_vault.as_ref().and_then(|v| v.key_envelope.clone()));
-                report.encrypted_directory = synced_directory.clone();
-                report.key_envelope = synced_envelope.clone();
-
-                if report.remote_updated > 0 {
-                    let mut updated_vault = local_vault.clone();
-                    updated_vault.records = merged_records.clone();
-                    updated_vault.encrypted_directory = synced_directory;
-                    updated_vault.key_envelope = synced_envelope;
-                    updated_vault.updated_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-
-                    if let Some(rf) = remote_file {
-                        client.update_vault(access_token, &rf.id, &updated_vault)?;
-                    } else {
-                        let boundary = "SHELLUMI_BOUNDARY_CLOUD_SYNC_MERGE";
-                        client.upload_vault(access_token, &updated_vault, boundary)?;
-                    }
-                }
-            }
-            Ok(sync_res)
-        }
-    }
+/// Resolve exactly the conflict branches shown to the user; stale views fail closed.
+pub fn execute_cloud_vault_sync_bound<T: HttpTransport>(
+    client: &GoogleDriveSyncClient<T>,
+    token: &str,
+    local: &SyncVault,
+    pass: &str,
+    resolution: &CloudConflictResolution,
+) -> Result<SyncCycleResult, SyncError> {
+    cloud::execute_bound(
+        client,
+        token,
+        local,
+        pass,
+        Some(&resolution.choices),
+        Some(&resolution.context),
+    ).inspect_err(|_| tracing::warn!(vault_id=%local.vault_id, "Reviewed cloud conflict resolution failed; refresh required"))
 }
 
 #[cfg(test)]

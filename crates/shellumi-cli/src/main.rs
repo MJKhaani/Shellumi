@@ -1,24 +1,23 @@
 use shellumi_core::{
     build_google_drive_auth_url, build_ssh_tunnel_command, default_credential_store,
     delete_secret_by_ref, diff_sync_records_with_passphrase, discover_serial_ports,
-    execute_cloud_vault_sync, execute_sync_cycle, export_csv, export_ssh_config,
-    format_duration_hms, generate_bash_hook, generate_ed25519_key, generate_fish_hook,
-    generate_pkce_challenge, generate_zsh_hook, list_local_directory, parse_csv,
-    parse_quick_connect_target, parse_ssh_config, probe_keychain_daemon, render_command,
-    render_preview, resolve_secret_from_ref, store_secret_to_ref, AccessoryBarLayout,
-    AnsibleInventoryEngine, AuditAction, AuthMethod, AutocompleteContext, AutocompleteEngine,
-    AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget, BatchPolicy,
-    BenchmarkCategory, BenchmarkRunner, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind,
-    ConflictResolutionChoice, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser,
-    FileAttributes, ForwardingType, GoogleDriveSyncClient, HostConfigEntry, HostExportItem,
-    HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
-    MoshConfig, MoshPredictMode, MultiplayerSession, NewIdentity, OpenFlags, OpenSshCertificate,
-    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
-    PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor,
-    SftpClient, SftpConnectOptions, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
-    SshDestination, SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole,
-    TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar, DEFAULT_KDF_ITERATIONS,
-    DEFAULT_KEYCHAIN_SERVICE,
+    execute_cloud_vault_sync, export_csv, export_ssh_config, format_duration_hms,
+    generate_bash_hook, generate_ed25519_key, generate_fish_hook, generate_pkce_challenge,
+    generate_zsh_hook, list_local_directory, parse_csv, parse_quick_connect_target,
+    parse_ssh_config, probe_keychain_daemon, render_command, render_preview,
+    resolve_secret_from_ref, store_secret_to_ref, AccessoryBarLayout, AnsibleInventoryEngine,
+    AuditAction, AuthMethod, AutocompleteContext, AutocompleteEngine, AwsEc2Parser, AzureVmParser,
+    BatchExecutionPlan, BatchHostTarget, BatchPolicy, BenchmarkCategory, BenchmarkRunner,
+    CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, ConflictResolutionChoice,
+    ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType,
+    GoogleDriveSyncClient, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
+    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
+    MultiplayerSession, NewIdentity, OpenFlags, OpenSshCertificate, PaletteAction, PaletteCategory,
+    PaletteCommand, PaletteRegistry, PasswordPromptDetector, PlaybackSpeed, PlaybackStatus,
+    PortForwardRule, ProtocolError, SerialConfig, SessionRedactor, SftpClient, SftpConnectOptions,
+    SftpPacket, SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncCycleResult,
+    SyncVault, SystemHttpTransport, TeamMember, TeamRole, TelnetConfig, TransferDirection,
+    TransferQueue, VirtualAccessoryBar, DEFAULT_KDF_ITERATIONS, DEFAULT_KEYCHAIN_SERVICE,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
@@ -2879,10 +2878,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             merged_records,
                         } => {
                             println!("{}", report.message);
-                            if report.local_updated > 0 {
-                                let mut updated_vault = local_vault.clone();
-                                updated_vault.records = merged_records;
-                                updated_vault.encrypted_directory = report.encrypted_directory;
+                            if report.has_local_changes() {
+                                let updated_vault =
+                                    report.synchronized_vault(&local_vault, merged_records);
                                 store.import_vault(&passphrase, &updated_vault).await?;
                                 println!(
                                     "Imported {} updated record(s) into local store.",
@@ -2954,10 +2952,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 merged_records,
                             } => {
                                 println!("{}", report.message);
-                                if report.local_updated > 0 {
-                                    let mut updated_vault = local_vault.clone();
-                                    updated_vault.records = merged_records;
-                                    updated_vault.encrypted_directory = report.encrypted_directory;
+                                if report.has_local_changes() {
+                                    let updated_vault =
+                                        report.synchronized_vault(&local_vault, merged_records);
                                     store.import_vault(&passphrase, &updated_vault).await?;
                                 }
                             }
@@ -2992,12 +2989,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 DEFAULT_KDF_ITERATIONS,
                             )
                             .await?;
-                        let res = execute_sync_cycle(
-                            &local_vault.records,
-                            &remote_vault.records,
+                        let res = shellumi_core::sync::execute_snapshot_sync(
+                            &local_vault,
+                            &remote_vault,
                             &passphrase,
                             None,
-                        );
+                        )?;
                         match res {
                             SyncCycleResult::AlreadySynchronized => {
                                 println!("Local vault and remote file are already in sync.");
@@ -3007,16 +3004,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 merged_records,
                             } => {
                                 println!("{}", report.message);
-                                if report.local_updated > 0 {
-                                    let mut updated = local_vault.clone();
-                                    updated.records = merged_records.clone();
-                                    store.import_vault(&passphrase, &updated).await?;
-                                }
-                                if report.remote_updated > 0 {
-                                    let mut updated_remote = remote_vault.clone();
-                                    updated_remote.records = merged_records;
-                                    fs::write(&remote_path, updated_remote.to_json()?)?;
-                                }
+                                let updated =
+                                    report.synchronized_vault(&local_vault, merged_records);
+                                store.import_vault(&passphrase, &updated).await?;
+                                fs::write(&remote_path, updated.to_json()?)?;
                             }
                             SyncCycleResult::Conflicts(conflicts) => {
                                 println!("File sync conflicts ({}):", conflicts.len());

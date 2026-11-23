@@ -2394,6 +2394,8 @@ fn test_client_side_directory_sync_envelope_and_palette_commands() {
         message: "Sync OK".to_string(),
         encrypted_directory: restored_vault.encrypted_directory,
         key_envelope: None,
+        cloud_state: None,
+        snapshot: None,
     };
     assert!(report.encrypted_directory.is_some());
 

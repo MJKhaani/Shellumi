@@ -34,6 +34,27 @@ impl Shellumi {
         let Some(modal) = self.conflict_modal.take() else {
             return;
         };
+        if modal.vault_id != self.active_vault_id {
+            self.sync_status = AppSyncStatus::Error(
+                "Select the vault whose conflicts were reviewed before applying choices.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(context) = modal
+            .items
+            .first()
+            .and_then(|item| item.revision_context.clone())
+        else {
+            self.sync_status =
+                AppSyncStatus::Error("Refresh cloud conflicts before applying choices.".into());
+            cx.notify();
+            return;
+        };
+        let Some(registry_path) = self.registry_db_path() else {
+            return;
+        };
+        let vault_id = self.active_vault_id.clone();
         let Some(path) = self.active_vault_db_path() else {
             self.sync_status = AppSyncStatus::Error("Database not open.".into());
             cx.notify();
@@ -86,36 +107,54 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = HostStore::open_with_key(&path, active_key.as_ref())
+                let mut store = HostStore::open_with_key(&path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                // Refresh encrypted vault directory if default vault key is available
-                if let Ok(dir) = store.build_vault_directory().await {
-                    if let Ok(default_vid) =
-                        shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                    {
-                        if let Some(ref key) = default_key {
-                            let mut wstore = HostStore::open_with_key(&path, active_key.as_ref())
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            let _ = wstore
-                                .save_vault_directory_from_model(&default_vid, key, &dir)
-                                .await;
-                        }
-                    }
+                let scoped = shellumi_core::VaultId::new(&vault_id).map_err(|e| e.to_string())?;
+                store.set_vault_id(scoped.clone());
+                let key = default_key
+                    .as_ref()
+                    .ok_or("Unlock the default registry before resolving Drive conflicts.")?;
+                let registry = HostStore::open_with_key(&registry_path, Some(key))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if !registry
+                    .is_vault_sync_enabled(&vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err(
+                        "Google Drive consent was disabled before conflict resolution.".into(),
+                    );
                 }
+                let directory = registry
+                    .build_vault_directory()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                registry
+                    .save_vault_directory_from_model(
+                        &shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
+                            .map_err(|e| e.to_string())?,
+                        key,
+                        &directory,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let local_vault = store
                     .export_vault(passphrase.expose_secret(), &device_id)
                     .await
                     .map_err(|e| e.to_string())?;
                 let client =
                     GoogleDriveSyncClient::new(SystemHttpTransport::default(), "shellumi-desktop");
-                let cycle_result = execute_cloud_vault_sync(
+                let cycle_result = shellumi_core::execute_cloud_vault_sync_bound(
                     &client,
                     &token,
                     &local_vault,
                     passphrase.expose_secret(),
-                    Some(&resolutions),
+                    &shellumi_core::CloudConflictResolution {
+                        context,
+                        choices: resolutions,
+                    },
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -128,29 +167,13 @@ impl Shellumi {
                         let mut write_store = HostStore::open_with_key(&path, active_key.as_ref())
                             .await
                             .map_err(|e| e.to_string())?;
-                        let mut merged_vault = SyncVault::new(&local_vault.vault_id, 0);
-                        merged_vault.records = merged_records;
-                        merged_vault.encrypted_directory = report.encrypted_directory.clone();
-                        merged_vault.key_envelope =
-                            report.key_envelope.or(local_vault.key_envelope);
+                        write_store.set_vault_id(scoped.clone());
+                        let merged_vault = report.synchronized_vault(&local_vault, merged_records);
                         write_store
                             .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
                             .map_err(|e| e.to_string())?;
 
-                        if let Some(enc_dir) = &report.encrypted_directory {
-                            if let Ok(default_vid) =
-                                shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                            {
-                                let _ = write_store
-                                    .import_encrypted_vault_directory(
-                                        &default_vid,
-                                        default_key.as_ref(),
-                                        enc_dir,
-                                    )
-                                    .await;
-                            }
-                        }
                         Ok(())
                     }
                     SyncCycleResult::Conflicts(_) => {
@@ -285,6 +308,7 @@ impl Shellumi {
         let active_key = self.active_vault_key();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let active_vault_id = self.active_vault_id.clone();
+        let conflict_vault_id = active_vault_id.clone();
         let Some(registry_path) = self.registry_db_path() else {
             self.sync_status = AppSyncStatus::Error("Vault registry not available.".into());
             cx.notify();
@@ -318,7 +342,7 @@ impl Shellumi {
                 let directory = registry.build_vault_directory().await.map_err(|e| e.to_string())?;
                 let default_vid = shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID).map_err(|e| e.to_string())?;
                 let key = default_key.as_ref().ok_or("Unlock the default vault registry before synchronizing.")?;
-                let mut directory_store = HostStore::open_with_key(&registry_path, Some(key)).await.map_err(|e| e.to_string())?;
+                let directory_store = HostStore::open_with_key(&registry_path, Some(key)).await.map_err(|e| e.to_string())?;
                 directory_store.save_vault_directory_from_model(&default_vid, key, &directory).await.map_err(|e| e.to_string())?;
                 let local_vault = store
                     .export_vault(passphrase.expose_secret(), &device_id)
@@ -345,29 +369,13 @@ impl Shellumi {
                             .await
                             .map_err(|e| e.to_string())?;
                         write_store.set_vault_id(scoped_id.clone());
-                        let mut merged_vault = SyncVault::new(&local_vault.vault_id, 0);
-                        merged_vault.records = merged_records;
-                        merged_vault.encrypted_directory = report.encrypted_directory.clone();
-                        merged_vault.key_envelope =
-                            report.key_envelope.or(local_vault.key_envelope);
+                        let merged_vault = report.synchronized_vault(&local_vault, merged_records);
                         let summary = write_store
                             .import_vault(passphrase.expose_secret(), &merged_vault)
                             .await
                             .map_err(|e| e.to_string())?;
 
-                        if let Some(enc_dir) = &report.encrypted_directory {
-                            if let Ok(default_vid) =
-                                shellumi_core::VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID)
-                            {
-                                let _ = write_store
-                                    .import_encrypted_vault_directory(
-                                        &default_vid,
-                                        default_key.as_ref(),
-                                        enc_dir,
-                                    )
-                                    .await;
-                            }
-                        }
+
 
                         let count = summary.hosts_imported
                             + summary.groups_imported
@@ -394,6 +402,7 @@ impl Shellumi {
                             selected_index: 0,
                             resolutions: default_resolutions,
                             file_id: "google-drive-sync".into(),
+                            vault_id: conflict_vault_id.clone(),
                         });
                         app.sync_status = AppSyncStatus::Conflict {
                             message: format!("{total_conflicts} conflicting changes detected"),

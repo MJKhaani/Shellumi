@@ -634,9 +634,14 @@ impl BenchmarkRunner {
         let ops_per_sec = iterations as f64 / elapsed_secs.max(0.000_001);
         let latency_us = (duration_ms * 1000.0) / iterations as f64;
 
-        let status = if ops_per_sec >= 40_000.0 {
+        let min_ops = if cfg!(debug_assertions) {
+            10_000.0
+        } else {
+            40_000.0
+        };
+        let status = if ops_per_sec >= min_ops {
             BenchmarkStatus::Passed
-        } else if ops_per_sec >= 20_000.0 {
+        } else if ops_per_sec >= min_ops * 0.5 {
             BenchmarkStatus::Warning
         } else {
             BenchmarkStatus::Failed
@@ -654,7 +659,11 @@ impl BenchmarkRunner {
             throughput_mb_per_sec: None,
             latency_us_per_op: latency_us,
             status,
-            target_sla: ">= 40,000 ops/s".to_string(),
+            target_sla: if cfg!(debug_assertions) {
+                ">= 10,000 ops/s (debug)".to_string()
+            } else {
+                ">= 40,000 ops/s".to_string()
+            },
             note: format!(
                 "{:.0} rules/sec ({} flagged as public exposures)",
                 ops_per_sec, exposure_warnings

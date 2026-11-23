@@ -1,5 +1,8 @@
 //! UI-independent connection definitions. No network connections are made here.
 
+#[cfg(test)]
+extern crate self as shellumi_core;
+
 pub mod autocomplete;
 pub mod batch;
 pub mod bench;
@@ -162,14 +165,15 @@ pub use sync::{
     build_oauth_callback_response, build_token_exchange_request, build_token_refresh_request,
     build_update_file_request, decrypt_entity, derive_argon2id_key, determine_sync_action,
     diff_sync_records, diff_sync_records_with_passphrase, encrypt_entity,
-    encrypt_entity_with_iterations, execute_cloud_vault_sync, execute_sync_cycle,
-    format_record_summary, generate_nonce, generate_pkce_challenge, generate_salt,
-    parse_download_file_response, parse_list_files_response, parse_oauth_callback_request,
-    parse_raw_http_response, parse_token_exchange_response, parse_token_refresh_response,
-    parse_upload_file_response, plan_sync_cycle, resolve_record_conflict, url_encode,
-    validate_vault_password, ConflictItemView, ConflictResolutionChoice, DiffStatus,
-    DriveFileMetadata, EncryptedEnvelope, GoogleDriveSyncClient, HttpRequest, HttpResponse,
-    HttpTransport, OAuthCallbackListener, OAuthTokenBundle, PkceChallenge, RecordDiffSummary,
+    encrypt_entity_with_iterations, execute_cloud_vault_sync, execute_cloud_vault_sync_bound,
+    execute_sync_cycle, format_record_summary, generate_nonce, generate_pkce_challenge,
+    generate_salt, parse_download_file_response, parse_list_files_response,
+    parse_oauth_callback_request, parse_raw_http_response, parse_token_exchange_response,
+    parse_token_refresh_response, parse_upload_file_response, plan_sync_cycle,
+    resolve_record_conflict, url_encode, validate_vault_password, CloudConflictResolution,
+    CloudState, ConflictItemView, ConflictResolutionChoice, DiffStatus, DriveFileMetadata,
+    EncryptedEnvelope, GoogleDriveSyncClient, HttpRequest, HttpResponse, HttpTransport,
+    OAuthCallbackListener, OAuthTokenBundle, PkceChallenge, RecordDiffSummary, RevisionHistory,
     SyncAction, SyncBackoff, SyncCycleResult, SyncEntityType, SyncError, SyncExecutionReport,
     SyncPlan, SyncRecord, SyncScheduler, SyncTrigger, SyncVault, SystemHttpTransport,
     DEFAULT_ARGON2_M_COST, DEFAULT_ARGON2_P_COST, DEFAULT_ARGON2_T_COST, DEFAULT_KDF_ITERATIONS,

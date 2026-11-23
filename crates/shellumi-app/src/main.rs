@@ -1,6 +1,7 @@
 mod actions;
 mod app_render;
 mod askpass;
+
 mod connection;
 mod data_path;
 mod desktop;
@@ -39,9 +40,9 @@ use shellumi_core::{
     PasswordPromptDetector, PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule,
     RdpConfig, SerialConfig, SessionRecordingSummary, SessionRedactor, SftpClient,
     SftpConnectOptions, SftpError, SharedVault, SharingAuditRecord, SshDestination,
-    SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole, TelnetConfig,
-    TransferDirection, TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey,
-    VirtualKeyModifier, VncConfig, WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    SyncCycleResult, SystemHttpTransport, TeamMember, TeamRole, TelnetConfig, TransferDirection,
+    TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey, VirtualKeyModifier, VncConfig,
+    WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
 };
 #[cfg(test)]
 use shellumi_core::{
@@ -305,6 +306,7 @@ enum HostState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConflictModalState {
+    vault_id: String,
     items: Vec<ConflictItemView>,
     selected_index: usize,
     resolutions: Vec<ConflictResolutionChoice>,

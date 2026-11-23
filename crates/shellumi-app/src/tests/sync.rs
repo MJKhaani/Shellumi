@@ -123,6 +123,7 @@ fn verifies_conflict_modal_state_and_resolution_flow() {
             remote_summary: "Web Prod (bob@web1:2222)".into(),
             local_raw_json: None,
             remote_raw_json: None,
+            revision_context: None,
         },
         ConflictItemView {
             object_id: "snippet-1".into(),
@@ -135,10 +136,12 @@ fn verifies_conflict_modal_state_and_resolution_flow() {
             remote_summary: "Restart (service restart)".into(),
             local_raw_json: None,
             remote_raw_json: None,
+            revision_context: None,
         },
     ];
 
     let mut modal = ConflictModalState {
+        vault_id: "test-vault".into(),
         items,
         selected_index: 0,
         resolutions: vec![
@@ -351,6 +354,7 @@ fn verifies_snippet_conflict_model_parsing_and_fallback() {
         remote_summary: "Snippet Restart".into(),
         local_raw_json: Some(local_json),
         remote_raw_json: Some(remote_json),
+        revision_context: None,
     };
 
     let model = SnippetConflictModel::from_conflict_item(&item);
@@ -381,6 +385,7 @@ fn verifies_snippet_conflict_model_parsing_and_fallback() {
         remote_summary: "Backup (`tar -czvf backup.tar.gz /data`)".into(),
         local_raw_json: None,
         remote_raw_json: None,
+        revision_context: None,
     };
 
     let fallback_model = SnippetConflictModel::from_conflict_item(&fallback_item);
@@ -433,6 +438,7 @@ fn verifies_tunnel_conflict_model_and_cli_flag_generation() {
         remote_summary: "Tunnel Remote 5433".into(),
         local_raw_json: Some(local_json),
         remote_raw_json: Some(remote_json),
+        revision_context: None,
     };
 
     let model = TunnelConflictModel::from_conflict_item(&item);
@@ -471,6 +477,7 @@ fn verifies_tunnel_conflict_model_and_cli_flag_generation() {
         remote_summary: "Dynamic Proxy".into(),
         local_raw_json: Some(dynamic_json.clone()),
         remote_raw_json: Some(dynamic_json),
+        revision_context: None,
     };
 
     let dynamic_model = TunnelConflictModel::from_conflict_item(&dynamic_item);

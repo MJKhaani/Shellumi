@@ -21,6 +21,8 @@ pub struct VaultManifest {
     pub name: String,
     pub primary_envelope: EncryptedEnvelope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_revision: Option<crate::sync::RevisionHistory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_envelope: Option<EncryptedEnvelope>,
     #[serde(default)]
     pub remember_in_keychain: bool,
@@ -47,6 +49,7 @@ impl VaultManifest {
             vault_id,
             name,
             primary_envelope,
+            key_revision: None,
             recovery_envelope,
             remember_in_keychain,
             created_at: now,
@@ -89,7 +92,7 @@ impl VaultManifest {
         let vid =
             VaultId::new(&self.vault_id).map_err(|e| SyncError::Serialization(e.to_string()))?;
         let new_envelope = current_key.wrap_with_password(&vid, new_password)?;
-        self.primary_envelope = new_envelope;
+        self.record_password_rotation(current_key, new_envelope)?;
         self.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -110,11 +113,45 @@ impl VaultManifest {
             VaultId::new(&self.vault_id).map_err(|e| SyncError::Serialization(e.to_string()))?;
         let new_envelope =
             current_key.wrap_with_argon2_params(&vid, new_password, m_cost, t_cost, p_cost)?;
-        self.primary_envelope = new_envelope;
+        self.record_password_rotation(current_key, new_envelope)?;
         self.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        Ok(())
+    }
+
+    fn record_password_rotation(
+        &mut self,
+        key: &VaultKey,
+        envelope: EncryptedEnvelope,
+    ) -> Result<(), SyncError> {
+        use crate::sync::revisions::{key_content, RevisionHistory};
+        let previous = match &self.key_revision {
+            Some(history) => {
+                history.verify(&self.vault_id, "key", key)?;
+                if history.content() != key_content(&Some(self.primary_envelope.clone()))? {
+                    return Err(SyncError::StateMismatch);
+                }
+                history.clone()
+            }
+            None => RevisionHistory::root(
+                &self.vault_id,
+                "key",
+                key_content(&Some(self.primary_envelope.clone()))?,
+                key,
+            )?,
+        };
+        let revision = RevisionHistory::append(
+            &self.vault_id,
+            "key",
+            key_content(&Some(envelope.clone()))?,
+            &[&previous],
+            key,
+        )?;
+        self.primary_envelope = envelope;
+        self.key_revision = Some(revision);
+        tracing::info!(vault_id=%self.vault_id,"Recorded authenticated password-envelope revision");
         Ok(())
     }
 
@@ -189,10 +226,55 @@ impl VaultManifest {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let json = self.to_json()?;
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, json.as_bytes())?;
+        let lock_path = path.with_extension("lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        lock.try_lock()
+            .map_err(|e| SyncError::Io(format!("Manifest is being updated: {e}")))?;
+        let mut next = self.clone();
+        if path.exists() {
+            let previous = Self::load_from_path(path)?;
+            if previous.vault_id != self.vault_id {
+                return Err(SyncError::StateMismatch);
+            }
+            if let Some(old) = &previous.key_revision {
+                match &self.key_revision {
+                    Some(new) if new.contains(&old.head) => {}
+                    None if self.primary_envelope == previous.primary_envelope => {
+                        next.key_revision = Some(old.clone())
+                    }
+                    _ => {
+                        return Err(SyncError::Api(
+                            "Local key-envelope revision changed; reload before saving".into(),
+                        ))
+                    }
+                }
+            }
+        }
+        let json = next.to_json()?;
+        let tmp_path = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp_path)?;
+        use std::io::Write;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         fs::rename(&tmp_path, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        tracing::debug!(vault_id=%self.vault_id,"Saved portable manifest with revision checks");
         Ok(())
     }
 }
@@ -204,6 +286,39 @@ mod tests {
     const TEST_M_COST: u32 = 64; // Fast parameter for unit test execution
     const TEST_T_COST: u32 = 1;
     const TEST_P_COST: u32 = 1;
+
+    #[test]
+    fn stale_manifest_writers_preserve_the_new_password_and_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vault.manifest.json");
+        let vid = VaultId::new("test-vault").unwrap();
+        let key = VaultKey::generate().unwrap();
+        let mut current = VaultManifest::new(
+            vid.as_str().into(),
+            "Vault".into(),
+            key.wrap_with_argon2_params(&vid, "OriginalPassword123!", 64, 1, 1)
+                .unwrap(),
+            None,
+            false,
+        );
+        current.save_to_path(&path).unwrap();
+        let mut stale = current.clone();
+        current
+            .change_password_with_params(&key, "NewPassword123!", 64, 1, 1)
+            .unwrap();
+        current.save_to_path(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(stale.save_to_path(&path).is_err());
+        stale
+            .change_password_with_params(&key, "ConcurrentPassword123!", 64, 1, 1)
+            .unwrap();
+        assert!(stale.save_to_path(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(VaultManifest::load_from_path(&path)
+            .unwrap()
+            .unlock("NewPassword123!")
+            .is_ok());
+    }
 
     #[test]
     fn manifest_creation_unlock_and_password_change() {
