@@ -568,6 +568,23 @@ impl HostStore {
         client: &mut ShellumiServerClient<T>,
         device_label: &str,
     ) -> Result<DeviceResponse, StorageError> {
+        let credentials = shellumi_core::default_credential_store();
+        self.enroll_device_using_credentials(
+            connection_id,
+            client,
+            device_label,
+            credentials.as_ref(),
+        )
+        .await
+    }
+
+    async fn enroll_device_using_credentials<T: HttpTransport>(
+        &mut self,
+        connection_id: &str,
+        client: &mut ShellumiServerClient<T>,
+        device_label: &str,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<DeviceResponse, StorageError> {
         let (signing_pkcs8, signing_pk_b64) = generate_device_ed25519_keypair_pkcs8()
             .map_err(|e| StorageError::InvalidSync(shellumi_core::SyncError::Api(e.to_string())))?;
 
@@ -615,14 +632,32 @@ impl HostStore {
             auth_token: client.token().map(|t| t.to_string()),
             refresh_token: existing.as_ref().and_then(|c| c.refresh_token.clone()),
             device_id: Some(reg_resp.device_id.to_string()),
-            device_signing_key: Some(BASE64_STANDARD.encode(&signing_pkcs8)),
+            device_signing_key: Some(
+                shellumi_core::store_secret_to_ref(
+                    credentials,
+                    VaultServerConnectionRecord::CREDENTIAL_SERVICE,
+                    &format!("{}-signing", reg_resp.device_id),
+                    &BASE64_STANDARD.encode(&signing_pkcs8),
+                )
+                .map_err(StorageError::InvalidCredential)?,
+            ),
             server_instance_id,
-            device_agreement_key: Some(BASE64_STANDARD.encode(agreement_secret.as_ref())),
+            device_agreement_key: Some(
+                shellumi_core::store_secret_to_ref(
+                    credentials,
+                    VaultServerConnectionRecord::CREDENTIAL_SERVICE,
+                    &format!("{}-agreement", reg_resp.device_id),
+                    &BASE64_STANDARD.encode(agreement_secret.as_ref()),
+                )
+                .map_err(StorageError::InvalidCredential)?,
+            ),
             created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
             updated_at: now,
         };
 
-        self.save_vault_server_connection(&conn_record).await?;
+        self.save_vault_server_connection_secured(&conn_record, credentials)
+            .await?;
+        tracing::info!(device_id = %reg_resp.device_id, "Saved protected credentials for registered device");
         Ok(reg_resp)
     }
 
@@ -1460,8 +1495,14 @@ mod tests {
         let mut client =
             ShellumiServerClient::with_transport("https://shellumi.corp.internal:8443", mock);
 
+        let credentials = shellumi_core::EphemeralCredentialStore::new();
         let resp = store
-            .enroll_device_with_server("corp-server", &mut client, "MacBook Pro M4")
+            .enroll_device_using_credentials(
+                "corp-server",
+                &mut client,
+                "MacBook Pro M4",
+                &credentials,
+            )
             .await
             .unwrap();
 
@@ -1478,7 +1519,12 @@ mod tests {
             Some(server_instance.to_string().as_str())
         );
         assert!(conn.device_signing_key.is_some());
-        assert!(conn.device_agreement_key.is_some());
+        assert!(conn
+            .device_agreement_key
+            .as_ref()
+            .unwrap()
+            .starts_with("keychain://"));
+        assert!(conn.resolve_agreement_key(&credentials).is_some());
     }
 
     #[tokio::test]

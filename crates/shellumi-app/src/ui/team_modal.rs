@@ -514,7 +514,7 @@ impl Shellumi {
                     div()
                         .text_xs()
                         .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child(format!("Enrolled Collaborators for: {selected_vault_name}")),
+                        .child(format!("Collaborators for {selected_vault_name}")),
                 );
 
                 let mut members_list = div()
@@ -530,7 +530,7 @@ impl Shellumi {
                         div().p_3().rounded_md().bg(rgb(MacTheme::INPUT_BG)).border_1().border_color(rgb(MacTheme::SEPARATOR)).text_xs().text_color(
                             rgb(MacTheme::TEXT_SECONDARY),
                         ).child(
-                            "No additional collaborators enrolled yet. Invite team members below.",
+                            "No additional collaborators invited yet. Invite team members below.",
                         ),
                     );
                 } else {
@@ -613,7 +613,7 @@ impl Shellumi {
                                                 .bg(rgb(0x133820))
                                                 .text_xs()
                                                 .text_color(rgb(MacTheme::SUCCESS))
-                                                .child("Active")
+                                                .child(m.enrollment_label())
                                         }
                                     }),
                             )

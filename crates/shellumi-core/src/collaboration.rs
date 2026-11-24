@@ -145,6 +145,17 @@ pub struct TeamMember {
 }
 
 impl TeamMember {
+    /// Legacy member rows do not attest ownership of a recipient device.
+    pub fn enrollment_label(&self) -> &'static str {
+        if self.revoked {
+            "Revoked"
+        } else if self.agreement_public_key.is_none() {
+            "Pending device enrollment"
+        } else {
+            "Device ownership unverified"
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,

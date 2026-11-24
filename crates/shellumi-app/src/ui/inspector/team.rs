@@ -190,16 +190,9 @@ impl Shellumi {
             .child(self.render_detail_row("Display Name", m_name))
             .child(self.render_detail_row("User Identifier", user_id))
             .child(self.render_detail_row("Assigned Role", m_role))
-            .child(self.render_detail_row(
-                "Access Status",
-                if is_revoked {
-                    "Revoked".to_string()
-                } else {
-                    "Active".to_string()
-                },
-            ))
-            .child(self.render_detail_row("Enrolled At", enrolled))
-            .child(self.render_detail_row("Public Key Fingerprint", pubkey_fp));
+            .child(self.render_detail_row("Access Status", member.enrollment_label().to_owned()))
+            .child(self.render_detail_row("Invited At", enrolled))
+            .child(self.render_detail_row("SSH Key Fingerprint", pubkey_fp));
         body = body.child(simple_section("Collaborator Details", details_items));
 
         InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
