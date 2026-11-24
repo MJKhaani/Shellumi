@@ -1050,7 +1050,7 @@ impl ServerSyncEngine {
         let found_conn_record = if let Some(cr) = conn_record {
             Some(cr.clone())
         } else {
-            let contexts = store.list_vault_contexts().await.unwrap_or_default();
+            let contexts = store.list_vault_contexts().await?;
             let server_conn_id = contexts.into_iter().find_map(|(_, ctx)| {
                 if ctx.id() == vault_id {
                     match ctx.location() {
@@ -1092,6 +1092,21 @@ impl ServerSyncEngine {
                         .await;
                 }
             }
+        }
+
+        let remote = client
+            .get_vault(remote_vault_id)
+            .map_err(|e| StorageError::InvalidSync(shellumi_core::SyncError::Api(e.to_string())))?;
+        if remote.vault_id != remote_vault_id
+            || remote.vault_type != "personal"
+            || remote.active_key_epoch != 1
+            || current_state.active_key_epoch != 1
+            || store.get_shared_vault(vault_str).await?.is_some()
+        {
+            tracing::warn!(vault_id = %remote_vault_id, "Blocked legacy sync for vault requiring an epoch key");
+            return Err(StorageError::InvalidSync(shellumi_core::SyncError::Api(
+                "This vault requires authenticated epoch-key synchronization. Pending changes have been retained.".into()
+            )));
         }
 
         let mut report = ServerSyncReport {
@@ -1189,11 +1204,18 @@ impl ServerSyncEngine {
                         let envelope = if p.deleted {
                             None
                         } else if let Some(ref raw_json) = p.payload_json {
-                            let val: serde_json::Value =
-                                serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
-                            encrypt_entity(passphrase, &p.entity_type, &p.object_id, &val).ok()
+                            let val: serde_json::Value = serde_json::from_str(raw_json)
+                                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                            Some(encrypt_entity(
+                                passphrase,
+                                &p.entity_type,
+                                &p.object_id,
+                                &val,
+                            )?)
                         } else {
-                            None
+                            return Err(StorageError::Serialization(
+                                "Pending mutation is missing its record payload".into(),
+                            ));
                         };
 
                         let digest = compute_ciphertext_digest(envelope.as_ref());
@@ -1256,7 +1278,7 @@ impl ServerSyncEngine {
                             let err_lower = err_str.to_lowercase();
                             if err_str.contains("STALE_KEY_EPOCH") {
                                 // Stale key epoch: advance active epoch and report error
-                                current_state.active_key_epoch += 1;
+                                // Only the server can confirm a committed epoch.
                                 current_state.status = "error".to_string();
                                 current_state.error_message = Some(err_str.clone());
                                 store.save_vault_sync_state(&current_state).await?;
@@ -1327,6 +1349,17 @@ mod tests {
     }
 
     impl MockHttpTransport {
+        fn queue_personal_vault(&self, vault_id: Uuid) {
+            self.queue_json_response(
+                200,
+                &serde_json::json!({
+                    "vault_id": vault_id, "tenant_id": Uuid::new_v4(), "owner_id": Uuid::new_v4(),
+                    "vault_type": "personal", "active_key_epoch": 1, "server_sequence": 0,
+                    "role": "owner", "created_at": 1, "updated_at": 1
+                }),
+            );
+        }
+
         fn queue_json_response<T: serde::Serialize>(&self, status: u16, body: &T) {
             let bytes = serde_json::to_vec(body).unwrap();
             self.responses
@@ -1543,6 +1576,7 @@ mod tests {
             message: "Cursor has expired".to_string(),
             request_id: None,
         };
+        mock.queue_personal_vault(remote_vault_id);
         mock.queue_json_response(410, &err_resp);
 
         // 2. Snapshot response
@@ -1730,6 +1764,7 @@ mod tests {
             },
         );
         // 2nd request is fetch_changes -> returns change_feed
+        mock.queue_personal_vault(remote_vault_id);
         mock.queue_json_response(200, &change_feed);
         // 3rd request is commit -> returns CommitBatchResponse
         let commit_ack = CommitBatchResponse {
@@ -1949,6 +1984,7 @@ mod tests {
                 },
             },
         );
+        mock.queue_personal_vault(remote_vault_id);
         // 2. Fetch changes (empty)
         mock.queue_json_response(
             200,
