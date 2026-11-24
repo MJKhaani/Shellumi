@@ -5,6 +5,13 @@ pub mod coordinator;
 pub mod drafts;
 pub mod group;
 pub mod host;
+pub mod identity;
+pub mod provider;
+pub mod snippet;
+pub mod team;
+pub mod tunnel;
+pub mod vault;
+pub mod workspace;
 
 pub use coordinator::{
     AsyncOperationState, InspectorCoordinator, InspectorMode, InspectorState, InspectorTarget,
@@ -140,7 +147,24 @@ impl Shellumi {
         match target {
             InspectorTarget::Host(host_id) => self.render_host_inspector(host_id, mode, window, cx),
             InspectorTarget::Group(group_name) => self.render_group_inspector(group_name, mode, cx),
-            _ => div(),
+            InspectorTarget::Identity(identity_id) => {
+                self.render_identity_inspector(identity_id, mode, cx)
+            }
+            InspectorTarget::Snippet(snippet_id) => {
+                self.render_snippet_inspector(snippet_id, mode, cx)
+            }
+            InspectorTarget::Tunnel(tunnel_id) => self.render_tunnel_inspector(tunnel_id, mode, cx),
+            InspectorTarget::Workspace(workspace_id) => {
+                self.render_workspace_inspector(workspace_id, mode, cx)
+            }
+            InspectorTarget::Vault(vault_id) => self.render_vault_inspector(vault_id, mode, cx),
+            InspectorTarget::Provider(provider_id) => {
+                self.render_provider_inspector(provider_id, mode, cx)
+            }
+            InspectorTarget::TeamMember(member_id) => {
+                self.render_team_inspector(member_id, mode, cx)
+            }
+            InspectorTarget::Session(_) => div(),
         }
     }
 
@@ -249,6 +273,8 @@ impl Shellumi {
             match &active.target {
                 InspectorTarget::Host(_) => self.save_host(cx),
                 InspectorTarget::Group(_) => self.save_group_inspector(cx),
+                InspectorTarget::Identity(_) => self.save_identity_modal(cx),
+                InspectorTarget::Tunnel(_) => self.save_new_tunnel_modal(cx),
                 _ => {}
             }
         }

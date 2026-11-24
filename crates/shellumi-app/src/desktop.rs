@@ -682,7 +682,11 @@ impl Shellumi {
                             .border_color(rgb(MacTheme::ACCENT_BLUE))
                             .text_color(rgb(0xffffff))
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.open_tunnel_modal(cx);
+                                app.open_tunnel_inspector_mode(
+                                    None,
+                                    crate::ui::inspector::InspectorMode::Create,
+                                    cx,
+                                );
                             })),
                     );
                 let content_scroll = div()
@@ -748,9 +752,9 @@ impl Shellumi {
                     .child(action_bar)
                     .child(content_scroll)
             }
-            "Vaults"=>empty("Local vault records","Manage vault metadata and local team membership. Network sharing is not connected.").child(primary("vault-records","Manage vaults").on_click(cx.listener(|app,_,_,cx|app.open_team_modal(cx)))),
+            "Vaults"=>empty("Local vault records","Manage vault metadata and local team membership. Network sharing is not connected.").child(primary("vault-records","Manage vaults").on_click(cx.listener(|app,_,_,cx|app.open_vault_inspector_mode(None, crate::ui::inspector::InspectorMode::View, cx)))),
             "Collaboration"=>empty("Session access","Network terminal sharing is not implemented. Local membership records are available under Vaults."),
-            "Integrations"=>empty("Infrastructure inventory","Manage provider records and inspect inventory with the existing infrastructure tools.").child(primary("integration-records","Manage infrastructure").on_click(cx.listener(|app,_,_,cx|app.open_infra_modal(cx)))),
+            "Integrations"=>empty("Infrastructure inventory","Manage provider records and inspect inventory with the existing infrastructure tools.").child(primary("integration-records","Manage infrastructure").on_click(cx.listener(|app,_,_,cx|app.open_provider_inspector_mode(None, crate::ui::inspector::InspectorMode::View, cx)))),
             "Google Drive Sync" => self.backup_page(cx),
             "Keychain"|"Known Hosts"=>self.public_inventory_page(page,cx),
             _=>empty("Workspace","Select a section from the navigation."),

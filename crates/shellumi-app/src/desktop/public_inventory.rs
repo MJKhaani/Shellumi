@@ -73,7 +73,11 @@ impl Shellumi {
                         .child(
                             button_icon("new-identity-btn", "identity_card", "+ New Identity").on_click(
                                 cx.listener(|app, _, _, cx| {
-                                    app.open_identity_modal(None, cx);
+                                    app.open_identity_inspector_mode(
+                                        None,
+                                        crate::ui::inspector::InspectorMode::Create,
+                                        cx,
+                                    );
                                 }),
                             ),
                         )
@@ -304,7 +308,11 @@ impl Shellumi {
                                 .border_color(rgb(MacTheme::ACCENT_BLUE))
                         })
                         .on_click(cx.listener(move |app, _, _, cx| {
-                            app.open_identity_modal(Some(edit_id), cx);
+                            app.open_identity_inspector_mode(
+                                Some(edit_id),
+                                crate::ui::inspector::InspectorMode::View,
+                                cx,
+                            );
                         }))
                         .child(
                             div()

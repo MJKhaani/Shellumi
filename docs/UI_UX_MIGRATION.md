@@ -68,7 +68,7 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 - **Phase 1:** Centralized design tokens, layout primitives, `InspectorShell`, and shared controls. (COMPLETED)
 - **Phase 2:** Single `InspectorCoordinator`, draft state machine, and guarded navigation. (COMPLETED)
 - **Phase 3:** Hosts and Groups end-to-end migration into the unified Inspector. (COMPLETED)
-- **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration.
+- **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration. (COMPLETED)
 - **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations.
 - **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping.
 - **Phase 7:** Complex full-page workflows and standardized safety alerts.
@@ -103,5 +103,22 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
   - 11 dedicated inspector unit tests passing (`INS-001`, `INS-002`, `INS-003`, `INS-004`, `INS-005`, `INS-008`, `INS-010`, `INS-016`, `INS-017`, `UI-01`, `UI-02`).
   - 6 layout geometry tests passing (`test_standard_laptop_1280x800_with_inspector`, etc.).
   - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
+  - Clean `cargo fmt --all -- --check`.
+
+### Phase 4: Remaining Object Management Inspectors
+- **Implemented:**
+  - `crates/shellumi-app/src/ui/inspector/identity.rs`: Unified Identity Inspector with View mode (key badge, key type, username, private key path, tags, Edit and Delete actions) and Edit/Create modes (form fields for name, user, key path, password, passphrase, tags, Cancel and Save actions).
+  - `crates/shellumi-app/src/ui/inspector/snippet.rs`: Unified Snippet Inspector with View mode (snippet badge, script preview card, Run, Paste, Edit actions) and Edit/Create modes (form fields for name, command, description, tags, Cancel and Save actions).
+  - `crates/shellumi-app/src/ui/inspector/tunnel.rs`: Unified Port Forwarding Inspector with View mode (protocol mode badge, configuration summary, Start Tunnel and Edit actions) and Edit/Create modes (direction, bind port, target host/port, Cancel and Save actions).
+  - `crates/shellumi-app/src/ui/inspector/workspace.rs`: Unified Workspace Inspector with View mode (workspace badge, session count, layout structure, Launch, Edit, Delete actions) and Edit/Create modes (name, description, layout selection, Cancel and Save actions).
+  - `crates/shellumi-app/src/ui/inspector/vault.rs`: Unified Vault Inspector with View and Edit modes (vault name, storage type, cloud sync toggle, master password setup).
+  - `crates/shellumi-app/src/ui/inspector/provider.rs`: Unified Infrastructure Provider Inspector with View and Edit modes (provider type AWS/Azure/DigitalOcean, credential references, sync intervals, inventory refresh).
+  - `crates/shellumi-app/src/ui/inspector/team.rs`: Unified Team Member & Invitation Inspector with View and Edit modes (name, email, role selection Admin/Member/Auditor, public key, invitation status).
+  - Connected all object management inspectors into `render_unified_inspector` in `crates/shellumi-app/src/ui/inspector/mod.rs`.
+  - Migrated Keychain page, Workspaces page, Port Forwarding page, and Vaults/Integrations pages to route through `open_*_inspector_mode`.
+  - Updated desktop page rendering in `crates/shellumi-app/src/app_render.rs` to render the unified inspector alongside desktop pages without dialog overlap.
+- **Automated Verification:**
+  - 15 dedicated inspector unit tests passing (`test_phase4_targets_replacement`, `test_phase4_identity_dirty_guard`, `test_phase4_tunnel_async_generation`, `test_phase4_workspace_mode_transitions`, plus all prior coordinator and host tests).
+  - Zero warnings on `cargo clippy -p shellumi-app --all-targets -- -D warnings`.
   - Clean `cargo fmt --all -- --check`.
 

@@ -183,9 +183,19 @@ impl Render for Shellumi {
             if show_sidebar {
                 container = container.child(self.workspace_sidebar(page, cx));
             }
-            let mut result = root.child(container.child(body));
+            container = container.child(body);
+            if self.inspector_coordinator.is_open() {
+                container = container.child(self.render_unified_inspector(window, cx));
+            }
+            let mut result = root.child(container);
             if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
                 result = result.child(dropdown);
+            }
+            if let Some(guard) = self.render_unsaved_changes_guard(cx) {
+                result = result.child(guard);
+            }
+            if let Some(confirm) = self.render_delete_confirm_dialog(cx) {
+                result = result.child(confirm);
             }
             return self.desktop_overlays(result, cx);
         }
@@ -1324,8 +1334,10 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.session_replay_modal {
                     result = result.child(self.render_session_replay_modal(modal, cx));
                 }
-                if let Some(modal) = &self.tunnel_modal {
-                    result = result.child(self.render_tunnel_modal(modal, cx));
+                if !self.inspector_coordinator.is_open() {
+                    if let Some(modal) = &self.tunnel_modal {
+                        result = result.child(self.render_tunnel_modal(modal, cx));
+                    }
                 }
                 if let Some(modal) = &self.create_vault_modal {
                     result = result.child(self.render_create_vault_modal(modal, cx));

@@ -1064,9 +1064,6 @@ impl Shellumi {
         if let Some(modal) = &self.session_replay_modal {
             result = result.child(self.render_session_replay_modal(modal, cx));
         }
-        if let Some(modal) = &self.tunnel_modal {
-            result = result.child(self.render_tunnel_modal(modal, cx));
-        }
         if let Some(modal) = &self.create_vault_modal {
             result = result.child(self.render_create_vault_modal(modal, cx));
         }
@@ -1082,8 +1079,13 @@ impl Shellumi {
         if let Some(modal) = &self.invite_modal {
             result = result.child(self.render_invite_team_modal(modal, cx));
         }
-        if let Some(modal) = &self.identity_modal {
-            result = result.child(self.render_identity_modal(modal, cx));
+        if !self.inspector_coordinator.is_open() {
+            if let Some(modal) = &self.tunnel_modal {
+                result = result.child(self.render_tunnel_modal(modal, cx));
+            }
+            if let Some(modal) = &self.identity_modal {
+                result = result.child(self.render_identity_modal(modal, cx));
+            }
         }
         if let Some(ctx_menu) = self.render_group_context_menu(cx) {
             result = result.child(ctx_menu);

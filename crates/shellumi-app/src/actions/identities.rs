@@ -203,4 +203,44 @@ impl Shellumi {
         })
         .detach();
     }
+
+    pub(crate) fn delete_identity(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
+                let credential_store = shellumi_core::default_credential_store();
+                store
+                    .delete_identity_with_secrets(id, &*credential_store)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Err(err) = res {
+                    app.desktop.message = Some(format!("Failed to delete identity: {err}"));
+                } else {
+                    app.load_identities(cx);
+                    app.desktop.message = Some("Identity deleted successfully".into());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }

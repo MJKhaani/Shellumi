@@ -18,10 +18,10 @@ pub enum InspectorTarget {
     Snippet(Option<i64>),
     Tunnel(Option<i64>),
     Workspace(Option<i64>),
-    Vault(String),
+    Vault(Option<String>),
     Provider(Option<i64>),
-    TeamMember(Option<i64>),
-    Session(String),
+    TeamMember(Option<String>),
+    Session(Option<u64>),
 }
 
 /// Operation mode for the Inspector.
@@ -526,5 +526,183 @@ mod tests {
             coord.active().unwrap().target,
             InspectorTarget::Host(Some(2))
         );
+    }
+
+    #[test]
+    fn test_phase4_targets_replacement() {
+        let mut coord = InspectorCoordinator::new();
+
+        // 1. Identity
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::Identity(Some(10)),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Identity(Some(10))
+        );
+        assert!(coord.is_open());
+
+        // 2. Snippet replaces Identity
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::Snippet(Some(20)),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Snippet(Some(20))
+        );
+
+        // 3. Tunnel replaces Snippet
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::Tunnel(Some(30)),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Tunnel(Some(30))
+        );
+
+        // 4. Workspace replaces Tunnel
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::Workspace(Some(40)),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Workspace(Some(40))
+        );
+
+        // 5. Vault replaces Workspace
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::Vault(Some("vault-alpha".into())),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Vault(Some("vault-alpha".into()))
+        );
+
+        // 6. Provider replaces Vault
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::Provider(Some(50)),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Provider(Some(50))
+        );
+
+        // 7. TeamMember replaces Provider
+        assert!(coord.open(
+            "v1",
+            InspectorTarget::TeamMember(Some("alice@example.com".into())),
+            InspectorMode::View,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::TeamMember(Some("alice@example.com".into()))
+        );
+    }
+
+    #[test]
+    fn test_phase4_identity_dirty_guard() {
+        let mut coord = InspectorCoordinator::new();
+        let draft = crate::ui::inspector::drafts::IdentityDraft {
+            id: Some(10),
+            name: "Server Key".into(),
+            username: "admin".into(),
+            ..Default::default()
+        };
+
+        coord.open(
+            "v1",
+            InspectorTarget::Identity(Some(10)),
+            InspectorMode::Edit,
+            Some(InspectorDraft::Identity(draft)),
+        );
+        assert!(!coord.is_dirty());
+
+        coord.set_dirty(true);
+        assert!(coord.is_dirty());
+
+        // Attempting to switch to Tunnel target is blocked by guard
+        let navigated = coord.open(
+            "v1",
+            InspectorTarget::Tunnel(Some(55)),
+            InspectorMode::View,
+            None,
+        );
+        assert!(!navigated);
+        assert!(coord.is_guard_active());
+
+        // Discarding allows navigation to proceed
+        coord.confirm_discard();
+        assert!(!coord.is_guard_active());
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Tunnel(Some(55))
+        );
+    }
+
+    #[test]
+    fn test_phase4_tunnel_async_generation() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Tunnel(Some(33)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        let gen = coord.start_save().unwrap();
+        assert_eq!(
+            coord.active().unwrap().operation,
+            AsyncOperationState::Saving { generation: gen }
+        );
+
+        // Completing save with correct target and gen clears saving status
+        let applied = coord.complete_save("v1", gen, InspectorTarget::Tunnel(Some(33)));
+        assert!(applied);
+        assert_eq!(coord.active().unwrap().operation, AsyncOperationState::Idle);
+    }
+
+    #[test]
+    fn test_phase4_workspace_mode_transitions() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Workspace(Some(42)),
+            InspectorMode::View,
+            None,
+        );
+        assert_eq!(coord.active().unwrap().mode, InspectorMode::View);
+
+        // Transition to Edit
+        coord.open(
+            "v1",
+            InspectorTarget::Workspace(Some(42)),
+            InspectorMode::Edit,
+            None,
+        );
+        assert_eq!(coord.active().unwrap().mode, InspectorMode::Edit);
+
+        // Close inspector cleanly
+        assert!(coord.request_close());
+        assert!(!coord.is_open());
     }
 }

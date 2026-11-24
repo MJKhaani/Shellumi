@@ -97,7 +97,11 @@ impl Shellumi {
                             ))
                             .child(button(("edit-workspace", id as u64), "Edit").on_click(
                                 cx.listener(move |app, _, _, cx| {
-                                    app.edit_library_item(EditorKind::Workspace, Some(id), cx)
+                                    app.open_workspace_inspector_mode(
+                                        Some(id),
+                                        crate::ui::inspector::InspectorMode::Edit,
+                                        cx,
+                                    );
                                 }),
                             ))
                             .child(
@@ -138,9 +142,17 @@ impl Shellumi {
             .border_b_1()
             .border_color(rgb(MacTheme::BORDER))
             .child(heading("Saved workspaces"))
-            .child(primary("new-workspace", "+ New workspace").on_click(
-                cx.listener(|app, _, _, cx| app.edit_library_item(EditorKind::Workspace, None, cx)),
-            ));
+            .child(
+                primary("new-workspace", "+ New workspace").on_click(cx.listener(
+                    |app, _, _, cx| {
+                        app.open_workspace_inspector_mode(
+                            None,
+                            crate::ui::inspector::InspectorMode::Create,
+                            cx,
+                        );
+                    },
+                )),
+            );
 
         let content_scroll = div()
             .id("workspaces-content-scroll")

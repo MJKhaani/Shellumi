@@ -30,7 +30,11 @@ impl Shellumi {
                             .border_color(rgb(MacTheme::ACCENT_BLUE))
                             .text_color(rgb(0xffffff))
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.edit_library_item(EditorKind::Snippet, None, cx)
+                                app.open_snippet_inspector_mode(
+                                    None,
+                                    crate::ui::inspector::InspectorMode::Create,
+                                    cx,
+                                );
                             })),
                     ),
             );
@@ -176,7 +180,11 @@ impl Shellumi {
                             .child(heading(snippet.name.clone()))
                             .child(button_icon("edit-snippet", "edit", "Edit").on_click(
                                 cx.listener(move |app, _, _, cx| {
-                                    app.edit_library_item(EditorKind::Snippet, Some(id), cx)
+                                    app.open_snippet_inspector_mode(
+                                        Some(id),
+                                        crate::ui::inspector::InspectorMode::Edit,
+                                        cx,
+                                    );
                                 }),
                             )),
                     )
