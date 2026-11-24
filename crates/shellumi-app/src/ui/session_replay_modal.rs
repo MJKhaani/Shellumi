@@ -15,13 +15,16 @@ impl Shellumi {
             .bg(rgba(0x000000bb))
             .flex()
             .items_center()
-            .justify_center();
+            .justify_center()
+            .p_4();
 
         let mut modal_box = div()
             .id("session-replay-modal-box")
-            .w(px(840.0))
-            .max_h(px(660.0))
-            .p_6()
+            .w_full()
+            .max_w(px(880.0))
+            .h_full()
+            .max_h(px(680.0))
+            .p_5()
             .rounded_xl()
             .bg(rgb(MacTheme::SURFACE))
             .border_1()
@@ -667,6 +670,7 @@ impl Shellumi {
 
         // Footer
         let footer = div()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()

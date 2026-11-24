@@ -1,5 +1,7 @@
-//! Interactive Unlock Vault modal dialog.
+//! Interactive Unlock Vault modal dialog using standardized safety alert.
 use super::*;
+use crate::ui::components::button::{AppButton, ButtonVariant};
+use crate::ui::components::safety_alert::{alert_backdrop, security_challenge_dialog};
 
 impl Shellumi {
     pub(crate) fn render_unlock_vault_modal(
@@ -7,82 +9,10 @@ impl Shellumi {
         modal: &UnlockVaultModalState,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let overlay = div()
-            .id("unlock-vault-modal-overlay")
-            .occlude()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .bg(rgba(0x000000bb))
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_6();
-
-        let mut modal_box = div()
-            .id("unlock-vault-modal-container")
-            .w(px(520.0))
-            .flex()
-            .flex_col()
-            .bg(rgb(MacTheme::SURFACE))
-            .border_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
-            .rounded_xl()
-            .p_5()
-            .gap_4();
-
-        // Header
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
-            .pb_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2p5()
-                    .child(div().text_xl().child("🔐"))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .child(format!("Unlock Vault — {}", modal.vault_name)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                    .child("Enter the password or 32-character recovery code to unlock this vault."),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("btn-close-unlock-modal")
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.dismiss_unlock_vault_modal(cx);
-                    }))
-                    .child("✕"),
-            );
-
-        // Body with Passphrase Input
         let remember = modal.remember_in_keychain;
-        let body = div()
+        let is_submitting = modal.is_submitting;
+
+        let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
@@ -154,11 +84,8 @@ impl Shellumi {
                     ),
             );
 
-        modal_box = modal_box.child(header).child(body);
-
-        // Error message if present
         if let Some(err) = &modal.error {
-            modal_box = modal_box.child(
+            body = body.child(
                 div()
                     .flex()
                     .items_center()
@@ -175,67 +102,39 @@ impl Shellumi {
             );
         }
 
-        // Actions Footer
-        let is_submitting = modal.is_submitting;
-        let footer = div()
+        let cancel_btn = AppButton::new("btn-cancel-unlock", "Cancel", ButtonVariant::Ghost)
+            .on_click(cx.listener(|app, _, _, cx| {
+                app.dismiss_unlock_vault_modal(cx);
+            }));
+
+        let submit_btn = if is_submitting {
+            AppButton::new("btn-submit-unlock", "Unlocking…", ButtonVariant::Secondary)
+        } else {
+            AppButton::new("btn-submit-unlock", "Unlock Vault", ButtonVariant::Primary).on_click(
+                cx.listener(|app, _, _, cx| {
+                    app.submit_unlock_vault(cx);
+                }),
+            )
+        };
+
+        let actions = div()
             .flex()
             .items_center()
             .justify_end()
             .gap_2()
-            .pt_2()
-            .border_t_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
-            .child(
-                div()
-                    .id("btn-cancel-unlock")
-                    .px_3()
-                    .py_1p5()
-                    .rounded_md()
-                    .text_xs()
-                    .cursor_pointer()
-                    .bg(rgb(MacTheme::SURFACE_ACTIVE))
-                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.dismiss_unlock_vault_modal(cx);
-                    }))
-                    .child("Cancel"),
-            )
-            .child(
-                div()
-                    .id("btn-submit-unlock")
-                    .px_4()
-                    .py_1p5()
-                    .rounded_md()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .bg(if is_submitting {
-                        rgb(MacTheme::SURFACE_ACTIVE)
-                    } else {
-                        rgb(MacTheme::ACCENT_BLUE)
-                    })
-                    .text_color(rgb(0xffffff))
-                    .hover(|s| {
-                        if !is_submitting {
-                            s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER))
-                        } else {
-                            s
-                        }
-                    })
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if !is_submitting {
-                            app.submit_unlock_vault(cx);
-                        }
-                    }))
-                    .child(if is_submitting {
-                        "Unlocking…"
-                    } else {
-                        "Unlock Vault"
-                    }),
-            );
+            .child(cancel_btn)
+            .child(submit_btn);
 
-        modal_box = modal_box.child(footer);
-        overlay.child(modal_box)
+        let card = security_challenge_dialog(
+            format!("Unlock Vault — {}", modal.vault_name),
+            "Enter the password or 32-character recovery code to unlock this vault.",
+            body,
+            actions,
+        )
+        .id("unlock-vault-modal-container");
+
+        alert_backdrop(card)
+            .id("unlock-vault-modal-overlay")
+            .occlude()
     }
 }

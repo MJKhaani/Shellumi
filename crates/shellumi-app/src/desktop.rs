@@ -210,16 +210,6 @@ fn primary(
                 .border_color(rgb(MacTheme::ACCENT_BLUE_HOVER))
         })
 }
-fn danger(
-    id: impl Into<gpui::ElementId>,
-    text: impl Into<gpui::SharedString>,
-) -> gpui::Stateful<gpui::Div> {
-    button_base(id, text)
-        .border_color(rgb(MacTheme::DANGER))
-        .bg(rgb(MacTheme::DANGER))
-        .text_color(rgb(0xffffff))
-        .hover(|style| style.bg(rgb(0xff6961)).border_color(rgb(0xff6961)))
-}
 fn empty(title: &str, text: &str) -> gpui::Div {
     panel()
         .flex_1()
@@ -965,12 +955,13 @@ impl Shellumi {
                 );
             }
             let mut modal = panel()
-                .w(px(760.0))
-                .max_w_full()
+                .w_full()
+                .max_w(px(760.0))
+                .max_h(px(640.0))
                 .flex()
                 .flex_col()
                 .gap_4()
-                .p_6()
+                .p_5()
                 .child(
                     div()
                         .text_lg()
@@ -1023,48 +1014,45 @@ impl Shellumi {
         }
         if let Some((message, command)) = &self.desktop.confirm {
             let command = command.clone();
+            let confirm_btn = crate::ui::components::button::AppButton::new(
+                "confirm-library-delete",
+                "Delete",
+                crate::ui::components::button::ButtonVariant::Danger,
+            )
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.desktop_command(command.clone(), cx);
+            }));
+
+            let cancel_btn = crate::ui::components::button::AppButton::new(
+                "cancel-library-delete",
+                "Cancel",
+                crate::ui::components::button::ButtonVariant::Ghost,
+            )
+            .on_click(cx.listener(|app, _, _, cx| {
+                app.desktop.confirm = None;
+                cx.notify();
+            }));
+
+            let actions = div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(cancel_btn)
+                .child(confirm_btn);
+
+            let alert = crate::ui::components::safety_alert::alert_dialog(
+                message.clone(),
+                "Confirm this change to the local record. Existing terminal sessions are not affected.",
+                None,
+                true,
+                actions,
+            );
+
             root = root.child(
-                div()
+                crate::ui::components::safety_alert::alert_backdrop(alert)
                     .id("library-confirm-overlay")
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-                    .bg(rgba(0x030305dd))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        panel()
-                            .w(px(440.0))
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .child(heading(message.clone()))
-                            .child(muted(
-                                "Confirm this change to the local record. Existing terminal sessions are not affected.",
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        button("cancel-library-delete", "Cancel").on_click(
-                                            cx.listener(|app, _, _, cx| {
-                                                app.desktop.confirm = None;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        danger("confirm-library-delete", "Delete").on_click(
-                                            cx.listener(move |app, _, _, cx| {
-                                                app.desktop_command(command.clone(), cx)
-                                            }),
-                                        ),
-                                    ),
-                            ),
-                    ),
+                    .occlude(),
             );
         }
         if let Some(modal) = &self.snippet_modal {

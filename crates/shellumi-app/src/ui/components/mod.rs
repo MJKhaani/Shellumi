@@ -17,6 +17,6 @@ pub use inspector_shell::InspectorShell;
 pub use popover::{action_menu, MenuItem, PopoverAnchor};
 pub use safety_alert::{
     alert_backdrop, alert_dialog, delete_confirmation_alert, delete_confirmation_dialog,
-    unsaved_changes_guard_alert, unsaved_changes_guard_dialog,
+    security_challenge_dialog, unsaved_changes_guard_alert, unsaved_changes_guard_dialog,
 };
 pub use status::{empty_state, error_state, status_indicator, StatusKind};

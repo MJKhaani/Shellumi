@@ -20,19 +20,19 @@ impl Shellumi {
             .id("conflict-modal-overlay")
             .occlude()
             .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
+            .inset_0()
             .bg(rgba(0x000000bb))
             .flex()
             .items_center()
             .justify_center()
-            .p_6();
+            .p_4();
 
         let mut modal_box = div()
             .id("conflict-modal-container")
-            .w(px(880.0))
-            .max_h(px(640.0))
+            .w_full()
+            .max_w(px(900.0))
+            .h_full()
+            .max_h(px(660.0))
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::SURFACE))
@@ -88,8 +88,15 @@ impl Shellumi {
         modal_box = modal_box.child(header);
 
         // Conflict items sidebar / tabs
-        let mut list_row = div().flex().gap_4().flex_1();
-        let mut items_col = div().w(px(240.0)).flex().flex_col().gap_1();
+        let mut list_row = div().flex().gap_4().flex_1().min_h_0();
+        let mut items_col = div()
+            .id("conflict-items-col")
+            .w(px(240.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .overflow_y_scroll();
         for (i, item) in modal.items.iter().enumerate() {
             let is_sel = i == selected_idx;
             let choice = modal
@@ -359,6 +366,7 @@ impl Shellumi {
 
         // Footer buttons
         let footer = div()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_end()

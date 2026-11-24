@@ -71,7 +71,7 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 - **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration. (COMPLETED)
 - **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations. (COMPLETED)
 - **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping. (COMPLETED)
-- **Phase 7:** Complex full-page workflows and standardized safety alerts.
+- **Phase 7:** Complex full-page workflows and standardized safety alerts. (COMPLETED)
 - **Phase 8:** Native GPUI interaction regression testing, visual QA, and final polish.
 
 ---
@@ -146,4 +146,27 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
   - 559 automated unit and integration tests passing across workspace (`cargo test --workspace`).
   - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
   - Clean `cargo fmt --all -- --check`.
+
+### Phase 7: Complex Workflows & Standardized Safety Alerts
+- **Implemented:**
+  - Standardized Security Challenge Dialogs (`crates/shellumi-app/src/ui/components/safety_alert.rs`):
+    - Added `security_challenge_dialog` for master passwords, recovery code verification, and zero-knowledge unlock prompts.
+    - Standardized `crates/shellumi-app/src/ui/unlock_vault_modal.rs` to use `security_challenge_dialog` and `alert_backdrop`, eliminating ad hoc floating card styles and enforcing design token consistency (`surface()`, `separator()`, `AppButton`).
+  - Standardized Blocking Delete Confirmation:
+    - Migrated legacy `library-confirm-overlay` in `crates/shellumi-app/src/desktop.rs` to use `alert_backdrop` and `alert_dialog` with `AppButton`, eliminating custom modal styling for desktop library deletions.
+    - Migrated overview "New Snippet" button to route directly to `open_snippet_inspector_mode(None, InspectorMode::Create, cx)`, eliminating duplicate editor routes.
+  - Dedicated Step-Based Setup Wizard Workflow (`crates/shellumi-app/src/ui/setup_wizard_modal.rs`):
+    - Replaced the fixed `740×840px` floating modal box with a responsive dedicated page workflow surface (`w_full().max_w(px(760.0)).h_full().max_h(px(720.0))`).
+    - Stepper bar and bottom navigation footer are pinned (`flex_shrink_0`), while body contents and error/status banners flex within an independently scrollable view (`#wizard-scroll-content`).
+    - Resolves `DATA-010`: guarantees that on minimum viewports (e.g. 940×650) all steps, forms, and navigation buttons (`Back`, `Next`, `Finish`, `Cancel`) remain fully visible, accessible, and operable without clipping.
+  - Responsive Conflict & Replay Resolution (`crates/shellumi-app/src/ui/conflict_modal.rs`, `session_replay_modal.rs`):
+    - Updated `conflict_modal.rs` to responsive dimensions (`w_full().max_w(px(900.0)).h_full().max_h(px(660.0))`), independent scroll for items list (`#conflict-items-col`), and pinned footer.
+    - Updated `session_replay_modal.rs` to responsive dimensions (`w_full().max_w(px(880.0)).h_full().max_h(px(680.0))`) and pinned footer.
+- **Automated Verification:**
+  - 4 dedicated unit tests for safety alerts in `crates/shellumi-app/src/ui/components/safety_alert.rs` (`test_alert_card_dimensions_and_structure`, `test_security_challenge_dialog_construction`, `test_unsaved_changes_guard_construction`, `test_delete_confirmation_construction`).
+  - Full suite of setup wizard, crash recovery, and vault lock/unlock roundtrip tests passing (`test_fresh_installation_detection_and_default_vault_creation_flow`, `test_interrupted_setup_recovery_crash_safe`, `test_fault_injection_wrong_password_corrupted_snapshot_safety`, `test_vault_lock_and_unlock_recovery_roundtrip`, `test_keychain_disabled_vault_unlock_and_sync_with_in_memory_keys`).
+  - 145 unit and integration tests passing in `shellumi-app`.
+  - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
+  - Clean `cargo fmt --all -- --check`.
+
 

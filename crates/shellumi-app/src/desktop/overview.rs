@@ -110,7 +110,11 @@ impl Shellumi {
                 button("overview-new-snippet", "New snippet").on_click(cx.listener(
                     |app, _, _, cx| {
                         app.page = Some("Snippets");
-                        app.edit_library_item(EditorKind::Snippet, None, cx);
+                        app.open_snippet_inspector_mode(
+                            None,
+                            crate::ui::inspector::coordinator::InspectorMode::Create,
+                            cx,
+                        );
                     },
                 )),
             )

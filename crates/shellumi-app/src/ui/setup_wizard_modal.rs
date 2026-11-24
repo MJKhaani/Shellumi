@@ -13,27 +13,27 @@ impl Shellumi {
             .id("setup-wizard-modal-overlay")
             .occlude()
             .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
+            .inset_0()
             .bg(rgba(0x000000dd))
             .flex()
             .items_center()
             .justify_center()
-            .p_6();
+            .p_4();
 
         let mut modal_box = div()
             .id("setup-wizard-container")
-            .w(px(740.0))
-            .max_h(px(840.0))
+            .w_full()
+            .max_w(px(760.0))
+            .h_full()
+            .max_h(px(720.0))
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::SURFACE))
             .border_1()
             .border_color(rgb(MacTheme::SEPARATOR))
             .rounded_xl()
-            .p_6()
-            .gap_4();
+            .p_5()
+            .gap_3();
 
         // -------------------------------------------------------------------
         // 1. Wizard Header & Stepper
@@ -49,6 +49,7 @@ impl Shellumi {
 
         let mut stepper = div()
             .id("wizard-stepper-bar")
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()
@@ -110,13 +111,21 @@ impl Shellumi {
             }
         };
 
-        modal_box = modal_box.child(body);
+        let mut scroll_content = div()
+            .id("wizard-scroll-content")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(body);
 
         // -------------------------------------------------------------------
         // 3. Status & Error Messages
         // -------------------------------------------------------------------
         if let Some(err) = &wizard.error {
-            modal_box = modal_box.child(
+            scroll_content = scroll_content.child(
                 div()
                     .id("wizard-error-banner")
                     .px_3()
@@ -132,7 +141,7 @@ impl Shellumi {
         }
 
         if let Some(msg) = &wizard.status_message {
-            modal_box = modal_box.child(
+            scroll_content = scroll_content.child(
                 div()
                     .id("wizard-status-banner")
                     .px_3()
@@ -147,11 +156,14 @@ impl Shellumi {
             );
         }
 
+        modal_box = modal_box.child(scroll_content);
+
         // -------------------------------------------------------------------
         // 4. Navigation Footer
         // -------------------------------------------------------------------
         let mut footer = div()
             .id("wizard-navigation-footer")
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()

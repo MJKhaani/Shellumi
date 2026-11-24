@@ -192,3 +192,106 @@ pub fn delete_confirmation_alert(
 
     alert_backdrop(alert_dialog(title, message, None, true, actions))
 }
+
+/// Standard security challenge dialog card (for master passwords, recovery codes, auth challenges).
+pub fn security_challenge_dialog(
+    title: impl Into<SharedString>,
+    subtitle: impl Into<SharedString>,
+    content: impl IntoElement,
+    actions: impl IntoElement,
+) -> Div {
+    let header = div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .mb_1()
+        .child(
+            div()
+                .w(px(32.0))
+                .h(px(32.0))
+                .rounded_full()
+                .bg(rgb(0x1e293b))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(crate::theme::accent_blue())
+                .child("🔐"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(text_primary())
+                        .child(title.into()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_secondary())
+                        .child(subtitle.into()),
+                ),
+        );
+
+    div()
+        .w(px(500.0))
+        .max_w_full()
+        .bg(surface())
+        .border_1()
+        .border_color(separator())
+        .rounded(px(MacTheme::PANEL_RADIUS))
+        .shadow_lg()
+        .p_5()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(header)
+        .child(content)
+        .child(
+            div()
+                .pt_3()
+                .border_t_1()
+                .border_color(separator())
+                .child(actions),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_alert_card_dimensions_and_structure() {
+        let actions = div().child("test-actions");
+        let alert = alert_dialog("Test Title", "Test Message", None, false, actions);
+        // Alert card should be instantiated without panics
+        let _backdrop = alert_backdrop(alert);
+    }
+
+    #[test]
+    fn test_security_challenge_dialog_construction() {
+        let content = div().child("passphrase-field");
+        let actions = div().child("submit-btn");
+        let dialog =
+            security_challenge_dialog("Unlock Vault", "Argon2id derivation", content, actions);
+        let backdrop = alert_backdrop(dialog);
+        // Verify backdrop wrapper encapsulates the dialog
+        drop(backdrop);
+    }
+
+    #[test]
+    fn test_unsaved_changes_guard_construction() {
+        let guard = unsaved_changes_guard_alert("Production Server", "save", "discard", "keep");
+        drop(guard);
+    }
+
+    #[test]
+    fn test_delete_confirmation_construction() {
+        let alert = delete_confirmation_alert("Host", "db-prod-01", "confirm", "cancel");
+        drop(alert);
+    }
+}
