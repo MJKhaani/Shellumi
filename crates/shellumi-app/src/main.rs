@@ -721,6 +721,8 @@ struct Shellumi {
     identity_modal: Option<IdentityModalState>,
     sftp_context_menu: Option<SftpContextMenuState>,
     sftp_modal: Option<SftpModalState>,
+    #[allow(dead_code)]
+    pub(crate) inspector_coordinator: ui::inspector::InspectorCoordinator,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -1157,6 +1159,7 @@ impl Shellumi {
             identity_modal: None,
             sftp_context_menu: None,
             sftp_modal: None,
+            inspector_coordinator: ui::inspector::InspectorCoordinator::new(),
         }
     }
 

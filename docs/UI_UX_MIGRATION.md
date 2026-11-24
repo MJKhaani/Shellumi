@@ -65,11 +65,26 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 ## 3. Migration Roadmap & Phased Execution Plan
 
 - **Phase 0:** Baseline, inventory, documentation, and test verification.
-- **Phase 1:** Centralized design tokens, layout primitives, `InspectorShell`, and shared controls.
-- **Phase 2:** Single `InspectorCoordinator`, draft state machine, and guarded navigation.
+- **Phase 1:** Centralized design tokens, layout primitives, `InspectorShell`, and shared controls. (COMPLETED)
+- **Phase 2:** Single `InspectorCoordinator`, draft state machine, and guarded navigation. (COMPLETED)
 - **Phase 3:** Hosts and Groups end-to-end migration into the unified Inspector.
 - **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration.
 - **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations.
 - **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping.
 - **Phase 7:** Complex full-page workflows and standardized safety alerts.
 - **Phase 8:** Native GPUI interaction regression testing, visual QA, and final polish.
+
+---
+
+## 4. Phase Completion Log
+
+### Phase 2: Inspector Coordinator & State Machine
+- **Implemented:**
+  - `crates/shellumi-app/src/ui/inspector/drafts.rs`: Strongly-typed draft state models for all 10 inspector targets (`HostDraft`, `GroupDraft`, `IdentityDraft`, `SnippetDraft`, `TunnelDraft`, `WorkspaceDraft`, `VaultDraft`, `ProviderDraft`, `TeamMemberDraft`, `SessionDraft`).
+  - `crates/shellumi-app/src/ui/inspector/coordinator.rs`: Single authoritative `InspectorCoordinator` governing inspector visibility, active target, edit mode, dirty state tracking, guarded navigation (`NavigationRequest`), multi-vault isolation switching, generation counters for stale async operation suppression, and double-submit prevention.
+  - Integration into `Shellumi` struct in `crates/shellumi-app/src/main.rs`.
+- **Automated Verification:**
+  - 6 dedicated state machine unit tests covering `INS-001`, `INS-002`, `INS-008`, `INS-010`, `INS-016`, `INS-017`.
+  - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
+  - Clean `cargo fmt --all -- --check`.
+
