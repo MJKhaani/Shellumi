@@ -3420,7 +3420,7 @@ fn test_vault_quarantine_restart_recovery() {
 #[test]
 fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
     use crate::data_path::{
-        detect_and_recover_interrupted_rotation, resolve_manifest_file, write_rotation_journal,
+        check_pending_password_rotation, resolve_manifest_file, write_rotation_journal,
         PasswordRotationJournal, PasswordRotationStage,
     };
     use shellumi_core::{VaultId, VaultKey, VaultManifest};
@@ -3470,17 +3470,28 @@ fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
     // Corrupt manifest to simulate partial write before crash
     fs::write(&manifest_path, b"corrupted partial manifest write").unwrap();
 
-    // Execute startup recovery
-    let recovered = detect_and_recover_interrupted_rotation(&temp_dir).unwrap();
-    assert_eq!(recovered, vec![vault_id.to_string()]);
-
-    // Verify manifest was restored from original backup and can unlock with old password
-    let restored_manifest = VaultManifest::load_from_path(&manifest_path).unwrap();
-    assert!(restored_manifest.unlock(old_pass).is_ok());
-    assert!(
-        !rotation_journal_path.exists(),
-        "Journal should be cleaned up after recovery"
-    );
+    for _ in 0..2 {
+        assert!(check_pending_password_rotation(&temp_dir).is_err());
+        assert_eq!(
+            fs::read(&manifest_path).unwrap(),
+            b"corrupted partial manifest write"
+        );
+        let saved: PasswordRotationJournal =
+            serde_json::from_slice(&fs::read(&rotation_journal_path).unwrap()).unwrap();
+        let backup: VaultManifest =
+            serde_json::from_str(saved.original_manifest_backup.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            backup.unlock(old_pass).unwrap().expose_bytes(),
+            key.expose_bytes()
+        );
+        assert_eq!(
+            backup.unlock_with_recovery(rec_code).unwrap().expose_bytes(),
+            key.expose_bytes()
+        );
+    }
+    fs::write(&rotation_journal_path, b"truncated").unwrap();
+    assert!(check_pending_password_rotation(&temp_dir).is_err());
+    assert_eq!(fs::read(&rotation_journal_path).unwrap(), b"truncated");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

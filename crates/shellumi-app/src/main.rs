@@ -3165,7 +3165,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let (database, create_parent, startup_error) = if let Some(path) = custom_hosts {
+    let (mut database, create_parent, mut startup_error) = if let Some(path) = custom_hosts {
         (Some(path), false, None)
     } else {
         match data_path::default_data_file().and_then(|path| {
@@ -3178,6 +3178,12 @@ fn main() {
         }
     };
 
+    if let Some(path) = &database {
+        if let Err(error) = data_path::check_pending_password_rotation(std::path::Path::new(path)) {
+            startup_error = Some(error);
+            database = None;
+        }
+    }
     let should_run_wizard = force_wizard || {
         if let Some(ref db_path) = database {
             let base_path = std::path::Path::new(db_path);
@@ -3204,17 +3210,6 @@ fn main() {
                     );
                 }
             }
-            if let Ok(recovered_rot) = data_path::detect_and_recover_interrupted_rotation(base_dir)
-            {
-                if !recovered_rot.is_empty() {
-                    tracing::info!(
-                        count = recovered_rot.len(),
-                        vaults = ?recovered_rot,
-                        "Recovered interrupted vault password rotation operations on startup"
-                    );
-                }
-            }
-
             !shellumi_core::setup::SetupState::is_setup_completed(base_dir)
         } else {
             false

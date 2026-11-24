@@ -15,7 +15,7 @@ use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
-use shellumi_core::{VaultContext, VaultId, VaultKey, VaultLocation, VaultManifest};
+use shellumi_core::{VaultContext, VaultId, VaultLocation, VaultManifest};
 use shellumi_storage::HostStore;
 
 impl Shellumi {
@@ -663,9 +663,6 @@ impl Shellumi {
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let name_for_msg = name.clone();
         let recovery_code_to_persist = gen_rec;
-        let existing_key = existing_vault_id
-            .as_deref()
-            .and_then(|id| self.vault_key_for(id));
         cx.notify();
 
         let task = cx.background_executor().spawn(async move {
@@ -674,6 +671,10 @@ impl Shellumi {
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
                 if let Some(target_id) = existing_vault_id {
+                    if !passphrase.is_empty() {
+                        tracing::warn!("Blocked password change before modifying vault credentials");
+                        return Err("Password changes are unavailable until recovery can verify all credential stores.".into());
+                    }
                     let vid = VaultId::new(&target_id).map_err(|e| e.to_string())?;
                     let location = if is_remote {
                         let conn_id = shellumi_core::ServerConnectionId::new(&server_url)
@@ -703,270 +704,6 @@ impl Shellumi {
                         .register_vault_context(&name, &context)
                         .await
                         .map_err(|e| e.to_string())?;
-
-                    // If a new passphrase was provided, rotate the DEK encryption envelope
-                    if !passphrase.is_empty() {
-                        if let Some(key) = existing_key {
-                            let new_primary = key
-                                .wrap_with_password(&vid, &passphrase)
-                                .map_err(|e| format!("Failed to re-wrap key: {e}"))?;
-
-                            // Pre-commit verification: verify new password unwraps identical DEK
-                            let test_unwrapped = VaultKey::unwrap_with_password(
-                                &vid,
-                                &passphrase,
-                                &new_primary,
-                            )
-                            .map_err(|e| {
-                                format!("Verification of rotated key envelope failed: {e}")
-                            })?;
-                            if test_unwrapped.expose_bytes() != key.expose_bytes() {
-                                return Err(
-                                    "Cryptographic verification failed: new password does not decrypt identical DEK"
-                                        .into(),
-                                );
-                            }
-
-                            let manifest_path = data_path::resolve_manifest_file(
-                                std::path::Path::new(&db_path),
-                                vid.as_str(),
-                            );
-                            let rotation_journal_path =
-                                manifest_path.with_extension("rotation_journal.json");
-
-                            let original_manifest_backup = if manifest_path.exists() {
-                                Some(std::fs::read_to_string(&manifest_path).map_err(|e| {
-                                    format!("Failed to read manifest for backup: {e}")
-                                })?)
-                            } else {
-                                None
-                            };
-
-                            let original_registry_envelope = reg_store
-                                .get_vault_recovery_envelope(vid.as_str())
-                                .await
-                                .unwrap_or(None);
-
-                            let target_db = data_path::resolve_vault_db_file(
-                                std::path::Path::new(&db_path),
-                                vid.as_str(),
-                            );
-                            let mut original_target_db_envelope = None;
-                            if let Some(target_db_str) = target_db.to_str() {
-                                if target_db.exists() {
-                                    if let Ok(target_store) =
-                                        HostStore::open_with_key(target_db_str, Some(&key)).await
-                                    {
-                                        original_target_db_envelope = target_store
-                                            .get_vault_recovery_envelope(vid.as_str())
-                                            .await
-                                            .unwrap_or(None);
-                                    }
-                                }
-                            }
-
-                            // Pre-rotation validation: verify that the new passphrase unwraps to the exact same DEK
-                            if manifest_path.exists() {
-                                let mut test_manifest =
-                                    VaultManifest::load_from_path(&manifest_path)
-                                        .map_err(|e| format!("Failed to parse manifest: {e}"))?;
-                                test_manifest.change_password(&key, &passphrase).map_err(|e| {
-                                    format!("Pre-rotation validation failed to change password: {e}")
-                                })?;
-                                let test_unlocked = test_manifest.unlock(&passphrase).map_err(|e| {
-                                    format!("Pre-rotation validation failed: new passphrase cannot unlock derived manifest: {e}")
-                                })?;
-                                if test_unlocked.expose_bytes() != key.expose_bytes() {
-                                    return Err("Pre-rotation validation failed: unlocked key does not match active vault DEK".into());
-                                }
-                            }
-
-                            let mut rotation_journal = data_path::PasswordRotationJournal {
-                                journal_version: 1,
-                                vault_id: vid.as_str().to_string(),
-                                stage: data_path::PasswordRotationStage::Initiated,
-                                original_manifest_backup: original_manifest_backup.clone(),
-                                original_registry_envelope: original_registry_envelope.clone(),
-                                original_target_db_envelope: original_target_db_envelope.clone(),
-                                target_db_path: target_db.to_str().map(|s| s.to_string()),
-                                registry_db_path: Some(db_path.clone()),
-                                updated_at: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                            };
-                            data_path::write_rotation_journal(
-                                &rotation_journal_path,
-                                &rotation_journal,
-                            )?;
-
-                            if manifest_path.exists() {
-                                let mut manifest = VaultManifest::load_from_path(&manifest_path)
-                                    .map_err(|e| format!("Failed to parse manifest: {e}"))?;
-                                manifest.name = name.clone();
-                                manifest
-                                    .change_password(&key, &passphrase)
-                                    .map_err(|e| {
-                                        format!("Failed to update primary envelope revision: {e}")
-                                    })?;
-                                let serialized = serde_json::to_string_pretty(&manifest)
-                                    .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
-                                data_path::write_durable_file(&manifest_path, &serialized)?;
-
-                                rotation_journal.stage =
-                                    data_path::PasswordRotationStage::ManifestSaved;
-                                let _ = data_path::write_rotation_journal(
-                                    &rotation_journal_path,
-                                    &rotation_journal,
-                                );
-                            }
-
-                            let env_json = serde_json::to_string(&new_primary)
-                                .map_err(|e| format!("Failed to serialize recovery envelope: {e}"))?;
-
-                            let target_db = data_path::resolve_vault_db_file(
-                                std::path::Path::new(&db_path),
-                                vid.as_str(),
-                            );
-                            if let Some(target_db_str) = target_db.to_str() {
-                                if target_db.exists() {
-                                    match HostStore::open_with_key(target_db_str, Some(&key)).await
-                                    {
-                                        Ok(mut target_store) => {
-                                            if let Err(e) = target_store
-                                                .save_vault_recovery_envelope(vid.as_str(), &env_json)
-                                                .await
-                                            {
-                                                if let Some(ref bytes) = original_manifest_backup {
-                                                    let _ = data_path::write_durable_file(
-                                                        &manifest_path,
-                                                        bytes,
-                                                    );
-                                                }
-                                                let _ =
-                                                    std::fs::remove_file(&rotation_journal_path);
-                                                return Err(format!(
-                                                    "Failed to persist recovery envelope in target vault: {e}"
-                                                ));
-                                            }
-                                            rotation_journal.stage =
-                                                data_path::PasswordRotationStage::TargetDbUpdated;
-                                            let _ = data_path::write_rotation_journal(
-                                                &rotation_journal_path,
-                                                &rotation_journal,
-                                            );
-                                        }
-                                        Err(e) => {
-                                            if let Some(ref bytes) = original_manifest_backup {
-                                                let _ = data_path::write_durable_file(
-                                                    &manifest_path,
-                                                    bytes,
-                                                );
-                                            }
-                                            let _ = std::fs::remove_file(&rotation_journal_path);
-                                            return Err(format!(
-                                                "Failed to open target database for envelope update: {e}"
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-
-                            if let Err(e) = reg_store
-                                .save_vault_recovery_envelope(vid.as_str(), &env_json)
-                                .await
-                            {
-                                if let Some(ref bytes) = original_manifest_backup {
-                                    let _ = data_path::write_durable_file(&manifest_path, bytes);
-                                }
-                                if let Some(target_db_str) = target_db.to_str() {
-                                    if target_db.exists() {
-                                        if let Ok(mut t_store) = HostStore::open_with_key(target_db_str, Some(&key)).await {
-                                            if let Some(ref orig_t_env) = original_target_db_envelope {
-                                                let _ = t_store.save_vault_recovery_envelope(vid.as_str(), orig_t_env).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                let _ = std::fs::remove_file(&rotation_journal_path);
-                                return Err(format!(
-                                    "Failed to persist recovery envelope in registry: {e}; rolled back manifest and target DB"
-                                ));
-                            }
-                            rotation_journal.stage =
-                                data_path::PasswordRotationStage::RegistryUpdated;
-                            let _ = data_path::write_rotation_journal(
-                                &rotation_journal_path,
-                                &rotation_journal,
-                            );
-
-                            // Synchronize OS credential store and strictly verify outcome
-                            let cred_store = shellumi_core::default_credential_store();
-                            if let Err(e) = cred_store.set_secret(
-                                "shellumi",
-                                &format!("vault_passphrase_{}", vid.as_str()),
-                                &passphrase,
-                            ) {
-                                if let Some(ref bytes) = original_manifest_backup {
-                                    let _ = data_path::write_durable_file(&manifest_path, bytes);
-                                }
-                                if let Some(target_db_str) = target_db.to_str() {
-                                    if target_db.exists() {
-                                        if let Ok(mut t_store) = HostStore::open_with_key(target_db_str, Some(&key)).await {
-                                            if let Some(ref orig_t_env) = original_target_db_envelope {
-                                                let _ = t_store.save_vault_recovery_envelope(vid.as_str(), orig_t_env).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                if let Some(ref orig_reg) = original_registry_envelope {
-                                    let _ = reg_store
-                                        .save_vault_recovery_envelope(vid.as_str(), orig_reg)
-                                        .await;
-                                }
-                                let _ = std::fs::remove_file(&rotation_journal_path);
-                                return Err(format!(
-                                    "Failed to update OS credential store with new vault passphrase: {e}; rolled back all stores"
-                                ));
-                            }
-                            rotation_journal.stage =
-                                data_path::PasswordRotationStage::CredentialStoreUpdated;
-                            let _ = data_path::write_rotation_journal(
-                                &rotation_journal_path,
-                                &rotation_journal,
-                            );
-
-                            // Post-rotation validation: verify unlocked DEK matches
-                            if manifest_path.exists() {
-                                let manifest = VaultManifest::load_from_path(&manifest_path)
-                                    .map_err(|e| {
-                                        format!(
-                                            "Failed to load rotated manifest for validation: {e}"
-                                        )
-                                    })?;
-                                let unlocked = manifest.unlock(&passphrase).map_err(|e| {
-                                    format!(
-                                        "Validation failed: new passphrase cannot unlock rotated manifest: {e}"
-                                    )
-                                })?;
-                                if unlocked.expose_bytes() != key.expose_bytes() {
-                                    return Err(
-                                        "Post-rotation validation failed: unlocked key does not match DEK"
-                                            .into(),
-                                    );
-                                }
-                            }
-                            rotation_journal.stage = data_path::PasswordRotationStage::Verified;
-                            let _ = data_path::write_rotation_journal(
-                                &rotation_journal_path,
-                                &rotation_journal,
-                            );
-
-                            // Complete rotation and cleanup temporary journal
-                            rotation_journal.stage = data_path::PasswordRotationStage::Completed;
-                            let _ = std::fs::remove_file(&rotation_journal_path);
-                        }
-                    }
 
                     Ok::<(String, Option<shellumi_core::VaultKey>), String>((target_id, None))
                 } else {

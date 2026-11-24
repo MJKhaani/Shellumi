@@ -223,6 +223,7 @@ pub(crate) struct VaultQuarantineRecord {
     pub reason: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PasswordRotationStage {
     Initiated,
@@ -234,6 +235,7 @@ pub(crate) enum PasswordRotationStage {
     Completed,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PasswordRotationJournal {
     pub journal_version: u32,
@@ -374,6 +376,7 @@ fn write_durable_journal(path: &Path, journal: &VaultQuarantineJournal) -> Resul
     write_durable_file(path, &json)
 }
 
+#[cfg(test)]
 pub(crate) fn write_rotation_journal(
     path: &Path,
     journal: &PasswordRotationJournal,
@@ -383,55 +386,37 @@ pub(crate) fn write_rotation_journal(
     write_durable_file(path, &json)
 }
 
-pub(crate) fn detect_and_recover_interrupted_rotation(
-    base_path: &Path,
-) -> Result<Vec<String>, String> {
-    let root = resolve_root_dir(base_path);
-    let manifests_dir = resolve_manifest_dir(base_path);
-    let vaults_dir = root.join("vaults");
-
-    let mut search_dirs = Vec::new();
-    if manifests_dir.exists() {
-        search_dirs.push(manifests_dir);
-    }
-    if vaults_dir.exists() && vaults_dir != root.join("vault_manifests") {
-        search_dirs.push(vaults_dir);
-    }
-
-    let mut recovered = Vec::new();
-    for dir in search_dirs {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.to_string_lossy().ends_with(".rotation_journal.json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(journal) = serde_json::from_str::<PasswordRotationJournal>(&content) {
-                        if journal.stage != PasswordRotationStage::Completed {
-                            tracing::warn!(
-                                vault_id = %journal.vault_id,
-                                stage = ?journal.stage,
-                                "Recovering interrupted password rotation"
-                            );
-                            if journal.stage != PasswordRotationStage::Verified {
-                                // Interrupted prior to full multi-store verification: revert manifest to original state
-                                if let Some(backup_content) = &journal.original_manifest_backup {
-                                    let manifest_path =
-                                        resolve_manifest_file(base_path, &journal.vault_id);
-                                    let _ = write_durable_file(&manifest_path, backup_content);
-                                }
-                            }
-                            if !recovered.contains(&journal.vault_id) {
-                                recovered.push(journal.vault_id);
-                            }
-                        }
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
+/// Version-one journals cannot prove which credential-store writes committed.
+/// Preserve every store until authenticated reconciliation is available.
+pub(crate) fn check_pending_password_rotation(base_path: &Path) -> Result<(), String> {
+    for dir in [
+        resolve_manifest_dir(base_path),
+        resolve_vault_dir(base_path),
+    ] {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Cannot inspect rotation journals in {}: {e}",
+                    dir.display()
+                ))
+            }
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("Cannot inspect rotation journal entry: {e}"))?
+                .path();
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".rotation_journal.json"))
+            {
+                tracing::error!("Pending password rotation requires authenticated recovery");
+                return Err(format!("Password rotation recovery required. Preserve the journal at {} and both vault databases.", path.display()));
             }
         }
     }
-    Ok(recovered)
+    Ok(())
 }
 
 pub(crate) fn quarantine_vault_files(
