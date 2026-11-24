@@ -1561,6 +1561,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn team_sync_retains_queue_without_reading_or_publishing_passphrase_records() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+        let local = VaultId::new("team-vault").unwrap();
+        let remote = Uuid::new_v4();
+        store
+            .record_pending_mutation(
+                local.as_str(),
+                "record",
+                "host",
+                0,
+                false,
+                Some(r#"{"name":"record"}"#),
+            )
+            .await
+            .unwrap();
+        let transport = MockHttpTransport::default();
+        transport.queue_json_response(
+            200,
+            &serde_json::json!({
+                "vault_id": remote, "tenant_id": Uuid::new_v4(), "owner_id": Uuid::new_v4(),
+                "vault_type": "team", "active_key_epoch": 1, "server_sequence": 0,
+                "role": "owner", "created_at": 1, "updated_at": 1
+            }),
+        );
+        let client =
+            ShellumiServerClient::with_transport("https://example.invalid", transport.clone());
+        let result =
+            ServerSyncEngine::sync_vault(&mut store, &local, remote, &client, "legacy-passphrase")
+                .await;
+        assert!(result.unwrap_err().to_string().contains("epoch-key"));
+        let request = transport.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, "GET");
+        assert!(request.url.ends_with(&format!("/vaults/{remote}")));
+        assert_eq!(
+            store
+                .get_pending_mutations(local.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .get_vault_sync_state(local.as_str())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn test_snapshot_recovery_on_cursor_expired() {
         let mut store = HostStore::open(":memory:").await.unwrap();
         let vault_id = VaultId::new("v-corp").unwrap();

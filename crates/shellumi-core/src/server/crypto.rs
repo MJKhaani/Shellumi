@@ -370,6 +370,12 @@ pub fn wrap_dek_for_recipient(
     let ephem_public = X25519PublicKey::from(&ephem_secret);
 
     let shared_secret = ephem_secret.diffie_hellman(&recipient_pk);
+    if !shared_secret.was_contributory() {
+        tracing::warn!("Rejected non-contributory recipient agreement key");
+        return Err(CryptoError::KeyGen(
+            "Invalid recipient agreement key".into(),
+        ));
+    }
     let wrap_key = derive_wrap_key(shared_secret.as_bytes(), vault_id, epoch)?;
 
     let mut nonce_bytes = [0u8; 12];
@@ -421,6 +427,12 @@ pub fn unwrap_dek_for_device(
 
     let dev_secret = X25519StaticSecret::from(*device_x25519_secret);
     let shared_secret = dev_secret.diffie_hellman(&ephem_pk);
+    if !shared_secret.was_contributory() {
+        tracing::warn!("Rejected non-contributory ephemeral agreement key");
+        return Err(CryptoError::KeyGen(
+            "Invalid ephemeral agreement key".into(),
+        ));
+    }
     let wrap_key = derive_wrap_key(shared_secret.as_bytes(), vault_id, epoch)?;
 
     let wrapped_bytes = BASE64_STANDARD
@@ -683,4 +695,24 @@ pub fn unwrap_collab_key_for_participant(
     let mut key = [0u8; 32];
     key.copy_from_slice(decrypted);
     Ok(Zeroizing::new(key))
+}
+
+#[cfg(test)]
+mod recipient_key_tests {
+    use super::*;
+
+    #[test]
+    fn reject_non_contributory_recipient_and_ephemeral_keys() {
+        let vault = Uuid::new_v4();
+        for first in [0, 1] {
+            let mut public = [0u8; 32];
+            public[0] = first;
+            let encoded = BASE64_STANDARD.encode(public);
+            assert!(wrap_dek_for_recipient(&[7; 32], &encoded, vault, 2).is_err());
+            assert!(matches!(
+                unwrap_dek_for_device("", &encoded, &[8; 32], vault, 2),
+                Err(CryptoError::KeyGen(_))
+            ));
+        }
+    }
 }
