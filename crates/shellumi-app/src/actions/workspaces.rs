@@ -7,6 +7,8 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
+        let gen = self.vault_load_generation;
         let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -16,7 +18,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 store.list_workspaces().await.map_err(|e| e.to_string())
@@ -25,10 +27,12 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
-                if let Ok(workspaces) = result {
-                    app.workspaces = workspaces;
+                if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
+                    if let Ok(workspaces) = result {
+                        app.workspaces = workspaces;
+                        cx.notify();
+                    }
                 }
-                cx.notify();
             });
         })
         .detach();

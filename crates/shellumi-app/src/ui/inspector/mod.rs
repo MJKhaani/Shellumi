@@ -437,6 +437,24 @@ impl Shellumi {
                 let leaked: &'static str = Box::leak(page_name.into_boxed_str());
                 self.navigate_page(leaked, window, cx);
             }
+            crate::ui::inspector::NavigationRequest::SwitchTab(idx) => {
+                if let Some(win) = window {
+                    self.select_tab(idx, win, cx);
+                } else {
+                    self.page = None;
+                    self.active_tab_idx = idx;
+                    cx.notify();
+                }
+            }
+            crate::ui::inspector::NavigationRequest::CloseTab(tab_id) => {
+                if let Some(win) = window {
+                    self.close_tab(tab_id, win, cx);
+                }
+            }
+            crate::ui::inspector::NavigationRequest::CloseWindow => {
+                self.inspector_coordinator.close();
+                cx.notify();
+            }
         }
     }
 

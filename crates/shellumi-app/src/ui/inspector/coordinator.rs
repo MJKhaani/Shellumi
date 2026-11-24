@@ -48,6 +48,9 @@ pub enum NavigationRequest {
     CloseInspector,
     SwitchVault(String),
     SwitchPage(String),
+    SwitchTab(Option<usize>),
+    CloseTab(u64),
+    CloseWindow,
 }
 
 /// State of the active Inspector in a window.
@@ -302,13 +305,12 @@ impl InspectorCoordinator {
                         .unwrap_or_else(|| "local".into());
                     self.open(vault_id, target, mode, None);
                 }
-                NavigationRequest::CloseInspector => {
-                    self.active = None;
-                }
-                NavigationRequest::SwitchVault(_) => {
-                    self.active = None;
-                }
-                NavigationRequest::SwitchPage(_) => {
+                NavigationRequest::CloseInspector
+                | NavigationRequest::SwitchVault(_)
+                | NavigationRequest::SwitchPage(_)
+                | NavigationRequest::SwitchTab(_)
+                | NavigationRequest::CloseTab(_)
+                | NavigationRequest::CloseWindow => {
                     self.active = None;
                 }
             }
@@ -788,6 +790,174 @@ mod tests {
         match &coord.active().unwrap().operation {
             AsyncOperationState::Error { message, .. } => assert_eq!(message, "Invalid API Key"),
             _ => panic!("Expected AsyncOperationState::Error"),
+        }
+    }
+
+    #[test]
+    fn test_navigation_request_guard_switch_tab() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Snippet(Some(10)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        let allowed = coord.request_navigation(NavigationRequest::SwitchTab(Some(2)));
+        assert!(!allowed);
+        assert!(coord.is_guard_active());
+        assert_eq!(
+            coord.pending_guard(),
+            Some(&NavigationRequest::SwitchTab(Some(2)))
+        );
+
+        // Confirm discard clears inspector and guard
+        coord.confirm_discard();
+        assert!(!coord.is_guard_active());
+        assert!(!coord.is_dirty());
+        assert!(!coord.is_open());
+    }
+
+    #[test]
+    fn test_navigation_request_guard_close_tab() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Tunnel(Some(20)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        let allowed = coord.request_navigation(NavigationRequest::CloseTab(42));
+        assert!(!allowed);
+        assert!(coord.is_guard_active());
+        assert_eq!(
+            coord.pending_guard(),
+            Some(&NavigationRequest::CloseTab(42))
+        );
+
+        // Keep editing keeps inspector open and dirty, dismisses guard
+        coord.cancel_guard();
+        assert!(!coord.is_guard_active());
+        assert!(coord.is_dirty());
+        assert!(coord.is_open());
+    }
+
+    #[test]
+    fn test_navigation_request_guard_close_window() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Workspace(Some(30)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        let allowed = coord.request_navigation(NavigationRequest::CloseWindow);
+        assert!(!allowed);
+        assert!(coord.is_guard_active());
+        assert_eq!(coord.pending_guard(), Some(&NavigationRequest::CloseWindow));
+    }
+
+    #[test]
+    fn test_save_survives_and_executes_pending_navigation_exactly_once() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Identity(Some(5)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        // Attempt navigation -> guard queues SwitchPage
+        let allowed = coord.request_navigation(NavigationRequest::SwitchPage("Settings".into()));
+        assert!(!allowed);
+        assert!(coord.is_guard_active());
+
+        // Save succeeds
+        let gen = coord.start_save().unwrap();
+        let ok = coord.complete_save("v1", gen, InspectorTarget::Identity(Some(5)));
+        assert!(ok);
+        assert!(!coord.is_dirty());
+
+        // Pending guard must be retrieved and cleared
+        let pending = coord.take_pending_guard();
+        assert_eq!(
+            pending,
+            Some(NavigationRequest::SwitchPage("Settings".into()))
+        );
+        assert!(!coord.is_guard_active());
+
+        // Second take returns None
+        assert_eq!(coord.take_pending_guard(), None);
+    }
+
+    #[test]
+    fn test_cross_vault_stale_save_rejection() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "vault-A",
+            InspectorTarget::Host(Some(1)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+        let gen_a = coord.start_save().unwrap();
+
+        // User switches to vault-B
+        coord.confirm_discard();
+        coord.open(
+            "vault-B",
+            InspectorTarget::Host(Some(1)),
+            InspectorMode::Edit,
+            None,
+        );
+
+        // Save from vault-A arrives
+        let ok = coord.complete_save("vault-A", gen_a, InspectorTarget::Host(Some(1)));
+        assert!(!ok, "Save result from vault-A must be rejected in vault-B");
+        assert_eq!(coord.active().unwrap().vault_id, "vault-B");
+    }
+
+    #[test]
+    fn test_double_submission_prevented_across_all_targets() {
+        let targets = vec![
+            InspectorTarget::Host(Some(1)),
+            InspectorTarget::Group(Some("g1".into())),
+            InspectorTarget::Identity(Some(2)),
+            InspectorTarget::Snippet(Some(3)),
+            InspectorTarget::Tunnel(Some(4)),
+            InspectorTarget::Workspace(Some(5)),
+            InspectorTarget::Vault(Some("v-target".into())),
+            InspectorTarget::Provider(Some("p-target".into())),
+            InspectorTarget::TeamMember(Some("tm@corp".into())),
+        ];
+
+        for target in targets {
+            let mut coord = InspectorCoordinator::new();
+            coord.open("v1", target.clone(), InspectorMode::Edit, None);
+            coord.set_dirty(true);
+
+            let gen1 = coord.start_save();
+            assert!(
+                gen1.is_some(),
+                "First save attempt must succeed for {target:?}"
+            );
+
+            let gen2 = coord.start_save();
+            assert!(
+                gen2.is_none(),
+                "Double save submission must be rejected for {target:?}"
+            );
+
+            // Once completed, save can be initiated again
+            assert!(coord.complete_save("v1", gen1.unwrap(), target.clone()));
+            coord.set_dirty(true);
+            assert!(coord.start_save().is_some());
         }
     }
 }

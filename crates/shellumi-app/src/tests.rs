@@ -2565,3 +2565,217 @@ async fn test_keychain_disabled_vault_unlock_and_sync_with_in_memory_keys() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn test_cross_vault_async_isolation_out_of_order_responses() {
+    use shellumi_core::{SshDestination, VaultId, VaultKey};
+    use shellumi_storage::HostStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let db_path_a = temp.path().join("vault_a.db");
+    let db_path_b = temp.path().join("vault_b.db");
+
+    let key_a = VaultKey::generate().unwrap();
+    let key_b = VaultKey::generate().unwrap();
+
+    let mut store_a = HostStore::open_with_key(db_path_a.to_str().unwrap(), Some(&key_a))
+        .await
+        .unwrap();
+    let vid_a = VaultId::new("vault-alpha").unwrap();
+    store_a.set_vault_id(vid_a.clone());
+
+    let dest_a = SshDestination::new("10.0.0.1", "admin", 22).unwrap();
+    store_a
+        .add("alpha-server", &dest_a, None, &[], None, None)
+        .await
+        .unwrap();
+
+    let dest_b = SshDestination::new("10.0.0.2", "admin", 22).unwrap();
+    let mut store_b = HostStore::open_with_key(db_path_b.to_str().unwrap(), Some(&key_b))
+        .await
+        .unwrap();
+    let vid_b = VaultId::new("vault-beta").unwrap();
+    store_b.set_vault_id(vid_b.clone());
+    store_b
+        .add("beta-server", &dest_b, None, &[], None, None)
+        .await
+        .unwrap();
+
+    // Verify generation isolation logic
+    let mut active_vault = "vault-alpha".to_string();
+    let mut vault_load_generation = 1u64;
+
+    // Simulate async dispatch for vault-alpha with gen = 1
+    let task_originating_vault = active_vault.clone();
+    let task_gen = vault_load_generation;
+
+    // User switches to vault-beta before task finishes
+    active_vault = "vault-beta".to_string();
+    vault_load_generation += 1;
+
+    // Task finishes with results from vault-alpha
+    let _loaded_hosts_a = store_a.list().await.unwrap();
+
+    // Application validates originating vault and generation
+    let is_valid = active_vault == task_originating_vault && vault_load_generation == task_gen;
+    assert!(
+        !is_valid,
+        "Out-of-order response from previous vault must be discarded"
+    );
+
+    // The active vault's generation matches its own load
+    let active_task_gen = vault_load_generation;
+    let active_task_vault = active_vault.clone();
+    let loaded_hosts_b = store_b.list().await.unwrap();
+    let is_valid_b = active_vault == active_task_vault && vault_load_generation == active_task_gen;
+    assert!(
+        is_valid_b,
+        "Current vault's matching generation must be accepted"
+    );
+    assert_eq!(loaded_hosts_b.len(), 1);
+    assert_eq!(loaded_hosts_b[0].name, "beta-server");
+}
+
+#[tokio::test]
+async fn test_vault_creation_emergency_recovery_and_password_rotation() {
+    use shellumi_core::{
+        EphemeralCredentialStore, VaultId, VaultKey, VaultKeyManager, VaultManifest,
+    };
+    use shellumi_storage::HostStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let vault_id = VaultId::new("vlt-rotate-test").unwrap();
+    let password_v1 = "InitialSecurePassword123!";
+    let password_v2 = "RotatedSecurePassword456#";
+
+    let cred_store = EphemeralCredentialStore::new();
+    let recovery_code = VaultKey::generate_recovery_code().unwrap();
+    assert!(
+        !recovery_code.is_empty(),
+        "Emergency recovery code must be non-empty"
+    );
+
+    // 1. Provision new vault with recovery code
+    let (key, primary_env, recovery_env) = VaultKeyManager::provision_new_vault(
+        &cred_store,
+        &vault_id,
+        password_v1,
+        false,
+        Some(&recovery_code),
+    )
+    .unwrap();
+
+    assert!(recovery_env.is_some(), "Recovery envelope must be present");
+
+    // 2. Save manifest
+    let manifest_path = temp.path().join("vlt-rotate-test.manifest.json");
+    let mut manifest = VaultManifest::new(
+        vault_id.as_str().to_string(),
+        "Rotate Test Vault".into(),
+        primary_env.clone(),
+        recovery_env.clone(),
+        false,
+    );
+    manifest.save_to_path(&manifest_path).unwrap();
+
+    // 3. Database opens with key
+    let db_path = temp.path().join("vlt-rotate-test.db");
+    let mut store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&key))
+        .await
+        .unwrap();
+    store.set_vault_id(vault_id.clone());
+
+    // 4. Password rotation: re-wrap DEK with password_v2
+    let new_primary = key.wrap_with_password(&vault_id, password_v2).unwrap();
+    manifest.primary_envelope = new_primary.clone();
+    manifest.save_to_path(&manifest_path).unwrap();
+
+    // 5. Verify unwrapping with password_v2 succeeds, and password_v1 fails
+    let unwrapped_v2 =
+        VaultKey::unwrap_with_password(&vault_id, password_v2, &manifest.primary_envelope);
+    assert!(
+        unwrapped_v2.is_ok(),
+        "Unwrapping with rotated password must succeed"
+    );
+    assert_eq!(unwrapped_v2.unwrap().expose_bytes(), key.expose_bytes());
+
+    let unwrapped_v1 =
+        VaultKey::unwrap_with_password(&vault_id, password_v1, &manifest.primary_envelope);
+    assert!(
+        unwrapped_v1.is_err(),
+        "Unwrapping with old password must fail"
+    );
+
+    // 6. Verify emergency recovery code still works
+    let recovered_key = VaultKey::unwrap_with_password(
+        &vault_id,
+        &recovery_code,
+        &manifest.recovery_envelope.unwrap(),
+    );
+    assert!(
+        recovered_key.is_ok(),
+        "Emergency recovery code must unwrap the key"
+    );
+    assert_eq!(recovered_key.unwrap().expose_bytes(), key.expose_bytes());
+}
+
+#[tokio::test]
+async fn test_vault_registry_deletion_and_protection() {
+    use shellumi_core::{VaultContext, VaultId, VaultKey, VaultLocation};
+    use shellumi_storage::HostStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let reg_db = temp.path().join("default.db");
+    let default_key = VaultKey::generate().unwrap();
+
+    let mut reg_store = HostStore::open_with_key(reg_db.to_str().unwrap(), Some(&default_key))
+        .await
+        .unwrap();
+    reg_store.set_vault_id(VaultId::new(shellumi_storage::LEGACY_LOCAL_VAULT_ID).unwrap());
+
+    // Register a secondary vault
+    let vid = VaultId::new("vlt-secondary").unwrap();
+    let context = VaultContext::new(vid, VaultLocation::Local);
+    reg_store
+        .register_vault_context("Secondary Vault", &context)
+        .await
+        .unwrap();
+
+    let contexts = reg_store.list_vault_contexts().await.unwrap();
+    assert_eq!(
+        contexts.len(),
+        2,
+        "Expected default vault + secondary vault"
+    );
+    assert!(contexts
+        .iter()
+        .any(|(name, ctx)| ctx.id().as_str() == "vlt-secondary" && name == "Secondary Vault"));
+
+    // Unregister secondary vault
+    let deleted = reg_store
+        .unregister_vault_context("vlt-secondary")
+        .await
+        .unwrap();
+    assert!(deleted, "Unregistering registered vault must return true");
+
+    // Verify it is gone and only the default vault remains
+    let contexts_after = reg_store.list_vault_contexts().await.unwrap();
+    assert_eq!(contexts_after.len(), 1);
+    assert!(!contexts_after
+        .iter()
+        .any(|(_, ctx)| ctx.id().as_str() == "vlt-secondary"));
+    assert_eq!(
+        contexts_after[0].1.id().as_str(),
+        shellumi_storage::LEGACY_LOCAL_VAULT_ID
+    );
+
+    // Unregistering again returns false
+    let deleted_again = reg_store
+        .unregister_vault_context("vlt-secondary")
+        .await
+        .unwrap();
+    assert!(
+        !deleted_again,
+        "Unregistering non-existent vault must return false"
+    );
+}

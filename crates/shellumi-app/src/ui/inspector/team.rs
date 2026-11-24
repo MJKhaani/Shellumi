@@ -14,7 +14,7 @@ use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
-use shellumi_core::{TeamMember, TeamRole};
+use shellumi_core::{AuditAction, SharingAuditRecord, TeamMember, TeamRole};
 use shellumi_storage::HostStore;
 
 impl Shellumi {
@@ -450,6 +450,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
         let email_for_msg = email.clone();
         cx.notify();
@@ -462,7 +463,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 let role = match role_str.as_str() {
@@ -486,7 +487,7 @@ impl Shellumi {
                     let target_id = format!("tm-{}", uuid::Uuid::new_v4().as_simple());
                     let member = TeamMember {
                         id: target_id.clone(),
-                        vault_id: active_vault_id,
+                        vault_id: active_vault_id_task,
                         user_id: email.clone(),
                         display_name: email,
                         public_key: pubkey,
@@ -513,32 +514,41 @@ impl Shellumi {
                 }
                 match res {
                     Ok(target_id) => {
-                        app.team_form = None;
                         let target = InspectorTarget::TeamMember(Some(target_id.clone()));
-                        let active_vid = app.active_vault_id.clone();
-                        let ok = app
-                            .inspector_coordinator
-                            .complete_save(&active_vid, gen, target);
+                        let ok =
+                            app.inspector_coordinator
+                                .complete_save(&active_vault_id, gen, target);
+                        if !ok {
+                            tracing::warn!(
+                                originating_vault = %active_vault_id,
+                                current_vault = %app.active_vault_id,
+                                gen = gen,
+                                "Discarded stale save completion for team member"
+                            );
+                            return;
+                        }
+
+                        app.team_form = None;
                         app.load_team_members(cx);
-                        app.open_team_inspector_mode(
-                            Some(target_id),
-                            crate::ui::inspector::InspectorMode::View,
-                            cx,
-                        );
                         app.desktop.message =
                             Some(format!("Team permissions updated for '{}'", email_for_msg));
-                        if ok {
-                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
-                                app.apply_navigation_request(req, None, cx);
-                            }
+
+                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                            app.apply_navigation_request(req, None, cx);
+                        } else {
+                            app.open_team_inspector_mode(
+                                Some(target_id),
+                                crate::ui::inspector::InspectorMode::View,
+                                cx,
+                            );
                         }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.team_form {
                             f.error = Some(err.clone());
                         }
-                        let active_vid = app.active_vault_id.clone();
-                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
+                        app.inspector_coordinator
+                            .fail_save(&active_vault_id, gen, err);
                     }
                 }
                 cx.notify();
@@ -552,6 +562,8 @@ impl Shellumi {
         let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let key = self.active_vault_key();
         let id_str = id.to_string();
         let now = std::time::SystemTime::now()
@@ -569,25 +581,54 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                store
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
+                    store.set_vault_id(vid);
+                }
+                let revoked = store
                     .revoke_team_member(&id_str_task, &now_task)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                if !revoked {
+                    return Err(format!(
+                        "Team member '{}' not found or access is already revoked",
+                        id_str_task
+                    ));
+                }
+                let new_epoch = store
+                    .increment_shared_vault_epoch(&active_vault_id_task, &now_task)
+                    .await
+                    .unwrap_or(2);
+                let audit = SharingAuditRecord::new(
+                    format!("aud-{}-{}", now_task, uuid::Uuid::new_v4().as_simple()),
+                    &active_vault_id_task,
+                    AuditAction::MemberRevoked,
+                    "local_owner",
+                    Some(id_str_task.clone()),
+                    Some(format!(
+                        "Revoked access and rotated sharing key to epoch {new_epoch}"
+                    )),
+                    &now_task,
+                );
+                let _ = store.log_audit_event(&audit).await;
+                Ok::<u64, String>(new_epoch)
             })
         });
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
                 match res {
-                    Ok(_) => {
-                        if let Some(m) = app.team_members.iter_mut().find(|m| m.id == id_str) {
-                            m.revoked = true;
-                            m.revoked_at = Some(now);
+                    Ok(new_epoch) => {
+                        if app.active_vault_id == active_vault_id {
+                            if let Some(m) = app.team_members.iter_mut().find(|m| m.id == id_str) {
+                                m.revoked = true;
+                                m.revoked_at = Some(now);
+                            }
+                            app.inspector_close(cx);
+                            app.load_team_members(cx);
+                            app.desktop.message = Some(format!(
+                                "Team member access revoked and sharing key rotated to epoch {new_epoch}."
+                            ));
                         }
-                        app.inspector_close(cx);
-                        app.load_team_members(cx);
-                        app.desktop.message =
-                            Some("Team member access revoked successfully".into());
                     }
                     Err(e) => {
                         if let Some(ref mut f) = app.team_form {

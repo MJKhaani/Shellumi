@@ -698,6 +698,8 @@ pub(crate) struct VaultFormState {
     pub(crate) is_remote: bool,
     pub(crate) server_url: Entity<TextInput>,
     pub(crate) passphrase: Entity<TextInput>,
+    pub(crate) generated_recovery_code: Option<String>,
+    pub(crate) recovery_code_confirmed: bool,
     pub(crate) error: Option<String>,
     pub(crate) saving: bool,
 }
@@ -810,6 +812,7 @@ struct Shellumi {
     #[allow(dead_code)]
     pub(crate) inspector_coordinator: ui::inspector::InspectorCoordinator,
     pub(crate) current_inspector_width: Option<f32>,
+    pub(crate) vault_load_generation: u64,
     pub(crate) tab_overflow_menu_open: bool,
     pub(crate) tab_overflow_x: f32,
     pub(crate) rd_display_menu_open: bool,
@@ -1263,6 +1266,7 @@ impl Shellumi {
             delete_confirm: None,
             inspector_coordinator: ui::inspector::InspectorCoordinator::new(),
             current_inspector_width: Some(crate::ui::layout::INSPECTOR_PREFERRED_WIDTH),
+            vault_load_generation: 0,
             tab_overflow_menu_open: false,
             tab_overflow_x: 220.0,
             snippet_form: None,

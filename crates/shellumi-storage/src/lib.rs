@@ -4858,6 +4858,25 @@ impl HostStore {
         Ok(rows > 0)
     }
 
+    /// Increments the cryptographic epoch for a shared vault or vault context, rotating keys.
+    pub async fn increment_shared_vault_epoch(
+        &mut self,
+        vault_id: &str,
+        updated_at: &str,
+    ) -> Result<u64, StorageError> {
+        if let Some(sv) = self.get_shared_vault(vault_id).await? {
+            let new_epoch = sv.current_epoch + 1;
+            self.update_shared_vault_epoch(vault_id, new_epoch, updated_at)
+                .await?;
+            Ok(new_epoch)
+        } else {
+            let cur = self.get_vault_active_key_epoch(vault_id).await.unwrap_or(1);
+            let next = cur + 1;
+            self.set_vault_active_key_epoch(vault_id, next).await?;
+            Ok(next as u64)
+        }
+    }
+
     pub async fn delete_shared_vault(&mut self, id: &str) -> Result<bool, StorageError> {
         let rows = self
             .connection
@@ -4989,7 +5008,7 @@ impl HostStore {
         let rows = self
             .connection
             .execute(
-                "UPDATE team_members SET revoked = 1, revoked_at = ?1 WHERE id = ?2",
+                "UPDATE team_members SET revoked = 1, revoked_at = ?1 WHERE id = ?2 AND revoked = 0",
                 (revoked_at, id),
             )
             .await?;
@@ -8501,6 +8520,117 @@ mod tests {
         assert_eq!(
             store.list_shared_session_logs("v-101").await.unwrap().len(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn team_revocation_returns_false_if_nonexistent_or_already_revoked_and_epoch_increments()
+    {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // Register vault
+        let vault = SharedVault::new(
+            "v-epoch-test",
+            "Epoch Test Vault",
+            None,
+            "admin@corp.internal",
+            "2026-11-24T10:00:00Z",
+        )
+        .unwrap();
+        store.create_shared_vault(&vault).await.unwrap();
+
+        // Add member
+        let member = TeamMember::new(
+            "m-rev-1",
+            "v-epoch-test",
+            "charlie@corp.internal",
+            "Charlie",
+            "charlie_pubkey_hex",
+            TeamRole::Viewer,
+            "2026-11-24T10:00:00Z",
+            "admin@corp.internal",
+        );
+        store.add_team_member(&member).await.unwrap();
+
+        // First revocation succeeds (rows == 1 -> true)
+        let revoked = store
+            .revoke_team_member("m-rev-1", "2026-11-24T10:01:00Z")
+            .await
+            .unwrap();
+        assert!(
+            revoked,
+            "First revocation of active member must return true"
+        );
+
+        // Second revocation of the same member returns false (already revoked)
+        let revoked_again = store
+            .revoke_team_member("m-rev-1", "2026-11-24T10:02:00Z")
+            .await
+            .unwrap();
+        assert!(
+            !revoked_again,
+            "Revoking an already revoked member must return false"
+        );
+
+        // Revoking non-existent member returns false
+        let revoked_missing = store
+            .revoke_team_member("m-non-existent", "2026-11-24T10:03:00Z")
+            .await
+            .unwrap();
+        assert!(
+            !revoked_missing,
+            "Revoking non-existent member must return false"
+        );
+
+        // Increment epoch
+        let next_epoch = store
+            .increment_shared_vault_epoch("v-epoch-test", "2026-11-24T10:04:00Z")
+            .await
+            .unwrap();
+        assert_eq!(next_epoch, 2, "Epoch should increment from 1 to 2");
+
+        let fetched = store
+            .get_shared_vault("v-epoch-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.current_epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn unregister_vault_context_returns_false_for_unknown_vault() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        // Unknown vault returns false
+        let unregistered = store
+            .unregister_vault_context("non-existent-vault")
+            .await
+            .unwrap();
+        assert!(
+            !unregistered,
+            "Unregistering an unknown vault must return false"
+        );
+
+        // Register a vault context
+        let vid = shellumi_core::VaultId::new("v-real-test").unwrap();
+        let context = shellumi_core::VaultContext::new(vid, shellumi_core::VaultLocation::Local);
+        store
+            .register_vault_context("Real Test Vault", &context)
+            .await
+            .unwrap();
+
+        // Unregistering existing vault returns true
+        let unregistered_real = store.unregister_vault_context("v-real-test").await.unwrap();
+        assert!(
+            unregistered_real,
+            "Unregistering an existing vault must return true"
+        );
+
+        // Second unregister returns false
+        let unregistered_again = store.unregister_vault_context("v-real-test").await.unwrap();
+        assert!(
+            !unregistered_again,
+            "Unregistering already unregistered vault must return false"
         );
     }
 

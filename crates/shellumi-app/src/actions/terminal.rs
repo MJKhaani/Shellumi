@@ -349,6 +349,13 @@ impl Shellumi {
     }
 
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .inspector_coordinator
+            .request_navigation(crate::ui::inspector::NavigationRequest::CloseTab(id))
+        {
+            cx.notify();
+            return;
+        }
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
             self.sftp_jobs.retain(|(tab_id, _), job| {
                 if *tab_id == id {
@@ -379,6 +386,13 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .inspector_coordinator
+            .request_navigation(crate::ui::inspector::NavigationRequest::SwitchTab(idx))
+        {
+            cx.notify();
+            return;
+        }
         self.page = None;
         self.active_tab_idx = idx;
         window.focus(&self.focus);

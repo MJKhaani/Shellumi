@@ -176,9 +176,16 @@ impl Shellumi {
         self.server_ws_status = None;
         self.navigate_page("Hosts", window, cx);
 
-        self.load_hosts(cx);
-        self.load_identities(cx);
-        self.load_workspaces(cx);
+        self.vault_load_generation += 1;
+        self.hosts = HostState::Loading;
+        self.snippets.clear();
+        self.identities.clear();
+        self.workspaces.clear();
+        self.tunnels.clear();
+        self.cloud_providers.clear();
+        self.team_members.clear();
+
+        self.start_storage(false, cx);
         self.desktop_command(Command::Refresh, cx);
 
         if self.is_active_vault_remote() {

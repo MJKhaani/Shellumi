@@ -49,6 +49,8 @@ impl Shellumi {
     }
 
     pub(crate) fn start_storage(&mut self, create_parent: bool, cx: &mut Context<Self>) {
+        self.vault_load_generation += 1;
+        let gen = self.vault_load_generation;
         let Some(path) = self.active_vault_db_path() else {
             return;
         };
@@ -56,6 +58,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let in_memory_key = self.active_vault_key();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         self.hosts = HostState::Loading;
@@ -97,7 +100,7 @@ impl Shellumi {
             let key = match in_memory_key {
                 Some(k) => Some(k),
                 None => {
-                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                         shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &vid)
                             .ok()
                             .flatten()
@@ -113,7 +116,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 let hosts = store.list().await.map_err(|error| error.to_string())?;
@@ -131,13 +134,23 @@ impl Shellumi {
                     .map_err(|error| error.to_string())?;
                 let tunnels = store.list_tunnels().await.unwrap_or_default();
                 let cloud_providers = store.list_cloud_providers().await.unwrap_or_default();
-                let team_members = store.list_team_members(&active_vault_id).await.unwrap_or_default();
+                let team_members = store.list_team_members(&active_vault_id_task).await.unwrap_or_default();
                 Ok::<_, String>((hosts, snippets, workspaces, identities, tunnels, cloud_providers, team_members, key))
             })
         });
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
+                if app.active_vault_id != active_vault_id || app.vault_load_generation != gen {
+                    tracing::warn!(
+                        task_vault = %active_vault_id,
+                        current_vault = %app.active_vault_id,
+                        task_gen = gen,
+                        current_gen = app.vault_load_generation,
+                        "Discarded stale start_storage result from previous vault or operation"
+                    );
+                    return;
+                }
                 match result {
                     Ok((
                         hosts,
@@ -150,7 +163,7 @@ impl Shellumi {
                         key,
                     )) => {
                         if let Some(k) = key {
-                            app.active_vault_keys.insert(app.active_vault_id.clone(), k);
+                            app.active_vault_keys.insert(active_vault_id.clone(), k);
                         }
                         app.hosts = HostState::Loaded(hosts);
                         app.snippets = snippets;
@@ -189,12 +202,14 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
+        let gen = self.vault_load_generation;
         let in_memory_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let key = match in_memory_key {
                 Some(k) => Some(k),
                 None => {
-                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                         let cred_store = shellumi_core::default_credential_store();
                         shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &vid)
                             .ok()
@@ -211,7 +226,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 // Auto-discover existing OpenSSH keys from ~/.ssh and ensure they exist as saved identities
@@ -255,9 +270,11 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
-                if let Ok(ids) = res {
-                    app.identities = ids;
-                    cx.notify();
+                if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
+                    if let Ok(ids) = res {
+                        app.identities = ids;
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -268,6 +285,8 @@ impl Shellumi {
         let Some(path) = self.active_vault_db_path() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
+        let gen = self.vault_load_generation;
         let in_memory_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -286,9 +305,11 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
-                if let Ok(providers) = res {
-                    app.cloud_providers = providers;
-                    cx.notify();
+                if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
+                    if let Ok(providers) = res {
+                        app.cloud_providers = providers;
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -300,6 +321,8 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
+        let gen = self.vault_load_generation;
         let in_memory_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -310,7 +333,7 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 store
-                    .list_team_members(&active_vault_id)
+                    .list_team_members(&active_vault_id_task)
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -318,9 +341,11 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
-                if let Ok(members) = res {
-                    app.team_members = members;
-                    cx.notify();
+                if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
+                    if let Ok(members) = res {
+                        app.team_members = members;
+                        cx.notify();
+                    }
                 }
             });
         })

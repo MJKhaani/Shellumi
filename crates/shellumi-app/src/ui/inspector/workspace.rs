@@ -392,6 +392,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
         let name_for_msg = name.clone();
         cx.notify();
@@ -404,7 +405,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 let desc_opt = if desc.is_empty() {
@@ -437,32 +438,41 @@ impl Shellumi {
                 }
                 match res {
                     Ok(saved_id) => {
+                        let target = InspectorTarget::Workspace(Some(saved_id));
+                        let ok =
+                            app.inspector_coordinator
+                                .complete_save(&active_vault_id, gen, target);
+                        if !ok {
+                            tracing::warn!(
+                                originating_vault = %active_vault_id,
+                                current_vault = %app.active_vault_id,
+                                gen = gen,
+                                "Discarded stale save completion for workspace"
+                            );
+                            return;
+                        }
+
                         app.workspace_form = None;
                         app.load_workspaces(cx);
-                        let target = InspectorTarget::Workspace(Some(saved_id));
-                        let active_vid = app.active_vault_id.clone();
-                        let ok = app
-                            .inspector_coordinator
-                            .complete_save(&active_vid, gen, target);
-                        app.open_workspace_inspector_mode(
-                            Some(saved_id),
-                            crate::ui::inspector::InspectorMode::View,
-                            cx,
-                        );
                         app.desktop.message =
                             Some(format!("Workspace '{}' saved successfully", name_for_msg));
-                        if ok {
-                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
-                                app.apply_navigation_request(req, None, cx);
-                            }
+
+                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                            app.apply_navigation_request(req, None, cx);
+                        } else {
+                            app.open_workspace_inspector_mode(
+                                Some(saved_id),
+                                crate::ui::inspector::InspectorMode::View,
+                                cx,
+                            );
                         }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.workspace_form {
                             f.error = Some(err.clone());
                         }
-                        let active_vid = app.active_vault_id.clone();
-                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
+                        app.inspector_coordinator
+                            .fail_save(&active_vault_id, gen, err);
                     }
                 }
                 cx.notify();
@@ -477,6 +487,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
 
         let task = cx.background_executor().spawn(async move {
@@ -487,10 +498,17 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
-                store.delete_workspace(id).await.map_err(|e| e.to_string())
+                let deleted = store
+                    .delete_workspace(id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if !deleted {
+                    return Err(format!("Workspace with ID {id} not found"));
+                }
+                Ok::<(), String>(())
             })
         });
 
@@ -498,10 +516,12 @@ impl Shellumi {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
                 match res {
-                    Ok(_) => {
-                        app.load_workspaces(cx);
-                        app.inspector_close(cx);
-                        app.desktop.message = Some("Workspace deleted successfully".into());
+                    Ok(()) => {
+                        if app.active_vault_id == active_vault_id {
+                            app.load_workspaces(cx);
+                            app.inspector_close(cx);
+                            app.desktop.message = Some("Workspace deleted successfully".into());
+                        }
                     }
                     Err(e) => {
                         app.desktop.message = Some(format!("Failed to delete workspace: {e}"));

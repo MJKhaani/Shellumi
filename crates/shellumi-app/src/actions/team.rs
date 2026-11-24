@@ -602,10 +602,16 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                store
+                let revoked = store
                     .revoke_team_member(&mid, &now_iso)
                     .await
                     .map_err(|e| e.to_string())?;
+                if !revoked {
+                    return Err(format!(
+                        "Team member '{}' not found or access is already revoked",
+                        mid
+                    ));
+                }
                 store
                     .log_audit_event(&audit)
                     .await

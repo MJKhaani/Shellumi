@@ -419,6 +419,7 @@ impl Shellumi {
         self.saving = true;
         self.form_error = None;
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let is_remote = self.is_active_vault_remote();
         let vault_key = self.active_vault_key();
         let name_for_lookup = name.clone();
@@ -431,7 +432,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 match id {
@@ -489,7 +490,7 @@ impl Shellumi {
                     let json = serde_json::to_string(&payload).ok();
                     let _ = store
                         .record_pending_mutation(
-                            &active_vault_id,
+                            &active_vault_id_task,
                             &name,
                             "host",
                             0,
@@ -507,13 +508,6 @@ impl Shellumi {
                 app.saving = false;
                 match result {
                     Ok(()) => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        app.sync_scheduler.notify_local_mutation(now);
-                        app.form = None;
-                        app.load_hosts(cx);
                         let final_host_id = if let Some(saved_id) = id {
                             Some(saved_id)
                         } else {
@@ -525,30 +519,46 @@ impl Shellumi {
                                 _ => None,
                             }
                         };
-                        let active_vid = app.active_vault_id.clone();
                         let target =
                             crate::ui::inspector::coordinator::InspectorTarget::Host(final_host_id);
-                        let ok = app
-                            .inspector_coordinator
-                            .complete_save(&active_vid, gen, target);
-                        app.open_host_inspector(
-                            final_host_id,
-                            crate::ui::inspector::InspectorMode::View,
-                            cx,
-                        );
+                        let ok =
+                            app.inspector_coordinator
+                                .complete_save(&active_vault_id, gen, target);
+                        if !ok {
+                            tracing::warn!(
+                                originating_vault = %active_vault_id,
+                                current_vault = %app.active_vault_id,
+                                gen = gen,
+                                "Discarded stale save completion for host"
+                            );
+                            return;
+                        }
+
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        app.sync_scheduler.notify_local_mutation(now);
+                        app.form = None;
+                        app.load_hosts(cx);
                         if app.is_active_vault_remote() {
                             app.sync_active_vault(cx);
                         }
-                        if ok {
-                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
-                                app.apply_navigation_request(req, None, cx);
-                            }
+
+                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                            app.apply_navigation_request(req, None, cx);
+                        } else {
+                            app.open_host_inspector(
+                                final_host_id,
+                                crate::ui::inspector::InspectorMode::View,
+                                cx,
+                            );
                         }
                     }
                     Err(error) => {
                         app.form_error = Some(error.clone());
-                        let active_vid = app.active_vault_id.clone();
-                        app.inspector_coordinator.fail_save(&active_vid, gen, error);
+                        app.inspector_coordinator
+                            .fail_save(&active_vault_id, gen, error);
                     }
                 }
                 cx.notify();
@@ -596,8 +606,8 @@ impl Shellumi {
         });
         cx.spawn(async move |app, cx| {
             let result = task.await;
-            let _ = app.update(cx, |app, cx| {
-                if let Ok(true) = result {
+            let _ = app.update(cx, |app, cx| match result {
+                Ok(true) => {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -608,19 +618,25 @@ impl Shellumi {
                         app.sync_active_vault(cx);
                     }
                 }
+                Ok(false) => {
+                    app.desktop.message = Some(format!("Host with ID {id} not found"));
+                }
+                Err(e) => {
+                    app.desktop.message = Some(format!("Failed to delete host: {e}"));
+                }
             });
         })
         .detach();
     }
 
     pub(crate) fn load_hosts(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.hosts, HostState::Loading) {
-            return;
-        }
+        self.vault_load_generation += 1;
+        let gen = self.vault_load_generation;
         let Some(path) = self.active_vault_db_path() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
         self.hosts = HostState::Loading;
         cx.notify();
@@ -633,7 +649,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 store.list().await.map_err(|e| e.to_string())
@@ -642,11 +658,21 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
-                app.hosts = match result {
-                    Ok(hosts) => HostState::Loaded(hosts),
-                    Err(error) => HostState::Error(error),
-                };
-                cx.notify();
+                if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
+                    app.hosts = match result {
+                        Ok(hosts) => HostState::Loaded(hosts),
+                        Err(error) => HostState::Error(error),
+                    };
+                    cx.notify();
+                } else {
+                    tracing::warn!(
+                        task_vault = %active_vault_id,
+                        current_vault = %app.active_vault_id,
+                        task_gen = gen,
+                        current_gen = app.vault_load_generation,
+                        "Discarded stale host load result from superseded vault or operation"
+                    );
+                }
             });
         })
         .detach();

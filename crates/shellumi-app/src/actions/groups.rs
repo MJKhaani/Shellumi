@@ -106,6 +106,7 @@ impl Shellumi {
         let is_rename = orig_name != new_name && !orig_name.is_empty();
         let target_group_name = new_name.clone();
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -114,7 +115,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 if is_rename {
@@ -147,31 +148,40 @@ impl Shellumi {
                         ins.error = Some(err.clone());
                         cx.notify();
                     }
-                    let active_vid = app.active_vault_id.clone();
-                    app.inspector_coordinator.fail_save(&active_vid, gen, err);
+                    app.inspector_coordinator
+                        .fail_save(&active_vault_id, gen, err);
                 }
                 Ok(()) => {
+                    let target = crate::ui::inspector::coordinator::InspectorTarget::Group(Some(
+                        target_group_name.clone(),
+                    ));
+                    let ok = app
+                        .inspector_coordinator
+                        .complete_save(&active_vault_id, gen, target);
+                    if !ok {
+                        tracing::warn!(
+                            originating_vault = %active_vault_id,
+                            current_vault = %app.active_vault_id,
+                            gen = gen,
+                            "Discarded stale save completion for group"
+                        );
+                        return;
+                    }
+
                     app.group_inspector = None;
                     app.load_hosts(cx);
                     app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
                     app.desktop.message =
                         Some(format!("Group '{}' saved successfully", target_group_name));
-                    let target = crate::ui::inspector::coordinator::InspectorTarget::Group(Some(
-                        target_group_name.clone(),
-                    ));
-                    let active_vid = app.active_vault_id.clone();
-                    let ok = app
-                        .inspector_coordinator
-                        .complete_save(&active_vid, gen, target);
-                    app.open_group_inspector_mode(
-                        &target_group_name,
-                        crate::ui::inspector::InspectorMode::View,
-                        cx,
-                    );
-                    if ok {
-                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
-                            app.apply_navigation_request(req, None, cx);
-                        }
+
+                    if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                        app.apply_navigation_request(req, None, cx);
+                    } else {
+                        app.open_group_inspector_mode(
+                            &target_group_name,
+                            crate::ui::inspector::InspectorMode::View,
+                            cx,
+                        );
                     }
                     cx.notify();
                 }
@@ -199,10 +209,13 @@ impl Shellumi {
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
                     store.set_vault_id(vid);
                 }
-                store
+                let deleted = store
                     .delete_group(&target_name)
                     .await
                     .map_err(|e| e.to_string())?;
+                if !deleted {
+                    return Err(format!("Group '{}' not found", target_name));
+                }
                 Ok::<(), String>(())
             })
         });

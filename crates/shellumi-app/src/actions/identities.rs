@@ -124,6 +124,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -133,7 +134,7 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 let credential_store = shellumi_core::default_credential_store();
@@ -215,29 +216,38 @@ impl Shellumi {
                         m.error = Some(err.clone());
                         cx.notify();
                     }
-                    let active_vid = app.active_vault_id.clone();
-                    app.inspector_coordinator.fail_save(&active_vid, gen, err);
+                    app.inspector_coordinator
+                        .fail_save(&active_vault_id, gen, err);
                 } else {
-                    app.identity_modal = None;
-                    app.load_identities(cx);
                     let target_id = editing_id
                         .or_else(|| app.identities.iter().find(|i| i.name == name).map(|i| i.id));
-                    let active_vid = app.active_vault_id.clone();
                     let target =
                         crate::ui::inspector::coordinator::InspectorTarget::Identity(target_id);
                     let ok = app
                         .inspector_coordinator
-                        .complete_save(&active_vid, gen, target);
-                    app.open_identity_inspector_mode(
-                        target_id,
-                        crate::ui::inspector::InspectorMode::View,
-                        cx,
-                    );
+                        .complete_save(&active_vault_id, gen, target);
+                    if !ok {
+                        tracing::warn!(
+                            originating_vault = %active_vault_id,
+                            current_vault = %app.active_vault_id,
+                            gen = gen,
+                            "Discarded stale save completion for identity"
+                        );
+                        return;
+                    }
+
+                    app.identity_modal = None;
+                    app.load_identities(cx);
                     app.desktop.message = Some(format!("Identity '{}' saved successfully", name));
-                    if ok {
-                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
-                            app.apply_navigation_request(req, None, cx);
-                        }
+
+                    if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                        app.apply_navigation_request(req, None, cx);
+                    } else {
+                        app.open_identity_inspector_mode(
+                            target_id,
+                            crate::ui::inspector::InspectorMode::View,
+                            cx,
+                        );
                     }
                     cx.notify();
                 }
@@ -251,6 +261,7 @@ impl Shellumi {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -260,25 +271,34 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
                 let credential_store = shellumi_core::default_credential_store();
-                store
+                let deleted = store
                     .delete_identity_with_secrets(id, &*credential_store)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                if !deleted {
+                    return Err(format!("Identity with ID {} not found", id));
+                }
+                Ok::<(), String>(())
             })
         });
 
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
-                if let Err(err) = res {
-                    app.desktop.message = Some(format!("Failed to delete identity: {err}"));
-                } else {
-                    app.load_identities(cx);
-                    app.desktop.message = Some("Identity deleted successfully".into());
+                match res {
+                    Ok(()) => {
+                        if app.active_vault_id == active_vault_id {
+                            app.load_identities(cx);
+                            app.desktop.message = Some("Identity deleted successfully".into());
+                        }
+                    }
+                    Err(err) => {
+                        app.desktop.message = Some(format!("Failed to delete identity: {err}"));
+                    }
                 }
                 cx.notify();
             });
