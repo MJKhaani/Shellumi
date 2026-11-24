@@ -253,121 +253,65 @@ pub(crate) struct PasswordRotationJournal {
 
 pub(crate) fn write_durable_file(path: &Path, content: &str) -> Result<(), String> {
     use std::io::Write;
-    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().as_simple()));
-    {
-        let mut file = std::fs::File::create(&tmp)
-            .map_err(|e| format!("Failed to create durable file {}: {e}", tmp.display()))?;
-        file.write_all(content.as_bytes())
-            .map_err(|e| format!("Failed to write durable file {}: {e}", tmp.display()))?;
-        file.sync_all()
-            .map_err(|e| format!("Failed to fsync durable file {}: {e}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        format!(
-            "Failed to atomic rename durable file to {}: {e}",
-            path.display()
-        )
-    })?;
+    let parent = path.parent().ok_or("Missing journal directory")?;
+    let result = (|| -> std::io::Result<()> {
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(content.as_bytes())?;
+        file.as_file().sync_all()?;
+        file.persist(path)?;
+        sync_directory(parent)
+    })();
+    result.map_err(|e| format!("Failed to persist {}: {e}", path.display()))
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 pub(crate) fn safe_move_file(src: &Path, dst: &Path) -> Result<(), String> {
-    if !src.exists() {
-        return Err(format!("Source file does not exist: {}", src.display()));
-    }
-    if dst.exists() {
-        return Err(format!(
-            "Refusing to overwrite existing destination file: {}",
-            dst.display()
-        ));
-    }
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create destination directory {}: {e}",
-                parent.display()
-            )
-        })?;
-    }
-
-    // Try standard filesystem rename first (atomic on same filesystem)
-    if std::fs::rename(src, dst).is_ok() {
-        return Ok(());
-    }
-
-    // Cross-filesystem fallback: copy to temp file, fsync, verify size, atomic rename, fsync parent, remove source
-    let parent = dst
-        .parent()
-        .ok_or_else(|| "Destination has no parent directory".to_string())?;
-    let tmp_dst = dst.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().as_simple()));
-
-    let src_len = std::fs::metadata(src)
-        .map_err(|e| {
-            format!(
-                "Failed to read metadata of source file {}: {e}",
-                src.display()
-            )
-        })?
-        .len();
-
-    {
-        let mut reader = std::fs::File::open(src)
-            .map_err(|e| format!("Failed to open source file {}: {e}", src.display()))?;
-        let mut writer = std::fs::File::create(&tmp_dst).map_err(|e| {
-            format!(
-                "Failed to create temporary copy file {}: {e}",
-                tmp_dst.display()
-            )
-        })?;
-        std::io::copy(&mut reader, &mut writer).map_err(|e| {
-            format!(
-                "Failed to copy bytes from {} to {}: {e}",
-                src.display(),
-                tmp_dst.display()
-            )
-        })?;
-        writer
-            .sync_all()
-            .map_err(|e| format!("Failed to fsync temporary file {}: {e}", tmp_dst.display()))?;
-    }
-
-    let copied_len = std::fs::metadata(&tmp_dst)
-        .map_err(|e| {
-            format!(
-                "Failed to read metadata of copied file {}: {e}",
-                tmp_dst.display()
-            )
-        })?
-        .len();
-
-    if copied_len != src_len {
-        let _ = std::fs::remove_file(&tmp_dst);
-        return Err(format!(
-            "Byte length mismatch during safe move: source was {} bytes, copy was {} bytes",
-            src_len, copied_len
-        ));
-    }
-
-    std::fs::rename(&tmp_dst, dst).map_err(|e| {
-        format!(
-            "Failed to rename temporary file to destination {}: {e}",
-            dst.display()
-        )
-    })?;
-
-    // Fsync directory if possible
-    if let Ok(dir_file) = std::fs::File::open(parent) {
-        let _ = dir_file.sync_all();
-    }
-
-    std::fs::remove_file(src).map_err(|e| {
-        format!(
-            "Failed to remove source file after copy {}: {e}",
-            src.display()
-        )
-    })?;
-
-    Ok(())
+    use std::io::Read;
+    let result = (|| -> std::io::Result<()> {
+        let parent = dst.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+        std::fs::create_dir_all(parent)?;
+        if !std::fs::symlink_metadata(src)?.is_file() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        match std::fs::hard_link(src, dst) {
+            Ok(()) => std::fs::File::open(dst)?.sync_all()?,
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                let mut copy = tempfile::NamedTempFile::new_in(parent)?;
+                std::io::copy(&mut std::fs::File::open(src)?, copy.as_file_mut())?;
+                copy.as_file().sync_all()?;
+                let mut original = std::fs::File::open(src)?;
+                let mut copied = copy.reopen()?;
+                let mut left = [0; 16384];
+                let mut right = [0; 16384];
+                loop {
+                    let n = original.read(&mut left)?;
+                    if n == 0 {
+                        break;
+                    }
+                    copied.read_exact(&mut right[..n])?;
+                    if left[..n] != right[..n] {
+                        return Err(std::io::ErrorKind::InvalidData.into());
+                    }
+                }
+                if copied.read(&mut right)? != 0 {
+                    return Err(std::io::ErrorKind::InvalidData.into());
+                }
+                copy.persist_noclobber(dst)?;
+            }
+            Err(e) => return Err(e),
+        }
+        sync_directory(parent)?;
+        std::fs::remove_file(src)?;
+        sync_directory(src.parent().ok_or(std::io::ErrorKind::InvalidInput)?)
+    })();
+    result.map_err(|e| format!("Failed to move {} to {}: {e}", src.display(), dst.display()))
 }
 
 fn write_durable_journal(path: &Path, journal: &VaultQuarantineJournal) -> Result<(), String> {
@@ -650,79 +594,83 @@ pub(crate) fn detect_and_recover_interrupted_quarantine(
     base_path: &Path,
 ) -> Result<Vec<String>, String> {
     let q_root = resolve_quarantine_dir(base_path);
-    if !q_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut recovered = Vec::new();
-    let entries =
-        std::fs::read_dir(&q_root).map_err(|e| format!("Failed to read quarantine root: {e}"))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    let entries = match std::fs::read_dir(&q_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Cannot inspect quarantine directory: {e}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Cannot inspect quarantine entry: {e}"))?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() {
+            return Err("Unexpected symlink in quarantine directory".into());
+        }
+        if !kind.is_dir() {
             continue;
         }
-        let journal_file = path.join("journal.json");
-        if !journal_file.exists() {
+        let dir = entry.path();
+        let journal_path = dir.join("journal.json");
+        let file = std::fs::File::open(&journal_path).map_err(|e| {
+            format!(
+                "Cannot open quarantine journal {}: {e}",
+                journal_path.display()
+            )
+        })?;
+        let journal: VaultQuarantineJournal = serde_json::from_reader(file)
+            .map_err(|e| format!("Invalid quarantine journal: {e}"))?;
+        if journal.stage == QuarantineStage::Completed {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(&journal_file) {
-            if let Ok(journal) = serde_json::from_str::<VaultQuarantineJournal>(&content) {
-                if journal.stage != QuarantineStage::Completed {
-                    tracing::warn!(
-                        vault_id = %journal.vault_id,
-                        stage = ?journal.stage,
-                        dir = %path.display(),
-                        "Recovering interrupted vault quarantine via physical file reconciliation"
-                    );
-
-                    let target_db = PathBuf::from(&journal.original_db_path);
-                    let target_manifest =
-                        journal.original_manifest_path.as_ref().map(PathBuf::from);
-                    let orig_wal = PathBuf::from(format!("{}-wal", target_db.display()));
-                    let orig_shm = PathBuf::from(format!("{}-shm", target_db.display()));
-
-                    let q_db = path.join(format!("{}.db", journal.vault_id));
-                    let q_manifest = path.join(format!("{}.manifest.json", journal.vault_id));
-                    let q_wal = path.join(format!("{}.db-wal", journal.vault_id));
-                    let q_shm = path.join(format!("{}.db-shm", journal.vault_id));
-
-                    // Rule 1: NEVER trust stage alone and NEVER remove_dir_all when data files exist in quarantine!
-                    // If quarantined file exists and target is missing, restore it back to target!
-                    if q_db.exists() && !target_db.exists() {
-                        let _ = safe_move_file(&q_db, &target_db);
-                    }
-                    if q_manifest.exists() {
-                        if let Some(ref tm) = target_manifest {
-                            if !tm.exists() {
-                                let _ = safe_move_file(&q_manifest, tm);
-                            }
-                        }
-                    }
-                    if q_wal.exists() && !orig_wal.exists() {
-                        let _ = safe_move_file(&q_wal, &orig_wal);
-                    }
-                    if q_shm.exists() && !orig_shm.exists() {
-                        let _ = safe_move_file(&q_shm, &orig_shm);
-                    }
-
-                    // Only clean up quarantine folder if all data files were safely reconciled and no data files remain
-                    let remaining =
-                        q_db.exists() || q_manifest.exists() || q_wal.exists() || q_shm.exists();
-                    if !remaining {
-                        let _ = std::fs::remove_dir_all(&path);
-                    } else {
-                        tracing::error!(
-                            vault_id = %journal.vault_id,
-                            dir = %path.display(),
-                            "Interrupted quarantine directory still contains data files; preserving files without deletion"
-                        );
-                    }
-                    recovered.push(journal.vault_id);
-                }
+        let id = &journal.vault_id;
+        if journal.journal_version != 1
+            || !is_safe_vault_id(id)
+            || is_default_vault(id)
+            || !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{id}_"))
+        {
+            return Err("Invalid quarantine journal identity".into());
+        }
+        let db = resolve_vault_db_file(base_path, id);
+        let manifest = resolve_manifest_file(base_path, id);
+        let files = [
+            (dir.join(format!("{id}.db")), db.clone(), true),
+            (
+                dir.join(format!("{id}.manifest.json")),
+                manifest,
+                journal.original_manifest_path.is_some(),
+            ),
+            (
+                dir.join(format!("{id}.db-wal")),
+                db.with_extension("db-wal"),
+                journal.original_wal_path.is_some(),
+            ),
+            (
+                dir.join(format!("{id}.db-shm")),
+                db.with_extension("db-shm"),
+                journal.original_shm_path.is_some(),
+            ),
+        ];
+        for (source, target, expected) in &files {
+            let has_source = source.try_exists().map_err(|e| e.to_string())?;
+            let has_target = target.try_exists().map_err(|e| e.to_string())?;
+            if has_source && has_target || *expected && !has_source && !has_target {
+                return Err(format!(
+                    "Quarantine recovery requires manual reconciliation for {}",
+                    target.display()
+                ));
             }
         }
+        for (source, target, _) in files {
+            if source.try_exists().map_err(|e| e.to_string())? {
+                safe_move_file(&source, &target)?;
+            }
+        }
+        tracing::warn!(vault_id = %id, "Quarantine recovery requires authenticated database and registry verification");
+        return Err(format!("Quarantine recovery for {id} requires authenticated database and registry verification. Journal retained."));
     }
-    Ok(recovered)
+    Ok(Vec::new())
 }
 
 #[allow(dead_code)]

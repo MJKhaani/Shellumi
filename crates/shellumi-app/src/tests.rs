@@ -3407,12 +3407,8 @@ fn test_vault_quarantine_restart_recovery() {
     fs::write(q_vault_dir.join("journal.json"), journal_json).unwrap();
 
     // Call recovery
-    let recovered = detect_and_recover_interrupted_quarantine(&temp_dir).unwrap();
-    assert_eq!(recovered, vec!["vlt-interrupted".to_string()]);
-    assert!(
-        !q_vault_dir.exists(),
-        "Initiated incomplete directory should be purged"
-    );
+    assert!(detect_and_recover_interrupted_quarantine(&temp_dir).is_err());
+    assert!(q_vault_dir.join("journal.json").exists());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -3485,7 +3481,10 @@ fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
             key.expose_bytes()
         );
         assert_eq!(
-            backup.unlock_with_recovery(rec_code).unwrap().expose_bytes(),
+            backup
+                .unlock_with_recovery(rec_code)
+                .unwrap()
+                .expose_bytes(),
             key.expose_bytes()
         );
     }
@@ -3547,8 +3546,10 @@ fn test_vault_quarantine_crash_recovery_restores_database_when_interrupted_at_in
     fs::write(q_vault_dir.join("journal.json"), journal_json).unwrap();
 
     // Call recovery
-    let recovered = detect_and_recover_interrupted_quarantine(&temp_dir).unwrap();
-    assert_eq!(recovered, vec!["vlt-crashed".to_string()]);
+    for _ in 0..2 {
+        assert!(detect_and_recover_interrupted_quarantine(&temp_dir).is_err());
+    }
+    assert!(q_vault_dir.join("journal.json").exists());
 
     // CRITICAL GUARANTEE: User data was NOT purged!
     // It was safely reconciled and restored back to original paths!

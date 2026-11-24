@@ -3179,7 +3179,12 @@ fn main() {
     };
 
     if let Some(path) = &database {
-        if let Err(error) = data_path::check_pending_password_rotation(std::path::Path::new(path)) {
+        if let Err(error) = data_path::check_pending_password_rotation(std::path::Path::new(path))
+            .and_then(|()| {
+                data_path::detect_and_recover_interrupted_quarantine(std::path::Path::new(path))
+                    .map(|_| ())
+            })
+        {
             startup_error = Some(error);
             database = None;
         }
@@ -3199,17 +3204,6 @@ fn main() {
                 std::path::Path::new(".")
             };
 
-            // Recover any interrupted vault quarantine or rotation operations on startup
-            if let Ok(recovered_q) = data_path::detect_and_recover_interrupted_quarantine(base_dir)
-            {
-                if !recovered_q.is_empty() {
-                    tracing::info!(
-                        count = recovered_q.len(),
-                        vaults = ?recovered_q,
-                        "Recovered interrupted vault quarantine operations on startup"
-                    );
-                }
-            }
             !shellumi_core::setup::SetupState::is_setup_completed(base_dir)
         } else {
             false
