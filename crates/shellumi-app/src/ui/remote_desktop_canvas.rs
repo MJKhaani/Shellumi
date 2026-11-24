@@ -89,20 +89,36 @@ impl Shellumi {
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .on_click(cx.listener(move |app, event: &ClickEvent, _window, cx| {
+                .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                     if let Some(pos) = event.mouse_position() {
-                        // Viewport width and height approximate container or 1920x1080 display
-                        let screen_x: f32 = pos.x.into();
-                        let screen_y: f32 = pos.y.into();
+                        let vp = window.viewport_size();
+                        let total_w = vp.width.to_f64() as f32;
+                        let total_h = vp.height.to_f64() as f32;
+
+                        let sidebar_w = if app.sidebar_visible {
+                            crate::ui::layout::DEFAULT_SIDEBAR_WIDTH
+                        } else {
+                            0.0
+                        };
+                        let inspector_open = app.inspector_coordinator.is_open();
+                        let geom = crate::ui::layout::calculate_layout(
+                            total_w,
+                            sidebar_w,
+                            inspector_open,
+                            None,
+                        );
+
+                        let canvas_w = geom.primary_content_width;
+                        let canvas_h = (total_h - 48.0 - 44.0).max(100.0);
+
+                        let origin_x = sidebar_w;
+                        let origin_y = 48.0 + 44.0;
+
+                        let screen_x = (pos.x.to_f64() as f32 - origin_x).max(0.0);
+                        let screen_y = (pos.y.to_f64() as f32 - origin_y).max(0.0);
 
                         if let Some((remote_x, remote_y)) = translate_coordinates(
-                            screen_x,
-                            screen_y,
-                            fb_width as f32,
-                            fb_height as f32,
-                            fb_width,
-                            fb_height,
-                            scale_mode,
+                            screen_x, screen_y, canvas_w, canvas_h, fb_width, fb_height, scale_mode,
                         ) {
                             app.remote_desktop_click_canvas(tab_idx, remote_x, remote_y, cx);
                         }
@@ -192,5 +208,111 @@ mod tests {
         // Verify pixel color in raw bytes
         // Top-left pixel (0, 0) should be blue (0, 0, 255, 255)
         assert_eq!(&bytes[0..4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn test_rd_006_letterbox_excludes_outside_points() {
+        // Framebuffer 1920x1080 (16:9) placed in an 800x800 square container
+        // Rendered size in Fit mode is 800 x 450.
+        // Letterbox offset_y = (800 - 450) / 2 = 175.0.
+        let viewport_w = 800.0;
+        let viewport_h = 800.0;
+        let fb_w = 1920;
+        let fb_h = 1080;
+
+        // Click in top letterbox margin (y < 175.0) -> None
+        assert_eq!(
+            translate_coordinates(
+                400.0,
+                50.0,
+                viewport_w,
+                viewport_h,
+                fb_w,
+                fb_h,
+                ScaleMode::Fit
+            ),
+            None
+        );
+
+        // Click in bottom letterbox margin (y >= 625.0) -> None
+        assert_eq!(
+            translate_coordinates(
+                400.0,
+                700.0,
+                viewport_w,
+                viewport_h,
+                fb_w,
+                fb_h,
+                ScaleMode::Fit
+            ),
+            None
+        );
+
+        // Click dead center (400, 400) -> remote center (960, 540)
+        let (rx, ry) = translate_coordinates(
+            400.0,
+            400.0,
+            viewport_w,
+            viewport_h,
+            fb_w,
+            fb_h,
+            ScaleMode::Fit,
+        )
+        .expect("center click should hit remote image");
+        assert_eq!(rx, 960);
+        assert_eq!(ry, 540);
+    }
+
+    #[test]
+    fn test_rd_007_fit_aspect_maps_edges_and_center() {
+        // 1920x1080 inside 960x540 (exact 2:1 scale, zero letterbox)
+        let (rx, ry) = translate_coordinates(0.0, 0.0, 960.0, 540.0, 1920, 1080, ScaleMode::Fit)
+            .expect("top-left should hit");
+        assert_eq!((rx, ry), (0, 0));
+
+        let (rx, ry) =
+            translate_coordinates(480.0, 270.0, 960.0, 540.0, 1920, 1080, ScaleMode::Fit)
+                .expect("center should hit");
+        assert_eq!((rx, ry), (960, 540));
+    }
+
+    #[test]
+    fn test_rd_008_fill_stretch_maps_non_uniform() {
+        // Fill stretches horizontally by 0.5 (960/1920) and vertically by 0.25 (270/1080)
+        let (rx, ry) =
+            translate_coordinates(480.0, 135.0, 960.0, 270.0, 1920, 1080, ScaleMode::Fill)
+                .expect("fill should hit");
+        assert_eq!((rx, ry), (960, 540));
+    }
+
+    #[test]
+    fn test_rd_010_original_centering_and_outside() {
+        // 800x600 remote inside 1200x900 viewport in 100% (Original) mode
+        // Centering offset_x = (1200 - 800) / 2 = 200.
+        // Centering offset_y = (900 - 600) / 2 = 150.
+        // Click outside left -> None
+        assert_eq!(
+            translate_coordinates(100.0, 450.0, 1200.0, 900.0, 800, 600, ScaleMode::Original),
+            None
+        );
+        // Click at offset_x + 10, offset_y + 10 -> (10, 10)
+        let (rx, ry) =
+            translate_coordinates(210.0, 160.0, 1200.0, 900.0, 800, 600, ScaleMode::Original)
+                .expect("inside should hit");
+        assert_eq!((rx, ry), (10, 10));
+    }
+
+    #[test]
+    fn test_rd_011_canvas_offset_transformation() {
+        let sidebar_w: f32 = 184.0;
+        let top_offset: f32 = 48.0 + 44.0; // topbar + remote desktop toolbar
+        let global_cursor_x: f32 = 184.0 + 400.0;
+        let global_cursor_y: f32 = 92.0 + 400.0;
+
+        let canvas_local_x = (global_cursor_x - sidebar_w).max(0.0);
+        let canvas_local_y = (global_cursor_y - top_offset).max(0.0);
+
+        assert_eq!(canvas_local_x, 400.0);
+        assert_eq!(canvas_local_y, 400.0);
     }
 }

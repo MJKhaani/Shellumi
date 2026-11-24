@@ -40,22 +40,7 @@ impl Shellumi {
 
         let (status_bg, status_color, status_text) = match state.status {
             RemoteDesktopStatus::Connected => {
-                let lat_str = state
-                    .latency_ms
-                    .map(|l| format!("{l}ms"))
-                    .unwrap_or_else(|| "— ms".into());
-                let fps_str = state
-                    .fps
-                    .map(|f| format!("{f} FPS"))
-                    .unwrap_or_else(|| "— FPS".into());
-                (
-                    rgb(0x0e3b2e),
-                    rgb(0x3dd68c),
-                    format!(
-                        "● Connected · {lat_str} · {fps_str} · {}x{} · {}bpp",
-                        state.width, state.height, state.color_depth
-                    ),
-                )
+                (rgb(0x0e3b2e), rgb(0x3dd68c), "● Connected".to_string())
             }
             RemoteDesktopStatus::Connecting => (
                 rgb(0x1a2e3b),
@@ -70,11 +55,9 @@ impl Shellumi {
                 rgb(0xf2a900),
                 format!("🔄 Reconnecting ({attempt}/{max_attempts})…"),
             ),
-            RemoteDesktopStatus::NotConnected => (
-                rgb(0x282338),
-                rgb(0xbb86fc),
-                "○ Not connected (native engine in development)".to_string(),
-            ),
+            RemoteDesktopStatus::NotConnected => {
+                (rgb(0x282338), rgb(0xbb86fc), "○ Offline".to_string())
+            }
             RemoteDesktopStatus::Disconnected => {
                 (rgb(0x3e1717), rgb(0xeb5757), "○ Disconnected".to_string())
             }
@@ -645,13 +628,13 @@ impl Shellumi {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(if state.show_diagnostics {
+            .bg(if self.inspector_coordinator.is_open() {
                 rgb(MacTheme::ACCENT_BLUE)
             } else {
                 rgb(MacTheme::SURFACE_ACTIVE)
             })
             .text_xs()
-            .text_color(if state.show_diagnostics {
+            .text_color(if self.inspector_coordinator.is_open() {
                 rgb(0xffffff)
             } else {
                 rgb(MacTheme::TEXT_PRIMARY)
@@ -659,7 +642,7 @@ impl Shellumi {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, _, cx| {
-                app.remote_desktop_toggle_diagnostics(tab_idx, cx);
+                app.toggle_session_inspector(tab_idx, cx);
             }))
             .child("📊 Telemetry");
 
@@ -745,6 +728,7 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .overflow_x_hidden()
                     .child(
                         div()
                             .flex()
@@ -755,11 +739,11 @@ impl Shellumi {
                             .child(alt_tab_btn)
                             .child(clip_btn)
                             .child(send_files_btn)
-                            .children(drive_btn)
+                            .children(if !is_vnc { drive_btn } else { None })
                             .child(mute_btn)
                             .child(volume_ctrl)
-                            .children(mic_mute_btn)
-                            .children(mic_volume_ctrl),
+                            .children(if !is_vnc { mic_mute_btn } else { None })
+                            .children(if !is_vnc { mic_volume_ctrl } else { None }),
                     )
                     .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
                     .child(
@@ -770,23 +754,27 @@ impl Shellumi {
                             .child(scale_orig)
                             .child(scale_fill),
                     )
-                    .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(res_indicator)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .child(res_1080p)
-                                    .child(res_1440p)
-                                    .child(res_4k),
-                            )
-                            .child(res_match_viewport),
-                    )
+                    .children(if !is_vnc {
+                        Some(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
+                                .child(res_indicator)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .child(res_1080p)
+                                        .child(res_1440p)
+                                        .child(res_4k),
+                                )
+                                .child(res_match_viewport),
+                        )
+                    } else {
+                        None
+                    })
                     .child(view_only_btn)
                     .child(diag_btn)
                     .child(fs_btn)

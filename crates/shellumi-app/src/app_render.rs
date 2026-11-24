@@ -1294,9 +1294,14 @@ impl Render for Shellumi {
                         if self.sidebar_visible {
                             row = row.child(self.workspace_sidebar("Remote Desktop", cx));
                         }
-                        root.child(row.child(body.child(
-                            self.render_remote_desktop_session(active_idx, rd_state, window, cx),
-                        )))
+                        let session_view =
+                            self.render_remote_desktop_session(active_idx, rd_state, window, cx);
+                        if self.inspector_coordinator.is_open() {
+                            let inspector = self.render_unified_inspector(window, cx);
+                            root.child(row.child(body.child(session_view)).child(inspector))
+                        } else {
+                            root.child(row.child(body.child(session_view)))
+                        }
                     } else {
                         let mut row = div().flex().flex_1().min_h_0();
                         if self.sidebar_visible {

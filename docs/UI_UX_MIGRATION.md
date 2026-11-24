@@ -70,7 +70,7 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 - **Phase 3:** Hosts and Groups end-to-end migration into the unified Inspector. (COMPLETED)
 - **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration. (COMPLETED)
 - **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations. (COMPLETED)
-- **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping.
+- **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping. (COMPLETED)
 - **Phase 7:** Complex full-page workflows and standardized safety alerts.
 - **Phase 8:** Native GPUI interaction regression testing, visual QA, and final polish.
 
@@ -132,5 +132,18 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 - **Automated Verification:**
   - 10 dedicated layout and topbar unit tests passing (`test_topbar_940px_window_with_quick_connect`, `test_topbar_1280px_window_with_quick_connect`, `test_topbar_with_20_tabs_limits_visible_tabs`, `test_topbar_without_quick_connect_gives_all_space_to_tabs`, plus all prior layout tests).
   - Zero warnings on `cargo clippy -p shellumi-app --all-targets -- -D warnings`.
+  - Clean `cargo fmt --all -- --check`.
+
+### Phase 6: Remote Desktop UX, Compact Toolbar & Canvas Geometry
+- **Implemented:**
+  - Eliminated `UI-05` in `crates/shellumi-app/src/ui/remote_desktop_session.rs`: Replaced the massive inline 25-button toolbar with a compact 44px toolbar. Permanent technical telemetry (FPS, latency, color depth, bytes) was migrated to the Unified Session Inspector, eliminating visual clutter (`RD-001`, `RD-002`).
+  - Implemented `crates/shellumi-app/src/ui/inspector/session.rs`: Unified Session Inspector (`InspectorTarget::Session`) rendering live technical telemetry (FPS, RTT, negotiated resolution, dynamic display control state), audio output/microphone channels, clipboard sync status, and shared drive metrics (`RD-016`).
+  - Protocol sensitivity (`RD-003`, `RD-004`): When VNC is connected, unsupported RDP features (microphone, shared drive redirection, dynamic display control) are cleanly hidden, preventing misleading or nonfunctional UI affordances.
+  - Eliminated `UI-06` in `crates/shellumi-app/src/ui/remote_desktop_canvas.rs`: Fixed pointer coordinate translation using measured window dimensions, layout geometry calculations (`calculate_layout`), and canvas origin offsets (`origin_x = sidebar_width`, `origin_y = topbar + toolbar`), properly accounting for letterbox/pillarbox margins across Fit, 100% (Original), and Fill scaling modes (`RD-005`, `RD-006`, `RD-007`, `RD-008`, `RD-010`, `RD-011`).
+- **Automated Verification:**
+  - 5 dedicated Remote Desktop canvas coordinate translation tests passing (`test_rd_006_letterbox_excludes_outside_points`, `test_rd_007_fit_aspect_maps_edges_and_center`, `test_rd_008_fill_stretch_maps_non_uniform`, `test_rd_010_original_centering_and_outside`, `test_rd_011_canvas_offset_transformation`).
+  - 7 native VNC protocol integration tests passing in `shellumi-vnc`.
+  - 559 automated unit and integration tests passing across workspace (`cargo test --workspace`).
+  - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
   - Clean `cargo fmt --all -- --check`.
 

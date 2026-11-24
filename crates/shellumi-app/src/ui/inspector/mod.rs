@@ -7,6 +7,7 @@ pub mod group;
 pub mod host;
 pub mod identity;
 pub mod provider;
+pub mod session;
 pub mod snippet;
 pub mod team;
 pub mod tunnel;
@@ -164,7 +165,9 @@ impl Shellumi {
             InspectorTarget::TeamMember(member_id) => {
                 self.render_team_inspector(member_id, mode, cx)
             }
-            InspectorTarget::Session(_) => div(),
+            InspectorTarget::Session(session_id) => {
+                self.render_session_inspector(session_id, window, cx)
+            }
         }
     }
 
