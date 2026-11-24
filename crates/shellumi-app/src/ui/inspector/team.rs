@@ -493,6 +493,7 @@ impl Shellumi {
                         user_id: email.clone(),
                         display_name: email,
                         public_key: pubkey,
+                        agreement_public_key: None,
                         role,
                         enrolled_at: now,
                         invited_by: "current_user".into(),

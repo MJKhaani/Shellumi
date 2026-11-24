@@ -747,13 +747,49 @@ impl Shellumi {
                                 .await
                                 .unwrap_or(None);
 
+                            let target_db = data_path::resolve_vault_db_file(
+                                std::path::Path::new(&db_path),
+                                vid.as_str(),
+                            );
+                            let mut original_target_db_envelope = None;
+                            if let Some(target_db_str) = target_db.to_str() {
+                                if target_db.exists() {
+                                    if let Ok(target_store) =
+                                        HostStore::open_with_key(target_db_str, Some(&key)).await
+                                    {
+                                        original_target_db_envelope = target_store
+                                            .get_vault_recovery_envelope(vid.as_str())
+                                            .await
+                                            .unwrap_or(None);
+                                    }
+                                }
+                            }
+
+                            // Pre-rotation validation: verify that the new passphrase unwraps to the exact same DEK
+                            if manifest_path.exists() {
+                                let mut test_manifest =
+                                    VaultManifest::load_from_path(&manifest_path)
+                                        .map_err(|e| format!("Failed to parse manifest: {e}"))?;
+                                test_manifest.change_password(&key, &passphrase).map_err(|e| {
+                                    format!("Pre-rotation validation failed to change password: {e}")
+                                })?;
+                                let test_unlocked = test_manifest.unlock(&passphrase).map_err(|e| {
+                                    format!("Pre-rotation validation failed: new passphrase cannot unlock derived manifest: {e}")
+                                })?;
+                                if test_unlocked.expose_bytes() != key.expose_bytes() {
+                                    return Err("Pre-rotation validation failed: unlocked key does not match active vault DEK".into());
+                                }
+                            }
+
                             let mut rotation_journal = data_path::PasswordRotationJournal {
                                 journal_version: 1,
                                 vault_id: vid.as_str().to_string(),
                                 stage: data_path::PasswordRotationStage::Initiated,
                                 original_manifest_backup: original_manifest_backup.clone(),
                                 original_registry_envelope: original_registry_envelope.clone(),
-                                original_target_db_envelope: None,
+                                original_target_db_envelope: original_target_db_envelope.clone(),
+                                target_db_path: target_db.to_str().map(|s| s.to_string()),
+                                registry_db_path: Some(db_path.clone()),
                                 updated_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -843,9 +879,18 @@ impl Shellumi {
                                 if let Some(ref bytes) = original_manifest_backup {
                                     let _ = data_path::write_durable_file(&manifest_path, bytes);
                                 }
+                                if let Some(target_db_str) = target_db.to_str() {
+                                    if target_db.exists() {
+                                        if let Ok(mut t_store) = HostStore::open_with_key(target_db_str, Some(&key)).await {
+                                            if let Some(ref orig_t_env) = original_target_db_envelope {
+                                                let _ = t_store.save_vault_recovery_envelope(vid.as_str(), orig_t_env).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 let _ = std::fs::remove_file(&rotation_journal_path);
                                 return Err(format!(
-                                    "Failed to persist recovery envelope in registry: {e}"
+                                    "Failed to persist recovery envelope in registry: {e}; rolled back manifest and target DB"
                                 ));
                             }
                             rotation_journal.stage =
@@ -865,6 +910,15 @@ impl Shellumi {
                                 if let Some(ref bytes) = original_manifest_backup {
                                     let _ = data_path::write_durable_file(&manifest_path, bytes);
                                 }
+                                if let Some(target_db_str) = target_db.to_str() {
+                                    if target_db.exists() {
+                                        if let Ok(mut t_store) = HostStore::open_with_key(target_db_str, Some(&key)).await {
+                                            if let Some(ref orig_t_env) = original_target_db_envelope {
+                                                let _ = t_store.save_vault_recovery_envelope(vid.as_str(), orig_t_env).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some(ref orig_reg) = original_registry_envelope {
                                     let _ = reg_store
                                         .save_vault_recovery_envelope(vid.as_str(), orig_reg)
@@ -872,7 +926,7 @@ impl Shellumi {
                                 }
                                 let _ = std::fs::remove_file(&rotation_journal_path);
                                 return Err(format!(
-                                    "Failed to update OS credential store with new vault passphrase: {e}"
+                                    "Failed to update OS credential store with new vault passphrase: {e}; rolled back all stores"
                                 ));
                             }
                             rotation_journal.stage =
@@ -1177,6 +1231,11 @@ impl Shellumi {
                                 .to_string(),
                         );
                     }
+                    store
+                        .checkpoint_truncate()
+                        .await
+                        .map_err(|e| format!("Failed to checkpoint vault WAL before decommissioning: {e}"))?;
+                    drop(store);
                 }
 
                 // 1. Quarantine physical files first (crash-safe staging)

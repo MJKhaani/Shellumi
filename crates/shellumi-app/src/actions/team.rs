@@ -256,7 +256,22 @@ impl Shellumi {
     }
 
     pub(crate) fn rotate_team_vault_key(&mut self, vault_id: &str, cx: &mut Context<Self>) {
+        if let Some(modal) = &mut self.team_modal {
+            if modal.is_loading {
+                return;
+            }
+            modal.is_loading = true;
+            modal.error = None;
+            modal.status_message = None;
+            cx.notify();
+        }
+
         let Some(path) = self.active_vault_db_path() else {
+            if let Some(modal) = &mut self.team_modal {
+                modal.is_loading = false;
+                modal.error = Some("No active vault database path available".to_string());
+                cx.notify();
+            }
             return;
         };
         let active_key = self.active_vault_key();
@@ -266,26 +281,7 @@ impl Shellumi {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         let now_secs = now.as_secs();
-        let now_nanos = now.subsec_nanos();
         let now_iso = format!("{now_secs}");
-
-        let current_epoch = self
-            .team_modal
-            .as_ref()
-            .and_then(|m| m.vaults.iter().find(|v| v.id == vid))
-            .map(|v| v.current_epoch)
-            .unwrap_or(1);
-        let new_epoch = current_epoch + 1;
-
-        let audit = SharingAuditRecord::new(
-            format!("aud-{now_secs}-{now_nanos}"),
-            &vid,
-            AuditAction::KeyRotated,
-            "local_owner",
-            None,
-            Some(format!("Rotated key to epoch {new_epoch}")),
-            &now_iso,
-        );
 
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -295,15 +291,11 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                store
-                    .update_shared_vault_epoch(&vid, new_epoch, &now_iso)
+                let new_epoch = store
+                    .rotate_shared_vault_key(&vid, None, "local_owner", &now_iso)
                     .await
                     .map_err(|e| e.to_string())?;
-                store
-                    .log_audit_event(&audit)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                Ok(())
+                Ok(new_epoch)
             })
         });
 
@@ -311,10 +303,12 @@ impl Shellumi {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
                 if let Some(modal) = &mut app.team_modal {
+                    modal.is_loading = false;
                     match result {
-                        Ok(()) => {
-                            modal.status_message =
-                                Some(format!("Vault key rotated to epoch {new_epoch}."));
+                        Ok(new_epoch) => {
+                            modal.status_message = Some(format!(
+                                "Vault key cryptographically rotated to epoch {new_epoch}."
+                            ));
                             app.load_team_vaults(cx);
                         }
                         Err(e) => {

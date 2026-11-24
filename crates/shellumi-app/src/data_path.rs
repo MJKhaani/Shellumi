@@ -242,6 +242,10 @@ pub(crate) struct PasswordRotationJournal {
     pub original_manifest_backup: Option<String>,
     pub original_registry_envelope: Option<String>,
     pub original_target_db_envelope: Option<String>,
+    #[serde(default)]
+    pub target_db_path: Option<String>,
+    #[serde(default)]
+    pub registry_db_path: Option<String>,
     pub updated_at: u64,
 }
 
@@ -262,6 +266,105 @@ pub(crate) fn write_durable_file(path: &Path, content: &str) -> Result<(), Strin
             path.display()
         )
     })?;
+    Ok(())
+}
+
+pub(crate) fn safe_move_file(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.exists() {
+        return Err(format!("Source file does not exist: {}", src.display()));
+    }
+    if dst.exists() {
+        return Err(format!(
+            "Refusing to overwrite existing destination file: {}",
+            dst.display()
+        ));
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create destination directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
+    // Try standard filesystem rename first (atomic on same filesystem)
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+
+    // Cross-filesystem fallback: copy to temp file, fsync, verify size, atomic rename, fsync parent, remove source
+    let parent = dst
+        .parent()
+        .ok_or_else(|| "Destination has no parent directory".to_string())?;
+    let tmp_dst = dst.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().as_simple()));
+
+    let src_len = std::fs::metadata(src)
+        .map_err(|e| {
+            format!(
+                "Failed to read metadata of source file {}: {e}",
+                src.display()
+            )
+        })?
+        .len();
+
+    {
+        let mut reader = std::fs::File::open(src)
+            .map_err(|e| format!("Failed to open source file {}: {e}", src.display()))?;
+        let mut writer = std::fs::File::create(&tmp_dst).map_err(|e| {
+            format!(
+                "Failed to create temporary copy file {}: {e}",
+                tmp_dst.display()
+            )
+        })?;
+        std::io::copy(&mut reader, &mut writer).map_err(|e| {
+            format!(
+                "Failed to copy bytes from {} to {}: {e}",
+                src.display(),
+                tmp_dst.display()
+            )
+        })?;
+        writer
+            .sync_all()
+            .map_err(|e| format!("Failed to fsync temporary file {}: {e}", tmp_dst.display()))?;
+    }
+
+    let copied_len = std::fs::metadata(&tmp_dst)
+        .map_err(|e| {
+            format!(
+                "Failed to read metadata of copied file {}: {e}",
+                tmp_dst.display()
+            )
+        })?
+        .len();
+
+    if copied_len != src_len {
+        let _ = std::fs::remove_file(&tmp_dst);
+        return Err(format!(
+            "Byte length mismatch during safe move: source was {} bytes, copy was {} bytes",
+            src_len, copied_len
+        ));
+    }
+
+    std::fs::rename(&tmp_dst, dst).map_err(|e| {
+        format!(
+            "Failed to rename temporary file to destination {}: {e}",
+            dst.display()
+        )
+    })?;
+
+    // Fsync directory if possible
+    if let Ok(dir_file) = std::fs::File::open(parent) {
+        let _ = dir_file.sync_all();
+    }
+
+    std::fs::remove_file(src).map_err(|e| {
+        format!(
+            "Failed to remove source file after copy {}: {e}",
+            src.display()
+        )
+    })?;
+
     Ok(())
 }
 
@@ -310,10 +413,13 @@ pub(crate) fn detect_and_recover_interrupted_rotation(
                                 stage = ?journal.stage,
                                 "Recovering interrupted password rotation"
                             );
-                            if let Some(backup_content) = &journal.original_manifest_backup {
-                                let manifest_path =
-                                    resolve_manifest_file(base_path, &journal.vault_id);
-                                let _ = write_durable_file(&manifest_path, backup_content);
+                            if journal.stage != PasswordRotationStage::Verified {
+                                // Interrupted prior to full multi-store verification: revert manifest to original state
+                                if let Some(backup_content) = &journal.original_manifest_backup {
+                                    let manifest_path =
+                                        resolve_manifest_file(base_path, &journal.vault_id);
+                                    let _ = write_durable_file(&manifest_path, backup_content);
+                                }
                             }
                             if !recovered.contains(&journal.vault_id) {
                                 recovered.push(journal.vault_id);
@@ -412,22 +518,12 @@ pub(crate) fn quarantine_vault_files(
     // Stage 2: Quarantine WAL / SHM files
     if wal.exists() {
         let q_wal = q_dir.join(format!("{vault_id}.db-wal"));
-        std::fs::rename(&wal, &q_wal)
-            .or_else(|_| {
-                std::fs::copy(&wal, &q_wal)?;
-                std::fs::remove_file(&wal)
-            })
-            .map_err(|e| format!("Failed to quarantine WAL file: {e}"))?;
+        safe_move_file(&wal, &q_wal).map_err(|e| format!("Failed to quarantine WAL file: {e}"))?;
         journal.quarantined_wal_path = Some(q_wal.to_string_lossy().to_string());
     }
     if shm.exists() {
         let q_shm = q_dir.join(format!("{vault_id}.db-shm"));
-        std::fs::rename(&shm, &q_shm)
-            .or_else(|_| {
-                std::fs::copy(&shm, &q_shm)?;
-                std::fs::remove_file(&shm)
-            })
-            .map_err(|e| format!("Failed to quarantine SHM file: {e}"))?;
+        safe_move_file(&shm, &q_shm).map_err(|e| format!("Failed to quarantine SHM file: {e}"))?;
         journal.quarantined_shm_path = Some(q_shm.to_string_lossy().to_string());
     }
     journal.stage = QuarantineStage::WalShmStaged;
@@ -436,11 +532,7 @@ pub(crate) fn quarantine_vault_files(
     // Stage 3: Quarantine database file
     let q_db = q_dir.join(format!("{vault_id}.db"));
     if target_db.exists() {
-        std::fs::rename(&target_db, &q_db)
-            .or_else(|_| {
-                std::fs::copy(&target_db, &q_db)?;
-                std::fs::remove_file(&target_db)
-            })
+        safe_move_file(&target_db, &q_db)
             .map_err(|e| format!("Failed to quarantine database file: {e}"))?;
         journal.quarantined_db_path = Some(q_db.to_string_lossy().to_string());
     }
@@ -450,11 +542,7 @@ pub(crate) fn quarantine_vault_files(
     // Stage 4: Quarantine manifest file
     let q_manifest = q_dir.join(format!("{vault_id}.manifest.json"));
     if target_manifest.exists() {
-        std::fs::rename(&target_manifest, &q_manifest)
-            .or_else(|_| {
-                std::fs::copy(&target_manifest, &q_manifest)?;
-                std::fs::remove_file(&target_manifest)
-            })
+        safe_move_file(&target_manifest, &q_manifest)
             .map_err(|e| format!("Failed to quarantine manifest file: {e}"))?;
         journal.quarantined_manifest_path = Some(q_manifest.to_string_lossy().to_string());
     }
@@ -513,67 +601,59 @@ pub(crate) fn restore_quarantined_vault(q_dir: &Path) -> Result<(), String> {
 
     let target_db = PathBuf::from(&record.original_db_path);
     let target_manifest = record.original_manifest_path.as_ref().map(PathBuf::from);
+    let orig_wal = PathBuf::from(format!("{}-wal", target_db.display()));
+    let orig_shm = PathBuf::from(format!("{}-shm", target_db.display()));
 
-    // Overwrite prevention: refuse to overwrite existing files!
-    if target_db.exists() {
+    let q_db = q_dir.join(format!("{}.db", record.vault_id));
+    let q_manifest = q_dir.join(format!("{}.manifest.json", record.vault_id));
+    let q_wal = q_dir.join(format!("{}.db-wal", record.vault_id));
+    let q_shm = q_dir.join(format!("{}.db-shm", record.vault_id));
+
+    // Overwrite prevention: refuse to overwrite existing non-empty files!
+    if q_db.exists() && target_db.exists() {
         return Err(format!(
             "Cannot restore vault '{}': destination database already exists at '{}'",
             record.vault_id,
             target_db.display()
         ));
     }
-    if let Some(ref tm) = target_manifest {
-        if tm.exists() {
-            return Err(format!(
-                "Cannot restore vault '{}': destination manifest already exists at '{}'",
-                record.vault_id,
-                tm.display()
-            ));
+    if q_manifest.exists() {
+        if let Some(ref tm) = target_manifest {
+            if tm.exists() {
+                return Err(format!(
+                    "Cannot restore vault '{}': destination manifest already exists at '{}'",
+                    record.vault_id,
+                    tm.display()
+                ));
+            }
         }
     }
 
-    let q_db = q_dir.join(format!("{}.db", record.vault_id));
     if q_db.exists() {
-        if let Some(parent) = target_db.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::rename(&q_db, &target_db)
-            .or_else(|_| {
-                std::fs::copy(&q_db, &target_db)?;
-                std::fs::remove_file(&q_db)
-            })
+        safe_move_file(&q_db, &target_db)
             .map_err(|e| format!("Failed to restore database from quarantine: {e}"))?;
     }
 
-    if let Some(target_manifest) = target_manifest {
-        let q_manifest = q_dir.join(format!("{}.manifest.json", record.vault_id));
-        if q_manifest.exists() {
-            if let Some(parent) = target_manifest.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            std::fs::rename(&q_manifest, &target_manifest)
-                .or_else(|_| {
-                    std::fs::copy(&q_manifest, &target_manifest)?;
-                    std::fs::remove_file(&q_manifest)
-                })
+    if q_manifest.exists() {
+        if let Some(ref tm) = target_manifest {
+            safe_move_file(&q_manifest, tm)
                 .map_err(|e| format!("Failed to restore manifest from quarantine: {e}"))?;
         }
     }
 
-    // Restore WAL / SHM if present
-    let q_wal = q_dir.join(format!("{}.db-wal", record.vault_id));
-    let orig_wal = PathBuf::from(format!("{}-wal", target_db.display()));
-    if q_wal.exists() {
-        let _ = std::fs::rename(&q_wal, &orig_wal);
+    if q_wal.exists() && !orig_wal.exists() {
+        let _ = safe_move_file(&q_wal, &orig_wal);
     }
-    let q_shm = q_dir.join(format!("{}.db-shm", record.vault_id));
-    let orig_shm = PathBuf::from(format!("{}-shm", target_db.display()));
-    if q_shm.exists() {
-        let _ = std::fs::rename(&q_shm, &orig_shm);
+    if q_shm.exists() && !orig_shm.exists() {
+        let _ = safe_move_file(&q_shm, &orig_shm);
     }
 
-    // Remove quarantine folder
-    let _ = std::fs::remove_dir_all(q_dir);
+    // Remove quarantine folder only if no data files remain
+    let remaining = q_db.exists() || q_manifest.exists() || q_wal.exists() || q_shm.exists();
+    if !remaining {
+        let _ = std::fs::remove_dir_all(q_dir);
+    }
+
     tracing::info!(
         vault_id = %record.vault_id,
         "Restored quarantined vault files safely"
@@ -601,59 +681,56 @@ pub(crate) fn detect_and_recover_interrupted_quarantine(
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&journal_file) {
-            if let Ok(mut journal) = serde_json::from_str::<VaultQuarantineJournal>(&content) {
+            if let Ok(journal) = serde_json::from_str::<VaultQuarantineJournal>(&content) {
                 if journal.stage != QuarantineStage::Completed {
                     tracing::warn!(
                         vault_id = %journal.vault_id,
                         stage = ?journal.stage,
                         dir = %path.display(),
-                        "Recovering interrupted vault quarantine"
+                        "Recovering interrupted vault quarantine via physical file reconciliation"
                     );
-                    match journal.stage {
-                        QuarantineStage::Initiated => {
-                            let _ = std::fs::remove_dir_all(&path);
+
+                    let target_db = PathBuf::from(&journal.original_db_path);
+                    let target_manifest =
+                        journal.original_manifest_path.as_ref().map(PathBuf::from);
+                    let orig_wal = PathBuf::from(format!("{}-wal", target_db.display()));
+                    let orig_shm = PathBuf::from(format!("{}-shm", target_db.display()));
+
+                    let q_db = path.join(format!("{}.db", journal.vault_id));
+                    let q_manifest = path.join(format!("{}.manifest.json", journal.vault_id));
+                    let q_wal = path.join(format!("{}.db-wal", journal.vault_id));
+                    let q_shm = path.join(format!("{}.db-shm", journal.vault_id));
+
+                    // Rule 1: NEVER trust stage alone and NEVER remove_dir_all when data files exist in quarantine!
+                    // If quarantined file exists and target is missing, restore it back to target!
+                    if q_db.exists() && !target_db.exists() {
+                        let _ = safe_move_file(&q_db, &target_db);
+                    }
+                    if q_manifest.exists() {
+                        if let Some(ref tm) = target_manifest {
+                            if !tm.exists() {
+                                let _ = safe_move_file(&q_manifest, tm);
+                            }
                         }
-                        QuarantineStage::WalShmStaged => {
-                            if let (Some(q_wal), Some(orig_wal)) =
-                                (&journal.quarantined_wal_path, &journal.original_wal_path)
-                            {
-                                let _ = std::fs::rename(q_wal, orig_wal);
-                            }
-                            if let (Some(q_shm), Some(orig_shm)) =
-                                (&journal.quarantined_shm_path, &journal.original_shm_path)
-                            {
-                                let _ = std::fs::rename(q_shm, orig_shm);
-                            }
-                            let _ = std::fs::remove_dir_all(&path);
-                        }
-                        QuarantineStage::DatabaseStaged | QuarantineStage::ManifestStaged => {
-                            if let Some(orig_manifest) = &journal.original_manifest_path {
-                                let orig_m = Path::new(orig_manifest);
-                                let q_m = path.join(format!("{}.manifest.json", journal.vault_id));
-                                if orig_m.exists() && !q_m.exists() {
-                                    let _ = std::fs::rename(orig_m, &q_m);
-                                    journal.quarantined_manifest_path =
-                                        Some(q_m.to_string_lossy().to_string());
-                                }
-                            }
-                            let record = VaultQuarantineRecord {
-                                vault_id: journal.vault_id.clone(),
-                                original_db_path: journal.original_db_path.clone(),
-                                original_manifest_path: journal.original_manifest_path.clone(),
-                                quarantined_at: journal.quarantined_at.clone(),
-                                reason: format!(
-                                    "{} (recovered after interrupted operation)",
-                                    journal.reason
-                                ),
-                            };
-                            if let Ok(meta_json) = serde_json::to_string_pretty(&record) {
-                                let _ =
-                                    std::fs::write(path.join("quarantine_meta.json"), meta_json);
-                            }
-                            journal.stage = QuarantineStage::Completed;
-                            let _ = write_durable_journal(&journal_file, &journal);
-                        }
-                        QuarantineStage::Completed => {}
+                    }
+                    if q_wal.exists() && !orig_wal.exists() {
+                        let _ = safe_move_file(&q_wal, &orig_wal);
+                    }
+                    if q_shm.exists() && !orig_shm.exists() {
+                        let _ = safe_move_file(&q_shm, &orig_shm);
+                    }
+
+                    // Only clean up quarantine folder if all data files were safely reconciled and no data files remain
+                    let remaining =
+                        q_db.exists() || q_manifest.exists() || q_wal.exists() || q_shm.exists();
+                    if !remaining {
+                        let _ = std::fs::remove_dir_all(&path);
+                    } else {
+                        tracing::error!(
+                            vault_id = %journal.vault_id,
+                            dir = %path.display(),
+                            "Interrupted quarantine directory still contains data files; preserving files without deletion"
+                        );
                     }
                     recovered.push(journal.vault_id);
                 }

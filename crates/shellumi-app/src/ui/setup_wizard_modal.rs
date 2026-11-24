@@ -441,10 +441,14 @@ impl Shellumi {
             }))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_base()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .child("⚡ Create New Setup"),
+                    .child(Icon::new(IconName::NewVault).size(18.0))
+                    .child("Create New Setup"),
             )
             .child(
                 div()
@@ -469,10 +473,14 @@ impl Shellumi {
             }))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_base()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .child("🔄 Restore Existing Setup"),
+                    .child(Icon::new(IconName::RestoreBackup).size(18.0))
+                    .child("Restore Existing Setup"),
             )
             .child(
                 div()
@@ -799,10 +807,14 @@ impl Shellumi {
                             })
                             .text_xs()
                             .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.wizard_set_restore_source(true, cx);
                             }))
-                            .child("☁ Google Drive Cloud Restore"),
+                            .child(Icon::new(IconName::GoogleDrive).size(14.0))
+                            .child("Google Drive Cloud Restore"),
                     )
                     .child(
                         div()
@@ -822,10 +834,14 @@ impl Shellumi {
                             })
                             .text_xs()
                             .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.wizard_set_restore_source(false, cx);
                             }))
-                            .child("💻 Local Vault Unlock / Migration"),
+                            .child(Icon::new(IconName::VaultUnlock).size(14.0))
+                            .child("Local Vault Unlock / Migration"),
                     ),
             );
 

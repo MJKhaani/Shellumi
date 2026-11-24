@@ -2888,6 +2888,7 @@ async fn test_team_member_revocation_with_cryptographic_rotation() {
         user_id: "charlie@corp.internal".into(),
         display_name: "Charlie Dev".into(),
         public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICfakeCharliePubKey".into(),
+        agreement_public_key: None,
         role: TeamRole::Editor,
         enrolled_at: "2026-11-24T12:01:00Z".into(),
         invited_by: "owner@corp.internal".into(),
@@ -3214,6 +3215,84 @@ fn test_icon_pack_all_168_resolutions_and_hover() {
 }
 
 #[test]
+fn test_all_1680_icon_assets_png_decode_dimensions_and_artwork() {
+    use crate::embedded_icons::get_embedded_icon;
+    use crate::ui::icon::IconName;
+    use image::GenericImageView;
+
+    let resolutions = [32u32, 48, 64, 128, 256];
+    let states = [false, true]; // [regular, hover]
+    let problematic_icons = [
+        "actual_size",
+        "delete",
+        "disconnect",
+        "display_resolution",
+        "dynamic_resize",
+        "file_permissions",
+    ];
+
+    let mut decoded_count = 0;
+
+    for icon in IconName::ALL {
+        let name_str = icon.as_str();
+
+        for &res in &resolutions {
+            for &is_hover in &states {
+                let state_str = if is_hover { "hover" } else { "regular" };
+                let bytes = get_embedded_icon(name_str, is_hover, res).unwrap_or_else(|| {
+                    panic!("Missing embedded asset for icon '{name_str}' at {res}px ({state_str})")
+                });
+
+                // Verify PNG magic header
+                assert!(
+                    bytes.len() > 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n",
+                    "Icon '{name_str}' at {res}px ({state_str}) has invalid PNG magic header"
+                );
+
+                // Fully decode PNG into pixel buffer using `image` crate with PNG feature
+                let decoded = image::load_from_memory(bytes).unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to decode PNG for icon '{name_str}' at {res}px ({state_str}): {e}"
+                    )
+                });
+
+                // Validate dimensions match exact requested resolution
+                let (width, height) = decoded.dimensions();
+                assert_eq!(
+                    (width, height),
+                    (res, res),
+                    "Dimension mismatch for icon '{name_str}' at {res}px ({state_str}): got {width}x{height}"
+                );
+
+                // Validate non-empty artwork: ensure at least some pixels have non-zero alpha channel
+                let rgba = decoded.to_rgba8();
+                let has_visible_artwork = rgba.pixels().any(|p| p[3] > 0);
+                assert!(
+                    has_visible_artwork,
+                    "Icon '{name_str}' at {res}px ({state_str}) contains only empty transparent pixels"
+                );
+
+                // For problematic icons, verify transparency exists (not a fully opaque corrupted block)
+                if problematic_icons.contains(&name_str) {
+                    let has_transparent_pixels = rgba.pixels().any(|p| p[3] < 255);
+                    assert!(
+                        has_transparent_pixels,
+                        "Problematic icon '{name_str}' at {res}px ({state_str}) must retain transparency"
+                    );
+                }
+
+                decoded_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        decoded_count, 1680,
+        "Must verify exactly 1,680 embedded icon assets (168 icons x 5 resolutions x 2 states)"
+    );
+}
+
+#[test]
 fn test_vault_quarantine_journal_durable_state_machine_and_overwrite_protection() {
     use crate::data_path::{
         quarantine_vault_files, resolve_manifest_file, resolve_vault_db_file,
@@ -3382,6 +3461,8 @@ fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
         original_manifest_backup: Some(original_bytes.clone()),
         original_registry_envelope: None,
         original_target_db_envelope: None,
+        target_db_path: None,
+        registry_db_path: None,
         updated_at: 1000,
     };
     write_rotation_journal(&rotation_journal_path, &journal).unwrap();
@@ -3399,6 +3480,82 @@ fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
     assert!(
         !rotation_journal_path.exists(),
         "Journal should be cleaned up after recovery"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_vault_quarantine_crash_recovery_restores_database_when_interrupted_at_initiated() {
+    use crate::data_path::{
+        detect_and_recover_interrupted_quarantine, resolve_quarantine_dir, QuarantineStage,
+        VaultQuarantineJournal,
+    };
+    use std::fs;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "shellumi_test_q_crash_{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let q_root = resolve_quarantine_dir(&temp_dir);
+    let q_vault_dir = q_root.join("vlt-crashed_54321_uuid");
+    fs::create_dir_all(&q_vault_dir).unwrap();
+
+    let original_db = temp_dir.join("vaults/vlt-crashed.db");
+    let original_manifest = temp_dir.join("vault_manifests/vlt-crashed.manifest.json");
+
+    // Put real data files into quarantine folder to simulate crash right after moving files
+    // but BEFORE journal stage was updated from Initiated
+    fs::write(
+        q_vault_dir.join("vlt-crashed.db"),
+        b"SQLITE_DATABASE_CRITICAL_USER_DATA",
+    )
+    .unwrap();
+    fs::write(
+        q_vault_dir.join("vlt-crashed.manifest.json"),
+        b"{\"manifest\":\"critical\"}",
+    )
+    .unwrap();
+
+    let journal = VaultQuarantineJournal {
+        journal_version: 1,
+        vault_id: "vlt-crashed".to_string(),
+        original_db_path: original_db.to_string_lossy().to_string(),
+        original_manifest_path: Some(original_manifest.to_string_lossy().to_string()),
+        original_wal_path: None,
+        original_shm_path: None,
+        quarantined_db_path: None, // Interrupted before recording moved path
+        quarantined_manifest_path: None,
+        quarantined_wal_path: None,
+        quarantined_shm_path: None,
+        stage: QuarantineStage::Initiated, // Stage still says Initiated!
+        quarantined_at: "54321".to_string(),
+        reason: "Crash recovery test".to_string(),
+    };
+    let journal_json = serde_json::to_string_pretty(&journal).unwrap();
+    fs::write(q_vault_dir.join("journal.json"), journal_json).unwrap();
+
+    // Call recovery
+    let recovered = detect_and_recover_interrupted_quarantine(&temp_dir).unwrap();
+    assert_eq!(recovered, vec!["vlt-crashed".to_string()]);
+
+    // CRITICAL GUARANTEE: User data was NOT purged!
+    // It was safely reconciled and restored back to original paths!
+    assert!(
+        original_db.exists(),
+        "Original database file must be restored"
+    );
+    assert_eq!(
+        fs::read(&original_db).unwrap(),
+        b"SQLITE_DATABASE_CRITICAL_USER_DATA"
+    );
+    assert!(
+        original_manifest.exists(),
+        "Original manifest file must be restored"
+    );
+    assert_eq!(
+        fs::read(&original_manifest).unwrap(),
+        b"{\"manifest\":\"critical\"}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

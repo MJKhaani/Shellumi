@@ -46,17 +46,7 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        if let Some(p) = resolve_icon_path("invite_member", false, 48) {
-                            div()
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .child(gpui::img(p).size_full())
-                                .into_any_element()
-                        } else {
-                            div().child("👥").into_any_element()
-                        },
-                    )
+                    .child(Icon::new(IconName::InviteMember).size(22.0))
                     .child(
                         div()
                             .text_lg()
@@ -130,7 +120,11 @@ impl Shellumi {
                         cx.notify();
                     }
                 }))
-                .child(format!("📁 Shared Vaults ({})", modal.vaults.len())),
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(Icon::new(IconName::SharedVault).size(14.0))
+                .child(format!("Shared Vaults ({})", modal.vaults.len())),
         );
 
         let is_members = modal.active_tab == TeamModalTab::Members;
@@ -176,7 +170,11 @@ impl Shellumi {
                         cx.notify();
                     }
                 }))
-                .child(format!("👥 Members ({})", modal.members.len())),
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(Icon::new(IconName::TeamMembers).size(14.0))
+                .child(format!("Members ({})", modal.members.len())),
         );
 
         let is_audit = modal.active_tab == TeamModalTab::AuditLog;
@@ -222,7 +220,11 @@ impl Shellumi {
                         cx.notify();
                     }
                 }))
-                .child(format!("📜 Audit Log ({})", modal.audit_records.len())),
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(Icon::new(IconName::SecurityAudit).size(14.0))
+                .child(format!("Audit Log ({})", modal.audit_records.len())),
         );
 
         modal_box = modal_box.child(tab_strip);
@@ -402,11 +404,15 @@ impl Shellumi {
                                 .text_xs()
                                 .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap_1()
                                 .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.rotate_team_vault_key(&vid_rotate, cx);
                                 }))
-                                .child("🔄 Rotate Key"),
+                                .child(Icon::new(IconName::RotateKey).size(14.0))
+                                .child("Rotate Key"),
                         );
 
                         right = right.child(
@@ -421,11 +427,13 @@ impl Shellumi {
                                 .text_xs()
                                 .text_color(rgb(MacTheme::DANGER))
                                 .cursor_pointer()
+                                .flex()
+                                .items_center()
                                 .hover(|s| s.bg(rgb(0x4a1818)))
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.delete_team_vault(&vid_del, cx);
                                 }))
-                                .child("🗑"),
+                                .child(Icon::new(IconName::Delete).size(14.0)),
                         );
 
                         card = card.child(left).child(right);
@@ -592,7 +600,11 @@ impl Shellumi {
                                                 .bg(rgb(0x4a1818))
                                                 .text_xs()
                                                 .text_color(rgb(MacTheme::DANGER))
-                                                .child("⛔ Revoked")
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(Icon::new(IconName::MemberRevoke).size(12.0))
+                                                .child("Revoked")
                                         } else {
                                             div()
                                                 .px_2()
@@ -655,11 +667,15 @@ impl Shellumi {
                                     .text_xs()
                                     .text_color(rgb(MacTheme::DANGER))
                                     .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .hover(|s| s.bg(rgb(0x4a1818)))
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.revoke_team_member(&mid_revoke, cx);
                                     }))
-                                    .child("⛔ Revoke"),
+                                    .child(Icon::new(IconName::MemberRevoke).size(12.0))
+                                    .child("Revoke"),
                             );
                         }
 
@@ -842,11 +858,15 @@ impl Shellumi {
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
                                     .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE_HOVER)))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.invite_team_member(cx);
                                     }))
-                                    .child("✉️ Invite Member"),
+                                    .child(Icon::new(IconName::InviteMember).size(14.0))
+                                    .child("Invite Member"),
                             ),
                     );
                 modal_box = modal_box.child(invite_form);

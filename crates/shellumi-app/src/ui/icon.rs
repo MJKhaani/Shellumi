@@ -1217,6 +1217,7 @@ pub struct Icon {
     pub active: bool,
     pub disabled: bool,
     pub hover_switch: bool,
+    pub parent_group: Option<SharedString>,
     #[allow(dead_code)]
     pub tooltip: Option<SharedString>,
 }
@@ -1229,6 +1230,7 @@ impl Icon {
             active: false,
             disabled: false,
             hover_switch: true,
+            parent_group: None,
             tooltip: None,
         }
     }
@@ -1257,6 +1259,13 @@ impl Icon {
     #[allow(dead_code)]
     pub fn hover_switch(mut self, switch: bool) -> Self {
         self.hover_switch = switch;
+        self
+    }
+
+    /// Connects this icon's hover switch to a parent element's GPUI hover group.
+    #[allow(dead_code)]
+    pub fn parent_group(mut self, group: impl Into<SharedString>) -> Self {
+        self.parent_group = Some(group.into());
         self
     }
 
@@ -1301,19 +1310,29 @@ impl IntoElement for Icon {
 
         if self.hover_switch {
             if let (Some(reg), Some(hov)) = (reg_path.clone(), hover_path.clone()) {
-                return div()
-                    .group("shellumi-icon-tile")
+                let group_name = self
+                    .parent_group
+                    .clone()
+                    .unwrap_or_else(|| "shellumi-icon-tile".into());
+                let has_parent = self.parent_group.is_some();
+                let mut container = div()
                     .relative()
                     .w(px(size_pt))
                     .h(px(size_pt))
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .justify_center();
+
+                if !has_parent {
+                    container = container.group(group_name.clone());
+                }
+
+                return container
                     .child(
                         img(reg)
                             .w(px(size_pt))
                             .h(px(size_pt))
-                            .group_hover("shellumi-icon-tile", |s| s.opacity(0.0)),
+                            .group_hover(group_name.clone(), |s| s.opacity(0.0)),
                     )
                     .child(
                         img(hov)
@@ -1323,7 +1342,7 @@ impl IntoElement for Icon {
                             .w(px(size_pt))
                             .h(px(size_pt))
                             .opacity(0.0)
-                            .group_hover("shellumi-icon-tile", |s| s.opacity(1.0)),
+                            .group_hover(group_name, |s| s.opacity(1.0)),
                     )
                     .into_any_element();
             }

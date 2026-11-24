@@ -59,15 +59,7 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(if let Some(p) = resolve_icon_path("invite_member", false, 48) {
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .child(gpui::img(p).size_full())
-                            .into_any_element()
-                    } else {
-                        div().text_2xl().child("👥").into_any_element()
-                    }),
+                    .child(Icon::new(IconName::InviteMember).size(28.0)),
             )
             .child(
                 div()

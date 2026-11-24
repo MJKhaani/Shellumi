@@ -21,7 +21,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -950,6 +950,7 @@ impl HostStore {
                     user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
                     display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
                     public_key TEXT NOT NULL,
+                    agreement_public_key TEXT,
                     role TEXT NOT NULL,
                     enrolled_at TEXT NOT NULL,
                     invited_by TEXT NOT NULL,
@@ -1590,6 +1591,7 @@ impl HostStore {
                         user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
                         display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
                         public_key TEXT NOT NULL,
+                    agreement_public_key TEXT,
                         role TEXT NOT NULL,
                         enrolled_at TEXT NOT NULL,
                         invited_by TEXT NOT NULL,
@@ -2325,6 +2327,23 @@ impl HostStore {
             .await?;
             tx.execute("PRAGMA user_version = 23", ()).await?;
         }
+        if version < 24 {
+            let mut columns = tx.query("PRAGMA table_info(team_members)", ()).await?;
+            let mut has_agreement_pk = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_agreement_pk |= name == "agreement_public_key";
+            }
+            drop(columns);
+            if !has_agreement_pk {
+                tx.execute(
+                    "ALTER TABLE team_members ADD COLUMN agreement_public_key TEXT",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute("PRAGMA user_version = 24", ()).await?;
+        }
         tx.commit().await?;
         tracing::debug!(
             path,
@@ -2464,6 +2483,23 @@ impl HostStore {
             .execute("DELETE FROM vault_contexts WHERE id = ?1", (id,))
             .await?;
         Ok(rows > 0)
+    }
+
+    /// Checkpoints and truncates the SQLite WAL log file into the main database.
+    pub async fn checkpoint_truncate(&self) -> Result<(), StorageError> {
+        let mut rows = self
+            .connection
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let busy: i64 = row.get(0)?;
+            if busy != 0 {
+                return Err(StorageError::Serialization(
+                    "database checkpoint is busy".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Saves a recovery envelope for a vault context.
@@ -4905,14 +4941,15 @@ impl HostStore {
     pub async fn add_team_member(&mut self, member: &TeamMember) -> Result<(), StorageError> {
         self.connection
             .execute(
-                "INSERT INTO team_members (id, vault_id, user_id, display_name, public_key, role, enrolled_at, invited_by, revoked, revoked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO team_members (id, vault_id, user_id, display_name, public_key, agreement_public_key, role, enrolled_at, invited_by, revoked, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 (
                     member.id.clone(),
                     member.vault_id.clone(),
                     member.user_id.clone(),
                     member.display_name.clone(),
                     member.public_key.clone(),
+                    member.agreement_public_key.clone(),
                     member.role.to_string(),
                     member.enrolled_at.clone(),
                     member.invited_by.clone(),
@@ -4928,7 +4965,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, vault_id, user_id, display_name, public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE id = ?1",
+                "SELECT id, vault_id, user_id, display_name, public_key, agreement_public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE id = ?1",
                 (id,),
             )
             .await?;
@@ -4938,11 +4975,12 @@ impl HostStore {
             let user_id: String = row.get(2)?;
             let display_name: String = row.get(3)?;
             let public_key: String = row.get(4)?;
-            let role_str: String = row.get(5)?;
-            let enrolled_at: String = row.get(6)?;
-            let invited_by: String = row.get(7)?;
-            let revoked_int: i64 = row.get(8)?;
-            let revoked_at: Option<String> = row.get(9)?;
+            let agreement_public_key: Option<String> = row.get(5)?;
+            let role_str: String = row.get(6)?;
+            let enrolled_at: String = row.get(7)?;
+            let invited_by: String = row.get(8)?;
+            let revoked_int: i64 = row.get(9)?;
+            let revoked_at: Option<String> = row.get(10)?;
 
             let role = TeamRole::from_str(&role_str).unwrap_or(TeamRole::Viewer);
 
@@ -4952,6 +4990,7 @@ impl HostStore {
                 user_id,
                 display_name,
                 public_key,
+                agreement_public_key,
                 role,
                 enrolled_at,
                 invited_by,
@@ -4967,7 +5006,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, vault_id, user_id, display_name, public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
+                "SELECT id, vault_id, user_id, display_name, public_key, agreement_public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
                 (vault_id,),
             )
             .await?;
@@ -4978,11 +5017,12 @@ impl HostStore {
             let user_id: String = row.get(2)?;
             let display_name: String = row.get(3)?;
             let public_key: String = row.get(4)?;
-            let role_str: String = row.get(5)?;
-            let enrolled_at: String = row.get(6)?;
-            let invited_by: String = row.get(7)?;
-            let revoked_int: i64 = row.get(8)?;
-            let revoked_at: Option<String> = row.get(9)?;
+            let agreement_public_key: Option<String> = row.get(5)?;
+            let role_str: String = row.get(6)?;
+            let enrolled_at: String = row.get(7)?;
+            let invited_by: String = row.get(8)?;
+            let revoked_int: i64 = row.get(9)?;
+            let revoked_at: Option<String> = row.get(10)?;
 
             let role = TeamRole::from_str(&role_str).unwrap_or(TeamRole::Viewer);
 
@@ -4992,6 +5032,7 @@ impl HostStore {
                 user_id,
                 display_name,
                 public_key,
+                agreement_public_key,
                 role,
                 enrolled_at,
                 invited_by,
@@ -5032,55 +5073,106 @@ impl HostStore {
         Ok(rows > 0)
     }
 
-    /// Revokes a team member and increments the shared vault epoch, rotates the cryptographic DEK,
-    /// and logs the audit record atomically within a single transaction.
-    /// Rotates the active key epoch and cryptographically invalidates subsequent epochs for the member.
-    pub async fn revoke_team_member_with_rotation(
+    async fn rotate_shared_vault_key_internal(
         &mut self,
         vault_id: &str,
-        member_id: &str,
-        revoked_at: &str,
+        member_to_revoke: Option<(&str, &str)>,
+        action: AuditAction,
+        custom_details: Option<&str>,
         actor_id: &str,
+        timestamp: &str,
     ) -> Result<u64, StorageError> {
-        let member = self.get_team_member(member_id).await?.ok_or_else(|| {
-            StorageError::InvalidCollaboration(CollaborationError::MemberNotFound(
-                member_id.to_string(),
-            ))
-        })?;
-        if member.vault_id != vault_id {
-            return Err(StorageError::InvalidCollaboration(
-                CollaborationError::Unauthorized(format!(
-                    "Team member '{member_id}' belongs to vault '{}', not '{vault_id}'",
-                    member.vault_id
-                )),
-            ));
-        }
-        if member.revoked {
-            return Err(StorageError::InvalidCollaboration(
-                CollaborationError::MemberRevoked(format!(
-                    "Team member '{member_id}' is already revoked"
-                )),
-            ));
+        if let Some((member_id, _)) = member_to_revoke {
+            let member = self.get_team_member(member_id).await?.ok_or_else(|| {
+                StorageError::InvalidCollaboration(CollaborationError::MemberNotFound(
+                    member_id.to_string(),
+                ))
+            })?;
+            if member.vault_id != vault_id {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::Unauthorized(format!(
+                        "Team member '{member_id}' belongs to vault '{}', not '{vault_id}'",
+                        member.vault_id
+                    )),
+                ));
+            }
+            if member.revoked {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::MemberRevoked(format!(
+                        "Team member '{member_id}' is already revoked"
+                    )),
+                ));
+            }
         }
 
         let tx = self.connection.transaction().await?;
 
-        // 1. Mark member revoked within transaction
-        let rows = tx
-            .execute(
-                "UPDATE team_members SET revoked = 1, revoked_at = ?1 WHERE id = ?2 AND vault_id = ?3 AND revoked = 0",
-                (revoked_at, member_id, vault_id),
-            )
-            .await?;
-        if rows == 0 {
-            return Err(StorageError::InvalidCollaboration(
-                CollaborationError::MemberNotFound(format!(
-                    "Failed to revoke team member '{member_id}' in vault '{vault_id}'"
-                )),
-            ));
+        // 1. If revoking a member, mark member revoked within transaction
+        if let Some((member_id, revoked_at)) = member_to_revoke {
+            let rows = tx
+                .execute(
+                    "UPDATE team_members SET revoked = 1, revoked_at = ?1 WHERE id = ?2 AND vault_id = ?3 AND revoked = 0",
+                    (revoked_at, member_id, vault_id),
+                )
+                .await?;
+            if rows == 0 {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::MemberNotFound(format!(
+                        "Failed to revoke team member '{member_id}' in vault '{vault_id}'"
+                    )),
+                ));
+            }
         }
 
-        // 2. Increment epoch atomically
+        // 2. Query remaining active non-revoked members for this vault
+        let mut m_rows = if let Some((rev_id, _)) = member_to_revoke {
+            tx.query(
+                "SELECT id, display_name, user_id, agreement_public_key FROM team_members WHERE vault_id = ?1 AND revoked = 0 AND id != ?2",
+                (vault_id, rev_id),
+            )
+            .await?
+        } else {
+            tx.query(
+                "SELECT id, display_name, user_id, agreement_public_key FROM team_members WHERE vault_id = ?1 AND revoked = 0",
+                (vault_id,),
+            )
+            .await?
+        };
+        let mut active_recipients = Vec::new();
+        while let Some(row) = m_rows.next().await? {
+            let id: String = row.get(0)?;
+            let display_name: String = row.get(1)?;
+            let user_id: String = row.get(2)?;
+            let agreement_pk: Option<String> = row.get(3)?;
+            active_recipients.push((id, display_name, user_id, agreement_pk));
+        }
+        drop(m_rows);
+
+        // 3. Prevalidate ALL active recipients BEFORE advancing epoch or committing.
+        // Each active member must have a valid 32-byte base64-encoded X25519 agreement key.
+        // If any member lacks this key or provides an SSH key / corrupt key, FAIL CLOSED.
+        use base64::prelude::*;
+        for (id, display_name, user_id, agreement_pk) in &active_recipients {
+            let valid = match agreement_pk {
+                Some(pk) if !pk.trim().is_empty() => {
+                    if let Ok(bytes) = BASE64_STANDARD.decode(pk.trim()) {
+                        bytes.len() == 32
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::KeyRotationFailed(format!(
+                        "Active team member '{display_name}' ({user_id}, id '{id}') does not have a valid 32-byte X25519 agreement public key"
+                    )),
+                ));
+            }
+        }
+
+        // 4. Increment epoch atomically
         let mut rows = tx
             .query(
                 "SELECT current_epoch FROM shared_vaults WHERE id = ?1",
@@ -5093,7 +5185,7 @@ impl HostStore {
             let next = (cur + 1) as u64;
             tx.execute(
                 "UPDATE shared_vaults SET current_epoch = ?1, updated_at = ?2 WHERE id = ?3",
-                (next as i64, revoked_at, vault_id),
+                (next as i64, timestamp, vault_id),
             )
             .await?;
             next
@@ -5120,7 +5212,7 @@ impl HostStore {
             next
         };
 
-        // 3. Cryptographic key rotation: Generate fresh 256-bit DEK
+        // 5. Cryptographic key rotation: Generate fresh 256-bit DEK
         let rng = SystemRandom::new();
         let mut new_dek = [0u8; 32];
         rng.fill(&mut new_dek)
@@ -5130,65 +5222,110 @@ impl HostStore {
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, vault_id.as_bytes())
         });
 
-        // 4. Query remaining active non-revoked members for this vault
-        let mut m_rows = tx
-            .query(
-                "SELECT id, public_key FROM team_members WHERE vault_id = ?1 AND revoked = 0 AND id != ?2",
-                (vault_id, member_id),
-            )
-            .await?;
-        let mut active_recipients = Vec::new();
-        while let Some(row) = m_rows.next().await? {
-            let id: String = row.get(0)?;
-            let pk: String = row.get(1)?;
-            if !pk.is_empty() {
-                active_recipients.push((id, pk));
-            }
-        }
-        drop(m_rows);
-
-        // 5. Wrap fresh DEK for all active non-revoked members and persist envelopes
-        for (recip_id, recip_pk) in active_recipients {
-            if let Ok((wrapped_dek, ephem_pk)) = shellumi_core::server::wrap_dek_for_recipient(
+        // 6. Wrap fresh DEK for all active non-revoked members and persist envelopes
+        for (recip_id, _, _, agreement_pk_opt) in &active_recipients {
+            let agreement_pk = agreement_pk_opt.as_ref().unwrap().trim();
+            let (wrapped_dek, ephem_pk) = shellumi_core::server::wrap_dek_for_recipient(
                 &new_dek,
-                &recip_pk,
+                agreement_pk,
                 vault_uuid,
                 new_epoch as u32,
-            ) {
-                tx.execute(
-                    "INSERT OR REPLACE INTO shared_vault_key_envelopes (vault_id, epoch, member_id, wrapped_dek, ephemeral_public_key, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    (vault_id, new_epoch as i64, recip_id, wrapped_dek, ephem_pk, revoked_at),
-                )
-                .await?;
-            }
+            )
+            .map_err(|e| {
+                StorageError::InvalidCollaboration(CollaborationError::KeyRotationFailed(format!(
+                    "Failed to wrap DEK for recipient '{recip_id}': {e}"
+                )))
+            })?;
+
+            tx.execute(
+                "INSERT OR REPLACE INTO shared_vault_key_envelopes (vault_id, epoch, member_id, wrapped_dek, ephemeral_public_key, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (vault_id, new_epoch as i64, recip_id.as_str(), wrapped_dek, ephem_pk, timestamp),
+            )
+            .await?;
         }
 
-        // 6. Record audit event atomically
-        let audit_id = format!("aud-{revoked_at}-{}", uuid::Uuid::new_v4().as_simple());
-        let details = format!(
-            "Revoked access for '{}' ({}) and rotated key to epoch {new_epoch}",
-            member.display_name, member.user_id
-        );
+        // 7. Record audit event atomically
+        let audit_id = format!("aud-{timestamp}-{}", uuid::Uuid::new_v4().as_simple());
+        let details = match &action {
+            AuditAction::MemberRevoked => {
+                if let Some((rev_id, _)) = member_to_revoke {
+                    format!("Revoked access for '{rev_id}' and rotated key to epoch {new_epoch}")
+                } else {
+                    format!("Rotated key to epoch {new_epoch}")
+                }
+            }
+            AuditAction::KeyRotated => {
+                if let Some(r) = custom_details {
+                    format!("Rotated key to epoch {new_epoch}: {r}")
+                } else {
+                    format!("Rotated key to epoch {new_epoch}")
+                }
+            }
+            _ => format!("Rotated key to epoch {new_epoch}"),
+        };
         tx.execute(
             "INSERT INTO sharing_audit_log (id, vault_id, action, actor_id, target_id, details, timestamp_utc)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 audit_id,
                 vault_id,
-                AuditAction::MemberRevoked.as_str(),
+                action.as_str(),
                 actor_id,
-                Some(member_id),
+                member_to_revoke.map(|(id, _)| id),
                 Some(details),
-                revoked_at,
+                timestamp,
             ),
         )
         .await?;
 
-        // 7. Commit atomic transaction
+        // 8. Commit atomic transaction
         tx.commit().await?;
 
         Ok(new_epoch)
+    }
+
+    /// Revokes a team member and increments the shared vault epoch, rotates the cryptographic DEK,
+    /// and logs the audit record atomically within a single transaction.
+    /// Rotates the active key epoch and cryptographically invalidates subsequent epochs for the member.
+    pub async fn revoke_team_member_with_rotation(
+        &mut self,
+        vault_id: &str,
+        member_id: &str,
+        revoked_at: &str,
+        actor_id: &str,
+    ) -> Result<u64, StorageError> {
+        self.rotate_shared_vault_key_internal(
+            vault_id,
+            Some((member_id, revoked_at)),
+            AuditAction::MemberRevoked,
+            None,
+            actor_id,
+            revoked_at,
+        )
+        .await
+    }
+
+    /// Authoritative cryptographic key rotation for a shared vault.
+    /// Prevalidates all active recipients have valid X25519 agreement keys,
+    /// generates a fresh 256-bit DEK, wraps envelopes for all recipients,
+    /// advances the epoch, and writes audit records atomically.
+    pub async fn rotate_shared_vault_key(
+        &mut self,
+        vault_id: &str,
+        reason: Option<&str>,
+        actor_id: &str,
+        timestamp: &str,
+    ) -> Result<u64, StorageError> {
+        self.rotate_shared_vault_key_internal(
+            vault_id,
+            None,
+            AuditAction::KeyRotated,
+            reason,
+            actor_id,
+            timestamp,
+        )
+        .await
     }
 
     /// Retrieves the wrapped DEK envelope for a team member at a specific vault epoch.
@@ -8821,31 +8958,36 @@ mod tests {
             "v-rot-test",
             "alice@company.com",
             "Alice",
-            alice_pk,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceSshKeyOwner000000000000",
             TeamRole::Owner,
             "2026-11-24T12:00:00Z",
             "owner@company.com",
-        );
+        )
+        .with_agreement_key(alice_pk);
+
         let bob = TeamMember::new(
             "m-bob",
             "v-rot-test",
             "bob@company.com",
             "Bob",
-            bob_pk,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobSshKeyEditor0000000000000",
             TeamRole::Editor,
             "2026-11-24T12:01:00Z",
             "owner@company.com",
-        );
+        )
+        .with_agreement_key(bob_pk);
+
         let eve = TeamMember::new(
             "m-eve",
             "v-rot-test",
             "eve@company.com",
             "Eve (Compromised/Revoked)",
-            eve_pk,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEveSshKeyViewer0000000000000",
             TeamRole::Viewer,
             "2026-11-24T12:02:00Z",
             "owner@company.com",
-        );
+        )
+        .with_agreement_key(eve_pk);
 
         store.add_team_member(&alice).await.unwrap();
         store.add_team_member(&bob).await.unwrap();
@@ -8945,6 +9087,171 @@ mod tests {
             double_revoke_err.is_err(),
             "Cannot revoke an already revoked member"
         );
+    }
+
+    #[tokio::test]
+    async fn test_key_rotation_fails_closed_when_recipient_lacks_agreement_key() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        let vault = SharedVault::new(
+            "v-fail-test",
+            "Fail Closed Vault",
+            None,
+            "owner@company.com",
+            "2026-11-24T12:00:00Z",
+        )
+        .unwrap();
+        store.create_shared_vault(&vault).await.unwrap();
+
+        // Member without agreement key (only SSH key)
+        let alice = TeamMember::new(
+            "m-alice-no-agree",
+            "v-fail-test",
+            "alice@company.com",
+            "Alice",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceSshKeyOnly",
+            TeamRole::Owner,
+            "2026-11-24T12:00:00Z",
+            "owner@company.com",
+        );
+        store.add_team_member(&alice).await.unwrap();
+
+        // 1. Manual rotation must fail closed because Alice lacks X25519 agreement key
+        let res = store
+            .rotate_shared_vault_key(
+                "v-fail-test",
+                Some("Test rotation"),
+                "owner@company.com",
+                "2026-11-24T12:05:00Z",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "Key rotation must fail when recipient lacks agreement key"
+        );
+
+        // Verify epoch was not incremented
+        let v = store
+            .get_shared_vault("v-fail-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v.current_epoch, 1,
+            "Epoch must remain at 1 after failed rotation"
+        );
+
+        // 2. Member with invalid (corrupt) agreement key
+        let bob = TeamMember::new(
+            "m-bob-corrupt",
+            "v-fail-test",
+            "bob@company.com",
+            "Bob",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobSshKey",
+            TeamRole::Editor,
+            "2026-11-24T12:01:00Z",
+            "owner@company.com",
+        )
+        .with_agreement_key("not-valid-base64-or-32-bytes");
+        store.add_team_member(&bob).await.unwrap();
+
+        let res2 = store
+            .rotate_shared_vault_key(
+                "v-fail-test",
+                Some("Test rotation 2"),
+                "owner@company.com",
+                "2026-11-24T12:06:00Z",
+            )
+            .await;
+        assert!(
+            res2.is_err(),
+            "Key rotation must fail when recipient has corrupt agreement key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manual_rotate_shared_vault_key_cryptographic_guarantees() {
+        let mut store = HostStore::open(":memory:").await.unwrap();
+
+        let vault = SharedVault::new(
+            "v-manual-rot",
+            "Manual Rotation Vault",
+            None,
+            "owner@company.com",
+            "2026-11-24T12:00:00Z",
+        )
+        .unwrap();
+        store.create_shared_vault(&vault).await.unwrap();
+
+        use shellumi_core::server::{generate_device_x25519_keypair, unwrap_dek_for_device};
+        let (alice_sk, alice_pk) = generate_device_x25519_keypair().unwrap();
+        let (bob_sk, bob_pk) = generate_device_x25519_keypair().unwrap();
+
+        let alice = TeamMember::new(
+            "m-alice",
+            "v-manual-rot",
+            "alice@company.com",
+            "Alice",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceSshKey",
+            TeamRole::Owner,
+            "2026-11-24T12:00:00Z",
+            "owner@company.com",
+        )
+        .with_agreement_key(alice_pk);
+
+        let bob = TeamMember::new(
+            "m-bob",
+            "v-manual-rot",
+            "bob@company.com",
+            "Bob",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobSshKey",
+            TeamRole::Editor,
+            "2026-11-24T12:01:00Z",
+            "owner@company.com",
+        )
+        .with_agreement_key(bob_pk);
+
+        store.add_team_member(&alice).await.unwrap();
+        store.add_team_member(&bob).await.unwrap();
+
+        // Perform manual rotation
+        let new_epoch = store
+            .rotate_shared_vault_key(
+                "v-manual-rot",
+                Some("Routine key rotation"),
+                "owner@company.com",
+                "2026-11-24T12:10:00Z",
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_epoch, 2);
+
+        // Verify envelopes exist for both members
+        let alice_env = store
+            .get_shared_vault_key_envelope("v-manual-rot", 2, "m-alice")
+            .await
+            .unwrap()
+            .expect("Alice envelope must exist");
+        let bob_env = store
+            .get_shared_vault_key_envelope("v-manual-rot", 2, "m-bob")
+            .await
+            .unwrap()
+            .expect("Bob envelope must exist");
+
+        let vault_uuid = uuid::Uuid::parse_str("v-manual-rot")
+            .unwrap_or_else(|_| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"v-manual-rot"));
+
+        let alice_dek =
+            unwrap_dek_for_device(&alice_env.0, &alice_env.1, &alice_sk, vault_uuid, 2).unwrap();
+        let bob_dek =
+            unwrap_dek_for_device(&bob_env.0, &bob_env.1, &bob_sk, vault_uuid, 2).unwrap();
+
+        assert_eq!(alice_dek.as_ref(), bob_dek.as_ref());
+
+        // Verify audit record was created
+        let audits = store.list_audit_log("v-manual-rot", None).await.unwrap();
+        assert!(!audits.is_empty());
+        assert_eq!(audits[0].action, AuditAction::KeyRotated);
     }
 
     #[tokio::test]

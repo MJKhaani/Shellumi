@@ -70,7 +70,7 @@ impl Shellumi {
                                     }
                                     cx.notify();
                                 }))
-                                .child("⚡")
+                                .child(Icon::new(IconName::Connect).size(16.0))
                                 .child("Connect All Hosts"),
                         )
                         .child(
@@ -99,17 +99,7 @@ impl Shellumi {
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child(
-                                            if let Some(p) = resolve_icon_path("edit", false, 32) {
-                                                div()
-                                                    .w(px(16.0))
-                                                    .h(px(16.0))
-                                                    .child(gpui::img(p).size_full())
-                                                    .into_any_element()
-                                            } else {
-                                                div().child("✏️").into_any_element()
-                                            },
-                                        )
+                                        .child(Icon::new(IconName::Edit).size(16.0))
                                         .child("Edit Group Details"),
                                 )
                                 .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("E")),
@@ -131,17 +121,7 @@ impl Shellumi {
                                     app.group_context_menu = None;
                                     app.open_invite_modal(cx);
                                 }))
-                                .child(
-                                    if let Some(p) = resolve_icon_path("invite_member", false, 32) {
-                                        div()
-                                            .w(px(16.0))
-                                            .h(px(16.0))
-                                            .child(gpui::img(p).size_full())
-                                            .into_any_element()
-                                    } else {
-                                        div().child("👥").into_any_element()
-                                    },
-                                )
+                                .child(Icon::new(IconName::InviteMember).size(16.0))
                                 .child("Collaborate"),
                         )
                         .child(
@@ -163,7 +143,7 @@ impl Shellumi {
                                         Some(crate::DeleteTarget::Group(name_for_del.clone()));
                                     cx.notify();
                                 }))
-                                .child("🗑️")
+                                .child(Icon::new(IconName::Delete).size(16.0))
                                 .child("Remove"),
                         ),
                 ),

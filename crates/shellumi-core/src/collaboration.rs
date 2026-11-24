@@ -135,6 +135,8 @@ pub struct TeamMember {
     pub user_id: String,
     pub display_name: String,
     pub public_key: String,
+    #[serde(default)]
+    pub agreement_public_key: Option<String>,
     pub role: TeamRole,
     pub enrolled_at: String,
     pub invited_by: String,
@@ -160,12 +162,19 @@ impl TeamMember {
             user_id: user_id.into(),
             display_name: display_name.into(),
             public_key: public_key.into(),
+            agreement_public_key: None,
             role,
             enrolled_at: enrolled_at.into(),
             invited_by: invited_by.into(),
             revoked: false,
             revoked_at: None,
         }
+    }
+
+    /// Sets the device key-agreement public key (base64-encoded 32-byte X25519) for wrapping vault DEKs.
+    pub fn with_agreement_key(mut self, key: impl Into<String>) -> Self {
+        self.agreement_public_key = Some(key.into());
+        self
     }
 
     /// Revokes member access to future vault operations.
