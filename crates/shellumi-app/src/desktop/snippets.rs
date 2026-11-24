@@ -39,7 +39,8 @@ impl Shellumi {
                     ),
             );
         let mut packages = panel()
-            .w(px(170.0))
+            .w(px(150.0))
+            .min_w(px(110.0))
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -130,7 +131,8 @@ impl Shellumi {
             .find(|s| Some(s.id) == self.desktop.selected_snippet)
             .or_else(|| snippets.first().copied());
         let mut list = panel()
-            .w(px(220.0))
+            .w(px(180.0))
+            .min_w(px(130.0))
             .flex_shrink_0()
             .flex()
             .flex_col()

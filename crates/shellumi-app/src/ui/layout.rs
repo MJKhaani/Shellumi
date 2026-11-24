@@ -109,6 +109,61 @@ pub fn calculate_layout(
     }
 }
 
+/// Topbar geometry result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TopbarGeometry {
+    /// Width allocated for Quick Connect search box in logical pixels.
+    pub quick_connect_width: f32,
+    /// Whether Quick Connect collapses to icon-only button mode.
+    pub quick_connect_collapsed: bool,
+    /// Number of session tabs that can be visibly displayed before overflow pill.
+    pub max_visible_tabs: usize,
+    /// Remaining available width for the tab strip.
+    pub tab_strip_available_width: f32,
+}
+
+/// Calculate responsive topbar dimensions, preventing tabs from squeezing out Quick Connect or right actions.
+pub fn calculate_topbar_geometry(
+    window_width: f32,
+    _total_tabs: usize,
+    has_quick_connect: bool,
+) -> TopbarGeometry {
+    let traffic_width = 80.0;
+    let vault_width = 110.0;
+    let right_actions_width = 80.0;
+    let sftp_width = 85.0;
+
+    let fixed_overhead = traffic_width + vault_width + right_actions_width + sftp_width;
+    let available_middle = (window_width - fixed_overhead).max(0.0);
+
+    if has_quick_connect {
+        if available_middle < 360.0 {
+            TopbarGeometry {
+                quick_connect_width: 36.0,
+                quick_connect_collapsed: true,
+                max_visible_tabs: ((available_middle - 40.0) / 100.0).floor().max(1.0) as usize,
+                tab_strip_available_width: available_middle - 40.0,
+            }
+        } else {
+            let qc_width = (available_middle * 0.38).clamp(180.0, 420.0);
+            let tab_width = available_middle - qc_width;
+            TopbarGeometry {
+                quick_connect_width: qc_width,
+                quick_connect_collapsed: false,
+                max_visible_tabs: (tab_width / 110.0).floor().max(1.0) as usize,
+                tab_strip_available_width: tab_width,
+            }
+        }
+    } else {
+        TopbarGeometry {
+            quick_connect_width: 0.0,
+            quick_connect_collapsed: false,
+            max_visible_tabs: (available_middle / 110.0).floor().max(1.0) as usize,
+            tab_strip_available_width: available_middle,
+        }
+    }
+}
+
 /// Calculate optimal column count for the hosts card grid given the available primary content width.
 pub fn calculate_grid_columns(content_width: f32) -> usize {
     const MIN_CARD_WIDTH: f32 = 280.0;
@@ -181,5 +236,39 @@ mod tests {
         assert_eq!(calculate_grid_columns(580.0), 2);
         assert_eq!(calculate_grid_columns(900.0), 3);
         assert_eq!(calculate_grid_columns(1200.0), 4);
+    }
+
+    #[test]
+    fn test_topbar_940px_window_with_quick_connect() {
+        let geom = calculate_topbar_geometry(940.0, 5, true);
+        assert!(!geom.quick_connect_collapsed);
+        assert!(geom.quick_connect_width >= 180.0 && geom.quick_connect_width <= 420.0);
+        assert!(geom.tab_strip_available_width > 200.0);
+        assert!(geom.max_visible_tabs >= 1);
+    }
+
+    #[test]
+    fn test_topbar_1280px_window_with_quick_connect() {
+        let geom = calculate_topbar_geometry(1280.0, 10, true);
+        assert!(!geom.quick_connect_collapsed);
+        assert!(geom.quick_connect_width <= 420.0);
+        assert!(geom.max_visible_tabs >= 4);
+    }
+
+    #[test]
+    fn test_topbar_with_20_tabs_limits_visible_tabs() {
+        let geom = calculate_topbar_geometry(1280.0, 20, true);
+        // With 20 tabs on 1280px, max_visible_tabs ensures they don't blow past available space
+        assert!(geom.max_visible_tabs < 20);
+        assert!(geom.tab_strip_available_width > 0.0);
+    }
+
+    #[test]
+    fn test_topbar_without_quick_connect_gives_all_space_to_tabs() {
+        let geom = calculate_topbar_geometry(1024.0, 8, false);
+        assert_eq!(geom.quick_connect_width, 0.0);
+        assert!(!geom.quick_connect_collapsed);
+        assert!(geom.tab_strip_available_width > 600.0);
+        assert!(geom.max_visible_tabs >= 5);
     }
 }

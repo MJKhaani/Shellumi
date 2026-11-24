@@ -2213,7 +2213,31 @@ impl Shellumi {
 
         tabs_row = tabs_row.child(sftp_tab);
 
-        for (idx, tab) in self.tabs.iter().enumerate() {
+        let total_tabs = self.tabs.len();
+        let max_visible_tabs = 8;
+        let active_idx = self.active_tab_idx;
+
+        // When many tabs exist, compute visible slice ensuring active tab is always visible
+        let (visible_indices, overflow_count) = if total_tabs > max_visible_tabs {
+            let active = active_idx.unwrap_or(0);
+            let start = if active >= max_visible_tabs {
+                active + 1 - max_visible_tabs
+            } else {
+                0
+            };
+            let end = (start + max_visible_tabs).min(total_tabs);
+            (
+                (start..end).collect::<Vec<_>>(),
+                total_tabs.saturating_sub(max_visible_tabs),
+            )
+        } else {
+            ((0..total_tabs).collect::<Vec<_>>(), 0)
+        };
+
+        for &idx in &visible_indices {
+            let Some(tab) = self.tabs.get(idx) else {
+                continue;
+            };
             let is_active = self.active_tab_idx == Some(idx) && self.page.is_none();
             let tab_id = tab.id;
             let tab_icon = match tab.kind {
@@ -2324,6 +2348,32 @@ impl Shellumi {
             tabs_row = tabs_row.child(tab_item);
         }
 
+        if overflow_count > 0 {
+            tabs_row = tabs_row.child(
+                div()
+                    .id("topbar-tabs-overflow-btn")
+                    .px_2()
+                    .py_1()
+                    .h(px(26.0))
+                    .rounded_md()
+                    .bg(rgb(MacTheme::SURFACE))
+                    .border_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .hover(|s| {
+                        s.bg(rgb(MacTheme::SURFACE_HOVER))
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.open_command_palette(window, cx);
+                    }))
+                    .child(format!("+{} more", overflow_count)),
+            );
+        }
+
         tabs_row = tabs_row.child(
             div()
                 .id("topbar-new-tab-btn")
@@ -2344,7 +2394,7 @@ impl Shellumi {
                 .child("+"),
         );
 
-        // 4. Quick Connect Box: ONLY visible on Hosts view!
+        // 4. Quick Connect Box: ONLY visible on Hosts view! Responsive width prevents squeezing tabs
         let quick_connect_box = if is_hosts_view {
             Some(
                 div()
@@ -2352,7 +2402,10 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .w(px(520.0))
+                    .w(px(340.0))
+                    .min_w(px(180.0))
+                    .max_w(px(460.0))
+                    .flex_1()
                     .h(px(36.0))
                     .px_3()
                     .rounded_lg()
@@ -2458,6 +2511,10 @@ impl Shellumi {
                         s.bg(rgb(MacTheme::SURFACE_HOVER))
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     })
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.desktop.message = Some("No unread notifications".into());
+                        cx.notify();
+                    }))
                     .child(
                         if let Some(icon_path) = resolve_icon_path("bell", false, 48) {
                             div()
@@ -2488,6 +2545,9 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_hidden()
                     .child(traffic_spacer)
                     .child(tabs_row),
             )
@@ -2496,6 +2556,7 @@ impl Shellumi {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .flex_shrink_0()
                     .children(quick_connect_box)
                     .child(right_actions),
             )

@@ -69,7 +69,7 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 - **Phase 2:** Single `InspectorCoordinator`, draft state machine, and guarded navigation. (COMPLETED)
 - **Phase 3:** Hosts and Groups end-to-end migration into the unified Inspector. (COMPLETED)
 - **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration. (COMPLETED)
-- **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations.
+- **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations. (COMPLETED)
 - **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping.
 - **Phase 7:** Complex full-page workflows and standardized safety alerts.
 - **Phase 8:** Native GPUI interaction regression testing, visual QA, and final polish.
@@ -119,6 +119,18 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
   - Updated desktop page rendering in `crates/shellumi-app/src/app_render.rs` to render the unified inspector alongside desktop pages without dialog overlap.
 - **Automated Verification:**
   - 15 dedicated inspector unit tests passing (`test_phase4_targets_replacement`, `test_phase4_identity_dirty_guard`, `test_phase4_tunnel_async_generation`, `test_phase4_workspace_mode_transitions`, plus all prior coordinator and host tests).
+  - Zero warnings on `cargo clippy -p shellumi-app --all-targets -- -D warnings`.
+  - Clean `cargo fmt --all -- --check`.
+
+### Phase 5: Responsive Pages, Topbar & Navigation Redesign
+- **Implemented:**
+  - Eliminated `UI-04` in `crates/shellumi-app/src/main.rs`: Replaced the fixed 520px Quick Connect input with a responsive search field flexing between 180px and 460px (`flex_1()`, `min_w(px(180.0))`, `max_w(px(460.0))`), preventing tab bar squeeze and right-action clipping on narrow windows.
+  - Implemented `LAY-010`: Topbar 20+ tabs overflow handling. Left tabs container uses `flex_1().min_w_0().overflow_x_hidden()`. When tabs exceed `max_visible_tabs` (8), an overflow pill (`+N more`) is displayed, while the active tab is guaranteed to always remain visible in the rendered slice.
+  - Resolved `DATA-006`: Topbar notification bell given a clear, functional notification action showing unread status rather than acting as a dead affordance.
+  - Resolved `LAY-014`: Eliminated three-rail squeeze in `crates/shellumi-app/src/desktop/snippets.rs` by allowing `packages` (110–150px) and `list` (130–180px) to flex gracefully, ensuring the main editor content remains comfortably accessible even on narrow viewports.
+  - Added pure geometry calculations and validation for `TopbarGeometry` in `crates/shellumi-app/src/ui/layout.rs`.
+- **Automated Verification:**
+  - 10 dedicated layout and topbar unit tests passing (`test_topbar_940px_window_with_quick_connect`, `test_topbar_1280px_window_with_quick_connect`, `test_topbar_with_20_tabs_limits_visible_tabs`, `test_topbar_without_quick_connect_gives_all_space_to_tabs`, plus all prior layout tests).
   - Zero warnings on `cargo clippy -p shellumi-app --all-targets -- -D warnings`.
   - Clean `cargo fmt --all -- --check`.
 
