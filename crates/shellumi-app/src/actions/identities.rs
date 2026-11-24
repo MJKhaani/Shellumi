@@ -19,6 +19,19 @@ impl Shellumi {
             .new(|cx| TextInput::new(cx, "", "Passphrase (leave blank to keep existing)").masked());
         let tags_input = cx.new(|cx| TextInput::new(cx, &tags, "Tags (comma-separated)"));
 
+        cx.observe(&name_input, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&user_input, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&key_input, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&password_input, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&pass_input, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&tags_input, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+
         self.identity_modal = Some(IdentityModalState {
             editing_id: id,
             name: name_input,
@@ -196,6 +209,14 @@ impl Shellumi {
                 } else {
                     app.identity_modal = None;
                     app.load_identities(cx);
+                    app.inspector_coordinator.set_dirty(false);
+                    let target_id = editing_id
+                        .or_else(|| app.identities.iter().find(|i| i.name == name).map(|i| i.id));
+                    app.open_identity_inspector_mode(
+                        target_id,
+                        crate::ui::inspector::InspectorMode::View,
+                        cx,
+                    );
                     app.desktop.message = Some(format!("Identity '{}' saved successfully", name));
                     cx.notify();
                 }

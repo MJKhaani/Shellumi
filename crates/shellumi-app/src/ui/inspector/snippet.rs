@@ -9,11 +9,12 @@ use crate::ui::components::form::{error_notice, simple_field, simple_section};
 use crate::ui::components::inspector_shell::InspectorShell;
 use crate::ui::inspector::coordinator::{InspectorMode, InspectorTarget};
 use crate::ui::layout;
-use crate::{SavedSnippet, Shellumi};
+use crate::{SavedSnippet, Shellumi, SnippetFormState, TextInput};
 use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
+use shellumi_storage::HostStore;
 
 impl Shellumi {
     /// Render the unified Snippet Inspector for viewing, running, or editing a snippet.
@@ -88,13 +89,21 @@ impl Shellumi {
             }))
             .child("Edit");
 
+        let close_btn = InspectorShell::close_button(
+            "close-snippet-inspector-btn",
+            false,
+            |app, _, _, cx| {
+                app.inspector_close(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             s_name.clone(),
             Some(format!("{} variables", snippet.variables.len())),
             Some(badge.into_any_element()),
             Some(edit_btn.into_any_element()),
-            "close-snippet-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
         let mut body = div().flex().flex_col().gap_4();
@@ -118,6 +127,17 @@ impl Shellumi {
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.insert_snippet(id_val, false, cx);
                     })),
+            )
+            .child(
+                AppButton::new("snippet-view-delete-btn", "Delete", ButtonVariant::Danger)
+                    .on_click({
+                        let name_for_del = s_name.clone();
+                        cx.listener(move |app, _, _, cx| {
+                            app.delete_confirm =
+                                Some(crate::DeleteTarget::Snippet(id_val, name_for_del.clone()));
+                            cx.notify();
+                        })
+                    }),
             );
         body = body.child(actions_row);
 
@@ -156,33 +176,70 @@ impl Shellumi {
         is_create: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        let Some(form) = &self.snippet_form else {
+            return InspectorShell::new(
+                div().p_4().child("Form not initialized"),
+                div().p_4().child("Snippet draft is missing."),
+                None::<Div>,
+                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            );
+        };
+
         let title = if is_create {
             "New Snippet"
         } else {
             "Edit Snippet"
         };
 
+        let back_btn = InspectorShell::close_button(
+            "close-snippet-edit-inspector-btn",
+            true,
+            |app, _, _, cx| {
+                app.inspector_back(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             title,
             Some("Configure reusable terminal script and parameters"),
             None,
             None,
-            "close-snippet-edit-inspector-btn",
-            false,
+            Some(back_btn),
         );
 
-        let body = div().flex().flex_col().gap_3().p_2().child(
-            div()
-                .text_xs()
-                .text_color(text_secondary())
-                .child("Snippet editor fields (title, script, tags)."),
-        );
+        let mut form_body = div().flex().flex_col().gap_3();
 
-        let footer = div()
+        form_body = form_body
+            .child(simple_field("Snippet Title", form.name.clone()))
+            .child(simple_field(
+                "Description (optional)",
+                form.description.clone(),
+            ))
+            .child(simple_field(
+                "Command Script (e.g. docker ps)",
+                form.command.clone(),
+            ))
+            .child(simple_field(
+                "Tags (comma-separated, e.g. docker, ops)",
+                form.tags.clone(),
+            ));
+
+        let mut footer = div()
             .p_4()
             .border_t_1()
             .border_color(rgb(MacTheme::BORDER))
             .bg(surface())
+            .flex()
+            .flex_col()
+            .gap_2();
+
+        if let Some(ref err) = form.error {
+            footer = footer.child(error_notice(err.clone()));
+        }
+
+        let is_saving = form.saving;
+        let buttons_row = div()
             .flex()
             .items_center()
             .justify_end()
@@ -194,19 +251,29 @@ impl Shellumi {
                     ButtonVariant::Ghost,
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
-                    app.inspector_close(cx);
+                    if !app.snippet_form.as_ref().is_some_and(|f| f.saving) {
+                        app.inspector_back(cx);
+                    }
                 })),
             )
-            .child(
+            .child(if is_saving {
+                AppButton::new(
+                    "snippet-inspector-save-btn",
+                    "Saving…",
+                    ButtonVariant::Secondary,
+                )
+            } else {
                 AppButton::new("snippet-inspector-save-btn", "Save", ButtonVariant::Primary)
                     .on_click(cx.listener(|app, _, _, cx| {
-                        app.inspector_close(cx);
-                    })),
-            );
+                        app.save_snippet_inspector(cx);
+                    }))
+            });
+
+        footer = footer.child(buttons_row);
 
         InspectorShell::new(
             header,
-            body,
+            form_body,
             Some(footer),
             Some(layout::INSPECTOR_PREFERRED_WIDTH),
         )
@@ -221,9 +288,199 @@ impl Shellumi {
     ) {
         let vault_id = self.active_vault_id.clone();
         let target = InspectorTarget::Snippet(snippet_id);
-        let _ = self
+        if self
             .inspector_coordinator
-            .open(vault_id, target, mode, None);
+            .open(vault_id, target, mode, None)
+            && (mode == InspectorMode::Edit || mode == InspectorMode::Create)
+        {
+            let existing = snippet_id.and_then(|id| self.snippets.iter().find(|s| s.id == id));
+            let name_val = existing.map(|s| s.name.as_str()).unwrap_or("");
+            let desc_val = existing
+                .and_then(|s| s.description.as_deref())
+                .unwrap_or("");
+            let cmd_val = existing.map(|s| s.command.as_str()).unwrap_or("");
+            let tags_val = existing.map(|s| s.tags.join(", ")).unwrap_or_default();
+
+            let name = cx.new(|cx| TextInput::new(cx, name_val, "Snippet title"));
+            let description = cx.new(|cx| TextInput::new(cx, desc_val, "Description (optional)"));
+            let command =
+                cx.new(|cx| TextInput::new(cx, cmd_val, "Command script (e.g. docker ps)"));
+            let tags = cx.new(|cx| TextInput::new(cx, &tags_val, "Tags (comma-separated)"));
+
+            cx.observe(&name, |app, _, cx| app.inspector_mark_dirty(cx))
+                .detach();
+            cx.observe(&description, |app, _, cx| app.inspector_mark_dirty(cx))
+                .detach();
+            cx.observe(&command, |app, _, cx| app.inspector_mark_dirty(cx))
+                .detach();
+            cx.observe(&tags, |app, _, cx| app.inspector_mark_dirty(cx))
+                .detach();
+
+            self.snippet_form = Some(SnippetFormState {
+                id: snippet_id,
+                name,
+                description,
+                command,
+                tags,
+                error: None,
+                saving: false,
+            });
+        }
         cx.notify();
+    }
+
+    /// Save snippet form asynchronously.
+    pub(crate) fn save_snippet_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.snippet_form else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+
+        let name = form.name.read(cx).value().trim().to_string();
+        let desc = form.description.read(cx).value().trim().to_string();
+        let command = form.command.read(cx).value().trim().to_string();
+        let tags: Vec<String> = form
+            .tags
+            .read(cx)
+            .value()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let id = form.id;
+
+        if name.is_empty() || command.is_empty() {
+            form.error = Some("Snippet title and command are required.".into());
+            cx.notify();
+            return;
+        }
+
+        let snippet_res = shellumi_core::Snippet::new(
+            name.clone(),
+            command,
+            if desc.is_empty() { None } else { Some(desc) },
+            &tags,
+        );
+
+        let snippet = match snippet_res {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some(f) = &mut self.snippet_form {
+                    f.error = Some(e.to_string());
+                    cx.notify();
+                }
+                return;
+            }
+        };
+
+        form.saving = true;
+        form.error = None;
+        let Some(db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
+                let saved_id = match id {
+                    Some(existing_id) => {
+                        store
+                            .update_snippet(existing_id, &snippet)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        existing_id
+                    }
+                    None => store
+                        .add_snippet(&snippet)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                };
+                Ok::<i64, String>(saved_id)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(ref mut f) = app.snippet_form {
+                    f.saving = false;
+                }
+                match res {
+                    Ok(saved_id) => {
+                        app.snippet_form = None;
+                        app.load_hosts(cx);
+                        app.inspector_coordinator.set_dirty(false);
+                        app.open_snippet_inspector_mode(
+                            Some(saved_id),
+                            crate::ui::inspector::InspectorMode::View,
+                            cx,
+                        );
+                        app.desktop.message =
+                            Some(format!("Snippet '{}' saved successfully", name));
+                    }
+                    Err(err) => {
+                        if let Some(ref mut f) = app.snippet_form {
+                            f.error = Some(err);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Delete snippet asynchronously.
+    pub(crate) fn delete_snippet_inspector(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
+                store.delete_snippet(id).await.map_err(|e| e.to_string())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok(_) => {
+                        app.load_hosts(cx);
+                        app.inspector_close(cx);
+                        app.desktop.message = Some("Snippet deleted successfully".into());
+                    }
+                    Err(e) => {
+                        app.desktop.message = Some(format!("Failed to delete snippet: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }

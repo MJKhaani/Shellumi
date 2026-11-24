@@ -1,5 +1,6 @@
 //! Hosts inventory page and editor rendering.
 use super::*;
+use crate::ui::components::{AppButton, ButtonVariant};
 
 impl Shellumi {
     pub(crate) fn render_hosts_view(
@@ -958,13 +959,44 @@ impl Shellumi {
                     .child(hosts_display),
             );
 
-        let main_hosts_area = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .child(content_scroll)
-            .children(inspector_panel);
+        let main_hosts_area = if is_inspector_open
+            && layout_calc.presentation == ui::layout::InspectorPresentation::FocusedContent
+        {
+            let mut focused_area = div().flex_1().min_w_0().h_full().flex().flex_col();
+            let back_bar = div()
+                .id("focused-content-back-bar")
+                .h(px(36.0))
+                .px_4()
+                .border_b_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .bg(rgb(MacTheme::SURFACE))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    AppButton::new(
+                        "focused-back-to-hosts-btn",
+                        "← Back to Hosts",
+                        ButtonVariant::Ghost,
+                    )
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.inspector_close(cx);
+                    })),
+                );
+            focused_area = focused_area.child(back_bar);
+            if let Some(panel) = inspector_panel {
+                focused_area = focused_area.child(div().flex_1().w_full().child(panel));
+            }
+            focused_area
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .child(content_scroll)
+                .children(inspector_panel)
+        };
 
         let mut body = div()
             .id("shellumi")
@@ -1049,9 +1081,6 @@ impl Shellumi {
         if let Some(modal) = &self.team_modal {
             result = result.child(self.render_team_modal(modal, cx));
         }
-        if let Some(modal) = &self.infra_modal {
-            result = result.child(self.render_infra_modal(modal, cx));
-        }
         if let Some(modal) = &self.diagnostics_modal {
             result = result.child(self.render_diagnostics_modal(modal, cx));
         }
@@ -1076,10 +1105,16 @@ impl Shellumi {
         if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
             result = result.child(dropdown);
         }
+        if let Some(overflow) = self.render_tab_overflow_popover(cx) {
+            result = result.child(overflow);
+        }
         if let Some(modal) = &self.invite_modal {
             result = result.child(self.render_invite_team_modal(modal, cx));
         }
         if !self.inspector_coordinator.is_open() {
+            if let Some(modal) = &self.infra_modal {
+                result = result.child(self.render_infra_modal(modal, cx));
+            }
             if let Some(modal) = &self.tunnel_modal {
                 result = result.child(self.render_tunnel_modal(modal, cx));
             }

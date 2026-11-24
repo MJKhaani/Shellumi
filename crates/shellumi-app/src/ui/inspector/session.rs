@@ -8,7 +8,7 @@ use crate::ui::components::button::{AppButton, ButtonVariant};
 use crate::ui::components::form::simple_section;
 use crate::ui::components::inspector_shell::InspectorShell;
 use crate::ui::inspector::coordinator::{InspectorMode, InspectorTarget};
-use crate::ui::layout;
+use crate::ui::layout::{self, InspectorPresentation};
 use crate::{RemoteDesktopProtocol, RemoteDesktopStatus, Shellumi};
 use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Styled, Window,
@@ -68,6 +68,14 @@ impl Shellumi {
             .text_color(if is_vnc { rgb(0xbb86fc) } else { rgb(0x3de0d8) })
             .child(if is_vnc { "VNC" } else { "RDP" });
 
+        let close_btn = InspectorShell::close_button(
+            "close-session-inspector-btn",
+            false,
+            |app, _, _, cx| {
+                app.inspector_close(cx);
+            },
+            cx,
+        );
         let header = InspectorShell::header(
             state.target.clone(),
             Some(format!(
@@ -76,8 +84,7 @@ impl Shellumi {
             )),
             Some(proto_badge.into_any_element()),
             None,
-            "close-session-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
         let mut body = div().flex().flex_col().gap_4();

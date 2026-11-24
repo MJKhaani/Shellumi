@@ -129,14 +129,15 @@ impl Shellumi {
                     .list_identities()
                     .await
                     .map_err(|error| error.to_string())?;
-                Ok::<_, String>((hosts, snippets, workspaces, identities, key))
+                let tunnels = store.list_tunnels().await.unwrap_or_default();
+                Ok::<_, String>((hosts, snippets, workspaces, identities, tunnels, key))
             })
         });
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
                 match result {
-                    Ok((hosts, snippets, workspaces, identities, key)) => {
+                    Ok((hosts, snippets, workspaces, identities, tunnels, key)) => {
                         if let Some(k) = key {
                             app.active_vault_keys.insert(app.active_vault_id.clone(), k);
                         }
@@ -144,6 +145,7 @@ impl Shellumi {
                         app.snippets = snippets;
                         app.workspaces = workspaces;
                         app.identities = identities;
+                        app.tunnels = tunnels;
                         app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
                         app.load_vault_list(cx);
                     }

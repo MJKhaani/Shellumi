@@ -57,19 +57,16 @@ impl InspectorShell {
         shell
     }
 
-    /// Build a standard inspector header with title, subtitle/badge, actions, and close button.
-    pub fn header(
-        title: impl Into<SharedString>,
-        subtitle: Option<impl Into<SharedString>>,
-        badge: Option<AnyElement>,
-        actions: Option<AnyElement>,
-        close_id: impl Into<ElementId>,
+    /// Build a standard inspector close/back button with attached click listener.
+    pub fn close_button<V: 'static>(
+        id: impl Into<ElementId>,
         is_back: bool,
-    ) -> Div {
+        listener: impl Fn(&mut V, &gpui::ClickEvent, &mut gpui::Window, &mut gpui::Context<V>) + 'static,
+        cx: &gpui::Context<V>,
+    ) -> AnyElement {
         let close_icon_glyph = if is_back { "←" } else { "✕" };
-
-        let close_btn = div()
-            .id(close_id)
+        div()
+            .id(id)
             .w(px(28.0))
             .h(px(28.0))
             .rounded(px(MacTheme::CONTROL_RADIUS))
@@ -83,8 +80,19 @@ impl InspectorShell {
                 s.bg(rgb(MacTheme::SURFACE_HOVER))
                     .text_color(text_primary())
             })
-            .child(close_icon_glyph);
+            .on_click(cx.listener(listener))
+            .child(close_icon_glyph)
+            .into_any_element()
+    }
 
+    /// Build a standard inspector header with title, subtitle/badge, actions, and close button.
+    pub fn header(
+        title: impl Into<SharedString>,
+        subtitle: Option<impl Into<SharedString>>,
+        badge: Option<AnyElement>,
+        actions: Option<AnyElement>,
+        close_button: Option<AnyElement>,
+    ) -> Div {
         let mut left_content = div().flex().items_center().gap_2().min_w_0();
 
         if let Some(b) = badge {
@@ -119,7 +127,9 @@ impl InspectorShell {
         if let Some(a) = actions {
             right_content = right_content.child(a);
         }
-        right_content = right_content.child(close_btn);
+        if let Some(btn) = close_button {
+            right_content = right_content.child(btn);
+        }
 
         div()
             .h(px(52.0))

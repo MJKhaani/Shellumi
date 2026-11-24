@@ -129,7 +129,51 @@ impl Shellumi {
             self.selected_host_id = None;
             self.form = None;
             self.group_inspector = None;
+            self.snippet_form = None;
+            self.tunnel_form = None;
+            self.workspace_form = None;
+            self.vault_form = None;
+            self.provider_form = None;
+            self.team_form = None;
         }
+        cx.notify();
+    }
+
+    /// Return from Edit mode to View mode, or close inspector (guarded if dirty).
+    pub(crate) fn inspector_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.inspector_coordinator.active().cloned() {
+            match active.mode {
+                InspectorMode::Edit => {
+                    let vault_id = self.active_vault_id.clone();
+                    if self.inspector_coordinator.open(
+                        vault_id,
+                        active.target.clone(),
+                        InspectorMode::View,
+                        None,
+                    ) {
+                        self.form = None;
+                        self.group_inspector = None;
+                        self.snippet_form = None;
+                        self.tunnel_form = None;
+                        self.workspace_form = None;
+                        self.vault_form = None;
+                        self.provider_form = None;
+                        self.team_form = None;
+                    }
+                }
+                InspectorMode::Create | InspectorMode::View => {
+                    self.inspector_close(cx);
+                }
+            }
+        } else {
+            self.inspector_close(cx);
+        }
+        cx.notify();
+    }
+
+    /// Mark inspector coordinator draft dirty and refresh UI.
+    pub(crate) fn inspector_mark_dirty(&mut self, cx: &mut Context<Self>) {
+        self.inspector_coordinator.set_dirty(true);
         cx.notify();
     }
 
@@ -177,6 +221,13 @@ impl Shellumi {
         let (obj_type, obj_name) = match &target {
             crate::DeleteTarget::Host(_, name) => ("host", name.clone()),
             crate::DeleteTarget::Group(name) => ("group", name.clone()),
+            crate::DeleteTarget::Identity(_, name) => ("identity", name.clone()),
+            crate::DeleteTarget::Snippet(_, name) => ("snippet", name.clone()),
+            crate::DeleteTarget::Tunnel(_, name) => ("tunnel", name.clone()),
+            crate::DeleteTarget::Workspace(_, name) => ("workspace", name.clone()),
+            crate::DeleteTarget::Vault(_, name) => ("vault", name.clone()),
+            crate::DeleteTarget::Provider(_, name) => ("cloud provider", name.clone()),
+            crate::DeleteTarget::TeamMember(_, name) => ("team member", name.clone()),
         };
 
         let confirm_btn = AppButton::new(
@@ -193,6 +244,28 @@ impl Shellumi {
                 crate::DeleteTarget::Group(name) => {
                     app.delete_group_inspector(name, cx);
                     app.inspector_close(cx);
+                }
+                crate::DeleteTarget::Identity(id, _) => {
+                    app.delete_identity(*id, cx);
+                    app.inspector_close(cx);
+                }
+                crate::DeleteTarget::Snippet(id, _) => {
+                    app.delete_snippet_inspector(*id, cx);
+                }
+                crate::DeleteTarget::Tunnel(id, _) => {
+                    app.delete_tunnel_inspector(*id, cx);
+                }
+                crate::DeleteTarget::Workspace(id, _) => {
+                    app.delete_workspace_inspector(*id, cx);
+                }
+                crate::DeleteTarget::Vault(id, _) => {
+                    app.delete_vault_inspector(id, cx);
+                }
+                crate::DeleteTarget::Provider(id, _) => {
+                    app.delete_provider_inspector(*id, cx);
+                }
+                crate::DeleteTarget::TeamMember(id, _) => {
+                    app.delete_team_member_inspector(id, cx);
                 }
             }
             app.delete_confirm = None;
@@ -277,7 +350,12 @@ impl Shellumi {
                 InspectorTarget::Host(_) => self.save_host(cx),
                 InspectorTarget::Group(_) => self.save_group_inspector(cx),
                 InspectorTarget::Identity(_) => self.save_identity_modal(cx),
-                InspectorTarget::Tunnel(_) => self.save_new_tunnel_modal(cx),
+                InspectorTarget::Snippet(_) => self.save_snippet_inspector(cx),
+                InspectorTarget::Tunnel(_) => self.save_tunnel_inspector(cx),
+                InspectorTarget::Workspace(_) => self.save_workspace_inspector(cx),
+                InspectorTarget::Vault(_) => self.save_vault_inspector(cx),
+                InspectorTarget::Provider(_) => self.save_provider_inspector(cx),
+                InspectorTarget::TeamMember(_) => self.save_team_inspector(cx),
                 _ => {}
             }
         }

@@ -96,23 +96,28 @@ impl Shellumi {
                         let total_h = vp.height.to_f64() as f32;
 
                         let sidebar_w = if app.sidebar_visible {
-                            crate::ui::layout::DEFAULT_SIDEBAR_WIDTH
+                            if app.sidebar_collapsed {
+                                56.0
+                            } else {
+                                crate::theme::MacTheme::SIDEBAR_WIDTH
+                            }
                         } else {
                             0.0
                         };
                         let inspector_open = app.inspector_coordinator.is_open();
-                        let geom = crate::ui::layout::calculate_layout(
-                            total_w,
-                            sidebar_w,
-                            inspector_open,
-                            None,
-                        );
+                        let inspector_w = if inspector_open {
+                            crate::ui::layout::INSPECTOR_PREFERRED_WIDTH
+                        } else {
+                            0.0
+                        };
+                        let topbar_h: f32 = 48.0;
+                        let toolbar_h: f32 = 36.0;
 
-                        let canvas_w = geom.primary_content_width;
-                        let canvas_h = (total_h - 48.0 - 44.0).max(100.0);
+                        let canvas_w = (total_w - sidebar_w - inspector_w).max(100.0);
+                        let canvas_h = (total_h - topbar_h - toolbar_h).max(100.0);
 
                         let origin_x = sidebar_w;
-                        let origin_y = 48.0 + 44.0;
+                        let origin_y = topbar_h + toolbar_h;
 
                         let screen_x = (pos.x.to_f64() as f32 - origin_x).max(0.0);
                         let screen_y = (pos.y.to_f64() as f32 - origin_y).max(0.0);
@@ -305,9 +310,9 @@ mod tests {
     #[test]
     fn test_rd_011_canvas_offset_transformation() {
         let sidebar_w: f32 = 184.0;
-        let top_offset: f32 = 48.0 + 44.0; // topbar + remote desktop toolbar
+        let top_offset: f32 = 48.0 + 36.0; // topbar + compact remote desktop toolbar (<40px)
         let global_cursor_x: f32 = 184.0 + 400.0;
-        let global_cursor_y: f32 = 92.0 + 400.0;
+        let global_cursor_y: f32 = 84.0 + 400.0;
 
         let canvas_local_x = (global_cursor_x - sidebar_w).max(0.0);
         let canvas_local_y = (global_cursor_y - top_offset).max(0.0);

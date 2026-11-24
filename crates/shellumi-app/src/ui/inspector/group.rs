@@ -103,6 +103,15 @@ impl Shellumi {
             }))
             .child("Edit");
 
+        let close_btn = InspectorShell::close_button(
+            "close-group-inspector-btn",
+            false,
+            |app, _, _, cx| {
+                app.inspector_close(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             name_str.clone(),
             Some(format!(
@@ -112,8 +121,7 @@ impl Shellumi {
             )),
             Some(badge.into_any_element()),
             Some(edit_btn.into_any_element()),
-            "close-group-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
         let mut body = div().flex().flex_col().gap_4();
@@ -259,19 +267,65 @@ impl Shellumi {
 
         let title = if is_create { "New Group" } else { "Edit Group" };
 
+        let back_btn = InspectorShell::close_button(
+            "close-group-edit-inspector-btn",
+            true,
+            |app, _, _, cx| {
+                app.inspector_back(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             title,
             Some("Configure group name and inherited defaults"),
             None,
             None,
-            "close-group-edit-inspector-btn",
-            false,
+            Some(back_btn),
         );
+
+        let is_cloud_sync = ins.cloud_sync;
+        let sync_toggle = div()
+            .id("group-cloud-sync-toggle")
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .bg(if is_cloud_sync {
+                rgb(0x103d3d)
+            } else {
+                surface()
+            })
+            .text_color(if is_cloud_sync {
+                rgb(0x3de0d8)
+            } else {
+                text_secondary()
+            })
+            .cursor_pointer()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(|app, _, _, cx| {
+                if let Some(ins) = &mut app.group_inspector {
+                    ins.cloud_sync = !ins.cloud_sync;
+                    app.inspector_mark_dirty(cx);
+                }
+            }))
+            .child(if is_cloud_sync {
+                "☁ Cloud Sync: Enabled"
+            } else {
+                "○ Cloud Sync: Disabled"
+            });
 
         let mut form_body = div().flex().flex_col().gap_3();
 
         form_body = form_body
             .child(simple_field("Group Name", ins.name.clone()))
+            .child(simple_field(
+                "Parent Group (optional)",
+                ins.parent_group.clone(),
+            ))
             .child(simple_field(
                 "Default Username (optional)",
                 ins.default_username.clone(),
@@ -280,7 +334,8 @@ impl Shellumi {
                 "Default Port (optional, 22)",
                 ins.default_port.clone(),
             ))
-            .child(self.render_group_identity_picker(ins.identity_id, cx));
+            .child(self.render_group_identity_picker(ins.identity_id, cx))
+            .child(simple_field("Synchronization", sync_toggle));
 
         let mut footer = div()
             .p_4()
@@ -303,7 +358,7 @@ impl Shellumi {
             .child(
                 AppButton::new("group-inspector-cancel-btn", "Cancel", ButtonVariant::Ghost)
                     .on_click(cx.listener(|app, _, _, cx| {
-                        app.inspector_close(cx);
+                        app.inspector_back(cx);
                     })),
             )
             .child(

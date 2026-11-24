@@ -93,6 +93,15 @@ impl Shellumi {
             }))
             .child("Edit");
 
+        let close_btn = InspectorShell::close_button(
+            "close-host-inspector-btn",
+            false,
+            |app, _, _, cx| {
+                app.inspector_close(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             host.name.clone(),
             Some(format_endpoint(
@@ -102,8 +111,7 @@ impl Shellumi {
             )),
             Some(badge.into_any_element()),
             Some(edit_btn.into_any_element()),
-            "close-host-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
         // Body content
@@ -335,13 +343,21 @@ impl Shellumi {
         let active_cat = form.active_category;
         let title = if is_create { "New Host" } else { "Edit Host" };
 
+        let back_btn = InspectorShell::close_button(
+            "close-host-edit-inspector-btn",
+            true,
+            |app, _, _, cx| {
+                app.inspector_back(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             title,
             Some("Configure connection and credentials"),
             None,
             None,
-            "close-host-edit-inspector-btn",
-            false,
+            Some(back_btn),
         );
 
         // Category tab selector
@@ -456,6 +472,7 @@ impl Shellumi {
             footer = footer.child(crate::ui::components::error_notice(err.clone()));
         }
 
+        let is_saving = self.saving;
         let buttons_row = div()
             .flex()
             .items_center()
@@ -464,17 +481,21 @@ impl Shellumi {
             .child(
                 AppButton::new("inspector-cancel-btn", "Cancel", ButtonVariant::Ghost).on_click(
                     cx.listener(|app, _, _, cx| {
-                        app.inspector_close(cx);
+                        if !app.saving {
+                            app.inspector_back(cx);
+                        }
                     }),
                 ),
             )
-            .child(
+            .child(if is_saving {
+                AppButton::new("inspector-save-btn", "Saving…", ButtonVariant::Secondary)
+            } else {
                 AppButton::new("inspector-save-btn", "Save", ButtonVariant::Primary).on_click(
                     cx.listener(|app, _, _, cx| {
                         app.save_host(cx);
                     }),
-                ),
-            );
+                )
+            });
 
         footer = footer.child(buttons_row);
 

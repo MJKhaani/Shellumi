@@ -656,10 +656,85 @@ struct InviteTeamModalState {
     status_message: Option<String>,
 }
 
+#[allow(dead_code)]
+pub(crate) struct SnippetFormState {
+    pub(crate) id: Option<i64>,
+    pub(crate) name: Entity<TextInput>,
+    pub(crate) description: Entity<TextInput>,
+    pub(crate) command: Entity<TextInput>,
+    pub(crate) tags: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
+}
+
+#[allow(dead_code)]
+pub(crate) struct TunnelFormState {
+    pub(crate) id: Option<i64>,
+    pub(crate) name: Entity<TextInput>,
+    pub(crate) forwarding_type: ForwardingType,
+    pub(crate) bind_port: Entity<TextInput>,
+    pub(crate) target_host: Entity<TextInput>,
+    pub(crate) target_port: Entity<TextInput>,
+    pub(crate) host_id: Option<i64>,
+    pub(crate) auto_start: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
+}
+
+#[allow(dead_code)]
+pub(crate) struct WorkspaceFormState {
+    pub(crate) id: Option<i64>,
+    pub(crate) name: Entity<TextInput>,
+    pub(crate) layout: String,
+    pub(crate) description: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
+}
+
+#[allow(dead_code)]
+pub(crate) struct VaultFormState {
+    pub(crate) vault_id: Option<String>,
+    pub(crate) name: Entity<TextInput>,
+    pub(crate) is_remote: bool,
+    pub(crate) server_url: Entity<TextInput>,
+    pub(crate) passphrase: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
+}
+
+#[allow(dead_code)]
+pub(crate) struct ProviderFormState {
+    pub(crate) id: Option<i64>,
+    pub(crate) name: Entity<TextInput>,
+    pub(crate) provider_type: String,
+    pub(crate) api_key: Entity<TextInput>,
+    pub(crate) secret_key: Entity<TextInput>,
+    pub(crate) region: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
+}
+
+#[allow(dead_code)]
+pub(crate) struct TeamFormState {
+    pub(crate) member_id: Option<String>,
+    pub(crate) email: Entity<TextInput>,
+    pub(crate) role: String,
+    pub(crate) public_key: Entity<TextInput>,
+    pub(crate) error: Option<String>,
+    pub(crate) sending: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum DeleteTarget {
     Host(i64, String),
     Group(String),
+    Identity(i64, String),
+    Snippet(i64, String),
+    Tunnel(i64, String),
+    Workspace(i64, String),
+    Vault(String, String),
+    Provider(i64, String),
+    TeamMember(String, String),
 }
 
 struct Shellumi {
@@ -683,8 +758,9 @@ struct Shellumi {
     quick_connect_error: Option<String>,
     snippets: Vec<SavedSnippet>,
     snippets_panel_open: bool,
-    workspaces: Vec<SavedWorkspace>,
-    identities: Vec<SavedIdentity>,
+    pub(crate) workspaces: Vec<SavedWorkspace>,
+    pub(crate) identities: Vec<SavedIdentity>,
+    pub(crate) tunnels: Vec<SavedTunnel>,
     broadcast_manager: BroadcastManager,
     broadcast_warning: Option<String>,
     sync_status: AppSyncStatus,
@@ -731,6 +807,16 @@ struct Shellumi {
     pub(crate) delete_confirm: Option<DeleteTarget>,
     #[allow(dead_code)]
     pub(crate) inspector_coordinator: ui::inspector::InspectorCoordinator,
+    pub(crate) tab_overflow_menu_open: bool,
+    pub(crate) rd_display_menu_open: bool,
+    pub(crate) rd_keyboard_menu_open: bool,
+    pub(crate) rd_more_menu_open: bool,
+    pub(crate) snippet_form: Option<SnippetFormState>,
+    pub(crate) tunnel_form: Option<TunnelFormState>,
+    pub(crate) workspace_form: Option<WorkspaceFormState>,
+    pub(crate) vault_form: Option<VaultFormState>,
+    pub(crate) provider_form: Option<ProviderFormState>,
+    pub(crate) team_form: Option<TeamFormState>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -1108,6 +1194,7 @@ impl Shellumi {
             snippets_panel_open: false,
             workspaces: Vec::new(),
             identities: Vec::new(),
+            tunnels: Vec::new(),
             broadcast_manager: BroadcastManager::new(0),
             broadcast_warning: None,
             sync_status: AppSyncStatus::LocalOnly,
@@ -1169,6 +1256,16 @@ impl Shellumi {
             sftp_modal: None,
             delete_confirm: None,
             inspector_coordinator: ui::inspector::InspectorCoordinator::new(),
+            tab_overflow_menu_open: false,
+            snippet_form: None,
+            tunnel_form: None,
+            workspace_form: None,
+            vault_form: None,
+            provider_form: None,
+            team_form: None,
+            rd_display_menu_open: false,
+            rd_keyboard_menu_open: false,
+            rd_more_menu_open: false,
         }
     }
 
@@ -2356,19 +2453,28 @@ impl Shellumi {
                     .py_1()
                     .h(px(26.0))
                     .rounded_md()
-                    .bg(rgb(MacTheme::SURFACE))
+                    .bg(if self.tab_overflow_menu_open {
+                        rgb(MacTheme::SURFACE_ACTIVE)
+                    } else {
+                        rgb(MacTheme::SURFACE)
+                    })
                     .border_1()
                     .border_color(rgb(MacTheme::BORDER))
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .text_color(if self.tab_overflow_menu_open {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::TEXT_SECONDARY)
+                    })
                     .hover(|s| {
                         s.bg(rgb(MacTheme::SURFACE_HOVER))
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     })
                     .cursor_pointer()
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        app.open_command_palette(window, cx);
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.tab_overflow_menu_open = !app.tab_overflow_menu_open;
+                        cx.notify();
                     }))
                     .child(format!("+{} more", overflow_count)),
             );
@@ -2887,6 +2993,119 @@ impl Shellumi {
                                 .child("👥 Manage Team Vaults…"),
                         )
                 }),
+        )
+    }
+
+    pub(crate) fn render_tab_overflow_popover(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        if !self.tab_overflow_menu_open {
+            return None;
+        }
+
+        let mut list = div()
+            .id("tab-overflow-popover")
+            .absolute()
+            .top(px(46.0))
+            .left(px(220.0))
+            .w(px(280.0))
+            .max_h(px(320.0))
+            .overflow_y_scroll()
+            .bg(rgb(MacTheme::SURFACE))
+            .border_1()
+            .border_color(rgb(MacTheme::BORDER))
+            .rounded_md()
+            .shadow_lg()
+            .p_1p5()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }));
+
+        list = list.child(
+            div()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                .child("Active Sessions"),
+        );
+
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let is_active = self.active_tab_idx == Some(idx) && self.page.is_none();
+            let tab_id = tab.id;
+            let tab_name = tab.name.clone();
+
+            let item = div()
+                .id(("overflow-tab-item", idx))
+                .px_2()
+                .py_1p5()
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .justify_between()
+                .cursor_pointer()
+                .bg(if is_active {
+                    rgb(MacTheme::SURFACE_ACTIVE)
+                } else {
+                    rgb(MacTheme::SURFACE)
+                })
+                .text_color(if is_active {
+                    rgb(MacTheme::ACCENT_BLUE)
+                } else {
+                    rgb(MacTheme::TEXT_PRIMARY)
+                })
+                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.page = None;
+                    app.select_tab(Some(idx), window, cx);
+                    app.tab_overflow_menu_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .min_w_0()
+                        .flex_1()
+                        .child(div().text_xs().child(if is_active { "●" } else { "○" }))
+                        .child(div().text_xs().truncate().child(tab_name)),
+                )
+                .child(
+                    div()
+                        .id(("overflow-tab-close", tab_id as usize))
+                        .px_1p5()
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .hover(|s| s.text_color(rgb(MacTheme::DANGER)))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.close_tab(tab_id, window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child("✕"),
+                );
+
+            list = list.child(item);
+        }
+
+        Some(
+            div()
+                .id("tab-overflow-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000033))
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.tab_overflow_menu_open = false;
+                    cx.notify();
+                }))
+                .child(list),
         )
     }
 }

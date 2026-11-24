@@ -493,10 +493,26 @@ impl Shellumi {
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, window, cx| {
                 let vp = window.viewport_size();
-                let w = (vp.width.to_f64() as u32).saturating_sub(16).max(640);
-                let h = (vp.height.to_f64() as u32).saturating_sub(60).max(480);
-                let w_even = w & !1;
-                app.remote_desktop_request_resize(tab_idx, w_even, h, cx);
+                let total_w = vp.width.to_f64() as f32;
+                let total_h = vp.height.to_f64() as f32;
+                let sidebar_w = if app.sidebar_visible {
+                    if app.sidebar_collapsed {
+                        56.0
+                    } else {
+                        crate::theme::MacTheme::SIDEBAR_WIDTH
+                    }
+                } else {
+                    0.0
+                };
+                let inspector_w = if app.inspector_coordinator.is_open() {
+                    crate::ui::layout::INSPECTOR_PREFERRED_WIDTH
+                } else {
+                    0.0
+                };
+                let canvas_w = (total_w - sidebar_w - inspector_w).max(640.0) as u32;
+                let canvas_h = (total_h - 48.0 - 36.0).max(480.0) as u32;
+                let w_even = canvas_w & !1;
+                app.remote_desktop_request_resize(tab_idx, w_even, canvas_h, cx);
             }))
             .child("⤢ Match Viewport");
 
@@ -698,9 +714,324 @@ impl Shellumi {
                 .child(note.clone())
         });
 
+        // Dropdown triggers
+        let display_menu_btn = div()
+            .id(("rd-menu-display-btn", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(if self.rd_display_menu_open {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            })
+            .text_xs()
+            .text_color(if self.rd_display_menu_open {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_PRIMARY)
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.rd_display_menu_open = !app.rd_display_menu_open;
+                app.rd_keyboard_menu_open = false;
+                app.rd_more_menu_open = false;
+                cx.notify();
+            }))
+            .child("🖥️ Display ▾");
+
+        let keyboard_menu_btn = div()
+            .id(("rd-menu-keyboard-btn", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(if self.rd_keyboard_menu_open {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            })
+            .text_xs()
+            .text_color(if self.rd_keyboard_menu_open {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_PRIMARY)
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.rd_keyboard_menu_open = !app.rd_keyboard_menu_open;
+                app.rd_display_menu_open = false;
+                app.rd_more_menu_open = false;
+                cx.notify();
+            }))
+            .child("⌨️ Keyboard ▾");
+
+        let more_menu_btn = div()
+            .id(("rd-menu-more-btn", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(if self.rd_more_menu_open {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            })
+            .text_xs()
+            .text_color(if self.rd_more_menu_open {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_PRIMARY)
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.rd_more_menu_open = !app.rd_more_menu_open;
+                app.rd_display_menu_open = false;
+                app.rd_keyboard_menu_open = false;
+                cx.notify();
+            }))
+            .child("⋯ More ▾");
+
+        let display_menu_popover = if self.rd_display_menu_open {
+            Some(
+                div()
+                    .id(("rd-display-popover-backdrop", tab_idx))
+                    .absolute()
+                    .inset_0()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.rd_display_menu_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(("rd-display-popover", tab_idx))
+                            .absolute()
+                            .top(px(4.0))
+                            .right(px(320.0))
+                            .w(px(280.0))
+                            .rounded_lg()
+                            .bg(rgb(0x181a24))
+                            .border_1()
+                            .border_color(rgb(0x2d3245))
+                            .p_3()
+                            .shadow_2xl()
+                            .flex()
+                            .flex_col()
+                            .gap_2p5()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("SCALING MODE"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(scale_fit)
+                                    .child(scale_orig)
+                                    .child(scale_fill),
+                            )
+                            .children(if !is_vnc {
+                                Some(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1p5()
+                                        .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child("DISPLAY RESOLUTION"),
+                                        )
+                                        .child(res_indicator)
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .child(res_1080p)
+                                                .child(res_1440p)
+                                                .child(res_4k),
+                                        )
+                                        .child(res_match_viewport),
+                                )
+                            } else {
+                                None
+                            })
+                            .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("INTERACTION MODE"),
+                            )
+                            .child(view_only_btn),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let keyboard_menu_popover = if self.rd_keyboard_menu_open {
+            Some(
+                div()
+                    .id(("rd-keyboard-popover-backdrop", tab_idx))
+                    .absolute()
+                    .inset_0()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.rd_keyboard_menu_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(("rd-keyboard-popover", tab_idx))
+                            .absolute()
+                            .top(px(4.0))
+                            .right(px(240.0))
+                            .w(px(220.0))
+                            .rounded_lg()
+                            .bg(rgb(0x181a24))
+                            .border_1()
+                            .border_color(rgb(0x2d3245))
+                            .p_3()
+                            .shadow_2xl()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("REMOTE KEY SHORTCUTS"),
+                            )
+                            .child(cad_btn)
+                            .child(win_btn)
+                            .child(alt_tab_btn)
+                            .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("CLIPBOARD"),
+                            )
+                            .child(clip_btn),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let more_menu_popover = if self.rd_more_menu_open {
+            Some(
+                div()
+                    .id(("rd-more-popover-backdrop", tab_idx))
+                    .absolute()
+                    .inset_0()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.rd_more_menu_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(("rd-more-popover", tab_idx))
+                            .absolute()
+                            .top(px(4.0))
+                            .right(px(160.0))
+                            .w(px(260.0))
+                            .rounded_lg()
+                            .bg(rgb(0x181a24))
+                            .border_1()
+                            .border_color(rgb(0x2d3245))
+                            .p_3()
+                            .shadow_2xl()
+                            .flex()
+                            .flex_col()
+                            .gap_2p5()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("FILE & DRIVE REDIRECTION"),
+                            )
+                            .child(send_files_btn)
+                            .children(if !is_vnc { drive_btn } else { None })
+                            .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child("AUDIO OUTPUT"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(mute_btn)
+                                    .child(volume_ctrl),
+                            )
+                            .children(if !is_vnc && mic_mute_btn.is_some() {
+                                Some(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1p5()
+                                        .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child("MICROPHONE INPUT"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .children(mic_mute_btn)
+                                                .children(mic_volume_ctrl),
+                                        ),
+                                )
+                            } else {
+                                None
+                            }),
+                    ),
+            )
+        } else {
+            None
+        };
+
         let toolbar = div()
-            .h(px(44.0))
-            .px_4()
+            .h(px(36.0))
+            .px_3()
             .flex()
             .items_center()
             .justify_between()
@@ -727,57 +1058,13 @@ impl Shellumi {
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .overflow_x_hidden()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(cad_btn)
-                            .child(win_btn)
-                            .child(alt_tab_btn)
-                            .child(clip_btn)
-                            .child(send_files_btn)
-                            .children(if !is_vnc { drive_btn } else { None })
-                            .child(mute_btn)
-                            .child(volume_ctrl)
-                            .children(if !is_vnc { mic_mute_btn } else { None })
-                            .children(if !is_vnc { mic_volume_ctrl } else { None }),
-                    )
+                    .gap_1p5()
+                    .child(display_menu_btn)
+                    .child(keyboard_menu_btn)
+                    .child(more_menu_btn)
                     .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(scale_fit)
-                            .child(scale_orig)
-                            .child(scale_fill),
-                    )
-                    .children(if !is_vnc {
-                        Some(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(MacTheme::SEPARATOR)))
-                                .child(res_indicator)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .child(res_1080p)
-                                        .child(res_1440p)
-                                        .child(res_4k),
-                                )
-                                .child(res_match_viewport),
-                        )
-                    } else {
-                        None
-                    })
-                    .child(view_only_btn)
-                    .child(diag_btn)
                     .child(fs_btn)
+                    .child(diag_btn)
                     .child(disc_btn),
             );
 
@@ -1497,7 +1784,10 @@ impl Shellumi {
             .min_h_0()
             .relative()
             .child(viewport)
-            .children(diagnostics_overlay);
+            .children(diagnostics_overlay)
+            .children(display_menu_popover)
+            .children(keyboard_menu_popover)
+            .children(more_menu_popover);
 
         div()
             .flex_1()

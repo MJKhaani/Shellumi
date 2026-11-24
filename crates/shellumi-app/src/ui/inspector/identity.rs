@@ -91,13 +91,21 @@ impl Shellumi {
             }))
             .child("Edit");
 
+        let close_btn = InspectorShell::close_button(
+            "close-identity-inspector-btn",
+            false,
+            |app, _, _, cx| {
+                app.inspector_close(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             id_name.clone(),
             Some(format!("User: {}", username_str)),
             Some(badge.into_any_element()),
             Some(edit_btn.into_any_element()),
-            "close-identity-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
         let mut body = div().flex().flex_col().gap_4();
@@ -122,10 +130,14 @@ impl Shellumi {
                     "Delete Identity",
                     ButtonVariant::Danger,
                 )
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.delete_identity(id_val, cx);
-                    app.inspector_close(cx);
-                })),
+                .on_click({
+                    let id_name_del = id_name.clone();
+                    cx.listener(move |app, _, _, cx| {
+                        app.delete_confirm =
+                            Some(crate::DeleteTarget::Identity(id_val, id_name_del.clone()));
+                        cx.notify();
+                    })
+                }),
             );
         body = body.child(actions_row);
 
@@ -168,13 +180,21 @@ impl Shellumi {
             "Edit Identity"
         };
 
+        let back_btn = InspectorShell::close_button(
+            "close-identity-edit-inspector-btn",
+            true,
+            |app, _, _, cx| {
+                app.inspector_back(cx);
+            },
+            cx,
+        );
+
         let header = InspectorShell::header(
             title,
             Some("Configure reusable SSH key and credentials"),
             None,
             None,
-            "close-identity-edit-inspector-btn",
-            false,
+            Some(back_btn),
         );
 
         let mut form_body = div().flex().flex_col().gap_3();
@@ -215,7 +235,7 @@ impl Shellumi {
                     ButtonVariant::Ghost,
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
-                    app.inspector_close(cx);
+                    app.inspector_back(cx);
                 })),
             )
             .child(
@@ -226,7 +246,6 @@ impl Shellumi {
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
                     app.save_identity_modal(cx);
-                    app.inspector_close(cx);
                 })),
             );
 

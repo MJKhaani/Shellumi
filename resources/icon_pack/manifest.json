@@ -1,513 +1,2443 @@
 {
   "name": "Shellumi GPUI Icon Pack",
-  "license": "Generated design assets based on user-provided images",
+  "version": "v10_subject_segmented",
+  "icon_count": 168,
+  "pixel_sizes": [
+    32,
+    48,
+    64,
+    128,
+    256
+  ],
   "states": [
     "regular",
     "hover"
   ],
-  "pixel_sizes": [
-    256,
-    128,
-    64,
-    48,
-    32
+  "state_rule": {
+    "regular": "standalone no background tile",
+    "hover": "dark rounded-square tile"
+  },
+  "source_catalog": "Shellumi_Icon_Generation_Catalog(1).zip",
+  "repaired_from": "v8 spritesheet misassignment and rigid-grid cropping; v9 corrected categories and v10 repaired cross-boundary extraction",
+  "centering_corrections": [
+    {
+      "name": "hosts",
+      "old_center_offset": [
+        2.0,
+        12.0
+      ],
+      "shift_pixels": [
+        -2,
+        -12
+      ]
+    },
+    {
+      "name": "sftp",
+      "old_center_offset": [
+        1.0,
+        11.5
+      ],
+      "shift_pixels": [
+        -1,
+        -12
+      ]
+    },
+    {
+      "name": "snippets",
+      "old_center_offset": [
+        -5.5,
+        13.0
+      ],
+      "shift_pixels": [
+        6,
+        -13
+      ]
+    },
+    {
+      "name": "history",
+      "old_center_offset": [
+        -2.0,
+        12.5
+      ],
+      "shift_pixels": [
+        2,
+        -12
+      ]
+    },
+    {
+      "name": "serial",
+      "old_center_offset": [
+        -5.0,
+        -14.0
+      ],
+      "shift_pixels": [
+        5,
+        14
+      ]
+    },
+    {
+      "name": "groups",
+      "old_center_offset": [
+        0.0,
+        -27.5
+      ],
+      "shift_pixels": [
+        0,
+        28
+      ]
+    },
+    {
+      "name": "tags",
+      "old_center_offset": [
+        -3.0,
+        -24.0
+      ],
+      "shift_pixels": [
+        3,
+        24
+      ]
+    },
+    {
+      "name": "favorite",
+      "old_center_offset": [
+        1.0,
+        -26.0
+      ],
+      "shift_pixels": [
+        -1,
+        26
+      ]
+    },
+    {
+      "name": "edit",
+      "old_center_offset": [
+        -1.0,
+        -36.0
+      ],
+      "shift_pixels": [
+        1,
+        36
+      ]
+    },
+    {
+      "name": "delete",
+      "old_center_offset": [
+        0.0,
+        -39.5
+      ],
+      "shift_pixels": [
+        0,
+        40
+      ]
+    },
+    {
+      "name": "refresh",
+      "old_center_offset": [
+        -5.5,
+        -33.5
+      ],
+      "shift_pixels": [
+        6,
+        34
+      ]
+    },
+    {
+      "name": "profile",
+      "old_center_offset": [
+        0.5,
+        -36.0
+      ],
+      "shift_pixels": [
+        0,
+        36
+      ]
+    },
+    {
+      "name": "tag",
+      "old_center_offset": [
+        -11.0,
+        13.5
+      ],
+      "shift_pixels": [
+        11,
+        -14
+      ]
+    },
+    {
+      "name": "certificate",
+      "old_center_offset": [
+        15.5,
+        22.0
+      ],
+      "shift_pixels": [
+        -16,
+        -22
+      ]
+    },
+    {
+      "name": "private_key",
+      "old_center_offset": [
+        15.5,
+        14.0
+      ],
+      "shift_pixels": [
+        -16,
+        -14
+      ]
+    },
+    {
+      "name": "public_key",
+      "old_center_offset": [
+        3.0,
+        13.5
+      ],
+      "shift_pixels": [
+        -3,
+        -14
+      ]
+    },
+    {
+      "name": "identity_card",
+      "old_center_offset": [
+        1.0,
+        14.5
+      ],
+      "shift_pixels": [
+        -1,
+        -14
+      ]
+    },
+    {
+      "name": "os_macos",
+      "old_center_offset": [
+        14.0,
+        5.0
+      ],
+      "shift_pixels": [
+        -14,
+        -5
+      ]
+    },
+    {
+      "name": "os_freebsd",
+      "old_center_offset": [
+        13.0,
+        4.5
+      ],
+      "shift_pixels": [
+        -13,
+        -4
+      ]
+    },
+    {
+      "name": "server",
+      "old_center_offset": [
+        14.0,
+        -6.0
+      ],
+      "shift_pixels": [
+        -14,
+        6
+      ]
+    }
   ],
-  "format": "Transparent PNG RGBA",
   "icons": [
     {
       "index": 1,
-      "row": 1,
-      "column": 1,
       "name": "hosts",
       "label": "Hosts / Servers",
       "regular_256": "icons/256/regular/hosts.png",
-      "hover_256": "icons/256/hover/hosts.png"
+      "hover_256": "icons/256/hover/hosts.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 2,
-      "row": 1,
-      "column": 2,
       "name": "connect",
       "label": "Connect",
       "regular_256": "icons/256/regular/connect.png",
-      "hover_256": "icons/256/hover/connect.png"
+      "hover_256": "icons/256/hover/connect.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 3,
-      "row": 1,
-      "column": 3,
       "name": "sftp",
       "label": "SFTP / Files",
       "regular_256": "icons/256/regular/sftp.png",
-      "hover_256": "icons/256/hover/sftp.png"
+      "hover_256": "icons/256/hover/sftp.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 4,
-      "row": 1,
-      "column": 4,
       "name": "snippets",
       "label": "Snippets / Scripts",
       "regular_256": "icons/256/regular/snippets.png",
-      "hover_256": "icons/256/hover/snippets.png"
+      "hover_256": "icons/256/hover/snippets.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 5,
-      "row": 1,
-      "column": 5,
       "name": "history",
       "label": "History",
       "regular_256": "icons/256/regular/history.png",
-      "hover_256": "icons/256/hover/history.png"
+      "hover_256": "icons/256/hover/history.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 6,
-      "row": 2,
-      "column": 1,
       "name": "keychain",
       "label": "SSH Keychain",
       "regular_256": "icons/256/regular/keychain.png",
-      "hover_256": "icons/256/hover/keychain.png"
+      "hover_256": "icons/256/hover/keychain.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 7,
-      "row": 2,
-      "column": 2,
       "name": "vaults",
       "label": "Vaults",
       "regular_256": "icons/256/regular/vaults.png",
-      "hover_256": "icons/256/hover/vaults.png"
+      "hover_256": "icons/256/hover/vaults.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 8,
-      "row": 2,
-      "column": 3,
       "name": "workspaces",
       "label": "Workspaces",
       "regular_256": "icons/256/regular/workspaces.png",
-      "hover_256": "icons/256/hover/workspaces.png"
+      "hover_256": "icons/256/hover/workspaces.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 9,
-      "row": 2,
-      "column": 4,
       "name": "cloud_sync",
       "label": "Cloud Sync",
       "regular_256": "icons/256/regular/cloud_sync.png",
-      "hover_256": "icons/256/hover/cloud_sync.png"
+      "hover_256": "icons/256/hover/cloud_sync.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 10,
-      "row": 2,
-      "column": 5,
       "name": "settings",
       "label": "Settings",
       "regular_256": "icons/256/regular/settings.png",
-      "hover_256": "icons/256/hover/settings.png"
+      "hover_256": "icons/256/hover/settings.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 11,
-      "row": 3,
-      "column": 1,
       "name": "add_host",
       "label": "Add Host",
       "regular_256": "icons/256/regular/add_host.png",
-      "hover_256": "icons/256/hover/add_host.png"
+      "hover_256": "icons/256/hover/add_host.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 12,
-      "row": 3,
-      "column": 2,
       "name": "search",
       "label": "Search",
       "regular_256": "icons/256/regular/search.png",
-      "hover_256": "icons/256/hover/search.png"
+      "hover_256": "icons/256/hover/search.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 13,
-      "row": 3,
-      "column": 3,
       "name": "terminal",
       "label": "SSH Terminal",
       "regular_256": "icons/256/regular/terminal.png",
-      "hover_256": "icons/256/hover/terminal.png"
+      "hover_256": "icons/256/hover/terminal.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 14,
-      "row": 3,
-      "column": 4,
       "name": "serial",
       "label": "Serial Connection",
       "regular_256": "icons/256/regular/serial.png",
-      "hover_256": "icons/256/hover/serial.png"
+      "hover_256": "icons/256/hover/serial.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 15,
-      "row": 3,
-      "column": 5,
       "name": "split_view",
       "label": "Split View",
       "regular_256": "icons/256/regular/split_view.png",
-      "hover_256": "icons/256/hover/split_view.png"
+      "hover_256": "icons/256/hover/split_view.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 16,
-      "row": 4,
-      "column": 1,
       "name": "grid_view",
       "label": "Grid View",
       "regular_256": "icons/256/regular/grid_view.png",
-      "hover_256": "icons/256/hover/grid_view.png"
+      "hover_256": "icons/256/hover/grid_view.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 17,
-      "row": 4,
-      "column": 2,
       "name": "list_view",
       "label": "List View",
       "regular_256": "icons/256/regular/list_view.png",
-      "hover_256": "icons/256/hover/list_view.png"
+      "hover_256": "icons/256/hover/list_view.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 18,
-      "row": 4,
-      "column": 3,
       "name": "groups",
       "label": "Groups",
       "regular_256": "icons/256/regular/groups.png",
-      "hover_256": "icons/256/hover/groups.png"
+      "hover_256": "icons/256/hover/groups.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 19,
-      "row": 4,
-      "column": 4,
       "name": "tags",
       "label": "Tags",
       "regular_256": "icons/256/regular/tags.png",
-      "hover_256": "icons/256/hover/tags.png"
+      "hover_256": "icons/256/hover/tags.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 20,
-      "row": 4,
-      "column": 5,
       "name": "favorite",
       "label": "Favorites",
       "regular_256": "icons/256/regular/favorite.png",
-      "hover_256": "icons/256/hover/favorite.png"
+      "hover_256": "icons/256/hover/favorite.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 21,
-      "row": 5,
-      "column": 1,
       "name": "more",
       "label": "More / Options",
       "regular_256": "icons/256/regular/more.png",
-      "hover_256": "icons/256/hover/more.png"
+      "hover_256": "icons/256/hover/more.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 22,
-      "row": 5,
-      "column": 2,
       "name": "edit",
       "label": "Edit",
       "regular_256": "icons/256/regular/edit.png",
-      "hover_256": "icons/256/hover/edit.png"
+      "hover_256": "icons/256/hover/edit.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 23,
-      "row": 5,
-      "column": 3,
       "name": "delete",
       "label": "Delete",
       "regular_256": "icons/256/regular/delete.png",
-      "hover_256": "icons/256/hover/delete.png"
+      "hover_256": "icons/256/hover/delete.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 24,
-      "row": 5,
-      "column": 4,
       "name": "refresh",
       "label": "Refresh",
       "regular_256": "icons/256/regular/refresh.png",
-      "hover_256": "icons/256/hover/refresh.png"
+      "hover_256": "icons/256/hover/refresh.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 25,
-      "row": 5,
-      "column": 5,
       "name": "profile",
       "label": "Account / Profile",
       "regular_256": "icons/256/regular/profile.png",
-      "hover_256": "icons/256/hover/profile.png"
+      "hover_256": "icons/256/hover/profile.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 26,
-      "row": 6,
-      "column": 1,
       "name": "known_hosts",
       "label": "Known Hosts",
       "regular_256": "icons/256/regular/known_hosts.png",
-      "hover_256": "icons/256/hover/known_hosts.png"
+      "hover_256": "icons/256/hover/known_hosts.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 27,
-      "row": 6,
-      "column": 2,
       "name": "port_forwarding",
       "label": "Port Forwarding",
       "regular_256": "icons/256/regular/port_forwarding.png",
-      "hover_256": "icons/256/hover/port_forwarding.png"
+      "hover_256": "icons/256/hover/port_forwarding.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 28,
-      "row": 6,
-      "column": 3,
       "name": "shellumi_logo",
       "label": "Shellumi Logo",
       "regular_256": "icons/256/regular/shellumi_logo.png",
-      "hover_256": "icons/256/hover/shellumi_logo.png"
+      "hover_256": "icons/256/hover/shellumi_logo.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 29,
-      "row": 6,
-      "column": 4,
       "name": "group_settings",
       "label": "Group Settings",
       "regular_256": "icons/256/regular/group_settings.png",
-      "hover_256": "icons/256/hover/group_settings.png"
+      "hover_256": "icons/256/hover/group_settings.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 30,
-      "row": 6,
-      "column": 5,
       "name": "import",
       "label": "Import",
       "regular_256": "icons/256/regular/import.png",
-      "hover_256": "icons/256/hover/import.png"
+      "hover_256": "icons/256/hover/import.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 31,
-      "row": 7,
-      "column": 1,
       "name": "export",
       "label": "Export",
       "regular_256": "icons/256/regular/export.png",
-      "hover_256": "icons/256/hover/export.png"
+      "hover_256": "icons/256/hover/export.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 32,
-      "row": 7,
-      "column": 2,
       "name": "tag",
       "label": "Tag",
       "regular_256": "icons/256/regular/tag.png",
-      "hover_256": "icons/256/hover/tag.png"
+      "hover_256": "icons/256/hover/tag.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 33,
-      "row": 7,
-      "column": 3,
       "name": "calendar_sort",
       "label": "Calendar Sort",
       "regular_256": "icons/256/regular/calendar_sort.png",
-      "hover_256": "icons/256/hover/calendar_sort.png"
+      "hover_256": "icons/256/hover/calendar_sort.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 34,
-      "row": 7,
-      "column": 4,
       "name": "certificate",
       "label": "Certificate",
       "regular_256": "icons/256/regular/certificate.png",
-      "hover_256": "icons/256/hover/certificate.png"
+      "hover_256": "icons/256/hover/certificate.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 35,
-      "row": 7,
-      "column": 5,
       "name": "private_key",
       "label": "Private Key",
       "regular_256": "icons/256/regular/private_key.png",
-      "hover_256": "icons/256/hover/private_key.png"
+      "hover_256": "icons/256/hover/private_key.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 36,
-      "row": 8,
-      "column": 1,
       "name": "public_key",
       "label": "Public Key",
       "regular_256": "icons/256/regular/public_key.png",
-      "hover_256": "icons/256/hover/public_key.png"
+      "hover_256": "icons/256/hover/public_key.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 37,
-      "row": 8,
-      "column": 2,
       "name": "identity_card",
       "label": "Identity Card",
       "regular_256": "icons/256/regular/identity_card.png",
-      "hover_256": "icons/256/hover/identity_card.png"
+      "hover_256": "icons/256/hover/identity_card.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 38,
-      "row": 8,
-      "column": 3,
       "name": "os_arch",
       "label": "Arch Linux",
       "regular_256": "icons/256/regular/os_arch.png",
-      "hover_256": "icons/256/hover/os_arch.png"
+      "hover_256": "icons/256/hover/os_arch.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 39,
-      "row": 8,
-      "column": 4,
       "name": "os_ubuntu",
       "label": "Ubuntu",
       "regular_256": "icons/256/regular/os_ubuntu.png",
-      "hover_256": "icons/256/hover/os_ubuntu.png"
+      "hover_256": "icons/256/hover/os_ubuntu.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 40,
-      "row": 8,
-      "column": 5,
       "name": "os_macos",
       "label": "macOS",
       "regular_256": "icons/256/regular/os_macos.png",
-      "hover_256": "icons/256/hover/os_macos.png"
+      "hover_256": "icons/256/hover/os_macos.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 41,
-      "row": 9,
-      "column": 1,
       "name": "os_freebsd",
       "label": "FreeBSD",
       "regular_256": "icons/256/regular/os_freebsd.png",
-      "hover_256": "icons/256/hover/os_freebsd.png"
+      "hover_256": "icons/256/hover/os_freebsd.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 42,
-      "row": 9,
-      "column": 2,
       "name": "os_netbsd",
       "label": "NetBSD",
       "regular_256": "icons/256/regular/os_netbsd.png",
-      "hover_256": "icons/256/hover/os_netbsd.png"
+      "hover_256": "icons/256/hover/os_netbsd.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 43,
-      "row": 9,
-      "column": 3,
       "name": "os_openbsd",
       "label": "OpenBSD",
       "regular_256": "icons/256/regular/os_openbsd.png",
-      "hover_256": "icons/256/hover/os_openbsd.png"
+      "hover_256": "icons/256/hover/os_openbsd.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 44,
-      "row": 9,
-      "column": 4,
       "name": "os_linux",
       "label": "Linux",
       "regular_256": "icons/256/regular/os_linux.png",
-      "hover_256": "icons/256/hover/os_linux.png"
+      "hover_256": "icons/256/hover/os_linux.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 45,
-      "row": 9,
-      "column": 5,
       "name": "os_windows",
       "label": "Windows",
       "regular_256": "icons/256/regular/os_windows.png",
-      "hover_256": "icons/256/hover/os_windows.png"
+      "hover_256": "icons/256/hover/os_windows.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 46,
-      "row": 10,
-      "column": 1,
       "name": "server",
       "label": "Server",
       "regular_256": "icons/256/regular/server.png",
-      "hover_256": "icons/256/hover/server.png"
+      "hover_256": "icons/256/hover/server.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 47,
-      "row": 10,
-      "column": 2,
       "name": "fido2",
       "label": "FIDO2",
       "regular_256": "icons/256/regular/fido2.png",
-      "hover_256": "icons/256/hover/fido2.png"
+      "hover_256": "icons/256/hover/fido2.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 48,
-      "row": 10,
-      "column": 3,
       "name": "fingerprint",
       "label": "Fingerprint",
       "regular_256": "icons/256/regular/fingerprint.png",
-      "hover_256": "icons/256/hover/fingerprint.png"
+      "hover_256": "icons/256/hover/fingerprint.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 49,
-      "row": 10,
-      "column": 4,
       "name": "log",
       "label": "Log",
       "regular_256": "icons/256/regular/log.png",
-      "hover_256": "icons/256/hover/log.png"
+      "hover_256": "icons/256/hover/log.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 50,
-      "row": 10,
-      "column": 5,
       "name": "bell",
       "label": "Bell",
       "regular_256": "icons/256/regular/bell.png",
-      "hover_256": "icons/256/hover/bell.png"
+      "hover_256": "icons/256/hover/bell.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 51,
-      "row": 11,
-      "column": 1,
       "name": "invite_member",
       "label": "Invite Member",
       "regular_256": "icons/256/regular/invite_member.png",
-      "hover_256": "icons/256/hover/invite_member.png"
+      "hover_256": "icons/256/hover/invite_member.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 52,
-      "row": 11,
-      "column": 2,
       "name": "infrastructure",
       "label": "Infrastructure",
       "regular_256": "icons/256/regular/infrastructure.png",
-      "hover_256": "icons/256/hover/infrastructure.png"
+      "hover_256": "icons/256/hover/infrastructure.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 53,
-      "row": 11,
-      "column": 3,
       "name": "diagnostics",
       "label": "Diagnostics",
       "regular_256": "icons/256/regular/diagnostics.png",
-      "hover_256": "icons/256/hover/diagnostics.png"
+      "hover_256": "icons/256/hover/diagnostics.png",
+      "priority": "EXISTING",
+      "description": ""
     },
     {
       "index": 54,
-      "row": 11,
-      "column": 4,
       "name": "mobile",
       "label": "Mobile",
       "regular_256": "icons/256/regular/mobile.png",
-      "hover_256": "icons/256/hover/mobile.png"
+      "hover_256": "icons/256/hover/mobile.png",
+      "priority": "EXISTING",
+      "description": ""
+    },
+    {
+      "index": 55,
+      "name": "overview",
+      "label": "Overview",
+      "regular_256": "icons/256/regular/overview.png",
+      "hover_256": "icons/256/hover/overview.png",
+      "priority": "P0",
+      "description": "A four-panel infrastructure dashboard, 2\u00d72 miniature cards.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 56,
+      "name": "inspector",
+      "label": "Inspector",
+      "regular_256": "icons/256/regular/inspector.png",
+      "hover_256": "icons/256/hover/inspector.png",
+      "priority": "P0",
+      "description": "A main content rectangle beside a narrow right-hand details pane with two information lines.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 57,
+      "name": "new_group",
+      "label": "New Group",
+      "regular_256": "icons/256/regular/new_group.png",
+      "hover_256": "icons/256/hover/new_group.png",
+      "priority": "P0",
+      "description": "A folder carrying a small plus badge, distinct from existing Groups.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 58,
+      "name": "duplicate_host",
+      "label": "Duplicate Host",
+      "regular_256": "icons/256/regular/duplicate_host.png",
+      "hover_256": "icons/256/hover/duplicate_host.png",
+      "priority": "P0",
+      "description": "Two offset, overlapping server cards indicating an exact duplicate.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 59,
+      "name": "move_to_group",
+      "label": "Move To Group",
+      "regular_256": "icons/256/regular/move_to_group.png",
+      "hover_256": "icons/256/hover/move_to_group.png",
+      "priority": "P0",
+      "description": "One server card and an arrow entering a folder (move; do not show a copied card).",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 60,
+      "name": "copy_to_group",
+      "label": "Copy To Group",
+      "regular_256": "icons/256/regular/copy_to_group.png",
+      "hover_256": "icons/256/hover/copy_to_group.png",
+      "priority": "P0",
+      "description": "Two layered server cards with an arrow pointing toward a folder (copy).",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 61,
+      "name": "new_workspace",
+      "label": "New Workspace",
+      "regular_256": "icons/256/regular/new_workspace.png",
+      "hover_256": "icons/256/hover/new_workspace.png",
+      "priority": "P1",
+      "description": "Two neatly arranged application panes with a small plus badge.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 62,
+      "name": "new_vault",
+      "label": "New Vault",
+      "regular_256": "icons/256/regular/new_vault.png",
+      "hover_256": "icons/256/hover/new_vault.png",
+      "priority": "P1",
+      "description": "A compact secure safe door with a small plus badge.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 63,
+      "name": "switch_vault",
+      "label": "Switch Vault",
+      "regular_256": "icons/256/regular/switch_vault.png",
+      "hover_256": "icons/256/hover/switch_vault.png",
+      "priority": "P1",
+      "description": "Two safe-door silhouettes joined by a curved switch arrow.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 64,
+      "name": "quick_connect",
+      "label": "Quick Connect",
+      "regular_256": "icons/256/regular/quick_connect.png",
+      "hover_256": "icons/256/hover/quick_connect.png",
+      "priority": "P1",
+      "description": "A server endpoint and one fast connecting arrow, not a lightning emoji.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 65,
+      "name": "jump_host",
+      "label": "Jump Host",
+      "regular_256": "icons/256/regular/jump_host.png",
+      "hover_256": "icons/256/hover/jump_host.png",
+      "priority": "P1",
+      "description": "Three small servers in line: a central bastion between local and destination.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 66,
+      "name": "ssh",
+      "label": "Ssh",
+      "regular_256": "icons/256/regular/ssh.png",
+      "hover_256": "icons/256/hover/ssh.png",
+      "priority": "P0",
+      "description": "A terminal window with a tiny secure network link; distinct from the existing Terminal icon.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 67,
+      "name": "mosh",
+      "label": "Mosh",
+      "regular_256": "icons/256/regular/mosh.png",
+      "hover_256": "icons/256/hover/mosh.png",
+      "priority": "P0",
+      "description": "A terminal with two curved roaming/signal strokes that express resilient mobile connection.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 68,
+      "name": "rdp",
+      "label": "Rdp",
+      "regular_256": "icons/256/regular/rdp.png",
+      "hover_256": "icons/256/hover/rdp.png",
+      "priority": "P0",
+      "description": "A desktop monitor with an inset four-pane Windows-inspired motif; no letters.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 69,
+      "name": "vnc",
+      "label": "Vnc",
+      "regular_256": "icons/256/regular/vnc.png",
+      "hover_256": "icons/256/hover/vnc.png",
+      "priority": "P0",
+      "description": "A remote monitor with a dotted network link and pointer cursor; distinct from RDP.",
+      "group": "overview_connection",
+      "source_sheet": "os2.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 70,
+      "name": "disconnect",
+      "label": "Disconnect",
+      "regular_256": "icons/256/regular/disconnect.png",
+      "hover_256": "icons/256/hover/disconnect.png",
+      "priority": "P0",
+      "description": "A split link/cable with two visibly separated endpoints.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 71,
+      "name": "reconnect",
+      "label": "Reconnect",
+      "regular_256": "icons/256/regular/reconnect.png",
+      "hover_256": "icons/256/hover/reconnect.png",
+      "priority": "P0",
+      "description": "A link being restored by a clockwise circular arrow.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 72,
+      "name": "local_terminal",
+      "label": "Local Terminal",
+      "regular_256": "icons/256/regular/local_terminal.png",
+      "hover_256": "icons/256/hover/local_terminal.png",
+      "priority": "P1",
+      "description": "A terminal screen above a miniature local computer base.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 73,
+      "name": "session_record",
+      "label": "Session Record",
+      "regular_256": "icons/256/regular/session_record.png",
+      "hover_256": "icons/256/hover/session_record.png",
+      "priority": "P1",
+      "description": "A terminal outline with a prominent small circular recording dot.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 74,
+      "name": "session_replay",
+      "label": "Session Replay",
+      "regular_256": "icons/256/regular/session_replay.png",
+      "hover_256": "icons/256/hover/session_replay.png",
+      "priority": "P1",
+      "description": "A terminal outline containing a play triangle and short timeline ticks.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 75,
+      "name": "session_info",
+      "label": "Session Info",
+      "regular_256": "icons/256/regular/session_info.png",
+      "hover_256": "icons/256/hover/session_info.png",
+      "priority": "P1",
+      "description": "A terminal identity card with a status light and two information lines.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 76,
+      "name": "fit_to_view",
+      "label": "Fit To View",
+      "regular_256": "icons/256/regular/fit_to_view.png",
+      "hover_256": "icons/256/hover/fit_to_view.png",
+      "priority": "P0",
+      "description": "A monitor bounded by four inward corner arrows, indicating fit the whole desktop.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 77,
+      "name": "actual_size",
+      "label": "Actual Size",
+      "regular_256": "icons/256/regular/actual_size.png",
+      "hover_256": "icons/256/hover/actual_size.png",
+      "priority": "P0",
+      "description": "A monitor with an inset 1:1 symbol, indicating native-pixel scaling.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 78,
+      "name": "fill_view",
+      "label": "Fill View",
+      "regular_256": "icons/256/regular/fill_view.png",
+      "hover_256": "icons/256/hover/fill_view.png",
+      "priority": "P0",
+      "description": "A monitor bounded by four outward corner arrows, indicating fill/crop.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 79,
+      "name": "display_resolution",
+      "label": "Display Resolution",
+      "regular_256": "icons/256/regular/display_resolution.png",
+      "hover_256": "icons/256/hover/display_resolution.png",
+      "priority": "P0",
+      "description": "A monitor with tiny horizontal and vertical measurement ticks.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 80,
+      "name": "dynamic_resize",
+      "label": "Dynamic Resize",
+      "regular_256": "icons/256/regular/dynamic_resize.png",
+      "hover_256": "icons/256/hover/dynamic_resize.png",
+      "priority": "P0",
+      "description": "A monitor inside an adjustable frame, with diagonal resize arrows.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 81,
+      "name": "remote_keyboard",
+      "label": "Remote Keyboard",
+      "regular_256": "icons/256/regular/remote_keyboard.png",
+      "hover_256": "icons/256/hover/remote_keyboard.png",
+      "priority": "P0",
+      "description": "A keyboard with an outward arrow toward a remote monitor.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 82,
+      "name": "remote_clipboard",
+      "label": "Remote Clipboard",
+      "regular_256": "icons/256/regular/remote_clipboard.png",
+      "hover_256": "icons/256/hover/remote_clipboard.png",
+      "priority": "P0",
+      "description": "Two overlapping clipboards connected by two short opposite arrows.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 83,
+      "name": "view_only",
+      "label": "View Only",
+      "regular_256": "icons/256/regular/view_only.png",
+      "hover_256": "icons/256/hover/view_only.png",
+      "priority": "P0",
+      "description": "A monitor with a clearly recognizable eye, indicating viewing without control.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 84,
+      "name": "fullscreen",
+      "label": "Fullscreen",
+      "regular_256": "icons/256/regular/fullscreen.png",
+      "hover_256": "icons/256/hover/fullscreen.png",
+      "priority": "P0",
+      "description": "A monitor with four outward-pointing corner markers.",
+      "group": "session_views",
+      "source_sheet": "session_media_transfers1.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 85,
+      "name": "send_ctrl_alt_del",
+      "label": "Send Ctrl Alt Del",
+      "regular_256": "icons/256/regular/send_ctrl_alt_del.png",
+      "hover_256": "icons/256/hover/send_ctrl_alt_del.png",
+      "priority": "P1",
+      "description": "Three adjacent keycaps on a small keyboard strip; avoid unreadable text.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 86,
+      "name": "send_windows_key",
+      "label": "Send Windows Key",
+      "regular_256": "icons/256/regular/send_windows_key.png",
+      "hover_256": "icons/256/hover/send_windows_key.png",
+      "priority": "P1",
+      "description": "One keycap containing the recognizable four-pane Windows shape.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 87,
+      "name": "shared_drive",
+      "label": "Shared Drive",
+      "regular_256": "icons/256/regular/shared_drive.png",
+      "hover_256": "icons/256/hover/shared_drive.png",
+      "priority": "P1",
+      "description": "A storage drive with a small shared-folder/network-link symbol.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 88,
+      "name": "remote_audio",
+      "label": "Remote Audio",
+      "regular_256": "icons/256/regular/remote_audio.png",
+      "hover_256": "icons/256/hover/remote_audio.png",
+      "priority": "P1",
+      "description": "A speaker with two restrained sound waves.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 89,
+      "name": "remote_audio_muted",
+      "label": "Remote Audio Muted",
+      "regular_256": "icons/256/regular/remote_audio_muted.png",
+      "hover_256": "icons/256/hover/remote_audio_muted.png",
+      "priority": "P1",
+      "description": "The same speaker with one clean diagonal mute slash.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 90,
+      "name": "remote_microphone",
+      "label": "Remote Microphone",
+      "regular_256": "icons/256/regular/remote_microphone.png",
+      "hover_256": "icons/256/hover/remote_microphone.png",
+      "priority": "P1",
+      "description": "A microphone with one compact signal curve.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 91,
+      "name": "remote_microphone_muted",
+      "label": "Remote Microphone Muted",
+      "regular_256": "icons/256/regular/remote_microphone_muted.png",
+      "hover_256": "icons/256/hover/remote_microphone_muted.png",
+      "priority": "P1",
+      "description": "The same microphone with one clean diagonal mute slash.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 92,
+      "name": "input_enabled",
+      "label": "Input Enabled",
+      "regular_256": "icons/256/regular/input_enabled.png",
+      "hover_256": "icons/256/hover/input_enabled.png",
+      "priority": "P1",
+      "description": "A monitor with a pointer cursor, indicating input control is permitted.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 93,
+      "name": "session_telemetry",
+      "label": "Session Telemetry",
+      "regular_256": "icons/256/regular/session_telemetry.png",
+      "hover_256": "icons/256/hover/session_telemetry.png",
+      "priority": "P1",
+      "description": "A small performance line graph inset into a monitor outline.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 94,
+      "name": "upload",
+      "label": "Upload",
+      "regular_256": "icons/256/regular/upload.png",
+      "hover_256": "icons/256/hover/upload.png",
+      "priority": "P0",
+      "description": "A file document with an upward arrow toward a small remote-server endpoint.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 95,
+      "name": "download",
+      "label": "Download",
+      "regular_256": "icons/256/regular/download.png",
+      "hover_256": "icons/256/hover/download.png",
+      "priority": "P0",
+      "description": "A remote-server endpoint with a downward arrow toward a file document.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 96,
+      "name": "transfer_queue",
+      "label": "Transfer Queue",
+      "regular_256": "icons/256/regular/transfer_queue.png",
+      "hover_256": "icons/256/hover/transfer_queue.png",
+      "priority": "P0",
+      "description": "Three short stacked file rows beside a small progress arc.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 97,
+      "name": "new_folder",
+      "label": "New Folder",
+      "regular_256": "icons/256/regular/new_folder.png",
+      "hover_256": "icons/256/hover/new_folder.png",
+      "priority": "P0",
+      "description": "A familiar file-browser folder with a clearly visible plus badge.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 98,
+      "name": "transfer_progress",
+      "label": "Transfer Progress",
+      "regular_256": "icons/256/regular/transfer_progress.png",
+      "hover_256": "icons/256/hover/transfer_progress.png",
+      "priority": "P1",
+      "description": "A file rectangle overlaid by a half-complete progress ring.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 99,
+      "name": "transfer_complete",
+      "label": "Transfer Complete",
+      "regular_256": "icons/256/regular/transfer_complete.png",
+      "hover_256": "icons/256/hover/transfer_complete.png",
+      "priority": "P1",
+      "description": "A file with a tiny successful check badge.",
+      "group": "session_media_transfers1",
+      "source_sheet": "transfer_vault_sync1.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 100,
+      "name": "transfer_failed",
+      "label": "Transfer Failed",
+      "regular_256": "icons/256/regular/transfer_failed.png",
+      "hover_256": "icons/256/hover/transfer_failed.png",
+      "priority": "P1",
+      "description": "A file with a tiny failure/cross badge.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 101,
+      "name": "transfer_retry",
+      "label": "Transfer Retry",
+      "regular_256": "icons/256/regular/transfer_retry.png",
+      "hover_256": "icons/256/hover/transfer_retry.png",
+      "priority": "P1",
+      "description": "A file with a small clockwise retry arrow.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 102,
+      "name": "local_files",
+      "label": "Local Files",
+      "regular_256": "icons/256/regular/local_files.png",
+      "hover_256": "icons/256/hover/local_files.png",
+      "priority": "P1",
+      "description": "A desktop/laptop device with a tiny folder in the foreground.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 103,
+      "name": "remote_files",
+      "label": "Remote Files",
+      "regular_256": "icons/256/regular/remote_files.png",
+      "hover_256": "icons/256/hover/remote_files.png",
+      "priority": "P1",
+      "description": "A server-rack device with a tiny folder in the foreground.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 104,
+      "name": "file_permissions",
+      "label": "File Permissions",
+      "regular_256": "icons/256/regular/file_permissions.png",
+      "hover_256": "icons/256/hover/file_permissions.png",
+      "priority": "P1",
+      "description": "A document with a lock and small checked permission marks, no text.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 105,
+      "name": "hidden_files",
+      "label": "Hidden Files",
+      "regular_256": "icons/256/regular/hidden_files.png",
+      "hover_256": "icons/256/hover/hidden_files.png",
+      "priority": "P1",
+      "description": "A document paired with a crossed-out eye, representing hidden entries.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 106,
+      "name": "vault_lock",
+      "label": "Vault Lock",
+      "regular_256": "icons/256/regular/vault_lock.png",
+      "hover_256": "icons/256/hover/vault_lock.png",
+      "priority": "P0",
+      "description": "A safe door combined with a closed padlock.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 107,
+      "name": "vault_unlock",
+      "label": "Vault Unlock",
+      "regular_256": "icons/256/regular/vault_unlock.png",
+      "hover_256": "icons/256/hover/vault_unlock.png",
+      "priority": "P0",
+      "description": "The same safe door combined with an open padlock.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 108,
+      "name": "google_drive",
+      "label": "Google Drive",
+      "regular_256": "icons/256/regular/google_drive.png",
+      "hover_256": "icons/256/hover/google_drive.png",
+      "priority": "P0",
+      "description": "An accurate simplified triangular Google Drive mark, without text.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 109,
+      "name": "sync_conflict",
+      "label": "Sync Conflict",
+      "regular_256": "icons/256/regular/sync_conflict.png",
+      "hover_256": "icons/256/hover/sync_conflict.png",
+      "priority": "P0",
+      "description": "Two opposing sync arrows meeting at a warning diamond.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 110,
+      "name": "encrypted_backup",
+      "label": "Encrypted Backup",
+      "regular_256": "icons/256/regular/encrypted_backup.png",
+      "hover_256": "icons/256/hover/encrypted_backup.png",
+      "priority": "P0",
+      "description": "A backup/archive container with a distinct closed padlock.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 111,
+      "name": "restore_backup",
+      "label": "Restore Backup",
+      "regular_256": "icons/256/regular/restore_backup.png",
+      "hover_256": "icons/256/hover/restore_backup.png",
+      "priority": "P0",
+      "description": "A backup container with an arrow returning into a safe/vault.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 112,
+      "name": "recovery_code",
+      "label": "Recovery Code",
+      "regular_256": "icons/256/regular/recovery_code.png",
+      "hover_256": "icons/256/hover/recovery_code.png",
+      "priority": "P0",
+      "description": "A protective shield containing an abstract recovery-card/key motif; never actual digits.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 113,
+      "name": "vault_encryption",
+      "label": "Vault Encryption",
+      "regular_256": "icons/256/regular/vault_encryption.png",
+      "hover_256": "icons/256/hover/vault_encryption.png",
+      "priority": "P1",
+      "description": "A safe door carrying a centered security shield and lock inset.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 114,
+      "name": "server_sync",
+      "label": "Server Sync",
+      "regular_256": "icons/256/regular/server_sync.png",
+      "hover_256": "icons/256/hover/server_sync.png",
+      "priority": "P1",
+      "description": "Two server-rack silhouettes connected by circular sync arrows.",
+      "group": "transfer_vault_sync1",
+      "source_sheet": "providers_inventory_diag_os1.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 115,
+      "name": "sync_upload",
+      "label": "Sync Upload",
+      "regular_256": "icons/256/regular/sync_upload.png",
+      "hover_256": "icons/256/hover/sync_upload.png",
+      "priority": "P1",
+      "description": "A cloud outline with one clear upward arrow.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 116,
+      "name": "sync_download",
+      "label": "Sync Download",
+      "regular_256": "icons/256/regular/sync_download.png",
+      "hover_256": "icons/256/hover/sync_download.png",
+      "priority": "P1",
+      "description": "A cloud outline with one clear downward arrow.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 117,
+      "name": "sync_offline",
+      "label": "Sync Offline",
+      "regular_256": "icons/256/regular/sync_offline.png",
+      "hover_256": "icons/256/hover/sync_offline.png",
+      "priority": "P1",
+      "description": "A cloud outline crossed by a small disconnected-link slash.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 118,
+      "name": "sync_success",
+      "label": "Sync Success",
+      "regular_256": "icons/256/regular/sync_success.png",
+      "hover_256": "icons/256/hover/sync_success.png",
+      "priority": "P1",
+      "description": "A cloud outline with a small checked success badge.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 119,
+      "name": "setup_resume",
+      "label": "Setup Resume",
+      "regular_256": "icons/256/regular/setup_resume.png",
+      "hover_256": "icons/256/hover/setup_resume.png",
+      "priority": "P1",
+      "description": "A five-step progress path with one highlighted unfinished step and a forward arrow.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 120,
+      "name": "device_enrollment",
+      "label": "Device Enrollment",
+      "regular_256": "icons/256/regular/device_enrollment.png",
+      "hover_256": "icons/256/hover/device_enrollment.png",
+      "priority": "P1",
+      "description": "A laptop and phone linked by a verified connection symbol.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 121,
+      "name": "host_key_verified",
+      "label": "Host Key Verified",
+      "regular_256": "icons/256/regular/host_key_verified.png",
+      "hover_256": "icons/256/hover/host_key_verified.png",
+      "priority": "P0",
+      "description": "A server endpoint with a shield and a check badge.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 122,
+      "name": "host_key_changed",
+      "label": "Host Key Changed",
+      "regular_256": "icons/256/regular/host_key_changed.png",
+      "hover_256": "icons/256/hover/host_key_changed.png",
+      "priority": "P0",
+      "description": "A server endpoint with a shield and a distinct warning triangle.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 123,
+      "name": "ssh_agent",
+      "label": "Ssh Agent",
+      "regular_256": "icons/256/regular/ssh_agent.png",
+      "hover_256": "icons/256/hover/ssh_agent.png",
+      "priority": "P1",
+      "description": "A metal key inside a small terminal agent/socket graphic.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 124,
+      "name": "generate_key",
+      "label": "Generate Key",
+      "regular_256": "icons/256/regular/generate_key.png",
+      "hover_256": "icons/256/hover/generate_key.png",
+      "priority": "P1",
+      "description": "A metal key bearing a tiny new/plus spark.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 125,
+      "name": "rotate_key",
+      "label": "Rotate Key",
+      "regular_256": "icons/256/regular/rotate_key.png",
+      "hover_256": "icons/256/hover/rotate_key.png",
+      "priority": "P1",
+      "description": "A metal key surrounded by a short clockwise rotation arrow.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 126,
+      "name": "revoke_key",
+      "label": "Revoke Key",
+      "regular_256": "icons/256/regular/revoke_key.png",
+      "hover_256": "icons/256/hover/revoke_key.png",
+      "priority": "P1",
+      "description": "A key with a decisive diagonal cancellation slash.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 127,
+      "name": "password",
+      "label": "Password",
+      "regular_256": "icons/256/regular/password.png",
+      "hover_256": "icons/256/hover/password.png",
+      "priority": "P1",
+      "description": "A padlock above a row of four masked dots; no real characters.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 128,
+      "name": "security_audit",
+      "label": "Security Audit",
+      "regular_256": "icons/256/regular/security_audit.png",
+      "hover_256": "icons/256/hover/security_audit.png",
+      "priority": "P1",
+      "description": "A shield beside a compact document checklist.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 129,
+      "name": "trusted_device",
+      "label": "Trusted Device",
+      "regular_256": "icons/256/regular/trusted_device.png",
+      "hover_256": "icons/256/hover/trusted_device.png",
+      "priority": "P1",
+      "description": "A desktop device with a checked shield badge.",
+      "group": "sync_keys_security",
+      "source_sheet": "overview_connection.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 130,
+      "name": "untrusted_device",
+      "label": "Untrusted Device",
+      "regular_256": "icons/256/regular/untrusted_device.png",
+      "hover_256": "icons/256/hover/untrusted_device.png",
+      "priority": "P1",
+      "description": "A desktop device with a warning shield badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 131,
+      "name": "team_members",
+      "label": "Team Members",
+      "regular_256": "icons/256/regular/team_members.png",
+      "hover_256": "icons/256/hover/team_members.png",
+      "priority": "P1",
+      "description": "Three small balanced human silhouettes as one team cluster.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 132,
+      "name": "shared_vault",
+      "label": "Shared Vault",
+      "regular_256": "icons/256/regular/shared_vault.png",
+      "hover_256": "icons/256/hover/shared_vault.png",
+      "priority": "P1",
+      "description": "A safe door placed between two small collaborating user silhouettes.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 133,
+      "name": "member_revoke",
+      "label": "Member Revoke",
+      "regular_256": "icons/256/regular/member_revoke.png",
+      "hover_256": "icons/256/hover/member_revoke.png",
+      "priority": "P1",
+      "description": "A user silhouette with a small blocked/cancellation badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 134,
+      "name": "pending_invite",
+      "label": "Pending Invite",
+      "regular_256": "icons/256/regular/pending_invite.png",
+      "hover_256": "icons/256/hover/pending_invite.png",
+      "priority": "P1",
+      "description": "An envelope carrying a small clock badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 135,
+      "name": "role_admin",
+      "label": "Role Admin",
+      "regular_256": "icons/256/regular/role_admin.png",
+      "hover_256": "icons/256/hover/role_admin.png",
+      "priority": "P1",
+      "description": "A user silhouette with a small privileged shield-and-star badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 136,
+      "name": "role_editor",
+      "label": "Role Editor",
+      "regular_256": "icons/256/regular/role_editor.png",
+      "hover_256": "icons/256/hover/role_editor.png",
+      "priority": "P1",
+      "description": "A user silhouette with a small pencil badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 137,
+      "name": "role_viewer",
+      "label": "Role Viewer",
+      "regular_256": "icons/256/regular/role_viewer.png",
+      "hover_256": "icons/256/hover/role_viewer.png",
+      "priority": "P1",
+      "description": "A user silhouette with a small eye badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 138,
+      "name": "team_key_rotation",
+      "label": "Team Key Rotation",
+      "regular_256": "icons/256/regular/team_key_rotation.png",
+      "hover_256": "icons/256/hover/team_key_rotation.png",
+      "priority": "P1",
+      "description": "A safe/vault key with a surrounding rotation arrow and shield accent.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 139,
+      "name": "tunnel_local",
+      "label": "Tunnel Local",
+      "regular_256": "icons/256/regular/tunnel_local.png",
+      "hover_256": "icons/256/hover/tunnel_local.png",
+      "priority": "P0",
+      "description": "A local computer on the left and a server on the right connected by a forwarding tunnel arrow.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 140,
+      "name": "tunnel_remote",
+      "label": "Tunnel Remote",
+      "regular_256": "icons/256/regular/tunnel_remote.png",
+      "hover_256": "icons/256/hover/tunnel_remote.png",
+      "priority": "P0",
+      "description": "A server on the right connected back to a local computer by an opposite forwarding arrow.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 141,
+      "name": "tunnel_socks",
+      "label": "Tunnel Socks",
+      "regular_256": "icons/256/regular/tunnel_socks.png",
+      "hover_256": "icons/256/hover/tunnel_socks.png",
+      "priority": "P0",
+      "description": "A central tunnel hub with three small outward branches (dynamic SOCKS proxy).",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 142,
+      "name": "tunnel_active",
+      "label": "Tunnel Active",
+      "regular_256": "icons/256/regular/tunnel_active.png",
+      "hover_256": "icons/256/hover/tunnel_active.png",
+      "priority": "P1",
+      "description": "A bidirectional tunnel link with a checked active badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 143,
+      "name": "tunnel_stopped",
+      "label": "Tunnel Stopped",
+      "regular_256": "icons/256/regular/tunnel_stopped.png",
+      "hover_256": "icons/256/hover/tunnel_stopped.png",
+      "priority": "P1",
+      "description": "A bidirectional tunnel link with a small square stop badge.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 144,
+      "name": "provider_aws",
+      "label": "Provider Aws",
+      "regular_256": "icons/256/regular/provider_aws.png",
+      "hover_256": "icons/256/hover/provider_aws.png",
+      "priority": "P1",
+      "description": "Faithful official AWS brand symbol (not an invented cloud logo); preserve its proportions.",
+      "group": "team_tunnels_aws",
+      "source_sheet": "sync_keys_security.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 145,
+      "name": "provider_azure",
+      "label": "Provider Azure",
+      "regular_256": "icons/256/regular/provider_azure.png",
+      "hover_256": "icons/256/hover/provider_azure.png",
+      "priority": "P1",
+      "description": "Faithful official Microsoft Azure symbol; preserve its proportions.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 146,
+      "name": "provider_digitalocean",
+      "label": "Provider Digitalocean",
+      "regular_256": "icons/256/regular/provider_digitalocean.png",
+      "hover_256": "icons/256/hover/provider_digitalocean.png",
+      "priority": "P1",
+      "description": "Faithful official DigitalOcean circle/square brand symbol.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 147,
+      "name": "provider_ansible",
+      "label": "Provider Ansible",
+      "regular_256": "icons/256/regular/provider_ansible.png",
+      "hover_256": "icons/256/hover/provider_ansible.png",
+      "priority": "P1",
+      "description": "Faithful official Ansible circular arrow/A symbol.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 148,
+      "name": "provider_connect",
+      "label": "Provider Connect",
+      "regular_256": "icons/256/regular/provider_connect.png",
+      "hover_256": "icons/256/hover/provider_connect.png",
+      "priority": "P1",
+      "description": "A cloud-provider node with a linked/connected badge.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 3,
+      "column": 4,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 149,
+      "name": "discover_hosts",
+      "label": "Discover Hosts",
+      "regular_256": "icons/256/regular/discover_hosts.png",
+      "hover_256": "icons/256/hover/discover_hosts.png",
+      "priority": "P1",
+      "description": "A server and small magnifying glass revealing two nearby network nodes.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 4,
+      "column": 5,
+      "row": 1,
+      "grid": "5x6"
+    },
+    {
+      "index": 150,
+      "name": "inventory",
+      "label": "Inventory",
+      "regular_256": "icons/256/regular/inventory.png",
+      "hover_256": "icons/256/hover/inventory.png",
+      "priority": "P1",
+      "description": "A compact sheet with three inventory rows and miniature server indicators.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 5,
+      "column": 1,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 151,
+      "name": "inventory_sync",
+      "label": "Inventory Sync",
+      "regular_256": "icons/256/regular/inventory_sync.png",
+      "hover_256": "icons/256/hover/inventory_sync.png",
+      "priority": "P1",
+      "description": "Two structured inventory sheets connected by circular arrows.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 6,
+      "column": 2,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 152,
+      "name": "health_check",
+      "label": "Health Check",
+      "regular_256": "icons/256/regular/health_check.png",
+      "hover_256": "icons/256/hover/health_check.png",
+      "priority": "P1",
+      "description": "A diagnostic heartbeat trace crossing a small checkmark shield.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 7,
+      "column": 3,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 153,
+      "name": "benchmark",
+      "label": "Benchmark",
+      "regular_256": "icons/256/regular/benchmark.png",
+      "hover_256": "icons/256/hover/benchmark.png",
+      "priority": "P1",
+      "description": "A compact speedometer/gauge with three restrained tick marks.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 8,
+      "column": 4,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 154,
+      "name": "latency",
+      "label": "Latency",
+      "regular_256": "icons/256/regular/latency.png",
+      "hover_256": "icons/256/hover/latency.png",
+      "priority": "P1",
+      "description": "Two small network nodes connected through a central stopwatch.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 9,
+      "column": 5,
+      "row": 2,
+      "grid": "5x6"
+    },
+    {
+      "index": 155,
+      "name": "network_test",
+      "label": "Network Test",
+      "regular_256": "icons/256/regular/network_test.png",
+      "hover_256": "icons/256/hover/network_test.png",
+      "priority": "P1",
+      "description": "Two connected nodes with a test pulse traveling between them.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 10,
+      "column": 1,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 156,
+      "name": "storage_test",
+      "label": "Storage Test",
+      "regular_256": "icons/256/regular/storage_test.png",
+      "hover_256": "icons/256/hover/storage_test.png",
+      "priority": "P1",
+      "description": "A drive/storage unit with a small checked verification badge.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 11,
+      "column": 2,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 157,
+      "name": "os_debian",
+      "label": "Os Debian",
+      "regular_256": "icons/256/regular/os_debian.png",
+      "hover_256": "icons/256/hover/os_debian.png",
+      "priority": "P2",
+      "description": "Faithful Debian spiral logo, clear at 32 px.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 12,
+      "column": 3,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 158,
+      "name": "os_fedora",
+      "label": "Os Fedora",
+      "regular_256": "icons/256/regular/os_fedora.png",
+      "hover_256": "icons/256/hover/os_fedora.png",
+      "priority": "P2",
+      "description": "Faithful Fedora loop/f symbol, clear at 32 px.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 13,
+      "column": 4,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 159,
+      "name": "os_rhel",
+      "label": "Os Rhel",
+      "regular_256": "icons/256/regular/os_rhel.png",
+      "hover_256": "icons/256/hover/os_rhel.png",
+      "priority": "P2",
+      "description": "Faithful Red Hat Enterprise Linux hat silhouette.",
+      "group": "providers_inventory_diag_os1",
+      "source_sheet": "team_tunnels_aws.png",
+      "cell": 14,
+      "column": 5,
+      "row": 3,
+      "grid": "5x6"
+    },
+    {
+      "index": 160,
+      "name": "os_centos",
+      "label": "Os Centos",
+      "regular_256": "icons/256/regular/os_centos.png",
+      "hover_256": "icons/256/hover/os_centos.png",
+      "priority": "P2",
+      "description": "Faithful CentOS compass/star geometric mark.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 0,
+      "column": 1,
+      "row": 1,
+      "grid": "3x6"
+    },
+    {
+      "index": 161,
+      "name": "os_rocky",
+      "label": "Os Rocky",
+      "regular_256": "icons/256/regular/os_rocky.png",
+      "hover_256": "icons/256/hover/os_rocky.png",
+      "priority": "P2",
+      "description": "Faithful Rocky Linux angular mountain mark.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 1,
+      "column": 2,
+      "row": 1,
+      "grid": "3x6"
+    },
+    {
+      "index": 162,
+      "name": "os_almalinux",
+      "label": "Os Almalinux",
+      "regular_256": "icons/256/regular/os_almalinux.png",
+      "hover_256": "icons/256/hover/os_almalinux.png",
+      "priority": "P2",
+      "description": "Faithful AlmaLinux multicolor petal/star geometry.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 2,
+      "column": 3,
+      "row": 1,
+      "grid": "3x6"
+    },
+    {
+      "index": 163,
+      "name": "os_alpine",
+      "label": "Os Alpine",
+      "regular_256": "icons/256/regular/os_alpine.png",
+      "hover_256": "icons/256/hover/os_alpine.png",
+      "priority": "P2",
+      "description": "Faithful Alpine Linux stylized mountain mark.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 3,
+      "column": 1,
+      "row": 2,
+      "grid": "3x6"
+    },
+    {
+      "index": 164,
+      "name": "os_opensuse",
+      "label": "Os Opensuse",
+      "regular_256": "icons/256/regular/os_opensuse.png",
+      "hover_256": "icons/256/hover/os_opensuse.png",
+      "priority": "P2",
+      "description": "Faithful openSUSE chameleon silhouette.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 4,
+      "column": 2,
+      "row": 2,
+      "grid": "3x6"
+    },
+    {
+      "index": 165,
+      "name": "os_kali",
+      "label": "Os Kali",
+      "regular_256": "icons/256/regular/os_kali.png",
+      "hover_256": "icons/256/hover/os_kali.png",
+      "priority": "P2",
+      "description": "Faithful Kali Linux dragon silhouette, simplified for legibility.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 5,
+      "column": 3,
+      "row": 2,
+      "grid": "3x6"
+    },
+    {
+      "index": 166,
+      "name": "os_windows_server",
+      "label": "Os Windows Server",
+      "regular_256": "icons/256/regular/os_windows_server.png",
+      "hover_256": "icons/256/hover/os_windows_server.png",
+      "priority": "P2",
+      "description": "Windows four-pane motif with a tiny server-rack accent.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 6,
+      "column": 1,
+      "row": 3,
+      "grid": "3x6"
+    },
+    {
+      "index": 167,
+      "name": "os_android",
+      "label": "Os Android",
+      "regular_256": "icons/256/regular/os_android.png",
+      "hover_256": "icons/256/hover/os_android.png",
+      "priority": "P2",
+      "description": "Recognizable Android robot-head silhouette.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 7,
+      "column": 2,
+      "row": 3,
+      "grid": "3x6"
+    },
+    {
+      "index": 168,
+      "name": "os_ios",
+      "label": "Os Ios",
+      "regular_256": "icons/256/regular/os_ios.png",
+      "hover_256": "icons/256/hover/os_ios.png",
+      "priority": "P2",
+      "description": "An iOS mobile device silhouette with a restrained platform-identifying accent.",
+      "group": "os2",
+      "source_sheet": "session_views.png",
+      "cell": 8,
+      "column": 3,
+      "row": 3,
+      "grid": "3x6"
     }
   ],
-  "icon_count": 54,
-  "state_definitions": {
-    "regular": "Borderless standalone metallic-blue/silver artwork on transparent background (no dark rounded-square tile).",
-    "hover": "Metallic-blue/silver icon on a bordered dark rounded-square macOS tile."
-  },
-  "exported_png_count": 330,
-  "design_reference": "icon_pack v5",
-  "regular_definition": "standalone glyph, no border/tile",
-  "hover_definition": "dark rounded square tile/border"
+  "extraction_method": "connected-component ownership over the whole source sheet; halo pixels assigned by nearest validated subject; captures artwork extending across cell boundaries; prevents fragments of adjacent subjects being included"
 }

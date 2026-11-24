@@ -10,6 +10,7 @@ impl Shellumi {
         let name_for_edit = group_name.clone();
         let name_for_del = group_name.clone();
 
+        let group_for_connect = group_name.clone();
         Some(
             div()
                 .id("group-context-menu-backdrop")
@@ -41,36 +42,36 @@ impl Shellumi {
                         }))
                         .child(
                             div()
+                                .id("ctx-connect-all-group")
                                 .px_2p5()
                                 .py_1p5()
                                 .rounded_md()
                                 .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0x252a36)))
                                 .flex()
                                 .items_center()
                                 .gap_2()
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.group_context_menu = None;
+                                    let hosts = match &app.hosts {
+                                        crate::HostState::Loaded(hosts) => hosts
+                                            .iter()
+                                            .filter(|h| {
+                                                h.group_name.as_deref() == Some(&group_for_connect)
+                                            })
+                                            .cloned()
+                                            .collect::<Vec<_>>(),
+                                        _ => Vec::new(),
+                                    };
+                                    for host in hosts {
+                                        app.connect(&host, window, cx);
+                                    }
+                                    cx.notify();
+                                }))
                                 .child("⚡")
-                                .child("Quick Connect"),
-                        )
-                        .child(
-                            div()
-                                .px_2p5()
-                                .py_1p5()
-                                .rounded_md()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child("⚡")
-                                        .child("Connect"),
-                                )
-                                .child("›"),
+                                .child("Connect All Hosts"),
                         )
                         .child(
                             div()
@@ -142,46 +143,6 @@ impl Shellumi {
                                     },
                                 )
                                 .child("Collaborate"),
-                        )
-                        .child(
-                            div()
-                                .px_2p5()
-                                .py_1p5()
-                                .rounded_md()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child("📄")
-                                        .child("Move to"),
-                                )
-                                .child("›"),
-                        )
-                        .child(
-                            div()
-                                .px_2p5()
-                                .py_1p5()
-                                .rounded_md()
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child("📄")
-                                        .child("Copy to"),
-                                )
-                                .child("›"),
                         )
                         .child(
                             div()

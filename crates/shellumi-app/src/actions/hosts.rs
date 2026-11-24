@@ -76,7 +76,7 @@ impl Shellumi {
                 _ => (String::new(), "1920".into(), "1080".into(), 32, false, true),
             };
 
-        self.form = Some(HostForm {
+        let form = HostForm {
             active_category: HostEditorCategory::General,
             identity_id: host.and_then(|host| host.identity_id),
             id,
@@ -99,7 +99,35 @@ impl Shellumi {
             rd_color_depth,
             rd_view_only,
             rd_tls_strict,
-        });
+        };
+
+        // Connect dirty-state tracking to inspector coordinator
+        cx.observe(&form.name, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.hostname, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.username, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.port, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.group, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.tags, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.jump_host, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.startup_snippet, |app, _, cx| {
+            app.inspector_mark_dirty(cx)
+        })
+        .detach();
+        cx.observe(&form.rd_domain, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.rd_width, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&form.rd_height, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+
+        self.form = Some(form);
         self.form_error = None;
         cx.notify();
         self.load_identities(cx);
@@ -372,6 +400,7 @@ impl Shellumi {
         let active_vault_id = self.active_vault_id.clone();
         let is_remote = self.is_active_vault_remote();
         let vault_key = self.active_vault_key();
+        let name_for_lookup = name.clone();
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -464,11 +493,34 @@ impl Shellumi {
                         app.sync_scheduler.notify_local_mutation(now);
                         app.form = None;
                         app.load_hosts(cx);
+                        app.inspector_coordinator.set_dirty(false);
+                        if let Some(saved_id) = id {
+                            app.open_host_inspector(
+                                Some(saved_id),
+                                crate::ui::inspector::InspectorMode::View,
+                                cx,
+                            );
+                        } else {
+                            let new_id = match &app.hosts {
+                                crate::HostState::Loaded(hosts) => hosts
+                                    .iter()
+                                    .find(|h| h.name == name_for_lookup)
+                                    .map(|h| h.id),
+                                _ => None,
+                            };
+                            app.open_host_inspector(
+                                new_id,
+                                crate::ui::inspector::InspectorMode::View,
+                                cx,
+                            );
+                        }
                         if app.is_active_vault_remote() {
                             app.sync_active_vault(cx);
                         }
                     }
-                    Err(error) => app.form_error = Some(error),
+                    Err(error) => {
+                        app.form_error = Some(error);
+                    }
                 }
                 cx.notify();
             });

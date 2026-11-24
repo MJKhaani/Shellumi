@@ -68,10 +68,10 @@ This file is the **acceptance contract** for the unified-inspector redesign. All
 
 | ID | Layers | Test scenario | Required result | Status | Automated Test / Verification Evidence |
 | --- | --- | --- | --- | --- | --- |
-| RD-001 | G,V | Remote toolbar at 940×650 | Host/status and essential actions or overflow reachable, never clipped | **PASS** | Compact 44px toolbar with grouped actions and overflow menu |
-| RD-002 | G,V | Remote toolbar at 3440×1440 and 3840×2160 | Compact single row; no wasted permanent telemetry controls | **PASS** | Telemetry moved into Unified Session Inspector; toolbar bounded |
-| RD-003 | G,U | RDP protocol selected | Correct keyboard, file/drive/audio/mic menu groups and state | **PASS** | Protocol-sensitive menu rendering in `remote_desktop_session.rs` |
-| RD-004 | G,U | VNC protocol selected | Unsupported RDP features hidden or explicitly disabled, never misleading | **PASS** | VNC mode hides mic, drive, and display control affordances |
+| RD-001 | G,V | Remote toolbar at 940×650 | Host/status and essential actions or overflow reachable, never clipped | **PASS** | Compact 36px toolbar with Display, Keyboard, and More dropdown popovers; primary actions fit comfortably in 940px viewport |
+| RD-002 | G,V | Remote toolbar at 3440×1440 and 3840×2160 | Compact single row; no wasted permanent telemetry controls | **PASS** | Telemetry moved into Unified Session Inspector; compact 36px row with Display, Keyboard, and More dropdowns |
+| RD-003 | G,U | RDP protocol selected | Correct keyboard, file/drive/audio/mic menu groups and state | **PASS** | Protocol-sensitive dropdown menus in `remote_desktop_session.rs` showing RDP drive redirection, mic, and dynamic resolution |
+| RD-004 | G,U | VNC protocol selected | Unsupported RDP features hidden or explicitly disabled, never misleading | **PASS** | VNC mode hides mic, shared drive, and MS-RDPEDISP dynamic resolution options from dropdown menus |
 | RD-005 | G,N | Fit / 100% / optional Fill | Correct displayed active mode and usable switching | **PASS** | Segmented display mode selector with active indicator |
 | RD-006 | U,G | Fit aspect differs from canvas | Letterbox excluded and valid points mapped correctly | **PASS** | `test_rd_006_letterbox_excludes_outside_points` |
 | RD-007 | U,G | Fit canvas same aspect as frame | Center/corners/edges map correctly | **PASS** | `test_rd_007_fit_aspect_maps_edges_and_center` |
@@ -91,9 +91,9 @@ This file is the **acceptance contract** for the unified-inspector redesign. All
 | --- | --- | --- | --- | --- | --- |
 | DATA-001 | U,G,E | Group Parent Group field changed | Persisted correctly and reflected after reload, or not exposed until functional | **PASS** | Group inspector View/Edit modes correctly persist parent and metadata |
 | DATA-002 | U,G,E | Group Cloud Sync setting changed | Real persisted behavior and correct permissions, or not exposed until functional | **PASS** | Cloud Sync flag truthfully persisted in `shellumi-storage` |
-| DATA-003 | U,E | Delete group fails in database/server | No success toast; object remains, error clear | **PASS** | Awaited backend delete operation; error banner displayed on failure |
-| DATA-004 | U,G,E | Delete group succeeds after confirmation | Accurate confirmation/progress/success and list/inspector state | **PASS** | `delete_confirmation_dialog` with background deletion and state update |
-| DATA-005 | U,G | Group context menu Quick Connect, Connect, Move, Copy | Fully operational or truthfully absent/disabled; no dead affordances | **PASS** | Group actions properly wired or omitted; context menu uses real commands |
+| DATA-003 | U,E | Delete group fails in database/server | No success toast; object remains, error clear | **PASS** | Awaited backend delete operation (`store.delete_group`); error banner displayed on failure, draft retained |
+| DATA-004 | U,G,E | Delete group succeeds after confirmation | Accurate confirmation/progress/success and list/inspector state | **PASS** | `delete_confirmation_dialog` with non-orphaning group deletion (`UPDATE hosts SET group_name = NULL`), cache reload, and inspector reset |
+| DATA-005 | U,G | Group context menu Quick Connect, Connect, Move, Copy | Fully operational or truthfully absent/disabled; no dead affordances | **PASS** | Dead mock affordances removed; functional "Connect All Hosts", transactional "Rename", and non-orphaning "Delete Group" |
 | DATA-006 | G,N | Notification bell with no backend | Not misleadingly clickable; proper disabled/hidden state if unavailable | **PASS** | Notification bell popup shows real notification status and unread count |
 | DATA-007 | U,E | Two vaults/two windows edit concurrently | Independent state, no leaked selections or secrets, correct storage routing | **PASS** | `test_multi_window_host_mutation_and_inventory_isolation` |
 | DATA-008 | U,E | Read-only team member tries to edit/delete | UI denial plus backend authorization; no privilege escalation | **PASS** | `verifies_team_role_permissions_and_hierarchy` in `shellumi-core` |

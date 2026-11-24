@@ -1,0 +1,114 @@
+P0	overview	A four-panel infrastructure dashboard, 2×2 miniature cards.
+P0	inspector	A main content rectangle beside a narrow right-hand details pane with two information lines.
+P0	new_group	A folder carrying a small plus badge, distinct from existing Groups.
+P0	duplicate_host	Two offset, overlapping server cards indicating an exact duplicate.
+P0	move_to_group	One server card and an arrow entering a folder (move; do not show a copied card).
+P0	copy_to_group	Two layered server cards with an arrow pointing toward a folder (copy).
+P1	new_workspace	Two neatly arranged application panes with a small plus badge.
+P1	new_vault	A compact secure safe door with a small plus badge.
+P1	switch_vault	Two safe-door silhouettes joined by a curved switch arrow.
+P1	quick_connect	A server endpoint and one fast connecting arrow, not a lightning emoji.
+P1	jump_host	Three small servers in line: a central bastion between local and destination.
+P0	ssh	A terminal window with a tiny secure network link; distinct from the existing Terminal icon.
+P0	mosh	A terminal with two curved roaming/signal strokes that express resilient mobile connection.
+P0	rdp	A desktop monitor with an inset four-pane Windows-inspired motif; no letters.
+P0	vnc	A remote monitor with a dotted network link and pointer cursor; distinct from RDP.
+P0	disconnect	A split link/cable with two visibly separated endpoints.
+P0	reconnect	A link being restored by a clockwise circular arrow.
+P1	local_terminal	A terminal screen above a miniature local computer base.
+P1	session_record	A terminal outline with a prominent small circular recording dot.
+P1	session_replay	A terminal outline containing a play triangle and short timeline ticks.
+P1	session_info	A terminal identity card with a status light and two information lines.
+P0	fit_to_view	A monitor bounded by four inward corner arrows, indicating fit the whole desktop.
+P0	actual_size	A monitor with an inset 1:1 symbol, indicating native-pixel scaling.
+P0	fill_view	A monitor bounded by four outward corner arrows, indicating fill/crop.
+P0	display_resolution	A monitor with tiny horizontal and vertical measurement ticks.
+P0	dynamic_resize	A monitor inside an adjustable frame, with diagonal resize arrows.
+P0	remote_keyboard	A keyboard with an outward arrow toward a remote monitor.
+P0	remote_clipboard	Two overlapping clipboards connected by two short opposite arrows.
+P0	view_only	A monitor with a clearly recognizable eye, indicating viewing without control.
+P0	fullscreen	A monitor with four outward-pointing corner markers.
+P1	send_ctrl_alt_del	Three adjacent keycaps on a small keyboard strip; avoid unreadable text.
+P1	send_windows_key	One keycap containing the recognizable four-pane Windows shape.
+P1	shared_drive	A storage drive with a small shared-folder/network-link symbol.
+P1	remote_audio	A speaker with two restrained sound waves.
+P1	remote_audio_muted	The same speaker with one clean diagonal mute slash.
+P1	remote_microphone	A microphone with one compact signal curve.
+P1	remote_microphone_muted	The same microphone with one clean diagonal mute slash.
+P1	input_enabled	A monitor with a pointer cursor, indicating input control is permitted.
+P1	session_telemetry	A small performance line graph inset into a monitor outline.
+P0	upload	A file document with an upward arrow toward a small remote-server endpoint.
+P0	download	A remote-server endpoint with a downward arrow toward a file document.
+P0	transfer_queue	Three short stacked file rows beside a small progress arc.
+P0	new_folder	A familiar file-browser folder with a clearly visible plus badge.
+P1	transfer_progress	A file rectangle overlaid by a half-complete progress ring.
+P1	transfer_complete	A file with a tiny successful check badge.
+P1	transfer_failed	A file with a tiny failure/cross badge.
+P1	transfer_retry	A file with a small clockwise retry arrow.
+P1	local_files	A desktop/laptop device with a tiny folder in the foreground.
+P1	remote_files	A server-rack device with a tiny folder in the foreground.
+P1	file_permissions	A document with a lock and small checked permission marks, no text.
+P1	hidden_files	A document paired with a crossed-out eye, representing hidden entries.
+P0	vault_lock	A safe door combined with a closed padlock.
+P0	vault_unlock	The same safe door combined with an open padlock.
+P0	google_drive	An accurate simplified triangular Google Drive mark, without text.
+P0	sync_conflict	Two opposing sync arrows meeting at a warning diamond.
+P0	encrypted_backup	A backup/archive container with a distinct closed padlock.
+P0	restore_backup	A backup container with an arrow returning into a safe/vault.
+P0	recovery_code	A protective shield containing an abstract recovery-card/key motif; never actual digits.
+P1	vault_encryption	A safe door carrying a centered security shield and lock inset.
+P1	server_sync	Two server-rack silhouettes connected by circular sync arrows.
+P1	sync_upload	A cloud outline with one clear upward arrow.
+P1	sync_download	A cloud outline with one clear downward arrow.
+P1	sync_offline	A cloud outline crossed by a small disconnected-link slash.
+P1	sync_success	A cloud outline with a small checked success badge.
+P1	setup_resume	A five-step progress path with one highlighted unfinished step and a forward arrow.
+P1	device_enrollment	A laptop and phone linked by a verified connection symbol.
+P0	host_key_verified	A server endpoint with a shield and a check badge.
+P0	host_key_changed	A server endpoint with a shield and a distinct warning triangle.
+P1	ssh_agent	A metal key inside a small terminal agent/socket graphic.
+P1	generate_key	A metal key bearing a tiny new/plus spark.
+P1	rotate_key	A metal key surrounded by a short clockwise rotation arrow.
+P1	revoke_key	A key with a decisive diagonal cancellation slash.
+P1	password	A padlock above a row of four masked dots; no real characters.
+P1	security_audit	A shield beside a compact document checklist.
+P1	trusted_device	A desktop device with a checked shield badge.
+P1	untrusted_device	A desktop device with a warning shield badge.
+P1	team_members	Three small balanced human silhouettes as one team cluster.
+P1	shared_vault	A safe door placed between two small collaborating user silhouettes.
+P1	member_revoke	A user silhouette with a small blocked/cancellation badge.
+P1	pending_invite	An envelope carrying a small clock badge.
+P1	role_admin	A user silhouette with a small privileged shield-and-star badge.
+P1	role_editor	A user silhouette with a small pencil badge.
+P1	role_viewer	A user silhouette with a small eye badge.
+P1	team_key_rotation	A safe/vault key with a surrounding rotation arrow and shield accent.
+P0	tunnel_local	A local computer on the left and a server on the right connected by a forwarding tunnel arrow.
+P0	tunnel_remote	A server on the right connected back to a local computer by an opposite forwarding arrow.
+P0	tunnel_socks	A central tunnel hub with three small outward branches (dynamic SOCKS proxy).
+P1	tunnel_active	A bidirectional tunnel link with a checked active badge.
+P1	tunnel_stopped	A bidirectional tunnel link with a small square stop badge.
+P1	provider_aws	Faithful official AWS brand symbol (not an invented cloud logo); preserve its proportions.
+P1	provider_azure	Faithful official Microsoft Azure symbol; preserve its proportions.
+P1	provider_digitalocean	Faithful official DigitalOcean circle/square brand symbol.
+P1	provider_ansible	Faithful official Ansible circular arrow/A symbol.
+P1	provider_connect	A cloud-provider node with a linked/connected badge.
+P1	discover_hosts	A server and small magnifying glass revealing two nearby network nodes.
+P1	inventory	A compact sheet with three inventory rows and miniature server indicators.
+P1	inventory_sync	Two structured inventory sheets connected by circular arrows.
+P1	health_check	A diagnostic heartbeat trace crossing a small checkmark shield.
+P1	benchmark	A compact speedometer/gauge with three restrained tick marks.
+P1	latency	Two small network nodes connected through a central stopwatch.
+P1	network_test	Two connected nodes with a test pulse traveling between them.
+P1	storage_test	A drive/storage unit with a small checked verification badge.
+P2	os_debian	Faithful Debian spiral logo, clear at 32 px.
+P2	os_fedora	Faithful Fedora loop/f symbol, clear at 32 px.
+P2	os_rhel	Faithful Red Hat Enterprise Linux hat silhouette.
+P2	os_centos	Faithful CentOS compass/star geometric mark.
+P2	os_rocky	Faithful Rocky Linux angular mountain mark.
+P2	os_almalinux	Faithful AlmaLinux multicolor petal/star geometry.
+P2	os_alpine	Faithful Alpine Linux stylized mountain mark.
+P2	os_opensuse	Faithful openSUSE chameleon silhouette.
+P2	os_kali	Faithful Kali Linux dragon silhouette, simplified for legibility.
+P2	os_windows_server	Windows four-pane motif with a tiny server-rack accent.
+P2	os_android	Recognizable Android robot-head silhouette.
+P2	os_ios	An iOS mobile device silhouette with a restrained platform-identifying accent.

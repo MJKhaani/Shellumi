@@ -1,0 +1,2119 @@
+{
+  "version": "v10_subject_segmented",
+  "group_source_mapping": [
+    {
+      "group": "overview_connection",
+      "actual_source_filename": "os2.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "session_views",
+      "actual_source_filename": "session_media_transfers1.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "session_media_transfers1",
+      "actual_source_filename": "transfer_vault_sync1.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "transfer_vault_sync1",
+      "actual_source_filename": "providers_inventory_diag_os1.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "sync_keys_security",
+      "actual_source_filename": "overview_connection.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "team_tunnels_aws",
+      "actual_source_filename": "sync_keys_security.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "providers_inventory_diag_os1",
+      "actual_source_filename": "team_tunnels_aws.png",
+      "grid": "5x6",
+      "count": 15
+    },
+    {
+      "group": "os2",
+      "actual_source_filename": "session_views.png",
+      "grid": "3x6",
+      "count": 9
+    }
+  ],
+  "counts": {
+    "existing": 54,
+    "recovered_missing": 114,
+    "total": 168,
+    "states": 2,
+    "resolutions": 5,
+    "png_files_expected": 1680
+  },
+  "preexisting_icon_center_corrections": [
+    {
+      "name": "hosts",
+      "old_center_offset": [
+        2.0,
+        12.0
+      ],
+      "shift_pixels": [
+        -2,
+        -12
+      ]
+    },
+    {
+      "name": "sftp",
+      "old_center_offset": [
+        1.0,
+        11.5
+      ],
+      "shift_pixels": [
+        -1,
+        -12
+      ]
+    },
+    {
+      "name": "snippets",
+      "old_center_offset": [
+        -5.5,
+        13.0
+      ],
+      "shift_pixels": [
+        6,
+        -13
+      ]
+    },
+    {
+      "name": "history",
+      "old_center_offset": [
+        -2.0,
+        12.5
+      ],
+      "shift_pixels": [
+        2,
+        -12
+      ]
+    },
+    {
+      "name": "serial",
+      "old_center_offset": [
+        -5.0,
+        -14.0
+      ],
+      "shift_pixels": [
+        5,
+        14
+      ]
+    },
+    {
+      "name": "groups",
+      "old_center_offset": [
+        0.0,
+        -27.5
+      ],
+      "shift_pixels": [
+        0,
+        28
+      ]
+    },
+    {
+      "name": "tags",
+      "old_center_offset": [
+        -3.0,
+        -24.0
+      ],
+      "shift_pixels": [
+        3,
+        24
+      ]
+    },
+    {
+      "name": "favorite",
+      "old_center_offset": [
+        1.0,
+        -26.0
+      ],
+      "shift_pixels": [
+        -1,
+        26
+      ]
+    },
+    {
+      "name": "edit",
+      "old_center_offset": [
+        -1.0,
+        -36.0
+      ],
+      "shift_pixels": [
+        1,
+        36
+      ]
+    },
+    {
+      "name": "delete",
+      "old_center_offset": [
+        0.0,
+        -39.5
+      ],
+      "shift_pixels": [
+        0,
+        40
+      ]
+    },
+    {
+      "name": "refresh",
+      "old_center_offset": [
+        -5.5,
+        -33.5
+      ],
+      "shift_pixels": [
+        6,
+        34
+      ]
+    },
+    {
+      "name": "profile",
+      "old_center_offset": [
+        0.5,
+        -36.0
+      ],
+      "shift_pixels": [
+        0,
+        36
+      ]
+    },
+    {
+      "name": "tag",
+      "old_center_offset": [
+        -11.0,
+        13.5
+      ],
+      "shift_pixels": [
+        11,
+        -14
+      ]
+    },
+    {
+      "name": "certificate",
+      "old_center_offset": [
+        15.5,
+        22.0
+      ],
+      "shift_pixels": [
+        -16,
+        -22
+      ]
+    },
+    {
+      "name": "private_key",
+      "old_center_offset": [
+        15.5,
+        14.0
+      ],
+      "shift_pixels": [
+        -16,
+        -14
+      ]
+    },
+    {
+      "name": "public_key",
+      "old_center_offset": [
+        3.0,
+        13.5
+      ],
+      "shift_pixels": [
+        -3,
+        -14
+      ]
+    },
+    {
+      "name": "identity_card",
+      "old_center_offset": [
+        1.0,
+        14.5
+      ],
+      "shift_pixels": [
+        -1,
+        -14
+      ]
+    },
+    {
+      "name": "os_macos",
+      "old_center_offset": [
+        14.0,
+        5.0
+      ],
+      "shift_pixels": [
+        -14,
+        -5
+      ]
+    },
+    {
+      "name": "os_freebsd",
+      "old_center_offset": [
+        13.0,
+        4.5
+      ],
+      "shift_pixels": [
+        -13,
+        -4
+      ]
+    },
+    {
+      "name": "server",
+      "old_center_offset": [
+        14.0,
+        -6.0
+      ],
+      "shift_pixels": [
+        -14,
+        6
+      ]
+    }
+  ],
+  "checks": {
+    "pngs_all_1680_present_and_valid": true,
+    "problems": [],
+    "all_report_names_accounted": true,
+    "no_duplicate_names": true,
+    "grid_source_files_verified": true,
+    "grouped_subject_ownership_for_all_missing_icons": true,
+    "all_1680_pngs_verified_again": true
+  },
+  "extraction_method": "connected-component ownership over the whole source sheet; halo pixels assigned by nearest validated subject; captures artwork extending across cell boundaries; prevents fragments of adjacent subjects being included",
+  "subject_extraction_metrics": [
+    {
+      "name": "overview",
+      "state": "regular",
+      "source_dimensions": [
+        174,
+        170
+      ]
+    },
+    {
+      "name": "inspector",
+      "state": "regular",
+      "source_dimensions": [
+        184,
+        130
+      ]
+    },
+    {
+      "name": "new_group",
+      "state": "regular",
+      "source_dimensions": [
+        162,
+        156
+      ]
+    },
+    {
+      "name": "duplicate_host",
+      "state": "regular",
+      "source_dimensions": [
+        172,
+        146
+      ]
+    },
+    {
+      "name": "move_to_group",
+      "state": "regular",
+      "source_dimensions": [
+        186,
+        131
+      ]
+    },
+    {
+      "name": "copy_to_group",
+      "state": "regular",
+      "source_dimensions": [
+        191,
+        108
+      ]
+    },
+    {
+      "name": "new_workspace",
+      "state": "regular",
+      "source_dimensions": [
+        173,
+        162
+      ]
+    },
+    {
+      "name": "new_vault",
+      "state": "regular",
+      "source_dimensions": [
+        161,
+        163
+      ]
+    },
+    {
+      "name": "switch_vault",
+      "state": "regular",
+      "source_dimensions": [
+        191,
+        167
+      ]
+    },
+    {
+      "name": "quick_connect",
+      "state": "regular",
+      "source_dimensions": [
+        173,
+        115
+      ]
+    },
+    {
+      "name": "jump_host",
+      "state": "regular",
+      "source_dimensions": [
+        210,
+        89
+      ]
+    },
+    {
+      "name": "ssh",
+      "state": "regular",
+      "source_dimensions": [
+        164,
+        164
+      ]
+    },
+    {
+      "name": "mosh",
+      "state": "regular",
+      "source_dimensions": [
+        170,
+        140
+      ]
+    },
+    {
+      "name": "rdp",
+      "state": "regular",
+      "source_dimensions": [
+        174,
+        157
+      ]
+    },
+    {
+      "name": "vnc",
+      "state": "regular",
+      "source_dimensions": [
+        173,
+        152
+      ]
+    },
+    {
+      "name": "overview",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        197
+      ]
+    },
+    {
+      "name": "inspector",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        197
+      ]
+    },
+    {
+      "name": "new_group",
+      "state": "hover",
+      "source_dimensions": [
+        201,
+        197
+      ]
+    },
+    {
+      "name": "duplicate_host",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        197
+      ]
+    },
+    {
+      "name": "move_to_group",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        197
+      ]
+    },
+    {
+      "name": "copy_to_group",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        195
+      ]
+    },
+    {
+      "name": "new_workspace",
+      "state": "hover",
+      "source_dimensions": [
+        204,
+        195
+      ]
+    },
+    {
+      "name": "new_vault",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        195
+      ]
+    },
+    {
+      "name": "switch_vault",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        195
+      ]
+    },
+    {
+      "name": "quick_connect",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        195
+      ]
+    },
+    {
+      "name": "jump_host",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        188
+      ]
+    },
+    {
+      "name": "ssh",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        187
+      ]
+    },
+    {
+      "name": "mosh",
+      "state": "hover",
+      "source_dimensions": [
+        200,
+        187
+      ]
+    },
+    {
+      "name": "rdp",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        187
+      ]
+    },
+    {
+      "name": "vnc",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        187
+      ]
+    },
+    {
+      "name": "disconnect",
+      "state": "regular",
+      "source_dimensions": [
+        166,
+        148
+      ]
+    },
+    {
+      "name": "reconnect",
+      "state": "regular",
+      "source_dimensions": [
+        159,
+        165
+      ]
+    },
+    {
+      "name": "local_terminal",
+      "state": "regular",
+      "source_dimensions": [
+        154,
+        173
+      ]
+    },
+    {
+      "name": "session_record",
+      "state": "regular",
+      "source_dimensions": [
+        173,
+        129
+      ]
+    },
+    {
+      "name": "session_replay",
+      "state": "regular",
+      "source_dimensions": [
+        173,
+        130
+      ]
+    },
+    {
+      "name": "session_info",
+      "state": "regular",
+      "source_dimensions": [
+        180,
+        143
+      ]
+    },
+    {
+      "name": "fit_to_view",
+      "state": "regular",
+      "source_dimensions": [
+        174,
+        159
+      ]
+    },
+    {
+      "name": "actual_size",
+      "state": "regular",
+      "source_dimensions": [
+        175,
+        159
+      ]
+    },
+    {
+      "name": "fill_view",
+      "state": "regular",
+      "source_dimensions": [
+        177,
+        159
+      ]
+    },
+    {
+      "name": "display_resolution",
+      "state": "regular",
+      "source_dimensions": [
+        181,
+        161
+      ]
+    },
+    {
+      "name": "dynamic_resize",
+      "state": "regular",
+      "source_dimensions": [
+        179,
+        165
+      ]
+    },
+    {
+      "name": "remote_keyboard",
+      "state": "regular",
+      "source_dimensions": [
+        187,
+        154
+      ]
+    },
+    {
+      "name": "remote_clipboard",
+      "state": "regular",
+      "source_dimensions": [
+        178,
+        168
+      ]
+    },
+    {
+      "name": "view_only",
+      "state": "regular",
+      "source_dimensions": [
+        178,
+        162
+      ]
+    },
+    {
+      "name": "fullscreen",
+      "state": "regular",
+      "source_dimensions": [
+        179,
+        162
+      ]
+    },
+    {
+      "name": "disconnect",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        205
+      ]
+    },
+    {
+      "name": "reconnect",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        204
+      ]
+    },
+    {
+      "name": "local_terminal",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        204
+      ]
+    },
+    {
+      "name": "session_record",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        204
+      ]
+    },
+    {
+      "name": "session_replay",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        204
+      ]
+    },
+    {
+      "name": "session_info",
+      "state": "hover",
+      "source_dimensions": [
+        210,
+        203
+      ]
+    },
+    {
+      "name": "fit_to_view",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        204
+      ]
+    },
+    {
+      "name": "actual_size",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        203
+      ]
+    },
+    {
+      "name": "fill_view",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        203
+      ]
+    },
+    {
+      "name": "display_resolution",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        204
+      ]
+    },
+    {
+      "name": "dynamic_resize",
+      "state": "hover",
+      "source_dimensions": [
+        210,
+        203
+      ]
+    },
+    {
+      "name": "remote_keyboard",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        205
+      ]
+    },
+    {
+      "name": "remote_clipboard",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        203
+      ]
+    },
+    {
+      "name": "view_only",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        203
+      ]
+    },
+    {
+      "name": "fullscreen",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        203
+      ]
+    },
+    {
+      "name": "send_ctrl_alt_del",
+      "state": "regular",
+      "source_dimensions": [
+        178,
+        78
+      ]
+    },
+    {
+      "name": "send_windows_key",
+      "state": "regular",
+      "source_dimensions": [
+        158,
+        145
+      ]
+    },
+    {
+      "name": "shared_drive",
+      "state": "regular",
+      "source_dimensions": [
+        170,
+        145
+      ]
+    },
+    {
+      "name": "remote_audio",
+      "state": "regular",
+      "source_dimensions": [
+        158,
+        137
+      ]
+    },
+    {
+      "name": "remote_audio_muted",
+      "state": "regular",
+      "source_dimensions": [
+        142,
+        137
+      ]
+    },
+    {
+      "name": "remote_microphone",
+      "state": "regular",
+      "source_dimensions": [
+        123,
+        156
+      ]
+    },
+    {
+      "name": "remote_microphone_muted",
+      "state": "regular",
+      "source_dimensions": [
+        113,
+        159
+      ]
+    },
+    {
+      "name": "input_enabled",
+      "state": "regular",
+      "source_dimensions": [
+        176,
+        156
+      ]
+    },
+    {
+      "name": "session_telemetry",
+      "state": "regular",
+      "source_dimensions": [
+        181,
+        156
+      ]
+    },
+    {
+      "name": "upload",
+      "state": "regular",
+      "source_dimensions": [
+        136,
+        175
+      ]
+    },
+    {
+      "name": "download",
+      "state": "regular",
+      "source_dimensions": [
+        140,
+        185
+      ]
+    },
+    {
+      "name": "transfer_queue",
+      "state": "regular",
+      "source_dimensions": [
+        182,
+        164
+      ]
+    },
+    {
+      "name": "new_folder",
+      "state": "regular",
+      "source_dimensions": [
+        172,
+        153
+      ]
+    },
+    {
+      "name": "transfer_progress",
+      "state": "regular",
+      "source_dimensions": [
+        148,
+        173
+      ]
+    },
+    {
+      "name": "transfer_complete",
+      "state": "regular",
+      "source_dimensions": [
+        148,
+        175
+      ]
+    },
+    {
+      "name": "send_ctrl_alt_del",
+      "state": "hover",
+      "source_dimensions": [
+        197,
+        193
+      ]
+    },
+    {
+      "name": "send_windows_key",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        193
+      ]
+    },
+    {
+      "name": "shared_drive",
+      "state": "hover",
+      "source_dimensions": [
+        200,
+        193
+      ]
+    },
+    {
+      "name": "remote_audio",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        193
+      ]
+    },
+    {
+      "name": "remote_audio_muted",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        193
+      ]
+    },
+    {
+      "name": "remote_microphone",
+      "state": "hover",
+      "source_dimensions": [
+        197,
+        195
+      ]
+    },
+    {
+      "name": "remote_microphone_muted",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        195
+      ]
+    },
+    {
+      "name": "input_enabled",
+      "state": "hover",
+      "source_dimensions": [
+        199,
+        195
+      ]
+    },
+    {
+      "name": "session_telemetry",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        195
+      ]
+    },
+    {
+      "name": "upload",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        195
+      ]
+    },
+    {
+      "name": "download",
+      "state": "hover",
+      "source_dimensions": [
+        197,
+        197
+      ]
+    },
+    {
+      "name": "transfer_queue",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        197
+      ]
+    },
+    {
+      "name": "new_folder",
+      "state": "hover",
+      "source_dimensions": [
+        200,
+        196
+      ]
+    },
+    {
+      "name": "transfer_progress",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        197
+      ]
+    },
+    {
+      "name": "transfer_complete",
+      "state": "hover",
+      "source_dimensions": [
+        198,
+        197
+      ]
+    },
+    {
+      "name": "transfer_failed",
+      "state": "regular",
+      "source_dimensions": [
+        159,
+        179
+      ]
+    },
+    {
+      "name": "transfer_retry",
+      "state": "regular",
+      "source_dimensions": [
+        155,
+        179
+      ]
+    },
+    {
+      "name": "local_files",
+      "state": "regular",
+      "source_dimensions": [
+        186,
+        159
+      ]
+    },
+    {
+      "name": "remote_files",
+      "state": "regular",
+      "source_dimensions": [
+        172,
+        167
+      ]
+    },
+    {
+      "name": "file_permissions",
+      "state": "regular",
+      "source_dimensions": [
+        163,
+        176
+      ]
+    },
+    {
+      "name": "hidden_files",
+      "state": "regular",
+      "source_dimensions": [
+        165,
+        179
+      ]
+    },
+    {
+      "name": "vault_lock",
+      "state": "regular",
+      "source_dimensions": [
+        170,
+        167
+      ]
+    },
+    {
+      "name": "vault_unlock",
+      "state": "regular",
+      "source_dimensions": [
+        178,
+        168
+      ]
+    },
+    {
+      "name": "google_drive",
+      "state": "regular",
+      "source_dimensions": [
+        175,
+        155
+      ]
+    },
+    {
+      "name": "sync_conflict",
+      "state": "regular",
+      "source_dimensions": [
+        170,
+        165
+      ]
+    },
+    {
+      "name": "encrypted_backup",
+      "state": "regular",
+      "source_dimensions": [
+        170,
+        167
+      ]
+    },
+    {
+      "name": "restore_backup",
+      "state": "regular",
+      "source_dimensions": [
+        188,
+        164
+      ]
+    },
+    {
+      "name": "recovery_code",
+      "state": "regular",
+      "source_dimensions": [
+        166,
+        192
+      ]
+    },
+    {
+      "name": "vault_encryption",
+      "state": "regular",
+      "source_dimensions": [
+        180,
+        170
+      ]
+    },
+    {
+      "name": "server_sync",
+      "state": "regular",
+      "source_dimensions": [
+        199,
+        170
+      ]
+    },
+    {
+      "name": "transfer_failed",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        208
+      ]
+    },
+    {
+      "name": "transfer_retry",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        208
+      ]
+    },
+    {
+      "name": "local_files",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        207
+      ]
+    },
+    {
+      "name": "remote_files",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        208
+      ]
+    },
+    {
+      "name": "file_permissions",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        208
+      ]
+    },
+    {
+      "name": "hidden_files",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        202
+      ]
+    },
+    {
+      "name": "vault_lock",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        203
+      ]
+    },
+    {
+      "name": "vault_unlock",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        204
+      ]
+    },
+    {
+      "name": "google_drive",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        202
+      ]
+    },
+    {
+      "name": "sync_conflict",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        202
+      ]
+    },
+    {
+      "name": "encrypted_backup",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        197
+      ]
+    },
+    {
+      "name": "restore_backup",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        197
+      ]
+    },
+    {
+      "name": "recovery_code",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        199
+      ]
+    },
+    {
+      "name": "vault_encryption",
+      "state": "hover",
+      "source_dimensions": [
+        205,
+        197
+      ]
+    },
+    {
+      "name": "server_sync",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        198
+      ]
+    },
+    {
+      "name": "sync_upload",
+      "state": "regular",
+      "source_dimensions": [
+        180,
+        139
+      ]
+    },
+    {
+      "name": "sync_download",
+      "state": "regular",
+      "source_dimensions": [
+        182,
+        139
+      ]
+    },
+    {
+      "name": "sync_offline",
+      "state": "regular",
+      "source_dimensions": [
+        181,
+        133
+      ]
+    },
+    {
+      "name": "sync_success",
+      "state": "regular",
+      "source_dimensions": [
+        183,
+        150
+      ]
+    },
+    {
+      "name": "setup_resume",
+      "state": "regular",
+      "source_dimensions": [
+        209,
+        50
+      ]
+    },
+    {
+      "name": "device_enrollment",
+      "state": "regular",
+      "source_dimensions": [
+        190,
+        108
+      ]
+    },
+    {
+      "name": "host_key_verified",
+      "state": "regular",
+      "source_dimensions": [
+        170,
+        150
+      ]
+    },
+    {
+      "name": "host_key_changed",
+      "state": "regular",
+      "source_dimensions": [
+        172,
+        151
+      ]
+    },
+    {
+      "name": "ssh_agent",
+      "state": "regular",
+      "source_dimensions": [
+        175,
+        152
+      ]
+    },
+    {
+      "name": "generate_key",
+      "state": "regular",
+      "source_dimensions": [
+        154,
+        147
+      ]
+    },
+    {
+      "name": "rotate_key",
+      "state": "regular",
+      "source_dimensions": [
+        144,
+        159
+      ]
+    },
+    {
+      "name": "revoke_key",
+      "state": "regular",
+      "source_dimensions": [
+        142,
+        137
+      ]
+    },
+    {
+      "name": "password",
+      "state": "regular",
+      "source_dimensions": [
+        169,
+        171
+      ]
+    },
+    {
+      "name": "security_audit",
+      "state": "regular",
+      "source_dimensions": [
+        185,
+        148
+      ]
+    },
+    {
+      "name": "trusted_device",
+      "state": "regular",
+      "source_dimensions": [
+        183,
+        156
+      ]
+    },
+    {
+      "name": "sync_upload",
+      "state": "hover",
+      "source_dimensions": [
+        210,
+        205
+      ]
+    },
+    {
+      "name": "sync_download",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        205
+      ]
+    },
+    {
+      "name": "sync_offline",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        205
+      ]
+    },
+    {
+      "name": "sync_success",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        205
+      ]
+    },
+    {
+      "name": "setup_resume",
+      "state": "hover",
+      "source_dimensions": [
+        211,
+        205
+      ]
+    },
+    {
+      "name": "device_enrollment",
+      "state": "hover",
+      "source_dimensions": [
+        210,
+        205
+      ]
+    },
+    {
+      "name": "host_key_verified",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        205
+      ]
+    },
+    {
+      "name": "host_key_changed",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        205
+      ]
+    },
+    {
+      "name": "ssh_agent",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        205
+      ]
+    },
+    {
+      "name": "generate_key",
+      "state": "hover",
+      "source_dimensions": [
+        211,
+        206
+      ]
+    },
+    {
+      "name": "rotate_key",
+      "state": "hover",
+      "source_dimensions": [
+        210,
+        206
+      ]
+    },
+    {
+      "name": "revoke_key",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        208
+      ]
+    },
+    {
+      "name": "password",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        206
+      ]
+    },
+    {
+      "name": "security_audit",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        208
+      ]
+    },
+    {
+      "name": "trusted_device",
+      "state": "hover",
+      "source_dimensions": [
+        211,
+        207
+      ]
+    },
+    {
+      "name": "untrusted_device",
+      "state": "regular",
+      "source_dimensions": [
+        174,
+        153
+      ]
+    },
+    {
+      "name": "team_members",
+      "state": "regular",
+      "source_dimensions": [
+        175,
+        123
+      ]
+    },
+    {
+      "name": "shared_vault",
+      "state": "regular",
+      "source_dimensions": [
+        191,
+        119
+      ]
+    },
+    {
+      "name": "member_revoke",
+      "state": "regular",
+      "source_dimensions": [
+        159,
+        153
+      ]
+    },
+    {
+      "name": "pending_invite",
+      "state": "regular",
+      "source_dimensions": [
+        174,
+        148
+      ]
+    },
+    {
+      "name": "role_admin",
+      "state": "regular",
+      "source_dimensions": [
+        167,
+        168
+      ]
+    },
+    {
+      "name": "role_editor",
+      "state": "regular",
+      "source_dimensions": [
+        163,
+        157
+      ]
+    },
+    {
+      "name": "role_viewer",
+      "state": "regular",
+      "source_dimensions": [
+        168,
+        150
+      ]
+    },
+    {
+      "name": "team_key_rotation",
+      "state": "regular",
+      "source_dimensions": [
+        158,
+        173
+      ]
+    },
+    {
+      "name": "tunnel_local",
+      "state": "regular",
+      "source_dimensions": [
+        193,
+        103
+      ]
+    },
+    {
+      "name": "tunnel_remote",
+      "state": "regular",
+      "source_dimensions": [
+        193,
+        103
+      ]
+    },
+    {
+      "name": "tunnel_socks",
+      "state": "regular",
+      "source_dimensions": [
+        164,
+        163
+      ]
+    },
+    {
+      "name": "tunnel_active",
+      "state": "regular",
+      "source_dimensions": [
+        180,
+        151
+      ]
+    },
+    {
+      "name": "tunnel_stopped",
+      "state": "regular",
+      "source_dimensions": [
+        181,
+        154
+      ]
+    },
+    {
+      "name": "provider_aws",
+      "state": "regular",
+      "source_dimensions": [
+        201,
+        140
+      ]
+    },
+    {
+      "name": "untrusted_device",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        203
+      ]
+    },
+    {
+      "name": "team_members",
+      "state": "hover",
+      "source_dimensions": [
+        204,
+        203
+      ]
+    },
+    {
+      "name": "shared_vault",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        203
+      ]
+    },
+    {
+      "name": "member_revoke",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        203
+      ]
+    },
+    {
+      "name": "pending_invite",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        203
+      ]
+    },
+    {
+      "name": "role_admin",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        199
+      ]
+    },
+    {
+      "name": "role_editor",
+      "state": "hover",
+      "source_dimensions": [
+        204,
+        200
+      ]
+    },
+    {
+      "name": "role_viewer",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        199
+      ]
+    },
+    {
+      "name": "team_key_rotation",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        199
+      ]
+    },
+    {
+      "name": "tunnel_local",
+      "state": "hover",
+      "source_dimensions": [
+        209,
+        200
+      ]
+    },
+    {
+      "name": "tunnel_remote",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        200
+      ]
+    },
+    {
+      "name": "tunnel_socks",
+      "state": "hover",
+      "source_dimensions": [
+        206,
+        200
+      ]
+    },
+    {
+      "name": "tunnel_active",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        200
+      ]
+    },
+    {
+      "name": "tunnel_stopped",
+      "state": "hover",
+      "source_dimensions": [
+        207,
+        202
+      ]
+    },
+    {
+      "name": "provider_aws",
+      "state": "hover",
+      "source_dimensions": [
+        208,
+        202
+      ]
+    },
+    {
+      "name": "provider_azure",
+      "state": "regular",
+      "source_dimensions": [
+        158,
+        145
+      ]
+    },
+    {
+      "name": "provider_digitalocean",
+      "state": "regular",
+      "source_dimensions": [
+        157,
+        158
+      ]
+    },
+    {
+      "name": "provider_ansible",
+      "state": "regular",
+      "source_dimensions": [
+        174,
+        177
+      ]
+    },
+    {
+      "name": "provider_connect",
+      "state": "regular",
+      "source_dimensions": [
+        176,
+        163
+      ]
+    },
+    {
+      "name": "discover_hosts",
+      "state": "regular",
+      "source_dimensions": [
+        179,
+        161
+      ]
+    },
+    {
+      "name": "inventory",
+      "state": "regular",
+      "source_dimensions": [
+        158,
+        183
+      ]
+    },
+    {
+      "name": "inventory_sync",
+      "state": "regular",
+      "source_dimensions": [
+        186,
+        186
+      ]
+    },
+    {
+      "name": "health_check",
+      "state": "regular",
+      "source_dimensions": [
+        183,
+        163
+      ]
+    },
+    {
+      "name": "benchmark",
+      "state": "regular",
+      "source_dimensions": [
+        188,
+        136
+      ]
+    },
+    {
+      "name": "latency",
+      "state": "regular",
+      "source_dimensions": [
+        207,
+        123
+      ]
+    },
+    {
+      "name": "network_test",
+      "state": "regular",
+      "source_dimensions": [
+        206,
+        78
+      ]
+    },
+    {
+      "name": "storage_test",
+      "state": "regular",
+      "source_dimensions": [
+        182,
+        152
+      ]
+    },
+    {
+      "name": "os_debian",
+      "state": "regular",
+      "source_dimensions": [
+        148,
+        172
+      ]
+    },
+    {
+      "name": "os_fedora",
+      "state": "regular",
+      "source_dimensions": [
+        163,
+        163
+      ]
+    },
+    {
+      "name": "os_rhel",
+      "state": "regular",
+      "source_dimensions": [
+        198,
+        143
+      ]
+    },
+    {
+      "name": "provider_azure",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        203
+      ]
+    },
+    {
+      "name": "provider_digitalocean",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        203
+      ]
+    },
+    {
+      "name": "provider_ansible",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        203
+      ]
+    },
+    {
+      "name": "provider_connect",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        203
+      ]
+    },
+    {
+      "name": "discover_hosts",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        203
+      ]
+    },
+    {
+      "name": "inventory",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        202
+      ]
+    },
+    {
+      "name": "inventory_sync",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        203
+      ]
+    },
+    {
+      "name": "health_check",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        202
+      ]
+    },
+    {
+      "name": "benchmark",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        202
+      ]
+    },
+    {
+      "name": "latency",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        202
+      ]
+    },
+    {
+      "name": "network_test",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        196
+      ]
+    },
+    {
+      "name": "storage_test",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        194
+      ]
+    },
+    {
+      "name": "os_debian",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        196
+      ]
+    },
+    {
+      "name": "os_fedora",
+      "state": "hover",
+      "source_dimensions": [
+        203,
+        196
+      ]
+    },
+    {
+      "name": "os_rhel",
+      "state": "hover",
+      "source_dimensions": [
+        202,
+        194
+      ]
+    },
+    {
+      "name": "os_centos",
+      "state": "regular",
+      "source_dimensions": [
+        228,
+        232
+      ]
+    },
+    {
+      "name": "os_rocky",
+      "state": "regular",
+      "source_dimensions": [
+        212,
+        216
+      ]
+    },
+    {
+      "name": "os_almalinux",
+      "state": "regular",
+      "source_dimensions": [
+        232,
+        223
+      ]
+    },
+    {
+      "name": "os_alpine",
+      "state": "regular",
+      "source_dimensions": [
+        237,
+        202
+      ]
+    },
+    {
+      "name": "os_opensuse",
+      "state": "regular",
+      "source_dimensions": [
+        246,
+        161
+      ]
+    },
+    {
+      "name": "os_kali",
+      "state": "regular",
+      "source_dimensions": [
+        232,
+        231
+      ]
+    },
+    {
+      "name": "os_windows_server",
+      "state": "regular",
+      "source_dimensions": [
+        220,
+        212
+      ]
+    },
+    {
+      "name": "os_android",
+      "state": "regular",
+      "source_dimensions": [
+        238,
+        163
+      ]
+    },
+    {
+      "name": "os_ios",
+      "state": "regular",
+      "source_dimensions": [
+        163,
+        224
+      ]
+    },
+    {
+      "name": "os_centos",
+      "state": "hover",
+      "source_dimensions": [
+        255,
+        252
+      ]
+    },
+    {
+      "name": "os_rocky",
+      "state": "hover",
+      "source_dimensions": [
+        258,
+        250
+      ]
+    },
+    {
+      "name": "os_almalinux",
+      "state": "hover",
+      "source_dimensions": [
+        256,
+        252
+      ]
+    },
+    {
+      "name": "os_alpine",
+      "state": "hover",
+      "source_dimensions": [
+        257,
+        254
+      ]
+    },
+    {
+      "name": "os_opensuse",
+      "state": "hover",
+      "source_dimensions": [
+        258,
+        254
+      ]
+    },
+    {
+      "name": "os_kali",
+      "state": "hover",
+      "source_dimensions": [
+        256,
+        254
+      ]
+    },
+    {
+      "name": "os_windows_server",
+      "state": "hover",
+      "source_dimensions": [
+        255,
+        253
+      ]
+    },
+    {
+      "name": "os_android",
+      "state": "hover",
+      "source_dimensions": [
+        257,
+        252
+      ]
+    },
+    {
+      "name": "os_ios",
+      "state": "hover",
+      "source_dimensions": [
+        255,
+        252
+      ]
+    }
+  ]
+}

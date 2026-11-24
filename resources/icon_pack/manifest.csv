@@ -1,55 +1,169 @@
-index,row,column,name,label,regular_256,hover_256
-1,1,1,hosts,Hosts / Servers,icons/256/regular/hosts.png,icons/256/hover/hosts.png
-2,1,2,connect,Connect,icons/256/regular/connect.png,icons/256/hover/connect.png
-3,1,3,sftp,SFTP / Files,icons/256/regular/sftp.png,icons/256/hover/sftp.png
-4,1,4,snippets,Snippets / Scripts,icons/256/regular/snippets.png,icons/256/hover/snippets.png
-5,1,5,history,History,icons/256/regular/history.png,icons/256/hover/history.png
-6,2,1,keychain,SSH Keychain,icons/256/regular/keychain.png,icons/256/hover/keychain.png
-7,2,2,vaults,Vaults,icons/256/regular/vaults.png,icons/256/hover/vaults.png
-8,2,3,workspaces,Workspaces,icons/256/regular/workspaces.png,icons/256/hover/workspaces.png
-9,2,4,cloud_sync,Cloud Sync,icons/256/regular/cloud_sync.png,icons/256/hover/cloud_sync.png
-10,2,5,settings,Settings,icons/256/regular/settings.png,icons/256/hover/settings.png
-11,3,1,add_host,Add Host,icons/256/regular/add_host.png,icons/256/hover/add_host.png
-12,3,2,search,Search,icons/256/regular/search.png,icons/256/hover/search.png
-13,3,3,terminal,SSH Terminal,icons/256/regular/terminal.png,icons/256/hover/terminal.png
-14,3,4,serial,Serial Connection,icons/256/regular/serial.png,icons/256/hover/serial.png
-15,3,5,split_view,Split View,icons/256/regular/split_view.png,icons/256/hover/split_view.png
-16,4,1,grid_view,Grid View,icons/256/regular/grid_view.png,icons/256/hover/grid_view.png
-17,4,2,list_view,List View,icons/256/regular/list_view.png,icons/256/hover/list_view.png
-18,4,3,groups,Groups,icons/256/regular/groups.png,icons/256/hover/groups.png
-19,4,4,tags,Tags,icons/256/regular/tags.png,icons/256/hover/tags.png
-20,4,5,favorite,Favorites,icons/256/regular/favorite.png,icons/256/hover/favorite.png
-21,5,1,more,More / Options,icons/256/regular/more.png,icons/256/hover/more.png
-22,5,2,edit,Edit,icons/256/regular/edit.png,icons/256/hover/edit.png
-23,5,3,delete,Delete,icons/256/regular/delete.png,icons/256/hover/delete.png
-24,5,4,refresh,Refresh,icons/256/regular/refresh.png,icons/256/hover/refresh.png
-25,5,5,profile,Account / Profile,icons/256/regular/profile.png,icons/256/hover/profile.png
-26,6,1,known_hosts,Known Hosts,icons/256/regular/known_hosts.png,icons/256/hover/known_hosts.png
-27,6,2,port_forwarding,Port Forwarding,icons/256/regular/port_forwarding.png,icons/256/hover/port_forwarding.png
-28,6,3,shellumi_logo,Shellumi Logo,icons/256/regular/shellumi_logo.png,icons/256/hover/shellumi_logo.png
-29,6,4,group_settings,Group Settings,icons/256/regular/group_settings.png,icons/256/hover/group_settings.png
-30,6,5,import,Import,icons/256/regular/import.png,icons/256/hover/import.png
-31,7,1,export,Export,icons/256/regular/export.png,icons/256/hover/export.png
-32,7,2,tag,Tag,icons/256/regular/tag.png,icons/256/hover/tag.png
-33,7,3,calendar_sort,Calendar Sort,icons/256/regular/calendar_sort.png,icons/256/hover/calendar_sort.png
-34,7,4,certificate,Certificate,icons/256/regular/certificate.png,icons/256/hover/certificate.png
-35,7,5,private_key,Private Key,icons/256/regular/private_key.png,icons/256/hover/private_key.png
-36,8,1,public_key,Public Key,icons/256/regular/public_key.png,icons/256/hover/public_key.png
-37,8,2,identity_card,Identity Card,icons/256/regular/identity_card.png,icons/256/hover/identity_card.png
-38,8,3,os_arch,Arch Linux,icons/256/regular/os_arch.png,icons/256/hover/os_arch.png
-39,8,4,os_ubuntu,Ubuntu,icons/256/regular/os_ubuntu.png,icons/256/hover/os_ubuntu.png
-40,8,5,os_macos,macOS,icons/256/regular/os_macos.png,icons/256/hover/os_macos.png
-41,9,1,os_freebsd,FreeBSD,icons/256/regular/os_freebsd.png,icons/256/hover/os_freebsd.png
-42,9,2,os_netbsd,NetBSD,icons/256/regular/os_netbsd.png,icons/256/hover/os_netbsd.png
-43,9,3,os_openbsd,OpenBSD,icons/256/regular/os_openbsd.png,icons/256/hover/os_openbsd.png
-44,9,4,os_linux,Linux,icons/256/regular/os_linux.png,icons/256/hover/os_linux.png
-45,9,5,os_windows,Windows,icons/256/regular/os_windows.png,icons/256/hover/os_windows.png
-46,10,1,server,Server,icons/256/regular/server.png,icons/256/hover/server.png
-47,10,2,fido2,FIDO2,icons/256/regular/fido2.png,icons/256/hover/fido2.png
-48,10,3,fingerprint,Fingerprint,icons/256/regular/fingerprint.png,icons/256/hover/fingerprint.png
-49,10,4,log,Log,icons/256/regular/log.png,icons/256/hover/log.png
-50,10,5,bell,Bell,icons/256/regular/bell.png,icons/256/hover/bell.png
-51,11,1,invite_member,Invite Member,icons/256/regular/invite_member.png,icons/256/hover/invite_member.png
-52,11,2,infrastructure,Infrastructure,icons/256/regular/infrastructure.png,icons/256/hover/infrastructure.png
-53,11,3,diagnostics,Diagnostics,icons/256/regular/diagnostics.png,icons/256/hover/diagnostics.png
-54,11,4,mobile,Mobile,icons/256/regular/mobile.png,icons/256/hover/mobile.png
+index,name,label,priority,description,group,source_sheet,cell,column,row,grid,regular_256,hover_256
+1,hosts,Hosts / Servers,EXISTING,,,,,,,,icons/256/regular/hosts.png,icons/256/hover/hosts.png
+2,connect,Connect,EXISTING,,,,,,,,icons/256/regular/connect.png,icons/256/hover/connect.png
+3,sftp,SFTP / Files,EXISTING,,,,,,,,icons/256/regular/sftp.png,icons/256/hover/sftp.png
+4,snippets,Snippets / Scripts,EXISTING,,,,,,,,icons/256/regular/snippets.png,icons/256/hover/snippets.png
+5,history,History,EXISTING,,,,,,,,icons/256/regular/history.png,icons/256/hover/history.png
+6,keychain,SSH Keychain,EXISTING,,,,,,,,icons/256/regular/keychain.png,icons/256/hover/keychain.png
+7,vaults,Vaults,EXISTING,,,,,,,,icons/256/regular/vaults.png,icons/256/hover/vaults.png
+8,workspaces,Workspaces,EXISTING,,,,,,,,icons/256/regular/workspaces.png,icons/256/hover/workspaces.png
+9,cloud_sync,Cloud Sync,EXISTING,,,,,,,,icons/256/regular/cloud_sync.png,icons/256/hover/cloud_sync.png
+10,settings,Settings,EXISTING,,,,,,,,icons/256/regular/settings.png,icons/256/hover/settings.png
+11,add_host,Add Host,EXISTING,,,,,,,,icons/256/regular/add_host.png,icons/256/hover/add_host.png
+12,search,Search,EXISTING,,,,,,,,icons/256/regular/search.png,icons/256/hover/search.png
+13,terminal,SSH Terminal,EXISTING,,,,,,,,icons/256/regular/terminal.png,icons/256/hover/terminal.png
+14,serial,Serial Connection,EXISTING,,,,,,,,icons/256/regular/serial.png,icons/256/hover/serial.png
+15,split_view,Split View,EXISTING,,,,,,,,icons/256/regular/split_view.png,icons/256/hover/split_view.png
+16,grid_view,Grid View,EXISTING,,,,,,,,icons/256/regular/grid_view.png,icons/256/hover/grid_view.png
+17,list_view,List View,EXISTING,,,,,,,,icons/256/regular/list_view.png,icons/256/hover/list_view.png
+18,groups,Groups,EXISTING,,,,,,,,icons/256/regular/groups.png,icons/256/hover/groups.png
+19,tags,Tags,EXISTING,,,,,,,,icons/256/regular/tags.png,icons/256/hover/tags.png
+20,favorite,Favorites,EXISTING,,,,,,,,icons/256/regular/favorite.png,icons/256/hover/favorite.png
+21,more,More / Options,EXISTING,,,,,,,,icons/256/regular/more.png,icons/256/hover/more.png
+22,edit,Edit,EXISTING,,,,,,,,icons/256/regular/edit.png,icons/256/hover/edit.png
+23,delete,Delete,EXISTING,,,,,,,,icons/256/regular/delete.png,icons/256/hover/delete.png
+24,refresh,Refresh,EXISTING,,,,,,,,icons/256/regular/refresh.png,icons/256/hover/refresh.png
+25,profile,Account / Profile,EXISTING,,,,,,,,icons/256/regular/profile.png,icons/256/hover/profile.png
+26,known_hosts,Known Hosts,EXISTING,,,,,,,,icons/256/regular/known_hosts.png,icons/256/hover/known_hosts.png
+27,port_forwarding,Port Forwarding,EXISTING,,,,,,,,icons/256/regular/port_forwarding.png,icons/256/hover/port_forwarding.png
+28,shellumi_logo,Shellumi Logo,EXISTING,,,,,,,,icons/256/regular/shellumi_logo.png,icons/256/hover/shellumi_logo.png
+29,group_settings,Group Settings,EXISTING,,,,,,,,icons/256/regular/group_settings.png,icons/256/hover/group_settings.png
+30,import,Import,EXISTING,,,,,,,,icons/256/regular/import.png,icons/256/hover/import.png
+31,export,Export,EXISTING,,,,,,,,icons/256/regular/export.png,icons/256/hover/export.png
+32,tag,Tag,EXISTING,,,,,,,,icons/256/regular/tag.png,icons/256/hover/tag.png
+33,calendar_sort,Calendar Sort,EXISTING,,,,,,,,icons/256/regular/calendar_sort.png,icons/256/hover/calendar_sort.png
+34,certificate,Certificate,EXISTING,,,,,,,,icons/256/regular/certificate.png,icons/256/hover/certificate.png
+35,private_key,Private Key,EXISTING,,,,,,,,icons/256/regular/private_key.png,icons/256/hover/private_key.png
+36,public_key,Public Key,EXISTING,,,,,,,,icons/256/regular/public_key.png,icons/256/hover/public_key.png
+37,identity_card,Identity Card,EXISTING,,,,,,,,icons/256/regular/identity_card.png,icons/256/hover/identity_card.png
+38,os_arch,Arch Linux,EXISTING,,,,,,,,icons/256/regular/os_arch.png,icons/256/hover/os_arch.png
+39,os_ubuntu,Ubuntu,EXISTING,,,,,,,,icons/256/regular/os_ubuntu.png,icons/256/hover/os_ubuntu.png
+40,os_macos,macOS,EXISTING,,,,,,,,icons/256/regular/os_macos.png,icons/256/hover/os_macos.png
+41,os_freebsd,FreeBSD,EXISTING,,,,,,,,icons/256/regular/os_freebsd.png,icons/256/hover/os_freebsd.png
+42,os_netbsd,NetBSD,EXISTING,,,,,,,,icons/256/regular/os_netbsd.png,icons/256/hover/os_netbsd.png
+43,os_openbsd,OpenBSD,EXISTING,,,,,,,,icons/256/regular/os_openbsd.png,icons/256/hover/os_openbsd.png
+44,os_linux,Linux,EXISTING,,,,,,,,icons/256/regular/os_linux.png,icons/256/hover/os_linux.png
+45,os_windows,Windows,EXISTING,,,,,,,,icons/256/regular/os_windows.png,icons/256/hover/os_windows.png
+46,server,Server,EXISTING,,,,,,,,icons/256/regular/server.png,icons/256/hover/server.png
+47,fido2,FIDO2,EXISTING,,,,,,,,icons/256/regular/fido2.png,icons/256/hover/fido2.png
+48,fingerprint,Fingerprint,EXISTING,,,,,,,,icons/256/regular/fingerprint.png,icons/256/hover/fingerprint.png
+49,log,Log,EXISTING,,,,,,,,icons/256/regular/log.png,icons/256/hover/log.png
+50,bell,Bell,EXISTING,,,,,,,,icons/256/regular/bell.png,icons/256/hover/bell.png
+51,invite_member,Invite Member,EXISTING,,,,,,,,icons/256/regular/invite_member.png,icons/256/hover/invite_member.png
+52,infrastructure,Infrastructure,EXISTING,,,,,,,,icons/256/regular/infrastructure.png,icons/256/hover/infrastructure.png
+53,diagnostics,Diagnostics,EXISTING,,,,,,,,icons/256/regular/diagnostics.png,icons/256/hover/diagnostics.png
+54,mobile,Mobile,EXISTING,,,,,,,,icons/256/regular/mobile.png,icons/256/hover/mobile.png
+55,overview,Overview,P0,"A four-panel infrastructure dashboard, 2×2 miniature cards.",overview_connection,os2.png,0,1,1,5x6,icons/256/regular/overview.png,icons/256/hover/overview.png
+56,inspector,Inspector,P0,A main content rectangle beside a narrow right-hand details pane with two information lines.,overview_connection,os2.png,1,2,1,5x6,icons/256/regular/inspector.png,icons/256/hover/inspector.png
+57,new_group,New Group,P0,"A folder carrying a small plus badge, distinct from existing Groups.",overview_connection,os2.png,2,3,1,5x6,icons/256/regular/new_group.png,icons/256/hover/new_group.png
+58,duplicate_host,Duplicate Host,P0,"Two offset, overlapping server cards indicating an exact duplicate.",overview_connection,os2.png,3,4,1,5x6,icons/256/regular/duplicate_host.png,icons/256/hover/duplicate_host.png
+59,move_to_group,Move To Group,P0,One server card and an arrow entering a folder (move; do not show a copied card).,overview_connection,os2.png,4,5,1,5x6,icons/256/regular/move_to_group.png,icons/256/hover/move_to_group.png
+60,copy_to_group,Copy To Group,P0,Two layered server cards with an arrow pointing toward a folder (copy).,overview_connection,os2.png,5,1,2,5x6,icons/256/regular/copy_to_group.png,icons/256/hover/copy_to_group.png
+61,new_workspace,New Workspace,P1,Two neatly arranged application panes with a small plus badge.,overview_connection,os2.png,6,2,2,5x6,icons/256/regular/new_workspace.png,icons/256/hover/new_workspace.png
+62,new_vault,New Vault,P1,A compact secure safe door with a small plus badge.,overview_connection,os2.png,7,3,2,5x6,icons/256/regular/new_vault.png,icons/256/hover/new_vault.png
+63,switch_vault,Switch Vault,P1,Two safe-door silhouettes joined by a curved switch arrow.,overview_connection,os2.png,8,4,2,5x6,icons/256/regular/switch_vault.png,icons/256/hover/switch_vault.png
+64,quick_connect,Quick Connect,P1,"A server endpoint and one fast connecting arrow, not a lightning emoji.",overview_connection,os2.png,9,5,2,5x6,icons/256/regular/quick_connect.png,icons/256/hover/quick_connect.png
+65,jump_host,Jump Host,P1,Three small servers in line: a central bastion between local and destination.,overview_connection,os2.png,10,1,3,5x6,icons/256/regular/jump_host.png,icons/256/hover/jump_host.png
+66,ssh,Ssh,P0,A terminal window with a tiny secure network link; distinct from the existing Terminal icon.,overview_connection,os2.png,11,2,3,5x6,icons/256/regular/ssh.png,icons/256/hover/ssh.png
+67,mosh,Mosh,P0,A terminal with two curved roaming/signal strokes that express resilient mobile connection.,overview_connection,os2.png,12,3,3,5x6,icons/256/regular/mosh.png,icons/256/hover/mosh.png
+68,rdp,Rdp,P0,A desktop monitor with an inset four-pane Windows-inspired motif; no letters.,overview_connection,os2.png,13,4,3,5x6,icons/256/regular/rdp.png,icons/256/hover/rdp.png
+69,vnc,Vnc,P0,A remote monitor with a dotted network link and pointer cursor; distinct from RDP.,overview_connection,os2.png,14,5,3,5x6,icons/256/regular/vnc.png,icons/256/hover/vnc.png
+70,disconnect,Disconnect,P0,A split link/cable with two visibly separated endpoints.,session_views,session_media_transfers1.png,0,1,1,5x6,icons/256/regular/disconnect.png,icons/256/hover/disconnect.png
+71,reconnect,Reconnect,P0,A link being restored by a clockwise circular arrow.,session_views,session_media_transfers1.png,1,2,1,5x6,icons/256/regular/reconnect.png,icons/256/hover/reconnect.png
+72,local_terminal,Local Terminal,P1,A terminal screen above a miniature local computer base.,session_views,session_media_transfers1.png,2,3,1,5x6,icons/256/regular/local_terminal.png,icons/256/hover/local_terminal.png
+73,session_record,Session Record,P1,A terminal outline with a prominent small circular recording dot.,session_views,session_media_transfers1.png,3,4,1,5x6,icons/256/regular/session_record.png,icons/256/hover/session_record.png
+74,session_replay,Session Replay,P1,A terminal outline containing a play triangle and short timeline ticks.,session_views,session_media_transfers1.png,4,5,1,5x6,icons/256/regular/session_replay.png,icons/256/hover/session_replay.png
+75,session_info,Session Info,P1,A terminal identity card with a status light and two information lines.,session_views,session_media_transfers1.png,5,1,2,5x6,icons/256/regular/session_info.png,icons/256/hover/session_info.png
+76,fit_to_view,Fit To View,P0,"A monitor bounded by four inward corner arrows, indicating fit the whole desktop.",session_views,session_media_transfers1.png,6,2,2,5x6,icons/256/regular/fit_to_view.png,icons/256/hover/fit_to_view.png
+77,actual_size,Actual Size,P0,"A monitor with an inset 1:1 symbol, indicating native-pixel scaling.",session_views,session_media_transfers1.png,7,3,2,5x6,icons/256/regular/actual_size.png,icons/256/hover/actual_size.png
+78,fill_view,Fill View,P0,"A monitor bounded by four outward corner arrows, indicating fill/crop.",session_views,session_media_transfers1.png,8,4,2,5x6,icons/256/regular/fill_view.png,icons/256/hover/fill_view.png
+79,display_resolution,Display Resolution,P0,A monitor with tiny horizontal and vertical measurement ticks.,session_views,session_media_transfers1.png,9,5,2,5x6,icons/256/regular/display_resolution.png,icons/256/hover/display_resolution.png
+80,dynamic_resize,Dynamic Resize,P0,"A monitor inside an adjustable frame, with diagonal resize arrows.",session_views,session_media_transfers1.png,10,1,3,5x6,icons/256/regular/dynamic_resize.png,icons/256/hover/dynamic_resize.png
+81,remote_keyboard,Remote Keyboard,P0,A keyboard with an outward arrow toward a remote monitor.,session_views,session_media_transfers1.png,11,2,3,5x6,icons/256/regular/remote_keyboard.png,icons/256/hover/remote_keyboard.png
+82,remote_clipboard,Remote Clipboard,P0,Two overlapping clipboards connected by two short opposite arrows.,session_views,session_media_transfers1.png,12,3,3,5x6,icons/256/regular/remote_clipboard.png,icons/256/hover/remote_clipboard.png
+83,view_only,View Only,P0,"A monitor with a clearly recognizable eye, indicating viewing without control.",session_views,session_media_transfers1.png,13,4,3,5x6,icons/256/regular/view_only.png,icons/256/hover/view_only.png
+84,fullscreen,Fullscreen,P0,A monitor with four outward-pointing corner markers.,session_views,session_media_transfers1.png,14,5,3,5x6,icons/256/regular/fullscreen.png,icons/256/hover/fullscreen.png
+85,send_ctrl_alt_del,Send Ctrl Alt Del,P1,Three adjacent keycaps on a small keyboard strip; avoid unreadable text.,session_media_transfers1,transfer_vault_sync1.png,0,1,1,5x6,icons/256/regular/send_ctrl_alt_del.png,icons/256/hover/send_ctrl_alt_del.png
+86,send_windows_key,Send Windows Key,P1,One keycap containing the recognizable four-pane Windows shape.,session_media_transfers1,transfer_vault_sync1.png,1,2,1,5x6,icons/256/regular/send_windows_key.png,icons/256/hover/send_windows_key.png
+87,shared_drive,Shared Drive,P1,A storage drive with a small shared-folder/network-link symbol.,session_media_transfers1,transfer_vault_sync1.png,2,3,1,5x6,icons/256/regular/shared_drive.png,icons/256/hover/shared_drive.png
+88,remote_audio,Remote Audio,P1,A speaker with two restrained sound waves.,session_media_transfers1,transfer_vault_sync1.png,3,4,1,5x6,icons/256/regular/remote_audio.png,icons/256/hover/remote_audio.png
+89,remote_audio_muted,Remote Audio Muted,P1,The same speaker with one clean diagonal mute slash.,session_media_transfers1,transfer_vault_sync1.png,4,5,1,5x6,icons/256/regular/remote_audio_muted.png,icons/256/hover/remote_audio_muted.png
+90,remote_microphone,Remote Microphone,P1,A microphone with one compact signal curve.,session_media_transfers1,transfer_vault_sync1.png,5,1,2,5x6,icons/256/regular/remote_microphone.png,icons/256/hover/remote_microphone.png
+91,remote_microphone_muted,Remote Microphone Muted,P1,The same microphone with one clean diagonal mute slash.,session_media_transfers1,transfer_vault_sync1.png,6,2,2,5x6,icons/256/regular/remote_microphone_muted.png,icons/256/hover/remote_microphone_muted.png
+92,input_enabled,Input Enabled,P1,"A monitor with a pointer cursor, indicating input control is permitted.",session_media_transfers1,transfer_vault_sync1.png,7,3,2,5x6,icons/256/regular/input_enabled.png,icons/256/hover/input_enabled.png
+93,session_telemetry,Session Telemetry,P1,A small performance line graph inset into a monitor outline.,session_media_transfers1,transfer_vault_sync1.png,8,4,2,5x6,icons/256/regular/session_telemetry.png,icons/256/hover/session_telemetry.png
+94,upload,Upload,P0,A file document with an upward arrow toward a small remote-server endpoint.,session_media_transfers1,transfer_vault_sync1.png,9,5,2,5x6,icons/256/regular/upload.png,icons/256/hover/upload.png
+95,download,Download,P0,A remote-server endpoint with a downward arrow toward a file document.,session_media_transfers1,transfer_vault_sync1.png,10,1,3,5x6,icons/256/regular/download.png,icons/256/hover/download.png
+96,transfer_queue,Transfer Queue,P0,Three short stacked file rows beside a small progress arc.,session_media_transfers1,transfer_vault_sync1.png,11,2,3,5x6,icons/256/regular/transfer_queue.png,icons/256/hover/transfer_queue.png
+97,new_folder,New Folder,P0,A familiar file-browser folder with a clearly visible plus badge.,session_media_transfers1,transfer_vault_sync1.png,12,3,3,5x6,icons/256/regular/new_folder.png,icons/256/hover/new_folder.png
+98,transfer_progress,Transfer Progress,P1,A file rectangle overlaid by a half-complete progress ring.,session_media_transfers1,transfer_vault_sync1.png,13,4,3,5x6,icons/256/regular/transfer_progress.png,icons/256/hover/transfer_progress.png
+99,transfer_complete,Transfer Complete,P1,A file with a tiny successful check badge.,session_media_transfers1,transfer_vault_sync1.png,14,5,3,5x6,icons/256/regular/transfer_complete.png,icons/256/hover/transfer_complete.png
+100,transfer_failed,Transfer Failed,P1,A file with a tiny failure/cross badge.,transfer_vault_sync1,providers_inventory_diag_os1.png,0,1,1,5x6,icons/256/regular/transfer_failed.png,icons/256/hover/transfer_failed.png
+101,transfer_retry,Transfer Retry,P1,A file with a small clockwise retry arrow.,transfer_vault_sync1,providers_inventory_diag_os1.png,1,2,1,5x6,icons/256/regular/transfer_retry.png,icons/256/hover/transfer_retry.png
+102,local_files,Local Files,P1,A desktop/laptop device with a tiny folder in the foreground.,transfer_vault_sync1,providers_inventory_diag_os1.png,2,3,1,5x6,icons/256/regular/local_files.png,icons/256/hover/local_files.png
+103,remote_files,Remote Files,P1,A server-rack device with a tiny folder in the foreground.,transfer_vault_sync1,providers_inventory_diag_os1.png,3,4,1,5x6,icons/256/regular/remote_files.png,icons/256/hover/remote_files.png
+104,file_permissions,File Permissions,P1,"A document with a lock and small checked permission marks, no text.",transfer_vault_sync1,providers_inventory_diag_os1.png,4,5,1,5x6,icons/256/regular/file_permissions.png,icons/256/hover/file_permissions.png
+105,hidden_files,Hidden Files,P1,"A document paired with a crossed-out eye, representing hidden entries.",transfer_vault_sync1,providers_inventory_diag_os1.png,5,1,2,5x6,icons/256/regular/hidden_files.png,icons/256/hover/hidden_files.png
+106,vault_lock,Vault Lock,P0,A safe door combined with a closed padlock.,transfer_vault_sync1,providers_inventory_diag_os1.png,6,2,2,5x6,icons/256/regular/vault_lock.png,icons/256/hover/vault_lock.png
+107,vault_unlock,Vault Unlock,P0,The same safe door combined with an open padlock.,transfer_vault_sync1,providers_inventory_diag_os1.png,7,3,2,5x6,icons/256/regular/vault_unlock.png,icons/256/hover/vault_unlock.png
+108,google_drive,Google Drive,P0,"An accurate simplified triangular Google Drive mark, without text.",transfer_vault_sync1,providers_inventory_diag_os1.png,8,4,2,5x6,icons/256/regular/google_drive.png,icons/256/hover/google_drive.png
+109,sync_conflict,Sync Conflict,P0,Two opposing sync arrows meeting at a warning diamond.,transfer_vault_sync1,providers_inventory_diag_os1.png,9,5,2,5x6,icons/256/regular/sync_conflict.png,icons/256/hover/sync_conflict.png
+110,encrypted_backup,Encrypted Backup,P0,A backup/archive container with a distinct closed padlock.,transfer_vault_sync1,providers_inventory_diag_os1.png,10,1,3,5x6,icons/256/regular/encrypted_backup.png,icons/256/hover/encrypted_backup.png
+111,restore_backup,Restore Backup,P0,A backup container with an arrow returning into a safe/vault.,transfer_vault_sync1,providers_inventory_diag_os1.png,11,2,3,5x6,icons/256/regular/restore_backup.png,icons/256/hover/restore_backup.png
+112,recovery_code,Recovery Code,P0,A protective shield containing an abstract recovery-card/key motif; never actual digits.,transfer_vault_sync1,providers_inventory_diag_os1.png,12,3,3,5x6,icons/256/regular/recovery_code.png,icons/256/hover/recovery_code.png
+113,vault_encryption,Vault Encryption,P1,A safe door carrying a centered security shield and lock inset.,transfer_vault_sync1,providers_inventory_diag_os1.png,13,4,3,5x6,icons/256/regular/vault_encryption.png,icons/256/hover/vault_encryption.png
+114,server_sync,Server Sync,P1,Two server-rack silhouettes connected by circular sync arrows.,transfer_vault_sync1,providers_inventory_diag_os1.png,14,5,3,5x6,icons/256/regular/server_sync.png,icons/256/hover/server_sync.png
+115,sync_upload,Sync Upload,P1,A cloud outline with one clear upward arrow.,sync_keys_security,overview_connection.png,0,1,1,5x6,icons/256/regular/sync_upload.png,icons/256/hover/sync_upload.png
+116,sync_download,Sync Download,P1,A cloud outline with one clear downward arrow.,sync_keys_security,overview_connection.png,1,2,1,5x6,icons/256/regular/sync_download.png,icons/256/hover/sync_download.png
+117,sync_offline,Sync Offline,P1,A cloud outline crossed by a small disconnected-link slash.,sync_keys_security,overview_connection.png,2,3,1,5x6,icons/256/regular/sync_offline.png,icons/256/hover/sync_offline.png
+118,sync_success,Sync Success,P1,A cloud outline with a small checked success badge.,sync_keys_security,overview_connection.png,3,4,1,5x6,icons/256/regular/sync_success.png,icons/256/hover/sync_success.png
+119,setup_resume,Setup Resume,P1,A five-step progress path with one highlighted unfinished step and a forward arrow.,sync_keys_security,overview_connection.png,4,5,1,5x6,icons/256/regular/setup_resume.png,icons/256/hover/setup_resume.png
+120,device_enrollment,Device Enrollment,P1,A laptop and phone linked by a verified connection symbol.,sync_keys_security,overview_connection.png,5,1,2,5x6,icons/256/regular/device_enrollment.png,icons/256/hover/device_enrollment.png
+121,host_key_verified,Host Key Verified,P0,A server endpoint with a shield and a check badge.,sync_keys_security,overview_connection.png,6,2,2,5x6,icons/256/regular/host_key_verified.png,icons/256/hover/host_key_verified.png
+122,host_key_changed,Host Key Changed,P0,A server endpoint with a shield and a distinct warning triangle.,sync_keys_security,overview_connection.png,7,3,2,5x6,icons/256/regular/host_key_changed.png,icons/256/hover/host_key_changed.png
+123,ssh_agent,Ssh Agent,P1,A metal key inside a small terminal agent/socket graphic.,sync_keys_security,overview_connection.png,8,4,2,5x6,icons/256/regular/ssh_agent.png,icons/256/hover/ssh_agent.png
+124,generate_key,Generate Key,P1,A metal key bearing a tiny new/plus spark.,sync_keys_security,overview_connection.png,9,5,2,5x6,icons/256/regular/generate_key.png,icons/256/hover/generate_key.png
+125,rotate_key,Rotate Key,P1,A metal key surrounded by a short clockwise rotation arrow.,sync_keys_security,overview_connection.png,10,1,3,5x6,icons/256/regular/rotate_key.png,icons/256/hover/rotate_key.png
+126,revoke_key,Revoke Key,P1,A key with a decisive diagonal cancellation slash.,sync_keys_security,overview_connection.png,11,2,3,5x6,icons/256/regular/revoke_key.png,icons/256/hover/revoke_key.png
+127,password,Password,P1,A padlock above a row of four masked dots; no real characters.,sync_keys_security,overview_connection.png,12,3,3,5x6,icons/256/regular/password.png,icons/256/hover/password.png
+128,security_audit,Security Audit,P1,A shield beside a compact document checklist.,sync_keys_security,overview_connection.png,13,4,3,5x6,icons/256/regular/security_audit.png,icons/256/hover/security_audit.png
+129,trusted_device,Trusted Device,P1,A desktop device with a checked shield badge.,sync_keys_security,overview_connection.png,14,5,3,5x6,icons/256/regular/trusted_device.png,icons/256/hover/trusted_device.png
+130,untrusted_device,Untrusted Device,P1,A desktop device with a warning shield badge.,team_tunnels_aws,sync_keys_security.png,0,1,1,5x6,icons/256/regular/untrusted_device.png,icons/256/hover/untrusted_device.png
+131,team_members,Team Members,P1,Three small balanced human silhouettes as one team cluster.,team_tunnels_aws,sync_keys_security.png,1,2,1,5x6,icons/256/regular/team_members.png,icons/256/hover/team_members.png
+132,shared_vault,Shared Vault,P1,A safe door placed between two small collaborating user silhouettes.,team_tunnels_aws,sync_keys_security.png,2,3,1,5x6,icons/256/regular/shared_vault.png,icons/256/hover/shared_vault.png
+133,member_revoke,Member Revoke,P1,A user silhouette with a small blocked/cancellation badge.,team_tunnels_aws,sync_keys_security.png,3,4,1,5x6,icons/256/regular/member_revoke.png,icons/256/hover/member_revoke.png
+134,pending_invite,Pending Invite,P1,An envelope carrying a small clock badge.,team_tunnels_aws,sync_keys_security.png,4,5,1,5x6,icons/256/regular/pending_invite.png,icons/256/hover/pending_invite.png
+135,role_admin,Role Admin,P1,A user silhouette with a small privileged shield-and-star badge.,team_tunnels_aws,sync_keys_security.png,5,1,2,5x6,icons/256/regular/role_admin.png,icons/256/hover/role_admin.png
+136,role_editor,Role Editor,P1,A user silhouette with a small pencil badge.,team_tunnels_aws,sync_keys_security.png,6,2,2,5x6,icons/256/regular/role_editor.png,icons/256/hover/role_editor.png
+137,role_viewer,Role Viewer,P1,A user silhouette with a small eye badge.,team_tunnels_aws,sync_keys_security.png,7,3,2,5x6,icons/256/regular/role_viewer.png,icons/256/hover/role_viewer.png
+138,team_key_rotation,Team Key Rotation,P1,A safe/vault key with a surrounding rotation arrow and shield accent.,team_tunnels_aws,sync_keys_security.png,8,4,2,5x6,icons/256/regular/team_key_rotation.png,icons/256/hover/team_key_rotation.png
+139,tunnel_local,Tunnel Local,P0,A local computer on the left and a server on the right connected by a forwarding tunnel arrow.,team_tunnels_aws,sync_keys_security.png,9,5,2,5x6,icons/256/regular/tunnel_local.png,icons/256/hover/tunnel_local.png
+140,tunnel_remote,Tunnel Remote,P0,A server on the right connected back to a local computer by an opposite forwarding arrow.,team_tunnels_aws,sync_keys_security.png,10,1,3,5x6,icons/256/regular/tunnel_remote.png,icons/256/hover/tunnel_remote.png
+141,tunnel_socks,Tunnel Socks,P0,A central tunnel hub with three small outward branches (dynamic SOCKS proxy).,team_tunnels_aws,sync_keys_security.png,11,2,3,5x6,icons/256/regular/tunnel_socks.png,icons/256/hover/tunnel_socks.png
+142,tunnel_active,Tunnel Active,P1,A bidirectional tunnel link with a checked active badge.,team_tunnels_aws,sync_keys_security.png,12,3,3,5x6,icons/256/regular/tunnel_active.png,icons/256/hover/tunnel_active.png
+143,tunnel_stopped,Tunnel Stopped,P1,A bidirectional tunnel link with a small square stop badge.,team_tunnels_aws,sync_keys_security.png,13,4,3,5x6,icons/256/regular/tunnel_stopped.png,icons/256/hover/tunnel_stopped.png
+144,provider_aws,Provider Aws,P1,Faithful official AWS brand symbol (not an invented cloud logo); preserve its proportions.,team_tunnels_aws,sync_keys_security.png,14,5,3,5x6,icons/256/regular/provider_aws.png,icons/256/hover/provider_aws.png
+145,provider_azure,Provider Azure,P1,Faithful official Microsoft Azure symbol; preserve its proportions.,providers_inventory_diag_os1,team_tunnels_aws.png,0,1,1,5x6,icons/256/regular/provider_azure.png,icons/256/hover/provider_azure.png
+146,provider_digitalocean,Provider Digitalocean,P1,Faithful official DigitalOcean circle/square brand symbol.,providers_inventory_diag_os1,team_tunnels_aws.png,1,2,1,5x6,icons/256/regular/provider_digitalocean.png,icons/256/hover/provider_digitalocean.png
+147,provider_ansible,Provider Ansible,P1,Faithful official Ansible circular arrow/A symbol.,providers_inventory_diag_os1,team_tunnels_aws.png,2,3,1,5x6,icons/256/regular/provider_ansible.png,icons/256/hover/provider_ansible.png
+148,provider_connect,Provider Connect,P1,A cloud-provider node with a linked/connected badge.,providers_inventory_diag_os1,team_tunnels_aws.png,3,4,1,5x6,icons/256/regular/provider_connect.png,icons/256/hover/provider_connect.png
+149,discover_hosts,Discover Hosts,P1,A server and small magnifying glass revealing two nearby network nodes.,providers_inventory_diag_os1,team_tunnels_aws.png,4,5,1,5x6,icons/256/regular/discover_hosts.png,icons/256/hover/discover_hosts.png
+150,inventory,Inventory,P1,A compact sheet with three inventory rows and miniature server indicators.,providers_inventory_diag_os1,team_tunnels_aws.png,5,1,2,5x6,icons/256/regular/inventory.png,icons/256/hover/inventory.png
+151,inventory_sync,Inventory Sync,P1,Two structured inventory sheets connected by circular arrows.,providers_inventory_diag_os1,team_tunnels_aws.png,6,2,2,5x6,icons/256/regular/inventory_sync.png,icons/256/hover/inventory_sync.png
+152,health_check,Health Check,P1,A diagnostic heartbeat trace crossing a small checkmark shield.,providers_inventory_diag_os1,team_tunnels_aws.png,7,3,2,5x6,icons/256/regular/health_check.png,icons/256/hover/health_check.png
+153,benchmark,Benchmark,P1,A compact speedometer/gauge with three restrained tick marks.,providers_inventory_diag_os1,team_tunnels_aws.png,8,4,2,5x6,icons/256/regular/benchmark.png,icons/256/hover/benchmark.png
+154,latency,Latency,P1,Two small network nodes connected through a central stopwatch.,providers_inventory_diag_os1,team_tunnels_aws.png,9,5,2,5x6,icons/256/regular/latency.png,icons/256/hover/latency.png
+155,network_test,Network Test,P1,Two connected nodes with a test pulse traveling between them.,providers_inventory_diag_os1,team_tunnels_aws.png,10,1,3,5x6,icons/256/regular/network_test.png,icons/256/hover/network_test.png
+156,storage_test,Storage Test,P1,A drive/storage unit with a small checked verification badge.,providers_inventory_diag_os1,team_tunnels_aws.png,11,2,3,5x6,icons/256/regular/storage_test.png,icons/256/hover/storage_test.png
+157,os_debian,Os Debian,P2,"Faithful Debian spiral logo, clear at 32 px.",providers_inventory_diag_os1,team_tunnels_aws.png,12,3,3,5x6,icons/256/regular/os_debian.png,icons/256/hover/os_debian.png
+158,os_fedora,Os Fedora,P2,"Faithful Fedora loop/f symbol, clear at 32 px.",providers_inventory_diag_os1,team_tunnels_aws.png,13,4,3,5x6,icons/256/regular/os_fedora.png,icons/256/hover/os_fedora.png
+159,os_rhel,Os Rhel,P2,Faithful Red Hat Enterprise Linux hat silhouette.,providers_inventory_diag_os1,team_tunnels_aws.png,14,5,3,5x6,icons/256/regular/os_rhel.png,icons/256/hover/os_rhel.png
+160,os_centos,Os Centos,P2,Faithful CentOS compass/star geometric mark.,os2,session_views.png,0,1,1,3x6,icons/256/regular/os_centos.png,icons/256/hover/os_centos.png
+161,os_rocky,Os Rocky,P2,Faithful Rocky Linux angular mountain mark.,os2,session_views.png,1,2,1,3x6,icons/256/regular/os_rocky.png,icons/256/hover/os_rocky.png
+162,os_almalinux,Os Almalinux,P2,Faithful AlmaLinux multicolor petal/star geometry.,os2,session_views.png,2,3,1,3x6,icons/256/regular/os_almalinux.png,icons/256/hover/os_almalinux.png
+163,os_alpine,Os Alpine,P2,Faithful Alpine Linux stylized mountain mark.,os2,session_views.png,3,1,2,3x6,icons/256/regular/os_alpine.png,icons/256/hover/os_alpine.png
+164,os_opensuse,Os Opensuse,P2,Faithful openSUSE chameleon silhouette.,os2,session_views.png,4,2,2,3x6,icons/256/regular/os_opensuse.png,icons/256/hover/os_opensuse.png
+165,os_kali,Os Kali,P2,"Faithful Kali Linux dragon silhouette, simplified for legibility.",os2,session_views.png,5,3,2,3x6,icons/256/regular/os_kali.png,icons/256/hover/os_kali.png
+166,os_windows_server,Os Windows Server,P2,Windows four-pane motif with a tiny server-rack accent.,os2,session_views.png,6,1,3,3x6,icons/256/regular/os_windows_server.png,icons/256/hover/os_windows_server.png
+167,os_android,Os Android,P2,Recognizable Android robot-head silhouette.,os2,session_views.png,7,2,3,3x6,icons/256/regular/os_android.png,icons/256/hover/os_android.png
+168,os_ios,Os Ios,P2,An iOS mobile device silhouette with a restrained platform-identifying accent.,os2,session_views.png,8,3,3,3x6,icons/256/regular/os_ios.png,icons/256/hover/os_ios.png

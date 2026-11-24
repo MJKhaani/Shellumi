@@ -8,12 +8,13 @@ use crate::ui::components::button::{AppButton, ButtonVariant};
 use crate::ui::components::form::{error_notice, simple_field, simple_section};
 use crate::ui::components::inspector_shell::InspectorShell;
 use crate::ui::inspector::coordinator::{InspectorMode, InspectorTarget};
-use crate::ui::layout;
-use crate::{SavedWorkspace, Shellumi};
+use crate::ui::layout::{self, InspectorPresentation};
+use crate::{SavedWorkspace, Shellumi, TextInput, WorkspaceFormState};
 use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
+use shellumi_storage::HostStore;
 
 impl Shellumi {
     /// Render the unified Workspace Inspector for viewing or editing multi-session workspaces.
@@ -86,6 +87,14 @@ impl Shellumi {
             }))
             .child("Edit");
 
+        let close_btn = InspectorShell::close_button(
+            "close-workspace-inspector-btn",
+            false,
+            |app, _, _, cx| {
+                app.inspector_close(cx);
+            },
+            cx,
+        );
         let header = InspectorShell::header(
             ws_name.clone(),
             Some(format!(
@@ -94,13 +103,13 @@ impl Shellumi {
             )),
             Some(badge.into_any_element()),
             Some(edit_btn.into_any_element()),
-            "close-workspace-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
         let mut body = div().flex().flex_col().gap_4();
 
         // Action buttons
+        let delete_name = ws_name.clone();
         let actions_row = div()
             .flex()
             .gap_2()
@@ -123,6 +132,14 @@ impl Shellumi {
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.open_workspace_inspector_mode(Some(id_val), InspectorMode::Edit, cx);
                 })),
+            )
+            .child(
+                AppButton::new("workspace-view-delete-btn", "Delete", ButtonVariant::Danger)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.delete_confirm =
+                            Some(crate::DeleteTarget::Workspace(id_val, delete_name.clone()));
+                        cx.notify();
+                    })),
             );
         body = body.child(actions_row);
 
@@ -155,22 +172,113 @@ impl Shellumi {
             "Edit Workspace"
         };
 
+        let close_btn = InspectorShell::close_button(
+            "close-workspace-edit-inspector-btn",
+            true,
+            |app, _, _, cx| {
+                app.inspector_back(cx);
+            },
+            cx,
+        );
         let header = InspectorShell::header(
             title,
             Some("Configure multi-session grid and pane presets"),
             None,
             None,
-            "close-workspace-edit-inspector-btn",
-            false,
+            Some(close_btn),
         );
 
-        let body = div().flex().flex_col().gap_3().p_2().child(
+        let Some(form) = &self.workspace_form else {
+            return InspectorShell::new(
+                header,
+                div().p_4().child("Form not initialized"),
+                None::<Div>,
+                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            );
+        };
+
+        let mut body = div().flex().flex_col().gap_4().p_1();
+
+        if let Some(err) = &form.error {
+            body = body.child(error_notice(err));
+        }
+
+        // Name input
+        let name_input = form.name.clone();
+        body = body.child(simple_field(
+            "Workspace Name *",
             div()
-                .text_xs()
-                .text_color(text_secondary())
-                .child("Workspace layout and session preset editor."),
-        );
+                .border_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .rounded_md()
+                .bg(surface())
+                .p_2()
+                .child(name_input),
+        ));
 
+        // Layout selector
+        let current_layout = form.layout.clone();
+        let mut layout_selector = div().flex().gap_1p5().py_1();
+        for (idx, (l_id, label)) in [
+            ("single", "Single"),
+            ("split_vertical", "2-Split Vert"),
+            ("split_horizontal", "2-Split Horiz"),
+            ("dual_grid", "4-Grid"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let is_sel = current_layout == *l_id;
+            let l_val = l_id.to_string();
+            layout_selector = layout_selector.child(
+                div()
+                    .id(("workspace-layout", idx))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .font_weight(if is_sel {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .bg(if is_sel {
+                        rgb(MacTheme::SURFACE_ACTIVE)
+                    } else {
+                        surface()
+                    })
+                    .text_color(if is_sel {
+                        accent_blue()
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(ref mut f) = app.workspace_form {
+                            f.layout = l_val.clone();
+                            app.inspector_mark_dirty(cx);
+                        }
+                    }))
+                    .child(*label),
+            );
+        }
+        body = body.child(simple_field("Layout Preset", layout_selector));
+
+        // Description input
+        let desc_input = form.description.clone();
+        body = body.child(simple_field(
+            "Description (Optional)",
+            div()
+                .border_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .rounded_md()
+                .bg(surface())
+                .p_2()
+                .child(desc_input),
+        ));
+
+        let is_saving = form.saving;
         let footer = div()
             .p_4()
             .border_t_1()
@@ -187,17 +295,21 @@ impl Shellumi {
                     ButtonVariant::Ghost,
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
-                    app.inspector_close(cx);
+                    app.inspector_back(cx);
                 })),
             )
             .child(
                 AppButton::new(
                     "workspace-inspector-save-btn",
-                    "Save",
+                    if is_saving { "Saving…" } else { "Save" },
                     ButtonVariant::Primary,
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
-                    app.inspector_close(cx);
+                    if let Some(f) = &app.workspace_form {
+                        if !f.saving {
+                            app.save_workspace_inspector(cx);
+                        }
+                    }
                 })),
             );
 
@@ -218,9 +330,175 @@ impl Shellumi {
     ) {
         let vault_id = self.active_vault_id.clone();
         let target = InspectorTarget::Workspace(workspace_id);
-        let _ = self
+        if self
             .inspector_coordinator
-            .open(vault_id, target, mode, None);
+            .open(vault_id, target, mode, None)
+        {
+            if mode == InspectorMode::Edit || mode == InspectorMode::Create {
+                let existing =
+                    workspace_id.and_then(|id| self.workspaces.iter().find(|w| w.id == id));
+                let name_val = existing.map(|w| w.name.as_str()).unwrap_or("");
+                let desc_val = existing
+                    .and_then(|w| w.description.as_deref())
+                    .unwrap_or("");
+                let layout_val = existing
+                    .map(|w| w.layout.clone())
+                    .unwrap_or_else(|| "single".into());
+
+                let name = cx.new(|cx| TextInput::new(cx, name_val, "Workspace name"));
+                let description =
+                    cx.new(|cx| TextInput::new(cx, desc_val, "Description (optional)"));
+
+                cx.observe(&name, |app, _, cx| app.inspector_mark_dirty(cx))
+                    .detach();
+                cx.observe(&description, |app, _, cx| app.inspector_mark_dirty(cx))
+                    .detach();
+
+                self.workspace_form = Some(WorkspaceFormState {
+                    id: workspace_id,
+                    name,
+                    layout: layout_val,
+                    description,
+                    error: None,
+                    saving: false,
+                });
+            } else {
+                self.workspace_form = None;
+            }
+        }
         cx.notify();
+    }
+
+    /// Save workspace inspector form data.
+    pub(crate) fn save_workspace_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.workspace_form else {
+            return;
+        };
+
+        let name = form.name.read(cx).value().trim().to_string();
+        let desc = form.description.read(cx).value().trim().to_string();
+        let layout_str = form.layout.clone();
+        let id = form.id;
+
+        if name.is_empty() {
+            form.error = Some("Workspace name is required.".into());
+            cx.notify();
+            return;
+        }
+
+        form.saving = true;
+        form.error = None;
+        let Some(db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
+        let name_for_msg = name.clone();
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
+                let desc_opt = if desc.is_empty() {
+                    None
+                } else {
+                    Some(desc.as_str())
+                };
+                let saved_id = match id {
+                    Some(existing_id) => {
+                        store
+                            .update_workspace(existing_id, &name, desc_opt, &layout_str, &[], &[])
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        existing_id
+                    }
+                    None => store
+                        .add_workspace(&name, desc_opt, &layout_str, &[], &[])
+                        .await
+                        .map_err(|e| e.to_string())?,
+                };
+                Ok::<i64, String>(saved_id)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Some(ref mut f) = app.workspace_form {
+                    f.saving = false;
+                }
+                match res {
+                    Ok(saved_id) => {
+                        app.workspace_form = None;
+                        app.load_workspaces(cx);
+                        app.inspector_coordinator.set_dirty(false);
+                        app.open_workspace_inspector_mode(
+                            Some(saved_id),
+                            crate::ui::inspector::InspectorMode::View,
+                            cx,
+                        );
+                        app.desktop.message =
+                            Some(format!("Workspace '{}' saved successfully", name_for_msg));
+                    }
+                    Err(err) => {
+                        if let Some(ref mut f) = app.workspace_form {
+                            f.error = Some(err);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Delete a workspace.
+    pub(crate) fn delete_workspace_inspector(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let vault_key = self.active_vault_key();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
+                store.delete_workspace(id).await.map_err(|e| e.to_string())
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok(_) => {
+                        app.load_workspaces(cx);
+                        app.inspector_close(cx);
+                        app.desktop.message = Some("Workspace deleted successfully".into());
+                    }
+                    Err(e) => {
+                        app.desktop.message = Some(format!("Failed to delete workspace: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }

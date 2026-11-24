@@ -2440,6 +2440,15 @@ impl HostStore {
         }
     }
 
+    /// Unregisters and deletes a vault context entry.
+    pub async fn unregister_vault_context(&mut self, id: &str) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute("DELETE FROM vault_contexts WHERE id = ?1", (id,))
+            .await?;
+        Ok(rows > 0)
+    }
+
     /// Saves a recovery envelope for a vault context.
     pub async fn save_vault_recovery_envelope(
         &mut self,
@@ -3605,12 +3614,54 @@ impl HostStore {
         Ok(groups)
     }
 
+    pub async fn rename_group(
+        &mut self,
+        old_name: &str,
+        new_group: &HostGroup,
+    ) -> Result<bool, StorageError> {
+        let old_trimmed = old_name.trim();
+        let new_trimmed = new_group.name.trim();
+        if old_trimmed == new_trimmed {
+            return self.update_group(new_group).await;
+        }
+        if self.get_group(new_trimmed).await?.is_some() {
+            return Err(StorageError::ItemNotFound(format!(
+                "Group '{}' already exists",
+                new_trimmed
+            )));
+        }
+        self.add_group(new_group).await?;
+        let _ = self
+            .connection
+            .execute(
+                "UPDATE hosts SET group_name = ?1 WHERE group_name = ?2 AND vault_id = ?3",
+                (new_trimmed, old_trimmed, self.host_vault_id.as_str()),
+            )
+            .await;
+        let _ = self
+            .connection
+            .execute(
+                "DELETE FROM groups WHERE name = ?1 AND vault_id = ?2",
+                (old_trimmed, self.host_vault_id.as_str()),
+            )
+            .await;
+        Ok(true)
+    }
+
     pub async fn delete_group(&mut self, name: &str) -> Result<bool, StorageError> {
+        let trimmed = name.trim();
+        let _ = self
+            .connection
+            .execute(
+                "UPDATE hosts SET group_name = NULL WHERE group_name = ?1 AND vault_id = ?2",
+                (trimmed, self.host_vault_id.as_str()),
+            )
+            .await;
         let rows = self
             .connection
             .execute(
                 "DELETE FROM groups WHERE name = ?1 AND vault_id = ?2",
-                (name.trim(), self.host_vault_id.as_str()),
+                (trimmed, self.host_vault_id.as_str()),
             )
             .await?;
         Ok(rows != 0)

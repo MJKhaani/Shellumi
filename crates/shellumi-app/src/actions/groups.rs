@@ -18,6 +18,15 @@ impl Shellumi {
         let default_username = cx.new(|cx| TextInput::new(cx, &default_user, "Default username"));
         let default_port = cx.new(|cx| TextInput::new(cx, &default_port, "22"));
 
+        cx.observe(&name, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&parent_group, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&default_username, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+        cx.observe(&default_port, |app, _, cx| app.inspector_mark_dirty(cx))
+            .detach();
+
         self.group_inspector = Some(GroupInspectorState {
             original_name: group_name.to_string(),
             name,
@@ -83,6 +92,7 @@ impl Shellumi {
         };
 
         let is_rename = orig_name != new_name && !orig_name.is_empty();
+        let target_group_name = new_name.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -91,7 +101,12 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if store
+                if is_rename {
+                    store
+                        .rename_group(&orig_name, &group)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else if store
                     .get_group(&group.name)
                     .await
                     .map_err(|e| e.to_string())?
@@ -103,9 +118,6 @@ impl Shellumi {
                         .map_err(|e| e.to_string())?;
                 } else {
                     store.add_group(&group).await.map_err(|e| e.to_string())?;
-                }
-                if is_rename {
-                    let _ = store.delete_group(&orig_name).await;
                 }
                 Ok::<(), String>(())
             })
@@ -123,7 +135,14 @@ impl Shellumi {
                     app.group_inspector = None;
                     app.load_hosts(cx);
                     app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
-                    app.desktop.message = Some(format!("Group '{}' saved successfully", new_name));
+                    app.desktop.message =
+                        Some(format!("Group '{}' saved successfully", target_group_name));
+                    app.inspector_coordinator.set_dirty(false);
+                    app.open_group_inspector_mode(
+                        &target_group_name,
+                        crate::ui::inspector::InspectorMode::View,
+                        cx,
+                    );
                     cx.notify();
                 }
             });
@@ -154,13 +173,22 @@ impl Shellumi {
             })
         });
         cx.spawn(async move |app, cx| {
-            let _ = task.await;
+            let res = task.await;
             let _ = app.update(cx, |app, cx| {
-                app.group_inspector = None;
-                app.group_context_menu = None;
-                app.load_hosts(cx);
-                app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
-                app.desktop.message = Some(format!("Group '{}' removed", name_str));
+                match res {
+                    Ok(()) => {
+                        app.group_inspector = None;
+                        app.group_context_menu = None;
+                        app.load_hosts(cx);
+                        app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
+                        app.desktop.message = Some(format!("Group '{}' removed", name_str));
+                        app.inspector_coordinator.close();
+                    }
+                    Err(err) => {
+                        app.desktop.message =
+                            Some(format!("Failed to delete group '{}': {}", name_str, err));
+                    }
+                }
                 cx.notify();
             });
         })

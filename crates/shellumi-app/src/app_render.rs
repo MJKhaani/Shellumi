@@ -191,6 +191,9 @@ impl Render for Shellumi {
             if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
                 result = result.child(dropdown);
             }
+            if let Some(overflow) = self.render_tab_overflow_popover(cx) {
+                result = result.child(overflow);
+            }
             if let Some(guard) = self.render_unsaved_changes_guard(cx) {
                 result = result.child(guard);
             }
@@ -1324,8 +1327,13 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.team_modal {
                     result = result.child(self.render_team_modal(modal, cx));
                 }
-                if let Some(modal) = &self.infra_modal {
-                    result = result.child(self.render_infra_modal(modal, cx));
+                if !self.inspector_coordinator.is_open() {
+                    if let Some(modal) = &self.infra_modal {
+                        result = result.child(self.render_infra_modal(modal, cx));
+                    }
+                    if let Some(modal) = &self.tunnel_modal {
+                        result = result.child(self.render_tunnel_modal(modal, cx));
+                    }
                 }
                 if let Some(modal) = &self.diagnostics_modal {
                     result = result.child(self.render_diagnostics_modal(modal, cx));
@@ -1339,11 +1347,6 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.session_replay_modal {
                     result = result.child(self.render_session_replay_modal(modal, cx));
                 }
-                if !self.inspector_coordinator.is_open() {
-                    if let Some(modal) = &self.tunnel_modal {
-                        result = result.child(self.render_tunnel_modal(modal, cx));
-                    }
-                }
                 if let Some(modal) = &self.create_vault_modal {
                     result = result.child(self.render_create_vault_modal(modal, cx));
                 }
@@ -1352,6 +1355,12 @@ impl Render for Shellumi {
                 }
                 if let Some(modal) = &self.setup_wizard_modal {
                     result = result.child(self.render_setup_wizard_modal(modal, cx));
+                }
+                if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
+                    result = result.child(dropdown);
+                }
+                if let Some(overflow) = self.render_tab_overflow_popover(cx) {
+                    result = result.child(overflow);
                 }
                 return result;
             }

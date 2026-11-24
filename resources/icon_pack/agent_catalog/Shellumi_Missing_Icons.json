@@ -1,0 +1,860 @@
+{
+  "source_sha": "a4132558e8127a177a92c81ec7554492d176ae03",
+  "existing": [
+    "hosts",
+    "connect",
+    "sftp",
+    "snippets",
+    "history",
+    "keychain",
+    "vaults",
+    "workspaces",
+    "cloud_sync",
+    "settings",
+    "add_host",
+    "search",
+    "terminal",
+    "serial",
+    "split_view",
+    "grid_view",
+    "list_view",
+    "groups",
+    "tags",
+    "favorite",
+    "more",
+    "edit",
+    "delete",
+    "refresh",
+    "profile",
+    "known_hosts",
+    "port_forwarding",
+    "shellumi_logo",
+    "group_settings",
+    "import",
+    "export",
+    "tag",
+    "calendar_sort",
+    "certificate",
+    "private_key",
+    "public_key",
+    "identity_card",
+    "os_arch",
+    "os_ubuntu",
+    "os_macos",
+    "os_freebsd",
+    "os_netbsd",
+    "os_openbsd",
+    "os_linux",
+    "os_windows",
+    "server",
+    "fido2",
+    "fingerprint",
+    "log",
+    "bell",
+    "invite_member",
+    "infrastructure",
+    "diagnostics",
+    "mobile"
+  ],
+  "missing": [
+    {
+      "priority": "P0",
+      "name": "overview",
+      "description": "A four-panel infrastructure dashboard, 2\u00d72 miniature cards.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "inspector",
+      "description": "A main content rectangle beside a narrow right-hand details pane with two information lines.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "new_group",
+      "description": "A folder carrying a small plus badge, distinct from existing Groups.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "duplicate_host",
+      "description": "Two offset, overlapping server cards indicating an exact duplicate.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "move_to_group",
+      "description": "One server card and an arrow entering a folder (move; do not show a copied card).",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "copy_to_group",
+      "description": "Two layered server cards with an arrow pointing toward a folder (copy).",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "new_workspace",
+      "description": "Two neatly arranged application panes with a small plus badge.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "new_vault",
+      "description": "A compact secure safe door with a small plus badge.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "switch_vault",
+      "description": "Two safe-door silhouettes joined by a curved switch arrow.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "quick_connect",
+      "description": "A server endpoint and one fast connecting arrow, not a lightning emoji.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "jump_host",
+      "description": "Three small servers in line: a central bastion between local and destination.",
+      "category": "Navigation and unified inspector",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "ssh",
+      "description": "A terminal window with a tiny secure network link; distinct from the existing Terminal icon.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "mosh",
+      "description": "A terminal with two curved roaming/signal strokes that express resilient mobile connection.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "rdp",
+      "description": "A desktop monitor with an inset four-pane Windows-inspired motif; no letters.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "vnc",
+      "description": "A remote monitor with a dotted network link and pointer cursor; distinct from RDP.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "disconnect",
+      "description": "A split link/cable with two visibly separated endpoints.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "reconnect",
+      "description": "A link being restored by a clockwise circular arrow.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "local_terminal",
+      "description": "A terminal screen above a miniature local computer base.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "session_record",
+      "description": "A terminal outline with a prominent small circular recording dot.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "session_replay",
+      "description": "A terminal outline containing a play triangle and short timeline ticks.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "session_info",
+      "description": "A terminal identity card with a status light and two information lines.",
+      "category": "Connection types and session actions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "fit_to_view",
+      "description": "A monitor bounded by four inward corner arrows, indicating fit the whole desktop.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "actual_size",
+      "description": "A monitor with an inset 1:1 symbol, indicating native-pixel scaling.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "fill_view",
+      "description": "A monitor bounded by four outward corner arrows, indicating fill/crop.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "display_resolution",
+      "description": "A monitor with tiny horizontal and vertical measurement ticks.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "dynamic_resize",
+      "description": "A monitor inside an adjustable frame, with diagonal resize arrows.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "remote_keyboard",
+      "description": "A keyboard with an outward arrow toward a remote monitor.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "remote_clipboard",
+      "description": "Two overlapping clipboards connected by two short opposite arrows.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "view_only",
+      "description": "A monitor with a clearly recognizable eye, indicating viewing without control.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "fullscreen",
+      "description": "A monitor with four outward-pointing corner markers.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "send_ctrl_alt_del",
+      "description": "Three adjacent keycaps on a small keyboard strip; avoid unreadable text.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "send_windows_key",
+      "description": "One keycap containing the recognizable four-pane Windows shape.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "shared_drive",
+      "description": "A storage drive with a small shared-folder/network-link symbol.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "remote_audio",
+      "description": "A speaker with two restrained sound waves.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "remote_audio_muted",
+      "description": "The same speaker with one clean diagonal mute slash.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "remote_microphone",
+      "description": "A microphone with one compact signal curve.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "remote_microphone_muted",
+      "description": "The same microphone with one clean diagonal mute slash.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "input_enabled",
+      "description": "A monitor with a pointer cursor, indicating input control is permitted.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "session_telemetry",
+      "description": "A small performance line graph inset into a monitor outline.",
+      "category": "RDP and VNC compact toolbar",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "upload",
+      "description": "A file document with an upward arrow toward a small remote-server endpoint.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "download",
+      "description": "A remote-server endpoint with a downward arrow toward a file document.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "transfer_queue",
+      "description": "Three short stacked file rows beside a small progress arc.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "new_folder",
+      "description": "A familiar file-browser folder with a clearly visible plus badge.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "transfer_progress",
+      "description": "A file rectangle overlaid by a half-complete progress ring.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "transfer_complete",
+      "description": "A file with a tiny successful check badge.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "transfer_failed",
+      "description": "A file with a tiny failure/cross badge.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "transfer_retry",
+      "description": "A file with a small clockwise retry arrow.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "local_files",
+      "description": "A desktop/laptop device with a tiny folder in the foreground.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "remote_files",
+      "description": "A server-rack device with a tiny folder in the foreground.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "file_permissions",
+      "description": "A document with a lock and small checked permission marks, no text.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "hidden_files",
+      "description": "A document paired with a crossed-out eye, representing hidden entries.",
+      "category": "SFTP and file transfers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "vault_lock",
+      "description": "A safe door combined with a closed padlock.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "vault_unlock",
+      "description": "The same safe door combined with an open padlock.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "google_drive",
+      "description": "An accurate simplified triangular Google Drive mark, without text.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "sync_conflict",
+      "description": "Two opposing sync arrows meeting at a warning diamond.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "encrypted_backup",
+      "description": "A backup/archive container with a distinct closed padlock.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "restore_backup",
+      "description": "A backup container with an arrow returning into a safe/vault.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "recovery_code",
+      "description": "A protective shield containing an abstract recovery-card/key motif; never actual digits.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "vault_encryption",
+      "description": "A safe door carrying a centered security shield and lock inset.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "server_sync",
+      "description": "Two server-rack silhouettes connected by circular sync arrows.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "sync_upload",
+      "description": "A cloud outline with one clear upward arrow.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "sync_download",
+      "description": "A cloud outline with one clear downward arrow.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "sync_offline",
+      "description": "A cloud outline crossed by a small disconnected-link slash.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "sync_success",
+      "description": "A cloud outline with a small checked success badge.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "setup_resume",
+      "description": "A five-step progress path with one highlighted unfinished step and a forward arrow.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "device_enrollment",
+      "description": "A laptop and phone linked by a verified connection symbol.",
+      "category": "Multi-vault security, backup and sync",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "host_key_verified",
+      "description": "A server endpoint with a shield and a check badge.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "host_key_changed",
+      "description": "A server endpoint with a shield and a distinct warning triangle.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "ssh_agent",
+      "description": "A metal key inside a small terminal agent/socket graphic.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "generate_key",
+      "description": "A metal key bearing a tiny new/plus spark.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "rotate_key",
+      "description": "A metal key surrounded by a short clockwise rotation arrow.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "revoke_key",
+      "description": "A key with a decisive diagonal cancellation slash.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "password",
+      "description": "A padlock above a row of four masked dots; no real characters.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "security_audit",
+      "description": "A shield beside a compact document checklist.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "trusted_device",
+      "description": "A desktop device with a checked shield badge.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "untrusted_device",
+      "description": "A desktop device with a warning shield badge.",
+      "category": "SSH identities, authentication, host-key trust",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "team_members",
+      "description": "Three small balanced human silhouettes as one team cluster.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "shared_vault",
+      "description": "A safe door placed between two small collaborating user silhouettes.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "member_revoke",
+      "description": "A user silhouette with a small blocked/cancellation badge.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "pending_invite",
+      "description": "An envelope carrying a small clock badge.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "role_admin",
+      "description": "A user silhouette with a small privileged shield-and-star badge.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "role_editor",
+      "description": "A user silhouette with a small pencil badge.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "role_viewer",
+      "description": "A user silhouette with a small eye badge.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "team_key_rotation",
+      "description": "A safe/vault key with a surrounding rotation arrow and shield accent.",
+      "category": "Team, collaboration and permissions",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "tunnel_local",
+      "description": "A local computer on the left and a server on the right connected by a forwarding tunnel arrow.",
+      "category": "SSH tunnels and port forwarding",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "tunnel_remote",
+      "description": "A server on the right connected back to a local computer by an opposite forwarding arrow.",
+      "category": "SSH tunnels and port forwarding",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P0",
+      "name": "tunnel_socks",
+      "description": "A central tunnel hub with three small outward branches (dynamic SOCKS proxy).",
+      "category": "SSH tunnels and port forwarding",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "tunnel_active",
+      "description": "A bidirectional tunnel link with a checked active badge.",
+      "category": "SSH tunnels and port forwarding",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "tunnel_stopped",
+      "description": "A bidirectional tunnel link with a small square stop badge.",
+      "category": "SSH tunnels and port forwarding",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "provider_aws",
+      "description": "Faithful official AWS brand symbol (not an invented cloud logo); preserve its proportions.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "provider_azure",
+      "description": "Faithful official Microsoft Azure symbol; preserve its proportions.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "provider_digitalocean",
+      "description": "Faithful official DigitalOcean circle/square brand symbol.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "provider_ansible",
+      "description": "Faithful official Ansible circular arrow/A symbol.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "provider_connect",
+      "description": "A cloud-provider node with a linked/connected badge.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "discover_hosts",
+      "description": "A server and small magnifying glass revealing two nearby network nodes.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "inventory",
+      "description": "A compact sheet with three inventory rows and miniature server indicators.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "inventory_sync",
+      "description": "Two structured inventory sheets connected by circular arrows.",
+      "category": "Infrastructure inventory and providers",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "health_check",
+      "description": "A diagnostic heartbeat trace crossing a small checkmark shield.",
+      "category": "Diagnostics and performance",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "benchmark",
+      "description": "A compact speedometer/gauge with three restrained tick marks.",
+      "category": "Diagnostics and performance",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "latency",
+      "description": "Two small network nodes connected through a central stopwatch.",
+      "category": "Diagnostics and performance",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "network_test",
+      "description": "Two connected nodes with a test pulse traveling between them.",
+      "category": "Diagnostics and performance",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P1",
+      "name": "storage_test",
+      "description": "A drive/storage unit with a small checked verification badge.",
+      "category": "Diagnostics and performance",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_debian",
+      "description": "Faithful Debian spiral logo, clear at 32 px.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_fedora",
+      "description": "Faithful Fedora loop/f symbol, clear at 32 px.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_rhel",
+      "description": "Faithful Red Hat Enterprise Linux hat silhouette.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_centos",
+      "description": "Faithful CentOS compass/star geometric mark.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_rocky",
+      "description": "Faithful Rocky Linux angular mountain mark.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_almalinux",
+      "description": "Faithful AlmaLinux multicolor petal/star geometry.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_alpine",
+      "description": "Faithful Alpine Linux stylized mountain mark.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_opensuse",
+      "description": "Faithful openSUSE chameleon silhouette.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_kali",
+      "description": "Faithful Kali Linux dragon silhouette, simplified for legibility.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_windows_server",
+      "description": "Windows four-pane motif with a tiny server-rack accent.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_android",
+      "description": "Recognizable Android robot-head silhouette.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    },
+    {
+      "priority": "P2",
+      "name": "os_ios",
+      "description": "An iOS mobile device silhouette with a restrained platform-identifying accent.",
+      "category": "Additional operating-system badges \u2014 optional, only when supported by detection",
+      "status": "missing: recommended for current/target UI"
+    }
+  ],
+  "native_ui_controls_not_custom_png": "## Native/vector controls \u2014 do NOT commission as custom illustrated PNGs\nUse lightweight consistent native/vector line icons (or GPUI drawn shapes) for these tiny controls. They still belong in the design system but are **not missing custom icon-pack assets**:\n\n`close`, `back`, `forward`, `chevron_up`, `chevron_down`, `chevron_left`, `chevron_right`, `plus`, `minus`, `check`, `warning`, `error`, `info`, `help`, `save`, `cancel`, `undo`, `redo`, `copy`, `cut`, `paste`, `rename`, `pin`, `unpin`, `filter`, `sort_ascending`, `sort_descending`, `open_external`, `new_tab`, `tab_close`, `menu`, `drag_handle`, `maximize`, `minimize`, `stop`, `play`, `pause`, `eye`, `eye_off`, `lock`, `unlock`, `volume_plus`, `volume_minus`, `scroll_up`, `scroll_down`, `home`, `up_one_level`, `breadcrumb_separator`.\n\nUse one vector family and consistent stroke weight. Avoid replacing all of these with high-detail metallic PNGs, particularly in a dense toolbar or 32px UI."
+}
