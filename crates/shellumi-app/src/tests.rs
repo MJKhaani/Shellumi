@@ -2994,3 +2994,412 @@ fn test_remote_desktop_canvas_geometry_translation_and_margins() {
         translate_coordinates(400.0, 30.0, canvas_w, canvas_h, fb_w, fb_h, ScaleMode::Fill);
     assert!(fill_top.is_some());
 }
+
+#[test]
+fn test_icon_pack_all_168_resolutions_and_hover() {
+    use crate::embedded_icons::get_embedded_icon;
+    use crate::ui::icon::{pick_asset_resolution, resolve_icon_path, IconName};
+
+    // 1. Retina resolution picker mapping tests
+    assert_eq!(pick_asset_resolution(14.0), 32);
+    assert_eq!(pick_asset_resolution(16.0), 32);
+    assert_eq!(pick_asset_resolution(20.0), 48);
+    assert_eq!(pick_asset_resolution(24.0), 48);
+    assert_eq!(pick_asset_resolution(32.0), 64);
+    assert_eq!(pick_asset_resolution(48.0), 128);
+    assert_eq!(pick_asset_resolution(64.0), 128);
+    assert_eq!(pick_asset_resolution(128.0), 256);
+    assert_eq!(pick_asset_resolution(256.0), 256);
+
+    // 2. All 168 icons have valid embedded assets across resolutions and states
+    let all_icons = [
+        IconName::Hosts,
+        IconName::Connect,
+        IconName::Sftp,
+        IconName::Snippets,
+        IconName::History,
+        IconName::Keychain,
+        IconName::Vaults,
+        IconName::Workspaces,
+        IconName::CloudSync,
+        IconName::Settings,
+        IconName::AddHost,
+        IconName::Search,
+        IconName::Terminal,
+        IconName::Serial,
+        IconName::SplitView,
+        IconName::GridView,
+        IconName::ListView,
+        IconName::Groups,
+        IconName::Tags,
+        IconName::Favorite,
+        IconName::More,
+        IconName::Edit,
+        IconName::Delete,
+        IconName::Refresh,
+        IconName::Profile,
+        IconName::KnownHosts,
+        IconName::PortForwarding,
+        IconName::ShellumiLogo,
+        IconName::GroupSettings,
+        IconName::Import,
+        IconName::Export,
+        IconName::Tag,
+        IconName::CalendarSort,
+        IconName::Certificate,
+        IconName::PrivateKey,
+        IconName::PublicKey,
+        IconName::IdentityCard,
+        IconName::OsArch,
+        IconName::OsUbuntu,
+        IconName::OsMacos,
+        IconName::OsFreebsd,
+        IconName::OsNetbsd,
+        IconName::OsOpenbsd,
+        IconName::OsLinux,
+        IconName::OsWindows,
+        IconName::Server,
+        IconName::Fido2,
+        IconName::Fingerprint,
+        IconName::Log,
+        IconName::Bell,
+        IconName::InviteMember,
+        IconName::Infrastructure,
+        IconName::Diagnostics,
+        IconName::Mobile,
+        IconName::Overview,
+        IconName::Inspector,
+        IconName::NewGroup,
+        IconName::DuplicateHost,
+        IconName::MoveToGroup,
+        IconName::CopyToGroup,
+        IconName::NewWorkspace,
+        IconName::NewVault,
+        IconName::SwitchVault,
+        IconName::QuickConnect,
+        IconName::JumpHost,
+        IconName::Ssh,
+        IconName::Mosh,
+        IconName::Rdp,
+        IconName::Vnc,
+        IconName::Disconnect,
+        IconName::Reconnect,
+        IconName::LocalTerminal,
+        IconName::SessionRecord,
+        IconName::SessionReplay,
+        IconName::SessionInfo,
+        IconName::FitToView,
+        IconName::ActualSize,
+        IconName::FillView,
+        IconName::DisplayResolution,
+        IconName::DynamicResize,
+        IconName::RemoteKeyboard,
+        IconName::RemoteClipboard,
+        IconName::ViewOnly,
+        IconName::Fullscreen,
+        IconName::SendCtrlAltDel,
+        IconName::SendWindowsKey,
+        IconName::SharedDrive,
+        IconName::RemoteAudio,
+        IconName::RemoteAudioMuted,
+        IconName::RemoteMicrophone,
+        IconName::RemoteMicrophoneMuted,
+        IconName::InputEnabled,
+        IconName::SessionTelemetry,
+        IconName::Upload,
+        IconName::Download,
+        IconName::TransferQueue,
+        IconName::NewFolder,
+        IconName::TransferProgress,
+        IconName::TransferComplete,
+        IconName::TransferFailed,
+        IconName::TransferRetry,
+        IconName::LocalFiles,
+        IconName::RemoteFiles,
+        IconName::FilePermissions,
+        IconName::HiddenFiles,
+        IconName::VaultLock,
+        IconName::VaultUnlock,
+        IconName::GoogleDrive,
+        IconName::SyncConflict,
+        IconName::EncryptedBackup,
+        IconName::RestoreBackup,
+        IconName::RecoveryCode,
+        IconName::VaultEncryption,
+        IconName::ServerSync,
+        IconName::SyncUpload,
+        IconName::SyncDownload,
+        IconName::SyncOffline,
+        IconName::SyncSuccess,
+        IconName::SetupResume,
+        IconName::DeviceEnrollment,
+        IconName::HostKeyVerified,
+        IconName::HostKeyChanged,
+        IconName::SshAgent,
+        IconName::GenerateKey,
+        IconName::RotateKey,
+        IconName::RevokeKey,
+        IconName::Password,
+        IconName::SecurityAudit,
+        IconName::TrustedDevice,
+        IconName::UntrustedDevice,
+        IconName::TeamMembers,
+        IconName::SharedVault,
+        IconName::MemberRevoke,
+        IconName::PendingInvite,
+        IconName::RoleAdmin,
+        IconName::RoleEditor,
+        IconName::RoleViewer,
+        IconName::TeamKeyRotation,
+        IconName::TunnelLocal,
+        IconName::TunnelRemote,
+        IconName::TunnelSocks,
+        IconName::TunnelActive,
+        IconName::TunnelStopped,
+        IconName::ProviderAws,
+        IconName::ProviderAzure,
+        IconName::ProviderDigitalocean,
+        IconName::ProviderAnsible,
+        IconName::ProviderConnect,
+        IconName::DiscoverHosts,
+        IconName::Inventory,
+        IconName::InventorySync,
+        IconName::HealthCheck,
+        IconName::Benchmark,
+        IconName::Latency,
+        IconName::NetworkTest,
+        IconName::StorageTest,
+        IconName::OsDebian,
+        IconName::OsFedora,
+        IconName::OsRhel,
+        IconName::OsCentos,
+        IconName::OsRocky,
+        IconName::OsAlmalinux,
+        IconName::OsAlpine,
+        IconName::OsOpensuse,
+        IconName::OsKali,
+        IconName::OsWindowsServer,
+        IconName::OsAndroid,
+        IconName::OsIos,
+    ];
+
+    assert_eq!(all_icons.len(), 168);
+
+    for icon in all_icons {
+        let name_str = icon.as_str();
+        assert_eq!(IconName::from_name(name_str), Some(icon));
+        assert!(!icon.label().is_empty());
+
+        // Regular state
+        let reg_bytes = get_embedded_icon(name_str, false, 48);
+        assert!(
+            reg_bytes.is_some(),
+            "Embedded icon '{}' (regular, 48) must exist",
+            name_str
+        );
+        assert_eq!(&reg_bytes.unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+
+        // Hover state
+        let hover_bytes = get_embedded_icon(name_str, true, 48);
+        assert!(
+            hover_bytes.is_some(),
+            "Embedded icon '{}' (hover, 48) must exist",
+            name_str
+        );
+        assert_eq!(&hover_bytes.unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+
+        // Resolution lookup
+        assert!(resolve_icon_path(name_str, false, 48).is_some());
+    }
+}
+
+#[test]
+fn test_vault_quarantine_journal_durable_state_machine_and_overwrite_protection() {
+    use crate::data_path::{
+        quarantine_vault_files, resolve_manifest_file, resolve_vault_db_file,
+        restore_quarantined_vault, QuarantineStage, VaultQuarantineJournal,
+    };
+    use std::fs;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "shellumi_test_q_{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let _ = fs::create_dir_all(&temp_dir);
+
+    let vault_id = "vlt-quarantine-test";
+    let db_path = resolve_vault_db_file(&temp_dir, vault_id);
+    let manifest_path = resolve_manifest_file(&temp_dir, vault_id);
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    fs::write(&db_path, b"SQLite format 3\0test_database_bytes").unwrap();
+    fs::write(
+        &manifest_path,
+        b"{\"vault_id\":\"vlt-quarantine-test\",\"name\":\"Test\"}",
+    )
+    .unwrap();
+    fs::write(&wal_path, b"mock_wal_bytes").unwrap();
+
+    // 1. Execute quarantine
+    let q_dir =
+        quarantine_vault_files(&temp_dir, vault_id, "Testing safe decommissioning").unwrap();
+    assert!(q_dir.exists());
+
+    // 2. Verify durable journal was written with Completed stage
+    let journal_path = q_dir.join("journal.json");
+    assert!(journal_path.exists());
+    let journal_content = fs::read_to_string(&journal_path).unwrap();
+    let journal: VaultQuarantineJournal = serde_json::from_str(&journal_content).unwrap();
+    assert_eq!(journal.stage, QuarantineStage::Completed);
+    assert_eq!(journal.vault_id, vault_id);
+    assert!(journal.quarantined_db_path.is_some());
+    assert!(journal.quarantined_manifest_path.is_some());
+    assert!(journal.quarantined_wal_path.is_some());
+
+    // 3. Verify original files no longer exist at original locations
+    assert!(!db_path.exists());
+    assert!(!manifest_path.exists());
+    assert!(!wal_path.exists());
+
+    // 4. Test Overwrite Protection: create conflicting destination file
+    fs::write(&db_path, b"conflict_db").unwrap();
+    let overwrite_err = restore_quarantined_vault(&q_dir);
+    assert!(
+        overwrite_err.is_err(),
+        "restore_quarantined_vault must refuse to overwrite existing files"
+    );
+    assert!(overwrite_err.unwrap_err().contains("already exists"));
+
+    // 5. Remove conflict and restore successfully
+    fs::remove_file(&db_path).unwrap();
+    let restore_res = restore_quarantined_vault(&q_dir);
+    assert!(
+        restore_res.is_ok(),
+        "Restore must succeed when destination has no conflicts"
+    );
+    assert!(db_path.exists());
+    assert!(manifest_path.exists());
+    assert!(wal_path.exists());
+    assert!(
+        !q_dir.exists(),
+        "Quarantine directory must be purged on successful restore"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_vault_quarantine_restart_recovery() {
+    use crate::data_path::{
+        detect_and_recover_interrupted_quarantine, resolve_quarantine_dir, QuarantineStage,
+        VaultQuarantineJournal,
+    };
+    use std::fs;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "shellumi_test_q_rec_{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let q_root = resolve_quarantine_dir(&temp_dir);
+    let q_vault_dir = q_root.join("vlt-interrupted_12345_uuid");
+    fs::create_dir_all(&q_vault_dir).unwrap();
+
+    let journal = VaultQuarantineJournal {
+        journal_version: 1,
+        vault_id: "vlt-interrupted".to_string(),
+        original_db_path: temp_dir
+            .join("vaults/vlt-interrupted.db")
+            .to_string_lossy()
+            .to_string(),
+        original_manifest_path: None,
+        original_wal_path: None,
+        original_shm_path: None,
+        quarantined_db_path: None,
+        quarantined_manifest_path: None,
+        quarantined_wal_path: None,
+        quarantined_shm_path: None,
+        stage: QuarantineStage::Initiated,
+        quarantined_at: "12345".to_string(),
+        reason: "Interrupted deletion test".to_string(),
+    };
+    let journal_json = serde_json::to_string_pretty(&journal).unwrap();
+    fs::write(q_vault_dir.join("journal.json"), journal_json).unwrap();
+
+    // Call recovery
+    let recovered = detect_and_recover_interrupted_quarantine(&temp_dir).unwrap();
+    assert_eq!(recovered, vec!["vlt-interrupted".to_string()]);
+    assert!(
+        !q_vault_dir.exists(),
+        "Initiated incomplete directory should be purged"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
+    use crate::data_path::{
+        detect_and_recover_interrupted_rotation, resolve_manifest_file, write_rotation_journal,
+        PasswordRotationJournal, PasswordRotationStage,
+    };
+    use shellumi_core::{VaultId, VaultKey, VaultManifest};
+    use std::fs;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "shellumi_test_pwd_rot_{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let vault_id = "vlt-pwd-test";
+    let manifest_path = resolve_manifest_file(&temp_dir, vault_id);
+    let _ = fs::create_dir_all(manifest_path.parent().unwrap());
+    let rotation_journal_path = manifest_path.with_extension("rotation_journal.json");
+
+    let vid = VaultId::new(vault_id).unwrap();
+    let old_pass = "OldPassword123!";
+    let rec_code = "RecoveryCode123!";
+
+    let key = VaultKey::generate().unwrap();
+    let primary_envelope = key.wrap_with_password(&vid, old_pass).unwrap();
+    let recovery_envelope = Some(key.wrap_with_password(&vid, rec_code).unwrap());
+    let manifest = VaultManifest::new(
+        vid.as_str().to_string(),
+        "Password Test Vault".to_string(),
+        primary_envelope,
+        recovery_envelope,
+        false,
+    );
+    manifest.save_to_path(&manifest_path).unwrap();
+
+    let original_bytes = fs::read_to_string(&manifest_path).unwrap();
+
+    // Stage an incomplete rotation journal (e.g. power loss during DB update)
+    let journal = PasswordRotationJournal {
+        journal_version: 1,
+        vault_id: vault_id.to_string(),
+        stage: PasswordRotationStage::Initiated,
+        original_manifest_backup: Some(original_bytes.clone()),
+        original_registry_envelope: None,
+        original_target_db_envelope: None,
+        updated_at: 1000,
+    };
+    write_rotation_journal(&rotation_journal_path, &journal).unwrap();
+
+    // Corrupt manifest to simulate partial write before crash
+    fs::write(&manifest_path, b"corrupted partial manifest write").unwrap();
+
+    // Execute startup recovery
+    let recovered = detect_and_recover_interrupted_rotation(&temp_dir).unwrap();
+    assert_eq!(recovered, vec![vault_id.to_string()]);
+
+    // Verify manifest was restored from original backup and can unlock with old password
+    let restored_manifest = VaultManifest::load_from_path(&manifest_path).unwrap();
+    assert!(restored_manifest.unlock(old_pass).is_ok());
+    assert!(
+        !rotation_journal_path.exists(),
+        "Journal should be cleaned up after recovery"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

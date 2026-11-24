@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=../../resources/shellumi.ico");
+    println!("cargo:rerun-if-changed=../../resources/icon_pack/manifest.json");
     #[cfg(windows)]
     {
         use std::path::Path;

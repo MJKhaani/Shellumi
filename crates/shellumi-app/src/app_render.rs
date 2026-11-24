@@ -397,7 +397,19 @@ impl Render for Shellumi {
                                                 .on_click(cx.listener(move |app, _, _, cx| {
                                                     app.sftp_refresh(active_idx, cx);
                                                 }))
-                                                .child("↻ Refresh"),
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_1p5()
+                                                        .child(
+                                                            crate::ui::icon::Icon::new(
+                                                                crate::ui::icon::IconName::Refresh,
+                                                            )
+                                                            .size(14.0),
+                                                        )
+                                                        .child("Refresh"),
+                                                ),
                                         );
                                     }
                                 }
@@ -547,10 +559,17 @@ impl Render for Shellumi {
                     let mut info_left = div().flex().items_center().gap_3();
                     info_left = info_left.child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(MacTheme::ACCENT_BLUE))
-                            .child(format!("👥 Session: {}", multiplayer.session_id)),
+                            .child(
+                                crate::ui::icon::Icon::new(crate::ui::icon::IconName::TeamMembers)
+                                    .size(16.0),
+                            )
+                            .child(format!("Session: {}", multiplayer.session_id)),
                     );
                     info_left = info_left.child(
                         div()
@@ -564,6 +583,9 @@ impl Render for Shellumi {
                     );
                     info_left = info_left.child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .px_2()
                             .py_0p5()
                             .rounded_sm()
@@ -579,7 +601,11 @@ impl Render for Shellumi {
                             } else {
                                 rgb(0x000000)
                             })
-                            .child(format!("✍️ Active Writer: @{controller}")),
+                            .child(
+                                crate::ui::icon::Icon::new(crate::ui::icon::IconName::Edit)
+                                    .size(12.0),
+                            )
+                            .child(format!("Active Writer: @{controller}")),
                     );
                     info_left = info_left.child(
                         div()
@@ -649,7 +675,19 @@ impl Render for Shellumi {
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.revoke_multiplayer_control(cx);
                                 }))
-                                .child("⛔ Revoke to Host"),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            crate::ui::icon::Icon::new(
+                                                crate::ui::icon::IconName::MemberRevoke,
+                                            )
+                                            .size(12.0),
+                                        )
+                                        .child("Revoke to Host"),
+                                ),
                         );
                     }
 
@@ -666,7 +704,19 @@ impl Render for Shellumi {
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.add_multiplayer_demo_participant(cx);
                             }))
-                            .child("+ Add Teammate"),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::InviteMember,
+                                        )
+                                        .size(12.0),
+                                    )
+                                    .child("Add Teammate"),
+                            ),
                     );
 
                     mp_actions = mp_actions.child(
@@ -682,7 +732,19 @@ impl Render for Shellumi {
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.toggle_multiplayer_on_active_tab(cx);
                             }))
-                            .child("✕ End"),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::Disconnect,
+                                        )
+                                        .size(12.0),
+                                    )
+                                    .child("End"),
+                            ),
                     );
 
                     mp_strip = mp_strip.child(mp_actions);
@@ -924,13 +986,22 @@ impl Render for Shellumi {
                         };
                         pane_info_group = pane_info_group.child(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
                                 .px_1p5()
                                 .py_0p5()
                                 .rounded_sm()
                                 .bg(rgb(MacTheme::INPUT_BG))
                                 .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .text_xs()
-                                .child(format!("📂 {}", display_cwd)),
+                                .child(
+                                    crate::ui::icon::Icon::new(
+                                        crate::ui::icon::IconName::LocalFiles,
+                                    )
+                                    .size(12.0),
+                                )
+                                .child(display_cwd),
                         );
                     }
 
@@ -959,13 +1030,22 @@ impl Render for Shellumi {
                         if let Some(prompt_match) = PasswordPromptDetector::detect(&current_line) {
                             pane_info_group = pane_info_group.child(
                                 div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(rgb(0x3a2817))
                                     .text_color(rgb(MacTheme::WARNING))
                                     .text_xs()
-                                    .child(format!("🔑 Prompt: {:?}", prompt_match.kind)),
+                                    .child(
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::Password,
+                                        )
+                                        .size(12.0),
+                                    )
+                                    .child(format!("Prompt: {:?}", prompt_match.kind)),
                             );
                         }
                     }

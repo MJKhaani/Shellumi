@@ -98,10 +98,14 @@ impl Shellumi {
                     cx,
                 );
             }))
+            .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::SendCtrlAltDel).size(14.0))
             .child("Ctrl+Alt+Del");
 
         let win_btn = div()
             .id(("rd-win", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
             .px_2()
             .py_1()
             .rounded_sm()
@@ -118,7 +122,8 @@ impl Shellumi {
                     cx,
                 );
             }))
-            .child("⊞ Win");
+            .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::SendWindowsKey).size(14.0))
+            .child("Win");
 
         let alt_tab_btn = div()
             .id(("rd-alttab", tab_idx))
@@ -137,6 +142,9 @@ impl Shellumi {
 
         let clip_btn = div()
             .id(("rd-clip", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
             .px_2()
             .py_1()
             .rounded_sm()
@@ -148,10 +156,16 @@ impl Shellumi {
             .on_click(cx.listener(move |app, _, _, cx| {
                 app.remote_desktop_sync_clipboard(tab_idx, cx);
             }))
-            .child("📋 Sync Clipboard");
+            .child(
+                crate::ui::icon::Icon::new(crate::ui::icon::IconName::RemoteClipboard).size(14.0),
+            )
+            .child("Sync Clipboard");
 
         let send_files_btn = div()
             .id(("rd-send-files", tab_idx))
+            .flex()
+            .items_center()
+            .gap_1()
             .px_2()
             .py_1()
             .rounded_sm()
@@ -163,7 +177,8 @@ impl Shellumi {
             .on_click(cx.listener(move |app, _, _, cx| {
                 app.remote_desktop_choose_and_send_files(tab_idx, cx);
             }))
-            .child("📁 Send Files…");
+            .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::SharedDrive).size(14.0))
+            .child("Send Files…");
 
         let (audio_icon, audio_label, audio_color) = if !state.enable_audio {
             ("🔇", "Audio Off", rgb(MacTheme::TEXT_TERTIARY))
@@ -527,7 +542,8 @@ impl Shellumi {
                 let w_even = canvas_w & !1;
                 app.remote_desktop_request_resize(tab_idx, w_even, canvas_h, cx);
             }))
-            .child("⤢ Match Viewport");
+            .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::DynamicResize).size(14.0))
+            .child("Match Viewport");
 
         let res_indicator = if state.display_control_ready {
             div()
@@ -673,7 +689,12 @@ impl Shellumi {
             .on_click(cx.listener(move |app, _, _, cx| {
                 app.toggle_session_inspector(tab_idx, cx);
             }))
-            .child("📊 Telemetry");
+            .child(
+                crate::ui::icon::Icon::new(crate::ui::icon::IconName::SessionTelemetry)
+                    .size(14.0)
+                    .active(self.inspector_coordinator.is_open()),
+            )
+            .child("Telemetry");
 
         let is_reconnecting = matches!(state.status, RemoteDesktopStatus::Reconnecting { .. });
         let disc_btn =
@@ -755,7 +776,12 @@ impl Shellumi {
                 app.rd_more_menu_open = false;
                 cx.notify();
             }))
-            .child("🖥️ Display ▾");
+            .child(
+                crate::ui::icon::Icon::new(crate::ui::icon::IconName::DisplayResolution)
+                    .size(14.0)
+                    .active(self.rd_display_menu_open),
+            )
+            .child("Display ▾");
 
         let keyboard_menu_btn = div()
             .id(("rd-menu-keyboard-btn", tab_idx))
@@ -784,7 +810,12 @@ impl Shellumi {
                 app.rd_more_menu_open = false;
                 cx.notify();
             }))
-            .child("⌨️ Keyboard ▾");
+            .child(
+                crate::ui::icon::Icon::new(crate::ui::icon::IconName::RemoteKeyboard)
+                    .size(14.0)
+                    .active(self.rd_keyboard_menu_open),
+            )
+            .child("Keyboard ▾");
 
         let more_menu_btn = div()
             .id(("rd-menu-more-btn", tab_idx))
@@ -813,7 +844,12 @@ impl Shellumi {
                 app.rd_keyboard_menu_open = false;
                 cx.notify();
             }))
-            .child("⋯ More ▾");
+            .child(
+                crate::ui::icon::Icon::new(crate::ui::icon::IconName::More)
+                    .size(14.0)
+                    .active(self.rd_more_menu_open),
+            )
+            .child("More ▾");
 
         let display_menu_popover = if self.rd_display_menu_open {
             Some(
@@ -1134,7 +1170,13 @@ impl Shellumi {
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .child("📊 Live Protocol Diagnostics"),
+                                    .child(
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::Diagnostics,
+                                        )
+                                        .size(14.0),
+                                    )
+                                    .child("Live Protocol Diagnostics"),
                             )
                             .child(
                                 div()
@@ -1149,7 +1191,12 @@ impl Shellumi {
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.remote_desktop_toggle_diagnostics(tab_idx, cx);
                                     }))
-                                    .child("✕"),
+                                    .child(
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::Disconnect,
+                                        )
+                                        .size(12.0),
+                                    ),
                             ),
                     )
                     .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
@@ -1766,7 +1813,19 @@ impl Shellumi {
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.remote_desktop_reconnect(tab_idx, cx);
                                             }))
-                                            .child("🔄 Reconnect Session"),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        crate::ui::icon::Icon::new(
+                                                            crate::ui::icon::IconName::Reconnect,
+                                                        )
+                                                        .size(14.0),
+                                                    )
+                                                    .child("Reconnect Session"),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -1785,7 +1844,19 @@ impl Shellumi {
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.remote_desktop_edit_credentials(tab_idx, cx);
                                             }))
-                                            .child("⚙️ Edit Credentials"),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        crate::ui::icon::Icon::new(
+                                                            crate::ui::icon::IconName::Edit,
+                                                        )
+                                                        .size(14.0),
+                                                    )
+                                                    .child("Edit Credentials"),
+                                            ),
                                     ),
                             ),
                     )

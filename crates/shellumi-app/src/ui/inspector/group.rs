@@ -7,6 +7,7 @@ use crate::theme::{
 use crate::ui::components::button::{AppButton, ButtonVariant};
 use crate::ui::components::form::{inline_notice, simple_field, simple_section};
 use crate::ui::components::inspector_shell::InspectorShell;
+use crate::ui::icon::{Icon, IconName};
 use crate::ui::inspector::coordinator::{InspectorMode, InspectorTarget};
 use crate::ui::layout;
 use crate::{SavedHost, Shellumi};
@@ -192,10 +193,13 @@ impl Shellumi {
                 let h_id = host.id;
                 let h_name = host.name.clone();
                 let proto_icon = match host.protocol() {
-                    crate::ConnectionProtocol::Ssh => "🖧",
-                    crate::ConnectionProtocol::Rdp => "🪟",
-                    crate::ConnectionProtocol::Vnc => "🖥️",
-                    _ => ">_",
+                    crate::ConnectionProtocol::Ssh => IconName::Ssh,
+                    crate::ConnectionProtocol::Rdp => IconName::Rdp,
+                    crate::ConnectionProtocol::Vnc => IconName::Vnc,
+                    crate::ConnectionProtocol::Mosh => IconName::Mosh,
+                    crate::ConnectionProtocol::Serial => IconName::Serial,
+                    crate::ConnectionProtocol::Telnet => IconName::Terminal,
+                    crate::ConnectionProtocol::Local => IconName::LocalTerminal,
                 };
 
                 host_list = host_list.child(
@@ -221,7 +225,7 @@ impl Shellumi {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(div().text_sm().child(proto_icon))
+                                .child(Icon::new(proto_icon).size(16.0))
                                 .child(
                                     div()
                                         .text_xs()

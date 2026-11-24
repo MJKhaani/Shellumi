@@ -659,16 +659,18 @@ impl Shellumi {
                         let remote_vault_uuid = uuid::Uuid::parse_str(server_vault_id.as_str())
                             .map_err(|e| format!("Invalid remote vault UUID: {e}"))?;
 
-                        // Revoke member on remote server if user identifier is valid UUID
-                        if let Ok(user_uuid) = uuid::Uuid::parse_str(&member.user_id) {
-                            client
-                                .remove_member(remote_vault_uuid, user_uuid)
-                                .map_err(|e| format!("Server rejected member revocation: {e}"))?;
-                        } else if let Ok(member_uuid) = uuid::Uuid::parse_str(&member.id) {
-                            client
-                                .remove_member(remote_vault_uuid, member_uuid)
-                                .map_err(|e| format!("Server rejected member revocation: {e}"))?;
-                        }
+                        let user_uuid = uuid::Uuid::parse_str(&member.user_id)
+                            .or_else(|_| uuid::Uuid::parse_str(&member.id))
+                            .map_err(|_| {
+                                format!(
+                                    "Cannot revoke remote member: user identifier '{}' (id '{}') is not a valid server UUID",
+                                    member.user_id, member.id
+                                )
+                            })?;
+
+                        client
+                            .remove_member(remote_vault_uuid, user_uuid)
+                            .map_err(|e| format!("Server rejected member revocation: {e}"))?;
 
                         let vault_id_obj = shellumi_core::VaultId::new(&active_vault_id_task)
                             .map_err(|e| format!("Invalid vault ID: {e}"))?;

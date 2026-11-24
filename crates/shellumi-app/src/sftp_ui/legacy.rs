@@ -1,5 +1,6 @@
 //! SFTP legacy UI.
 use super::*;
+use crate::ui::icon::{Icon, IconName};
 
 impl Shellumi {
     pub(crate) fn render_sftp_dual_pane(
@@ -49,7 +50,9 @@ impl Shellumi {
             .text_xs()
             .text_color(rgb(MacTheme::TEXT_SECONDARY))
             .flex_wrap();
-        local_crumbs_div = local_crumbs_div.child("💻 Local: ");
+        local_crumbs_div = local_crumbs_div
+            .child(Icon::new(IconName::Hosts).size(13.0))
+            .child(" Local: ");
         for (i, (name, path)) in local_crumbs.into_iter().enumerate() {
             let p_clone = path.clone();
             local_crumbs_div = local_crumbs_div.child(
@@ -86,10 +89,10 @@ impl Shellumi {
                 let is_selected = state.selected_local.as_deref() == Some(&entry.name);
                 let name_clone = entry.name.clone();
                 let is_dir = entry.kind.is_dir();
-                let icon = match entry.kind {
-                    FileKind::Directory => "📁 ",
-                    FileKind::Symlink { .. } => "🔗 ",
-                    _ => "📄 ",
+                let icon_name = match entry.kind {
+                    FileKind::Directory => IconName::LocalFiles,
+                    FileKind::Symlink { .. } => IconName::JumpHost,
+                    _ => IconName::RemoteFiles,
                 };
 
                 let row_base = div()
@@ -140,7 +143,7 @@ impl Shellumi {
                             .items_center()
                             .gap_1()
                             .flex_1()
-                            .child(icon)
+                            .child(Icon::new(icon_name).size(13.0))
                             .child(name_clone),
                     )
                     .child(
@@ -308,7 +311,9 @@ impl Shellumi {
             .text_xs()
             .text_color(rgb(MacTheme::TEXT_SECONDARY))
             .flex_wrap();
-        remote_crumbs_div = remote_crumbs_div.child(format!("🌐 Remote ({}): ", state.host_name));
+        remote_crumbs_div = remote_crumbs_div
+            .child(Icon::new(IconName::KnownHosts).size(13.0))
+            .child(format!(" Remote ({}): ", state.host_name));
         for (i, (name, path)) in remote_crumbs.into_iter().enumerate() {
             let p_clone = path.clone();
             remote_crumbs_div = remote_crumbs_div.child(
@@ -353,10 +358,10 @@ impl Shellumi {
                 let is_selected = state.selected_remote.as_deref() == Some(&entry.name);
                 let name_clone = entry.name.clone();
                 let is_dir = entry.kind.is_dir();
-                let icon = match entry.kind {
-                    FileKind::Directory => "📁 ",
-                    FileKind::Symlink { .. } => "🔗 ",
-                    _ => "📄 ",
+                let icon_name = match entry.kind {
+                    FileKind::Directory => IconName::LocalFiles,
+                    FileKind::Symlink { .. } => IconName::JumpHost,
+                    _ => IconName::RemoteFiles,
                 };
 
                 let row_base = div()
@@ -407,7 +412,7 @@ impl Shellumi {
                             .items_center()
                             .gap_1()
                             .flex_1()
-                            .child(icon)
+                            .child(Icon::new(icon_name).size(13.0))
                             .child(name_clone),
                     )
                     .child(

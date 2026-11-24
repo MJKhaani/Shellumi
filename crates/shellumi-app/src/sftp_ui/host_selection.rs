@@ -1,5 +1,6 @@
 //! SFTP host selection rendering.
 use super::*;
+use crate::ui::icon::{Icon, IconName};
 
 impl Shellumi {
     pub(crate) fn render_sftp_connect_to_host(
@@ -31,7 +32,9 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().text_2xl().child("📁").into_any_element()
+                        Icon::new(IconName::LocalFiles)
+                            .size(30.0)
+                            .into_any_element()
                     }),
             )
             .child(
@@ -176,7 +179,7 @@ impl Shellumi {
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
-                            div().child("🖧").into_any_element()
+                            Icon::new(IconName::Hosts).size(16.0).into_any_element()
                         },
                     )
                     .child("Local"),
@@ -208,11 +211,7 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                            .child("🔍")
-                            .into_any_element()
+                        Icon::new(IconName::Search).size(16.0).into_any_element()
                     })
                     .child(
                         div()
@@ -239,7 +238,7 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().text_xs().child("🏷").into_any_element()
+                        Icon::new(IconName::Tag).size(16.0).into_any_element()
                     }),
             )
             .child(
@@ -261,7 +260,9 @@ impl Shellumi {
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
-                            div().text_xs().child("📅").into_any_element()
+                            Icon::new(IconName::CalendarSort)
+                                .size(16.0)
+                                .into_any_element()
                         },
                     ),
             );
@@ -340,7 +341,7 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div().text_sm().child("📁").into_any_element()
+                                    Icon::new(IconName::Groups).size(18.0).into_any_element()
                                 }),
                         )
                         .child(
@@ -440,15 +441,13 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div()
-                                        .text_sm()
-                                        .text_color(if is_ssh {
-                                            rgb(0xfb923c)
-                                        } else {
-                                            rgb(0x94a3b8)
-                                        })
-                                        .child("🖥")
-                                        .into_any_element()
+                                    Icon::new(if is_ssh {
+                                        IconName::Ssh
+                                    } else {
+                                        IconName::Terminal
+                                    })
+                                    .size(18.0)
+                                    .into_any_element()
                                 }),
                         )
                         .child(

@@ -129,7 +129,9 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().text_xs().child("🔍").into_any_element()
+                                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Search)
+                                            .size(18.0)
+                                            .into_any_element()
                                     },
                                 ),
                         )
@@ -160,7 +162,9 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().text_xs().child("⊞").into_any_element()
+                                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::GridView)
+                                            .size(18.0)
+                                            .into_any_element()
                                     },
                                 ),
                         )
@@ -194,7 +198,9 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().text_xs().child("📅").into_any_element()
+                                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::CalendarSort)
+                                            .size(18.0)
+                                            .into_any_element()
                                     },
                                 ),
                         ),
@@ -250,7 +256,11 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().child("🔑").into_any_element()
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::PublicKey,
+                                        )
+                                        .size(36.0)
+                                        .into_any_element()
                                     },
                                 ),
                         )
@@ -335,7 +345,11 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().child("🪪").into_any_element()
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::IdentityCard,
+                                        )
+                                        .size(36.0)
+                                        .into_any_element()
                                     },
                                 ),
                         )
@@ -381,7 +395,9 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().child("✏️").into_any_element()
+                                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Edit)
+                                            .size(14.0)
+                                            .into_any_element()
                                     },
                                 )
                                 .child("Edit"),
@@ -536,7 +552,11 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().text_xs().child("🔍").into_any_element()
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::Search,
+                                        )
+                                        .size(18.0)
+                                        .into_any_element()
                                     },
                                 ),
                         )
@@ -567,7 +587,11 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().text_xs().child("⊞").into_any_element()
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::GridView,
+                                        )
+                                        .size(18.0)
+                                        .into_any_element()
                                     },
                                 ),
                         )
@@ -601,7 +625,11 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().text_xs().child("📅").into_any_element()
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::CalendarSort,
+                                        )
+                                        .size(18.0)
+                                        .into_any_element()
                                     },
                                 ),
                         ),
@@ -645,7 +673,11 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().child("🛡").into_any_element()
+                                        crate::ui::icon::Icon::new(
+                                            crate::ui::icon::IconName::Fingerprint,
+                                        )
+                                        .size(36.0)
+                                        .into_any_element()
                                     },
                                 ),
                         )

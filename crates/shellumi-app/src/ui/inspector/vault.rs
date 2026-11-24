@@ -731,13 +731,38 @@ impl Shellumi {
                                 std::path::Path::new(&db_path),
                                 vid.as_str(),
                             );
-                            let original_manifest_bytes = if manifest_path.exists() {
-                                Some(std::fs::read(&manifest_path).map_err(|e| {
+                            let rotation_journal_path =
+                                manifest_path.with_extension("rotation_journal.json");
+
+                            let original_manifest_backup = if manifest_path.exists() {
+                                Some(std::fs::read_to_string(&manifest_path).map_err(|e| {
                                     format!("Failed to read manifest for backup: {e}")
                                 })?)
                             } else {
                                 None
                             };
+
+                            let original_registry_envelope = reg_store
+                                .get_vault_recovery_envelope(vid.as_str())
+                                .await
+                                .unwrap_or(None);
+
+                            let mut rotation_journal = data_path::PasswordRotationJournal {
+                                journal_version: 1,
+                                vault_id: vid.as_str().to_string(),
+                                stage: data_path::PasswordRotationStage::Initiated,
+                                original_manifest_backup: original_manifest_backup.clone(),
+                                original_registry_envelope: original_registry_envelope.clone(),
+                                original_target_db_envelope: None,
+                                updated_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            };
+                            data_path::write_rotation_journal(
+                                &rotation_journal_path,
+                                &rotation_journal,
+                            )?;
 
                             if manifest_path.exists() {
                                 let mut manifest = VaultManifest::load_from_path(&manifest_path)
@@ -748,9 +773,16 @@ impl Shellumi {
                                     .map_err(|e| {
                                         format!("Failed to update primary envelope revision: {e}")
                                     })?;
-                                manifest.save_to_path(&manifest_path).map_err(|e| {
-                                    format!("Failed to save rotated manifest atomically: {e}")
-                                })?;
+                                let serialized = serde_json::to_string_pretty(&manifest)
+                                    .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
+                                data_path::write_durable_file(&manifest_path, &serialized)?;
+
+                                rotation_journal.stage =
+                                    data_path::PasswordRotationStage::ManifestSaved;
+                                let _ = data_path::write_rotation_journal(
+                                    &rotation_journal_path,
+                                    &rotation_journal,
+                                );
                             }
 
                             let env_json = serde_json::to_string(&new_primary)
@@ -769,18 +801,33 @@ impl Shellumi {
                                                 .save_vault_recovery_envelope(vid.as_str(), &env_json)
                                                 .await
                                             {
-                                                if let Some(bytes) = &original_manifest_bytes {
-                                                    let _ = std::fs::write(&manifest_path, bytes);
+                                                if let Some(ref bytes) = original_manifest_backup {
+                                                    let _ = data_path::write_durable_file(
+                                                        &manifest_path,
+                                                        bytes,
+                                                    );
                                                 }
+                                                let _ =
+                                                    std::fs::remove_file(&rotation_journal_path);
                                                 return Err(format!(
                                                     "Failed to persist recovery envelope in target vault: {e}"
                                                 ));
                                             }
+                                            rotation_journal.stage =
+                                                data_path::PasswordRotationStage::TargetDbUpdated;
+                                            let _ = data_path::write_rotation_journal(
+                                                &rotation_journal_path,
+                                                &rotation_journal,
+                                            );
                                         }
                                         Err(e) => {
-                                            if let Some(bytes) = &original_manifest_bytes {
-                                                let _ = std::fs::write(&manifest_path, bytes);
+                                            if let Some(ref bytes) = original_manifest_backup {
+                                                let _ = data_path::write_durable_file(
+                                                    &manifest_path,
+                                                    bytes,
+                                                );
                                             }
+                                            let _ = std::fs::remove_file(&rotation_journal_path);
                                             return Err(format!(
                                                 "Failed to open target database for envelope update: {e}"
                                             ));
@@ -793,21 +840,77 @@ impl Shellumi {
                                 .save_vault_recovery_envelope(vid.as_str(), &env_json)
                                 .await
                             {
-                                if let Some(bytes) = &original_manifest_bytes {
-                                    let _ = std::fs::write(&manifest_path, bytes);
+                                if let Some(ref bytes) = original_manifest_backup {
+                                    let _ = data_path::write_durable_file(&manifest_path, bytes);
                                 }
+                                let _ = std::fs::remove_file(&rotation_journal_path);
                                 return Err(format!(
                                     "Failed to persist recovery envelope in registry: {e}"
                                 ));
                             }
+                            rotation_journal.stage =
+                                data_path::PasswordRotationStage::RegistryUpdated;
+                            let _ = data_path::write_rotation_journal(
+                                &rotation_journal_path,
+                                &rotation_journal,
+                            );
 
-                            // Synchronize OS credential store
+                            // Synchronize OS credential store and strictly verify outcome
                             let cred_store = shellumi_core::default_credential_store();
-                            let _ = cred_store.set_secret(
+                            if let Err(e) = cred_store.set_secret(
                                 "shellumi",
                                 &format!("vault_passphrase_{}", vid.as_str()),
                                 &passphrase,
+                            ) {
+                                if let Some(ref bytes) = original_manifest_backup {
+                                    let _ = data_path::write_durable_file(&manifest_path, bytes);
+                                }
+                                if let Some(ref orig_reg) = original_registry_envelope {
+                                    let _ = reg_store
+                                        .save_vault_recovery_envelope(vid.as_str(), orig_reg)
+                                        .await;
+                                }
+                                let _ = std::fs::remove_file(&rotation_journal_path);
+                                return Err(format!(
+                                    "Failed to update OS credential store with new vault passphrase: {e}"
+                                ));
+                            }
+                            rotation_journal.stage =
+                                data_path::PasswordRotationStage::CredentialStoreUpdated;
+                            let _ = data_path::write_rotation_journal(
+                                &rotation_journal_path,
+                                &rotation_journal,
                             );
+
+                            // Post-rotation validation: verify unlocked DEK matches
+                            if manifest_path.exists() {
+                                let manifest = VaultManifest::load_from_path(&manifest_path)
+                                    .map_err(|e| {
+                                        format!(
+                                            "Failed to load rotated manifest for validation: {e}"
+                                        )
+                                    })?;
+                                let unlocked = manifest.unlock(&passphrase).map_err(|e| {
+                                    format!(
+                                        "Validation failed: new passphrase cannot unlock rotated manifest: {e}"
+                                    )
+                                })?;
+                                if unlocked.expose_bytes() != key.expose_bytes() {
+                                    return Err(
+                                        "Post-rotation validation failed: unlocked key does not match DEK"
+                                            .into(),
+                                    );
+                                }
+                            }
+                            rotation_journal.stage = data_path::PasswordRotationStage::Verified;
+                            let _ = data_path::write_rotation_journal(
+                                &rotation_journal_path,
+                                &rotation_journal,
+                            );
+
+                            // Complete rotation and cleanup temporary journal
+                            rotation_journal.stage = data_path::PasswordRotationStage::Completed;
+                            let _ = std::fs::remove_file(&rotation_journal_path);
                         }
                     }
 
@@ -1044,28 +1147,35 @@ impl Shellumi {
                         format!("Vault context '{}' was not found in registry", id_string_task)
                     })?;
 
-                // Check pending unsynced changes if key is loaded
+                // Fail-closed check: verify pending unsynced changes before deletion
                 let target_db = data_path::resolve_vault_db_file(
                     std::path::Path::new(&db_path),
                     &id_string_task,
                 );
                 if target_db.exists() {
-                    if let Some(k) = &target_key {
-                        if let Ok(store) = HostStore::open_with_key(
-                            target_db.to_str().unwrap(),
-                            Some(k),
-                        ).await {
-                            if let Ok(mutations) =
-                                store.get_pending_mutations(&id_string_task).await
-                            {
-                                if !mutations.is_empty() {
-                                    return Err(
-                                        "Vault has pending unsynced local mutations. Please sync or export before deleting."
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                        }
+                    let Some(k) = &target_key else {
+                        return Err(
+                            "Cannot delete encrypted vault while it is locked. Please unlock the vault first to verify pending mutations and safely decommission it."
+                                .to_string(),
+                        );
+                    };
+                    let target_db_str = target_db.to_str().ok_or_else(|| {
+                        "Target database path is not valid UTF-8".to_string()
+                    })?;
+                    let store = HostStore::open_with_key(target_db_str, Some(k))
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to open vault to verify pending mutations: {e}")
+                        })?;
+                    let mutations = store
+                        .get_pending_mutations(&id_string_task)
+                        .await
+                        .map_err(|e| format!("Failed to check pending mutations: {e}"))?;
+                    if !mutations.is_empty() {
+                        return Err(
+                            "Vault has pending unsynced local mutations. Please sync or export before deleting."
+                                .to_string(),
+                        );
                     }
                 }
 

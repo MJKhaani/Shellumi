@@ -44,7 +44,9 @@ impl Shellumi {
                 .child(gpui::img(p).size_full())
                 .into_any_element()
         } else {
-            div().text_lg().child("🔍").into_any_element()
+            crate::ui::icon::Icon::new(crate::ui::icon::IconName::Search)
+                .size(20.0)
+                .into_any_element()
         };
 
         let search_header = div()
@@ -83,7 +85,10 @@ impl Shellumi {
                     .child(gpui::img(p).size_full())
                     .into_any_element()
             } else {
-                div().text_2xl().child("🔍").into_any_element()
+                crate::ui::icon::Icon::new(crate::ui::icon::IconName::Search)
+                    .size(36.0)
+                    .disabled(true)
+                    .into_any_element()
             };
             let empty_view = div()
                 .p_8()

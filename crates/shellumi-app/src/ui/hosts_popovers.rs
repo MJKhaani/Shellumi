@@ -62,7 +62,12 @@ impl Shellumi {
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
-                                            div().child("▦").into_any_element()
+                                            crate::ui::icon::Icon::new(
+                                                crate::ui::icon::IconName::GridView,
+                                            )
+                                            .size(16.0)
+                                            .active(self.view_mode == HostViewMode::Grid)
+                                            .into_any_element()
                                         },
                                     )
                                     .child("Grid"),
@@ -112,7 +117,12 @@ impl Shellumi {
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
-                                            div().child("≡").into_any_element()
+                                            crate::ui::icon::Icon::new(
+                                                crate::ui::icon::IconName::ListView,
+                                            )
+                                            .size(16.0)
+                                            .active(self.view_mode == HostViewMode::List)
+                                            .into_any_element()
                                         },
                                     )
                                     .child("List"),
@@ -156,7 +166,9 @@ impl Shellumi {
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
-                            div().text_xl().child("🏷").into_any_element()
+                            crate::ui::icon::Icon::new(crate::ui::icon::IconName::Tags)
+                                .size(32.0)
+                                .into_any_element()
                         },
                     )
                     .child(
@@ -230,7 +242,9 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div().child("🏷").into_any_element()
+                                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Tags)
+                                            .size(16.0)
+                                            .into_any_element()
                                     })
                                     .child(
                                         div()
@@ -395,7 +409,12 @@ impl Shellumi {
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
-                                            div().child("📅").into_any_element()
+                                            crate::ui::icon::Icon::new(
+                                                crate::ui::icon::IconName::CalendarSort,
+                                            )
+                                            .size(16.0)
+                                            .active(self.sort_mode == HostSortMode::Newest)
+                                            .into_any_element()
                                         },
                                     )
                                     .child("Newest to oldest"),
@@ -445,7 +464,12 @@ impl Shellumi {
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
-                                            div().child("📅").into_any_element()
+                                            crate::ui::icon::Icon::new(
+                                                crate::ui::icon::IconName::CalendarSort,
+                                            )
+                                            .size(16.0)
+                                            .active(self.sort_mode == HostSortMode::Newest)
+                                            .into_any_element()
                                         },
                                     )
                                     .child("Oldest to newest"),
@@ -508,7 +532,11 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div().child("👤+").into_any_element()
+                                    crate::ui::icon::Icon::new(
+                                        crate::ui::icon::IconName::InviteMember,
+                                    )
+                                    .size(20.0)
+                                    .into_any_element()
                                 },
                             )
                             .child("Invite team members"),
@@ -534,7 +562,9 @@ impl Shellumi {
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
-                                div().child("👤").into_any_element()
+                                crate::ui::icon::Icon::new(crate::ui::icon::IconName::Profile)
+                                    .size(22.0)
+                                    .into_any_element()
                             })
                             .child(
                                 div()

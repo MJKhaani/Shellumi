@@ -64,7 +64,9 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().child("🖧").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Server)
+                            .size(16.0)
+                            .into_any_element()
                     })
                     .child(host_title),
             )
@@ -112,7 +114,9 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div().child("🔍").into_any_element()
+                                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::Search)
+                                        .size(16.0)
+                                        .into_any_element()
                                 },
                             )
                             .child("Filter"),
@@ -238,7 +242,9 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().text_xs().child("📁").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::LocalFiles)
+                            .size(14.0)
+                            .into_any_element()
                     })
                     .child(crumb.to_string()),
             );
@@ -415,7 +421,9 @@ impl Shellumi {
                                 .child(gpui::img(p.clone()).size_full())
                                 .into_any_element()
                         } else {
-                            div().text_xs().child("📁").into_any_element()
+                            crate::ui::icon::Icon::new(crate::ui::icon::IconName::LocalFiles)
+                                .size(14.0)
+                                .into_any_element()
                         })
                         .child(
                             div()
@@ -501,7 +509,14 @@ impl Shellumi {
                     } else {
                         rgb(MacTheme::TEXT_TERTIARY)
                     })
-                    .child(if is_dir { "📁" } else { "📄" })
+                    .child(
+                        crate::ui::icon::Icon::new(if is_dir {
+                            crate::ui::icon::IconName::LocalFiles
+                        } else {
+                            crate::ui::icon::IconName::RemoteFiles
+                        })
+                        .size(14.0),
+                    )
                     .into_any_element()
             };
 

@@ -188,6 +188,32 @@ pub(crate) fn is_safe_vault_id(vault_id: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum QuarantineStage {
+    Initiated,
+    WalShmStaged,
+    DatabaseStaged,
+    ManifestStaged,
+    Completed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct VaultQuarantineJournal {
+    pub journal_version: u32,
+    pub vault_id: String,
+    pub original_db_path: String,
+    pub original_manifest_path: Option<String>,
+    pub original_wal_path: Option<String>,
+    pub original_shm_path: Option<String>,
+    pub quarantined_db_path: Option<String>,
+    pub quarantined_manifest_path: Option<String>,
+    pub quarantined_wal_path: Option<String>,
+    pub quarantined_shm_path: Option<String>,
+    pub stage: QuarantineStage,
+    pub quarantined_at: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct VaultQuarantineRecord {
     pub vault_id: String,
@@ -195,6 +221,111 @@ pub(crate) struct VaultQuarantineRecord {
     pub original_manifest_path: Option<String>,
     pub quarantined_at: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum PasswordRotationStage {
+    Initiated,
+    ManifestSaved,
+    TargetDbUpdated,
+    RegistryUpdated,
+    CredentialStoreUpdated,
+    Verified,
+    Completed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PasswordRotationJournal {
+    pub journal_version: u32,
+    pub vault_id: String,
+    pub stage: PasswordRotationStage,
+    pub original_manifest_backup: Option<String>,
+    pub original_registry_envelope: Option<String>,
+    pub original_target_db_envelope: Option<String>,
+    pub updated_at: u64,
+}
+
+pub(crate) fn write_durable_file(path: &Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().as_simple()));
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("Failed to create durable file {}: {e}", tmp.display()))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("Failed to write durable file {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to fsync durable file {}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        format!(
+            "Failed to atomic rename durable file to {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn write_durable_journal(path: &Path, journal: &VaultQuarantineJournal) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(journal)
+        .map_err(|e| format!("Failed to serialize quarantine journal: {e}"))?;
+    write_durable_file(path, &json)
+}
+
+pub(crate) fn write_rotation_journal(
+    path: &Path,
+    journal: &PasswordRotationJournal,
+) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(journal)
+        .map_err(|e| format!("Failed to serialize rotation journal: {e}"))?;
+    write_durable_file(path, &json)
+}
+
+pub(crate) fn detect_and_recover_interrupted_rotation(
+    base_path: &Path,
+) -> Result<Vec<String>, String> {
+    let root = resolve_root_dir(base_path);
+    let manifests_dir = resolve_manifest_dir(base_path);
+    let vaults_dir = root.join("vaults");
+
+    let mut search_dirs = Vec::new();
+    if manifests_dir.exists() {
+        search_dirs.push(manifests_dir);
+    }
+    if vaults_dir.exists() && vaults_dir != root.join("vault_manifests") {
+        search_dirs.push(vaults_dir);
+    }
+
+    let mut recovered = Vec::new();
+    for dir in search_dirs {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.to_string_lossy().ends_with(".rotation_journal.json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(journal) = serde_json::from_str::<PasswordRotationJournal>(&content) {
+                        if journal.stage != PasswordRotationStage::Completed {
+                            tracing::warn!(
+                                vault_id = %journal.vault_id,
+                                stage = ?journal.stage,
+                                "Recovering interrupted password rotation"
+                            );
+                            if let Some(backup_content) = &journal.original_manifest_backup {
+                                let manifest_path =
+                                    resolve_manifest_file(base_path, &journal.vault_id);
+                                let _ = write_durable_file(&manifest_path, backup_content);
+                            }
+                            if !recovered.contains(&journal.vault_id) {
+                                recovered.push(journal.vault_id);
+                            }
+                        }
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+    Ok(recovered)
 }
 
 pub(crate) fn quarantine_vault_files(
@@ -211,22 +342,18 @@ pub(crate) fn quarantine_vault_files(
 
     let target_db = resolve_vault_db_file(base_path, vault_id);
     let target_manifest = resolve_manifest_file(base_path, vault_id);
+    let wal = PathBuf::from(format!("{}-wal", target_db.display()));
+    let shm = PathBuf::from(format!("{}-shm", target_db.display()));
 
     // Verify paths are not symlinks (prevent symlink redirection attacks)
-    if let Ok(meta) = std::fs::symlink_metadata(&target_db) {
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "Refusing to quarantine symlinked database file: {}",
-                target_db.display()
-            ));
-        }
-    }
-    if let Ok(meta) = std::fs::symlink_metadata(&target_manifest) {
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "Refusing to quarantine symlinked manifest file: {}",
-                target_manifest.display()
-            ));
+    for p in [&target_db, &target_manifest, &wal, &shm] {
+        if let Ok(meta) = std::fs::symlink_metadata(p) {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "Refusing to quarantine symlinked file: {}",
+                    p.display()
+                ));
+            }
         }
     }
 
@@ -243,9 +370,70 @@ pub(crate) fn quarantine_vault_files(
     std::fs::create_dir_all(&q_dir)
         .map_err(|e| format!("Failed to create quarantine vault folder: {e}"))?;
 
-    let mut moved_db = false;
-    let mut moved_manifest = false;
+    // Canonical path validation: verify q_dir stays within quarantine_root
+    if let (Ok(canon_root), Ok(canon_q)) = (quarantine_root.canonicalize(), q_dir.canonicalize()) {
+        if !canon_q.starts_with(&canon_root) {
+            return Err("Quarantine folder escapes quarantine root directory".into());
+        }
+    }
 
+    let journal_path = q_dir.join("journal.json");
+    let mut journal = VaultQuarantineJournal {
+        journal_version: 1,
+        vault_id: vault_id.to_string(),
+        original_db_path: target_db.to_string_lossy().to_string(),
+        original_manifest_path: if target_manifest.exists() {
+            Some(target_manifest.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        original_wal_path: if wal.exists() {
+            Some(wal.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        original_shm_path: if shm.exists() {
+            Some(shm.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        quarantined_db_path: None,
+        quarantined_manifest_path: None,
+        quarantined_wal_path: None,
+        quarantined_shm_path: None,
+        stage: QuarantineStage::Initiated,
+        quarantined_at: now_secs.to_string(),
+        reason: reason.to_string(),
+    };
+
+    // Stage 1: Persist durable operation journal with fsync BEFORE moving any files
+    write_durable_journal(&journal_path, &journal)?;
+
+    // Stage 2: Quarantine WAL / SHM files
+    if wal.exists() {
+        let q_wal = q_dir.join(format!("{vault_id}.db-wal"));
+        std::fs::rename(&wal, &q_wal)
+            .or_else(|_| {
+                std::fs::copy(&wal, &q_wal)?;
+                std::fs::remove_file(&wal)
+            })
+            .map_err(|e| format!("Failed to quarantine WAL file: {e}"))?;
+        journal.quarantined_wal_path = Some(q_wal.to_string_lossy().to_string());
+    }
+    if shm.exists() {
+        let q_shm = q_dir.join(format!("{vault_id}.db-shm"));
+        std::fs::rename(&shm, &q_shm)
+            .or_else(|_| {
+                std::fs::copy(&shm, &q_shm)?;
+                std::fs::remove_file(&shm)
+            })
+            .map_err(|e| format!("Failed to quarantine SHM file: {e}"))?;
+        journal.quarantined_shm_path = Some(q_shm.to_string_lossy().to_string());
+    }
+    journal.stage = QuarantineStage::WalShmStaged;
+    write_durable_journal(&journal_path, &journal)?;
+
+    // Stage 3: Quarantine database file
     let q_db = q_dir.join(format!("{vault_id}.db"));
     if target_db.exists() {
         std::fs::rename(&target_db, &q_db)
@@ -254,9 +442,12 @@ pub(crate) fn quarantine_vault_files(
                 std::fs::remove_file(&target_db)
             })
             .map_err(|e| format!("Failed to quarantine database file: {e}"))?;
-        moved_db = true;
+        journal.quarantined_db_path = Some(q_db.to_string_lossy().to_string());
     }
+    journal.stage = QuarantineStage::DatabaseStaged;
+    write_durable_journal(&journal_path, &journal)?;
 
+    // Stage 4: Quarantine manifest file
     let q_manifest = q_dir.join(format!("{vault_id}.manifest.json"));
     if target_manifest.exists() {
         std::fs::rename(&target_manifest, &q_manifest)
@@ -265,61 +456,83 @@ pub(crate) fn quarantine_vault_files(
                 std::fs::remove_file(&target_manifest)
             })
             .map_err(|e| format!("Failed to quarantine manifest file: {e}"))?;
-        moved_manifest = true;
+        journal.quarantined_manifest_path = Some(q_manifest.to_string_lossy().to_string());
     }
+    journal.stage = QuarantineStage::ManifestStaged;
+    write_durable_journal(&journal_path, &journal)?;
 
-    // Quarantine any SQLite WAL / SHM files
-    let wal = PathBuf::from(format!("{}-wal", target_db.display()));
-    if wal.exists() {
-        let q_wal = q_dir.join(format!("{vault_id}.db-wal"));
-        let _ = std::fs::rename(&wal, &q_wal);
-    }
-    let shm = PathBuf::from(format!("{}-shm", target_db.display()));
-    if shm.exists() {
-        let q_shm = q_dir.join(format!("{vault_id}.db-shm"));
-        let _ = std::fs::rename(&shm, &q_shm);
-    }
-
+    // Stage 5: Finalize metadata & mark Completed
     let record = VaultQuarantineRecord {
         vault_id: vault_id.to_string(),
         original_db_path: target_db.to_string_lossy().to_string(),
-        original_manifest_path: if moved_manifest {
-            Some(target_manifest.to_string_lossy().to_string())
-        } else {
-            None
-        },
+        original_manifest_path: journal.original_manifest_path.clone(),
         quarantined_at: now_secs.to_string(),
         reason: reason.to_string(),
     };
     let meta_path = q_dir.join("quarantine_meta.json");
     let record_json = serde_json::to_string_pretty(&record)
         .map_err(|e| format!("Failed to serialize quarantine metadata: {e}"))?;
-    std::fs::write(&meta_path, record_json)
-        .map_err(|e| format!("Failed to write quarantine metadata: {e}"))?;
+    write_durable_file(&meta_path, &record_json)?;
+
+    journal.stage = QuarantineStage::Completed;
+    write_durable_journal(&journal_path, &journal)?;
 
     tracing::info!(
         vault_id = %vault_id,
         quarantine_dir = %q_dir.display(),
-        moved_db = moved_db,
-        moved_manifest = moved_manifest,
-        "Quarantined vault files securely"
+        "Quarantined vault files securely with durable journal"
     );
 
     Ok(q_dir)
 }
 
 pub(crate) fn restore_quarantined_vault(q_dir: &Path) -> Result<(), String> {
+    let journal_path = q_dir.join("journal.json");
     let meta_path = q_dir.join("quarantine_meta.json");
-    if !meta_path.exists() {
-        return Err("Quarantine metadata file not found".into());
+
+    let record = if journal_path.exists() {
+        let content = std::fs::read_to_string(&journal_path)
+            .map_err(|e| format!("Failed to read quarantine journal: {e}"))?;
+        let journal: VaultQuarantineJournal = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse quarantine journal: {e}"))?;
+        VaultQuarantineRecord {
+            vault_id: journal.vault_id,
+            original_db_path: journal.original_db_path,
+            original_manifest_path: journal.original_manifest_path,
+            quarantined_at: journal.quarantined_at,
+            reason: journal.reason,
+        }
+    } else if meta_path.exists() {
+        let content = std::fs::read_to_string(&meta_path)
+            .map_err(|e| format!("Failed to read quarantine metadata: {e}"))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse quarantine metadata: {e}"))?
+    } else {
+        return Err("Neither quarantine journal nor metadata file found".into());
+    };
+
+    let target_db = PathBuf::from(&record.original_db_path);
+    let target_manifest = record.original_manifest_path.as_ref().map(PathBuf::from);
+
+    // Overwrite prevention: refuse to overwrite existing files!
+    if target_db.exists() {
+        return Err(format!(
+            "Cannot restore vault '{}': destination database already exists at '{}'",
+            record.vault_id,
+            target_db.display()
+        ));
     }
-    let record_str = std::fs::read_to_string(&meta_path)
-        .map_err(|e| format!("Failed to read quarantine metadata: {e}"))?;
-    let record: VaultQuarantineRecord = serde_json::from_str(&record_str)
-        .map_err(|e| format!("Failed to parse quarantine metadata: {e}"))?;
+    if let Some(ref tm) = target_manifest {
+        if tm.exists() {
+            return Err(format!(
+                "Cannot restore vault '{}': destination manifest already exists at '{}'",
+                record.vault_id,
+                tm.display()
+            ));
+        }
+    }
 
     let q_db = q_dir.join(format!("{}.db", record.vault_id));
-    let target_db = PathBuf::from(&record.original_db_path);
     if q_db.exists() {
         if let Some(parent) = target_db.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -332,9 +545,8 @@ pub(crate) fn restore_quarantined_vault(q_dir: &Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to restore database from quarantine: {e}"))?;
     }
 
-    if let Some(orig_manifest) = record.original_manifest_path {
+    if let Some(target_manifest) = target_manifest {
         let q_manifest = q_dir.join(format!("{}.manifest.json", record.vault_id));
-        let target_manifest = PathBuf::from(orig_manifest);
         if q_manifest.exists() {
             if let Some(parent) = target_manifest.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -348,13 +560,107 @@ pub(crate) fn restore_quarantined_vault(q_dir: &Path) -> Result<(), String> {
         }
     }
 
+    // Restore WAL / SHM if present
+    let q_wal = q_dir.join(format!("{}.db-wal", record.vault_id));
+    let orig_wal = PathBuf::from(format!("{}-wal", target_db.display()));
+    if q_wal.exists() {
+        let _ = std::fs::rename(&q_wal, &orig_wal);
+    }
+    let q_shm = q_dir.join(format!("{}.db-shm", record.vault_id));
+    let orig_shm = PathBuf::from(format!("{}-shm", target_db.display()));
+    if q_shm.exists() {
+        let _ = std::fs::rename(&q_shm, &orig_shm);
+    }
+
     // Remove quarantine folder
     let _ = std::fs::remove_dir_all(q_dir);
     tracing::info!(
         vault_id = %record.vault_id,
-        "Restored quarantined vault files"
+        "Restored quarantined vault files safely"
     );
     Ok(())
+}
+
+pub(crate) fn detect_and_recover_interrupted_quarantine(
+    base_path: &Path,
+) -> Result<Vec<String>, String> {
+    let q_root = resolve_quarantine_dir(base_path);
+    if !q_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut recovered = Vec::new();
+    let entries =
+        std::fs::read_dir(&q_root).map_err(|e| format!("Failed to read quarantine root: {e}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let journal_file = path.join("journal.json");
+        if !journal_file.exists() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&journal_file) {
+            if let Ok(mut journal) = serde_json::from_str::<VaultQuarantineJournal>(&content) {
+                if journal.stage != QuarantineStage::Completed {
+                    tracing::warn!(
+                        vault_id = %journal.vault_id,
+                        stage = ?journal.stage,
+                        dir = %path.display(),
+                        "Recovering interrupted vault quarantine"
+                    );
+                    match journal.stage {
+                        QuarantineStage::Initiated => {
+                            let _ = std::fs::remove_dir_all(&path);
+                        }
+                        QuarantineStage::WalShmStaged => {
+                            if let (Some(q_wal), Some(orig_wal)) =
+                                (&journal.quarantined_wal_path, &journal.original_wal_path)
+                            {
+                                let _ = std::fs::rename(q_wal, orig_wal);
+                            }
+                            if let (Some(q_shm), Some(orig_shm)) =
+                                (&journal.quarantined_shm_path, &journal.original_shm_path)
+                            {
+                                let _ = std::fs::rename(q_shm, orig_shm);
+                            }
+                            let _ = std::fs::remove_dir_all(&path);
+                        }
+                        QuarantineStage::DatabaseStaged | QuarantineStage::ManifestStaged => {
+                            if let Some(orig_manifest) = &journal.original_manifest_path {
+                                let orig_m = Path::new(orig_manifest);
+                                let q_m = path.join(format!("{}.manifest.json", journal.vault_id));
+                                if orig_m.exists() && !q_m.exists() {
+                                    let _ = std::fs::rename(orig_m, &q_m);
+                                    journal.quarantined_manifest_path =
+                                        Some(q_m.to_string_lossy().to_string());
+                                }
+                            }
+                            let record = VaultQuarantineRecord {
+                                vault_id: journal.vault_id.clone(),
+                                original_db_path: journal.original_db_path.clone(),
+                                original_manifest_path: journal.original_manifest_path.clone(),
+                                quarantined_at: journal.quarantined_at.clone(),
+                                reason: format!(
+                                    "{} (recovered after interrupted operation)",
+                                    journal.reason
+                                ),
+                            };
+                            if let Ok(meta_json) = serde_json::to_string_pretty(&record) {
+                                let _ =
+                                    std::fs::write(path.join("quarantine_meta.json"), meta_json);
+                            }
+                            journal.stage = QuarantineStage::Completed;
+                            let _ = write_durable_journal(&journal_file, &journal);
+                        }
+                        QuarantineStage::Completed => {}
+                    }
+                    recovered.push(journal.vault_id);
+                }
+            }
+        }
+    }
+    Ok(recovered)
 }
 
 #[allow(dead_code)]

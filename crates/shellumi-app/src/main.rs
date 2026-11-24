@@ -292,7 +292,7 @@ impl Render for DragPreviewView {
             .flex()
             .items_center()
             .gap_1p5()
-            .child("📄")
+            .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::Snippets).size(16.0))
             .child(self.label.clone())
     }
 }
@@ -1386,74 +1386,7 @@ pub(crate) fn resolve_icon_path(
     is_active: bool,
     size_px: u32,
 ) -> Option<std::path::PathBuf> {
-    // Corrected asset states: "regular" folder is normal state (borderless), "hover" folder is active/hover state (dark rounded tile)
-    let state = if is_active { "hover" } else { "regular" };
-    let alt_state = if is_active { "regular" } else { "hover" };
-    let size_folder = match size_px {
-        s if s <= 32 => "32",
-        s if s <= 48 => "48",
-        s if s <= 64 => "64",
-        s if s <= 128 => "128",
-        _ => "256",
-    };
-    let filename = format!("{name}.png");
-
-    // 1. Check relative to current executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate_dirs = [
-                parent.join("../Resources/icon_pack/icons"),
-                parent.join("resources/icon_pack/icons"),
-                parent.join("icon_pack/icons"),
-                parent.join("../resources/icon_pack/icons"),
-                parent.join("../../resources/icon_pack/icons"),
-            ];
-            for dir in &candidate_dirs {
-                let candidate = dir.join(size_folder).join(state).join(&filename);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-                let candidate_alt = dir.join(size_folder).join(alt_state).join(&filename);
-                if candidate_alt.exists() {
-                    return Some(candidate_alt);
-                }
-            }
-        }
-    }
-
-    // 2. Check relative to current working directory
-    let local_dirs = [
-        std::path::PathBuf::from("resources/icon_pack/icons"),
-        std::path::PathBuf::from("icon_pack/icons"),
-    ];
-    for dir in &local_dirs {
-        let local = dir.join(size_folder).join(state).join(&filename);
-        if local.exists() {
-            return Some(local);
-        }
-        let local_alt = dir.join(size_folder).join(alt_state).join(&filename);
-        if local_alt.exists() {
-            return Some(local_alt);
-        }
-    }
-
-    // 3. Embedded fallback: ensures 100% icon availability even on standalone binary distributions
-    if let Some(bytes) = embedded_icons::get_embedded_icon(name, is_active) {
-        let cache_dir = std::env::temp_dir()
-            .join("shellumi-icons-cache")
-            .join(size_folder)
-            .join(state);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        let cache_file = cache_dir.join(&filename);
-        if !cache_file.exists() {
-            let _ = std::fs::write(&cache_file, bytes);
-        }
-        if cache_file.exists() {
-            return Some(cache_file);
-        }
-    }
-
-    None
+    crate::ui::icon::resolve_icon_path(name, is_active, size_px)
 }
 
 pub(crate) fn resolve_folder_icon_path(name: &str) -> Option<std::path::PathBuf> {
@@ -1565,8 +1498,30 @@ pub(crate) fn resolve_host_os_icon(host: &SavedHost) -> &'static str {
     let combined = format!("{} {}", lower_name, tags_str);
     if combined.contains("ubuntu") {
         "os_ubuntu"
+    } else if combined.contains("debian") {
+        "os_debian"
     } else if combined.contains("arch") {
         "os_arch"
+    } else if combined.contains("fedora") {
+        "os_fedora"
+    } else if combined.contains("centos") {
+        "os_centos"
+    } else if combined.contains("rhel") || combined.contains("redhat") {
+        "os_rhel"
+    } else if combined.contains("rocky") {
+        "os_rocky"
+    } else if combined.contains("almalinux") || combined.contains("alma") {
+        "os_almalinux"
+    } else if combined.contains("alpine") {
+        "os_alpine"
+    } else if combined.contains("opensuse") || combined.contains("suse") {
+        "os_opensuse"
+    } else if combined.contains("kali") {
+        "os_kali"
+    } else if combined.contains("windows server") || combined.contains("winserver") {
+        "os_windows_server"
+    } else if combined.contains("windows") || combined.contains("win") {
+        "os_windows"
     } else if combined.contains("macos")
         || combined.contains("darwin")
         || combined.contains("apple")
@@ -1579,14 +1534,11 @@ pub(crate) fn resolve_host_os_icon(host: &SavedHost) -> &'static str {
         "os_netbsd"
     } else if combined.contains("openbsd") {
         "os_openbsd"
-    } else if combined.contains("windows") || combined.contains("win") {
-        "os_windows"
-    } else if combined.contains("linux")
-        || combined.contains("debian")
-        || combined.contains("centos")
-        || combined.contains("fedora")
-        || combined.contains("rhel")
-    {
+    } else if combined.contains("android") {
+        "os_android"
+    } else if combined.contains("ios") {
+        "os_ios"
+    } else if combined.contains("linux") {
         "os_linux"
     } else {
         "server"
@@ -1724,7 +1676,7 @@ impl Shellumi {
             ("Keychain", "keychain", "🔑"),
             ("Port Forwarding", "port_forwarding", "⇄"),
             ("Snippets", "snippets", "{ }"),
-            ("Known Hosts", "fingerprint", "◉"),
+            ("Known Hosts", "known_hosts", "◉"),
             ("Session Logs", "log", "⏱"),
         ];
 
@@ -1742,14 +1694,11 @@ impl Shellumi {
                     .w(px(32.0))
                     .h(px(32.0))
                     .rounded_md()
-                    .bg(rgb(MacTheme::BADGE_NAVY))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgb(MacTheme::ACCENT_BLUE))
-                    .font_weight(FontWeight::BOLD)
-                    .child("🐚")
+                    .overflow_hidden()
+                    .child(
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::ShellumiLogo)
+                            .size(32.0),
+                    )
             };
 
             let mut rail_links = div()
@@ -1851,7 +1800,10 @@ impl Shellumi {
                                     .child(gpui::img(icon_path).size_full())
                                     .into_any_element()
                             } else {
-                                div().child("⚙").into_any_element()
+                                crate::ui::icon::Icon::new(crate::ui::icon::IconName::Settings)
+                                    .size(22.0)
+                                    .active(self.page == Some("Settings"))
+                                    .into_any_element()
                             },
                         ),
                 )
@@ -1889,14 +1841,10 @@ impl Shellumi {
                 .w(px(28.0))
                 .h(px(28.0))
                 .rounded_md()
-                .bg(rgb(MacTheme::BADGE_NAVY))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(rgb(MacTheme::ACCENT_BLUE))
-                .font_weight(FontWeight::BOLD)
-                .child("🐚")
+                .overflow_hidden()
+                .child(
+                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::ShellumiLogo).size(28.0),
+                )
         };
 
         let mut nav_links = div()
@@ -2067,11 +2015,9 @@ impl Shellumi {
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
-                            div()
-                                .w(px(18.0))
-                                .text_xs()
-                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                .child("⚙")
+                            crate::ui::icon::Icon::new(crate::ui::icon::IconName::Settings)
+                                .size(18.0)
+                                .active(self.page == Some("Settings"))
                                 .into_any_element()
                         },
                     )
@@ -2130,7 +2076,10 @@ impl Shellumi {
                                 .child(gpui::img(icon_path).size_full())
                                 .into_any_element()
                         } else {
-                            div().child("💬").into_any_element()
+                            crate::ui::icon::Icon::new(crate::ui::icon::IconName::Vaults)
+                                .size(22.0)
+                                .active(self.vault_dropdown_open)
+                                .into_any_element()
                         },
                     )
                     .child(
@@ -2211,7 +2160,9 @@ impl Shellumi {
                         .child(gpui::img(icon_path).size_full())
                         .into_any_element()
                 } else {
-                    div().child("📁").into_any_element()
+                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::Sftp)
+                        .size(20.0)
+                        .into_any_element()
                 },
             )
             .child("SFTP")
@@ -2284,7 +2235,10 @@ impl Shellumi {
                         .border_color(rgb(MacTheme::BORDER))
                         .text_xs()
                         .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                        .child("🌐")
+                        .child(
+                            crate::ui::icon::Icon::new(crate::ui::icon::IconName::KnownHosts)
+                                .size(13.0),
+                        )
                         .child(host_str.to_string()),
                 );
             }
@@ -2302,7 +2256,14 @@ impl Shellumi {
                         .bg(rgba(0x2563eb18))
                         .text_xs()
                         .text_color(status_color)
-                        .child(if is_syncing { "🔄" } else { "☁️" })
+                        .child(
+                            crate::ui::icon::Icon::new(if is_syncing {
+                                crate::ui::icon::IconName::ServerSync
+                            } else {
+                                crate::ui::icon::IconName::CloudSync
+                            })
+                            .size(13.0),
+                        )
                         .child(status_text),
                 )
                 .child(
@@ -2386,7 +2347,10 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().child("🖥").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Ssh)
+                            .size(18.0)
+                            .active(is_active)
+                            .into_any_element()
                     }
                 }
                 SessionKind::Serial => {
@@ -2397,7 +2361,10 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().child("🔌").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Serial)
+                            .size(18.0)
+                            .active(is_active)
+                            .into_any_element()
                     }
                 }
                 SessionKind::Sftp => {
@@ -2408,20 +2375,37 @@ impl Shellumi {
                             .child(gpui::img(p).size_full())
                             .into_any_element()
                     } else {
-                        div().child("📁").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Sftp)
+                            .size(18.0)
+                            .active(is_active)
+                            .into_any_element()
                     }
                 }
-                SessionKind::Mosh => div().child("⚡").into_any_element(),
-                SessionKind::Telnet => div().child("⚠️").into_any_element(),
+                SessionKind::Mosh => crate::ui::icon::Icon::new(crate::ui::icon::IconName::Mosh)
+                    .size(18.0)
+                    .active(is_active)
+                    .into_any_element(),
+                SessionKind::Telnet => {
+                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::Terminal)
+                        .size(18.0)
+                        .active(is_active)
+                        .into_any_element()
+                }
                 SessionKind::RemoteDesktop => {
                     if tab
                         .remote_desktop_state
                         .as_ref()
                         .is_some_and(|r| r.protocol == RemoteDesktopProtocol::Vnc)
                     {
-                        div().child("🖥️").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Vnc)
+                            .size(18.0)
+                            .active(is_active)
+                            .into_any_element()
                     } else {
-                        div().child("🪟").into_any_element()
+                        crate::ui::icon::Icon::new(crate::ui::icon::IconName::Rdp)
+                            .size(18.0)
+                            .active(is_active)
+                            .into_any_element()
                     }
                 }
             };
@@ -3208,6 +3192,29 @@ fn main() {
             } else {
                 std::path::Path::new(".")
             };
+
+            // Recover any interrupted vault quarantine or rotation operations on startup
+            if let Ok(recovered_q) = data_path::detect_and_recover_interrupted_quarantine(base_dir)
+            {
+                if !recovered_q.is_empty() {
+                    tracing::info!(
+                        count = recovered_q.len(),
+                        vaults = ?recovered_q,
+                        "Recovered interrupted vault quarantine operations on startup"
+                    );
+                }
+            }
+            if let Ok(recovered_rot) = data_path::detect_and_recover_interrupted_rotation(base_dir)
+            {
+                if !recovered_rot.is_empty() {
+                    tracing::info!(
+                        count = recovered_rot.len(),
+                        vaults = ?recovered_rot,
+                        "Recovered interrupted vault password rotation operations on startup"
+                    );
+                }
+            }
+
             !shellumi_core::setup::SetupState::is_setup_completed(base_dir)
         } else {
             false
@@ -3216,204 +3223,206 @@ fn main() {
     if let Some(ref err) = startup_error {
         tracing::error!(error = %err, "Data path initialization failed");
     }
-    Application::new().run(move |cx: &mut App| {
-        cx.on_action(|_: &Quit, cx: &mut App| {
-            cx.quit();
-        });
-        cx.on_action(|_: &HideApp, cx: &mut App| {
-            cx.hide();
-        });
-        cx.on_action(|_: &HideOthersApp, cx: &mut App| {
-            cx.hide_other_apps();
-        });
-        cx.on_action(|_: &ShowAllApp, cx: &mut App| {
-            cx.unhide_other_apps();
-        });
+    Application::new()
+        .with_assets(crate::ui::icon::ShellumiAssetSource::new())
+        .run(move |cx: &mut App| {
+            cx.on_action(|_: &Quit, cx: &mut App| {
+                cx.quit();
+            });
+            cx.on_action(|_: &HideApp, cx: &mut App| {
+                cx.hide();
+            });
+            cx.on_action(|_: &HideOthersApp, cx: &mut App| {
+                cx.hide_other_apps();
+            });
+            cx.on_action(|_: &ShowAllApp, cx: &mut App| {
+                cx.unhide_other_apps();
+            });
 
-        #[cfg(target_os = "macos")]
-        cx.set_menus(vec![
-            Menu {
-                name: "Shellumi".into(),
-                items: vec![
-                    MenuItem::action("About Shellumi", AboutApp),
-                    MenuItem::separator(),
-                    MenuItem::action("Vaults", OpenVaultsMenu),
-                    MenuItem::action("Setup Wizard…", RunSetupWizard),
-                    MenuItem::action("SFTP", OpenSftpMenu),
-                    MenuItem::action("Settings…", OpenSettingsMenu),
-                    MenuItem::separator(),
-                    MenuItem::os_submenu("Services", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("Hide Shellumi", HideApp),
-                    MenuItem::action("Hide Others", HideOthersApp),
-                    MenuItem::action("Show All", ShowAllApp),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit Shellumi", Quit),
-                ],
-            },
-            Menu {
-                name: "Edit".into(),
-                items: vec![
-                    MenuItem::os_action("Undo", UndoAction, OsAction::Undo),
-                    MenuItem::os_action("Redo", RedoAction, OsAction::Redo),
-                    MenuItem::separator(),
-                    MenuItem::os_action("Cut", CutAction, OsAction::Cut),
-                    MenuItem::os_action("Copy", CopyAction, OsAction::Copy),
-                    MenuItem::os_action("Paste", PasteAction, OsAction::Paste),
-                    MenuItem::os_action("Select All", SelectAllAction, OsAction::SelectAll),
-                ],
-            },
-            Menu {
-                name: "Window".into(),
-                items: vec![
-                    MenuItem::action("Minimize", MinimizeWindow),
-                    MenuItem::action("Zoom", ZoomWindow),
-                    MenuItem::separator(),
-                    MenuItem::action("Bring All to Front", BringAllToFront),
-                ],
-            },
-            Menu {
-                name: "Help".into(),
-                items: vec![
-                    MenuItem::action("Keyboard Shortcuts", OpenShortcutsHelp),
-                    MenuItem::separator(),
-                    MenuItem::action("Run Setup Wizard…", RunSetupWizard),
-                ],
-            },
-        ]);
+            #[cfg(target_os = "macos")]
+            cx.set_menus(vec![
+                Menu {
+                    name: "Shellumi".into(),
+                    items: vec![
+                        MenuItem::action("About Shellumi", AboutApp),
+                        MenuItem::separator(),
+                        MenuItem::action("Vaults", OpenVaultsMenu),
+                        MenuItem::action("Setup Wizard…", RunSetupWizard),
+                        MenuItem::action("SFTP", OpenSftpMenu),
+                        MenuItem::action("Settings…", OpenSettingsMenu),
+                        MenuItem::separator(),
+                        MenuItem::os_submenu("Services", SystemMenuType::Services),
+                        MenuItem::separator(),
+                        MenuItem::action("Hide Shellumi", HideApp),
+                        MenuItem::action("Hide Others", HideOthersApp),
+                        MenuItem::action("Show All", ShowAllApp),
+                        MenuItem::separator(),
+                        MenuItem::action("Quit Shellumi", Quit),
+                    ],
+                },
+                Menu {
+                    name: "Edit".into(),
+                    items: vec![
+                        MenuItem::os_action("Undo", UndoAction, OsAction::Undo),
+                        MenuItem::os_action("Redo", RedoAction, OsAction::Redo),
+                        MenuItem::separator(),
+                        MenuItem::os_action("Cut", CutAction, OsAction::Cut),
+                        MenuItem::os_action("Copy", CopyAction, OsAction::Copy),
+                        MenuItem::os_action("Paste", PasteAction, OsAction::Paste),
+                        MenuItem::os_action("Select All", SelectAllAction, OsAction::SelectAll),
+                    ],
+                },
+                Menu {
+                    name: "Window".into(),
+                    items: vec![
+                        MenuItem::action("Minimize", MinimizeWindow),
+                        MenuItem::action("Zoom", ZoomWindow),
+                        MenuItem::separator(),
+                        MenuItem::action("Bring All to Front", BringAllToFront),
+                    ],
+                },
+                Menu {
+                    name: "Help".into(),
+                    items: vec![
+                        MenuItem::action("Keyboard Shortcuts", OpenShortcutsHelp),
+                        MenuItem::separator(),
+                        MenuItem::action("Run Setup Wizard…", RunSetupWizard),
+                    ],
+                },
+            ]);
 
-        text_input::bind_keys(cx);
-        #[cfg(target_os = "macos")]
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-h", HideApp, None),
-            KeyBinding::new("alt-cmd-h", HideOthersApp, None),
-            KeyBinding::new("cmd-m", MinimizeWindow, None),
-            KeyBinding::new("cmd-k", ToggleCommandPalette, None),
-            KeyBinding::new("cmd-r", RefreshHosts, None),
-            KeyBinding::new("cmd-t", NewTab, None),
-            KeyBinding::new("cmd-l", OpenLocalTerminal, None),
-            KeyBinding::new("cmd-w", CloseTab, None),
-            KeyBinding::new("cmd-shift-]", NextTab, None),
-            KeyBinding::new("ctrl-tab", NextTab, None),
-            KeyBinding::new("cmd-shift-[", PrevTab, None),
-            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-            KeyBinding::new("cmd-1", SelectTab1, None),
-            KeyBinding::new("cmd-2", SelectTab2, None),
-            KeyBinding::new("cmd-3", SelectTab3, None),
-            KeyBinding::new("cmd-4", SelectTab4, None),
-            KeyBinding::new("cmd-5", SelectTab5, None),
-            KeyBinding::new("cmd-6", SelectTab6, None),
-            KeyBinding::new("cmd-7", SelectTab7, None),
-            KeyBinding::new("cmd-8", SelectTab8, None),
-            KeyBinding::new("cmd-9", SelectTab9, None),
-            KeyBinding::new("cmd-d", SplitVertical, None),
-            KeyBinding::new("cmd-shift-d", SplitHorizontal, None),
-            KeyBinding::new("cmd-]", FocusNextPane, None),
-            KeyBinding::new("cmd-[", FocusPrevPane, None),
-            KeyBinding::new("cmd-shift-w", ClosePane, None),
-            KeyBinding::new("cmd-shift-m", ToggleFocusMode, None),
-            KeyBinding::new("cmd-b", ToggleBroadcast, None),
-            KeyBinding::new("cmd-shift-b", ToggleBroadcast, None),
-            KeyBinding::new("cmd-.", ToggleSnippets, None),
-            KeyBinding::new("cmd-f", FindInTerminal, None),
-            KeyBinding::new("cmd-=", ZoomIn, None),
-            KeyBinding::new("cmd-+", ZoomIn, None),
-            KeyBinding::new("cmd--", ZoomOut, None),
-            KeyBinding::new("cmd-0", ResetZoom, None),
-            KeyBinding::new("cmd-o", QuickConnect, None),
-            KeyBinding::new("cmd-n", NewHost, None),
-            KeyBinding::new("cmd-shift-r", ReconnectSession, None),
-            KeyBinding::new("cmd-\\", ToggleSidebar, None),
-            KeyBinding::new("cmd-shift-\\", ToggleSidebarCollapse, None),
-            KeyBinding::new("cmd-,", OpenSettings, None),
-            KeyBinding::new("cmd-shift-h", GoToHosts, None),
-            KeyBinding::new("cmd-shift-o", GoToOverview, None),
-            KeyBinding::new("cmd-shift-k", GoToWorkspaces, None),
-            KeyBinding::new("cmd-shift-u", GoToSftp, None),
-            KeyBinding::new("cmd-shift-y", GoToKeychain, None),
-            KeyBinding::new("cmd-shift-p", GoToPortForwarding, None),
-            KeyBinding::new("cmd-shift-n", OpenVaultInNewWindow, None),
-        ]);
+            text_input::bind_keys(cx);
+            #[cfg(target_os = "macos")]
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-h", HideApp, None),
+                KeyBinding::new("alt-cmd-h", HideOthersApp, None),
+                KeyBinding::new("cmd-m", MinimizeWindow, None),
+                KeyBinding::new("cmd-k", ToggleCommandPalette, None),
+                KeyBinding::new("cmd-r", RefreshHosts, None),
+                KeyBinding::new("cmd-t", NewTab, None),
+                KeyBinding::new("cmd-l", OpenLocalTerminal, None),
+                KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("cmd-shift-]", NextTab, None),
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("cmd-shift-[", PrevTab, None),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+                KeyBinding::new("cmd-1", SelectTab1, None),
+                KeyBinding::new("cmd-2", SelectTab2, None),
+                KeyBinding::new("cmd-3", SelectTab3, None),
+                KeyBinding::new("cmd-4", SelectTab4, None),
+                KeyBinding::new("cmd-5", SelectTab5, None),
+                KeyBinding::new("cmd-6", SelectTab6, None),
+                KeyBinding::new("cmd-7", SelectTab7, None),
+                KeyBinding::new("cmd-8", SelectTab8, None),
+                KeyBinding::new("cmd-9", SelectTab9, None),
+                KeyBinding::new("cmd-d", SplitVertical, None),
+                KeyBinding::new("cmd-shift-d", SplitHorizontal, None),
+                KeyBinding::new("cmd-]", FocusNextPane, None),
+                KeyBinding::new("cmd-[", FocusPrevPane, None),
+                KeyBinding::new("cmd-shift-w", ClosePane, None),
+                KeyBinding::new("cmd-shift-m", ToggleFocusMode, None),
+                KeyBinding::new("cmd-b", ToggleBroadcast, None),
+                KeyBinding::new("cmd-shift-b", ToggleBroadcast, None),
+                KeyBinding::new("cmd-.", ToggleSnippets, None),
+                KeyBinding::new("cmd-f", FindInTerminal, None),
+                KeyBinding::new("cmd-=", ZoomIn, None),
+                KeyBinding::new("cmd-+", ZoomIn, None),
+                KeyBinding::new("cmd--", ZoomOut, None),
+                KeyBinding::new("cmd-0", ResetZoom, None),
+                KeyBinding::new("cmd-o", QuickConnect, None),
+                KeyBinding::new("cmd-n", NewHost, None),
+                KeyBinding::new("cmd-shift-r", ReconnectSession, None),
+                KeyBinding::new("cmd-\\", ToggleSidebar, None),
+                KeyBinding::new("cmd-shift-\\", ToggleSidebarCollapse, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("cmd-shift-h", GoToHosts, None),
+                KeyBinding::new("cmd-shift-o", GoToOverview, None),
+                KeyBinding::new("cmd-shift-k", GoToWorkspaces, None),
+                KeyBinding::new("cmd-shift-u", GoToSftp, None),
+                KeyBinding::new("cmd-shift-y", GoToKeychain, None),
+                KeyBinding::new("cmd-shift-p", GoToPortForwarding, None),
+                KeyBinding::new("cmd-shift-n", OpenVaultInNewWindow, None),
+            ]);
 
-        #[cfg(not(target_os = "macos"))]
-        cx.bind_keys([
-            KeyBinding::new("ctrl-q", Quit, None),
-            KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
-            KeyBinding::new("ctrl-r", RefreshHosts, None),
-            KeyBinding::new("ctrl-t", NewTab, None),
-            KeyBinding::new("ctrl-l", OpenLocalTerminal, None),
-            KeyBinding::new("ctrl-w", CloseTab, None),
-            KeyBinding::new("ctrl-tab", NextTab, None),
-            KeyBinding::new("ctrl-pagedown", NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-            KeyBinding::new("ctrl-pageup", PrevTab, None),
-            KeyBinding::new("ctrl-1", SelectTab1, None),
-            KeyBinding::new("ctrl-2", SelectTab2, None),
-            KeyBinding::new("ctrl-3", SelectTab3, None),
-            KeyBinding::new("ctrl-4", SelectTab4, None),
-            KeyBinding::new("ctrl-5", SelectTab5, None),
-            KeyBinding::new("ctrl-6", SelectTab6, None),
-            KeyBinding::new("ctrl-7", SelectTab7, None),
-            KeyBinding::new("ctrl-8", SelectTab8, None),
-            KeyBinding::new("ctrl-9", SelectTab9, None),
-            KeyBinding::new("ctrl-shift-e", SplitVertical, None),
-            KeyBinding::new("ctrl-shift-o", SplitHorizontal, None),
-            KeyBinding::new("alt-right", FocusNextPane, None),
-            KeyBinding::new("alt-left", FocusPrevPane, None),
-            KeyBinding::new("ctrl-shift-w", ClosePane, None),
-            KeyBinding::new("ctrl-alt-m", ToggleFocusMode, None),
-            KeyBinding::new("ctrl-alt-b", ToggleBroadcast, None),
-            KeyBinding::new("ctrl-.", ToggleSnippets, None),
-            KeyBinding::new("ctrl-f", FindInTerminal, None),
-            KeyBinding::new("ctrl-=", ZoomIn, None),
-            KeyBinding::new("ctrl-+", ZoomIn, None),
-            KeyBinding::new("ctrl--", ZoomOut, None),
-            KeyBinding::new("ctrl-0", ResetZoom, None),
-            KeyBinding::new("ctrl-o", QuickConnect, None),
-            KeyBinding::new("ctrl-n", NewHost, None),
-            KeyBinding::new("ctrl-shift-r", ReconnectSession, None),
-            KeyBinding::new("ctrl-\\", ToggleSidebar, None),
-            KeyBinding::new("ctrl-shift-\\", ToggleSidebarCollapse, None),
-            KeyBinding::new("ctrl-,", OpenSettings, None),
-            KeyBinding::new("ctrl-shift-h", GoToHosts, None),
-            KeyBinding::new("ctrl-shift-o", GoToOverview, None),
-            KeyBinding::new("ctrl-shift-k", GoToWorkspaces, None),
-            KeyBinding::new("ctrl-shift-u", GoToSftp, None),
-            KeyBinding::new("ctrl-shift-y", GoToKeychain, None),
-            KeyBinding::new("ctrl-shift-p", GoToPortForwarding, None),
-            KeyBinding::new("ctrl-shift-n", OpenVaultInNewWindow, None),
-        ]);
-        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(940.0), px(650.0))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Shellumi — Personal".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.0), px(14.0))),
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| Shellumi::new(database, window, cx));
-                view.update(cx, |app, cx| {
-                    if let Some(error) = startup_error {
-                        app.hosts = HostState::Error(error);
-                        cx.notify();
-                    } else if should_run_wizard {
-                        app.open_setup_wizard(cx);
-                    } else {
-                        app.start_storage(create_parent, cx);
-                    }
-                });
-                view
-            },
-        )
-        .expect("failed to open Shellumi window");
-        cx.activate(true);
-    });
+            #[cfg(not(target_os = "macos"))]
+            cx.bind_keys([
+                KeyBinding::new("ctrl-q", Quit, None),
+                KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
+                KeyBinding::new("ctrl-r", RefreshHosts, None),
+                KeyBinding::new("ctrl-t", NewTab, None),
+                KeyBinding::new("ctrl-l", OpenLocalTerminal, None),
+                KeyBinding::new("ctrl-w", CloseTab, None),
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("ctrl-pagedown", NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+                KeyBinding::new("ctrl-pageup", PrevTab, None),
+                KeyBinding::new("ctrl-1", SelectTab1, None),
+                KeyBinding::new("ctrl-2", SelectTab2, None),
+                KeyBinding::new("ctrl-3", SelectTab3, None),
+                KeyBinding::new("ctrl-4", SelectTab4, None),
+                KeyBinding::new("ctrl-5", SelectTab5, None),
+                KeyBinding::new("ctrl-6", SelectTab6, None),
+                KeyBinding::new("ctrl-7", SelectTab7, None),
+                KeyBinding::new("ctrl-8", SelectTab8, None),
+                KeyBinding::new("ctrl-9", SelectTab9, None),
+                KeyBinding::new("ctrl-shift-e", SplitVertical, None),
+                KeyBinding::new("ctrl-shift-o", SplitHorizontal, None),
+                KeyBinding::new("alt-right", FocusNextPane, None),
+                KeyBinding::new("alt-left", FocusPrevPane, None),
+                KeyBinding::new("ctrl-shift-w", ClosePane, None),
+                KeyBinding::new("ctrl-alt-m", ToggleFocusMode, None),
+                KeyBinding::new("ctrl-alt-b", ToggleBroadcast, None),
+                KeyBinding::new("ctrl-.", ToggleSnippets, None),
+                KeyBinding::new("ctrl-f", FindInTerminal, None),
+                KeyBinding::new("ctrl-=", ZoomIn, None),
+                KeyBinding::new("ctrl-+", ZoomIn, None),
+                KeyBinding::new("ctrl--", ZoomOut, None),
+                KeyBinding::new("ctrl-0", ResetZoom, None),
+                KeyBinding::new("ctrl-o", QuickConnect, None),
+                KeyBinding::new("ctrl-n", NewHost, None),
+                KeyBinding::new("ctrl-shift-r", ReconnectSession, None),
+                KeyBinding::new("ctrl-\\", ToggleSidebar, None),
+                KeyBinding::new("ctrl-shift-\\", ToggleSidebarCollapse, None),
+                KeyBinding::new("ctrl-,", OpenSettings, None),
+                KeyBinding::new("ctrl-shift-h", GoToHosts, None),
+                KeyBinding::new("ctrl-shift-o", GoToOverview, None),
+                KeyBinding::new("ctrl-shift-k", GoToWorkspaces, None),
+                KeyBinding::new("ctrl-shift-u", GoToSftp, None),
+                KeyBinding::new("ctrl-shift-y", GoToKeychain, None),
+                KeyBinding::new("ctrl-shift-p", GoToPortForwarding, None),
+                KeyBinding::new("ctrl-shift-n", OpenVaultInNewWindow, None),
+            ]);
+            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(940.0), px(650.0))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Shellumi — Personal".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(14.0), px(14.0))),
+                    }),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| Shellumi::new(database, window, cx));
+                    view.update(cx, |app, cx| {
+                        if let Some(error) = startup_error {
+                            app.hosts = HostState::Error(error);
+                            cx.notify();
+                        } else if should_run_wizard {
+                            app.open_setup_wizard(cx);
+                        } else {
+                            app.start_storage(create_parent, cx);
+                        }
+                    });
+                    view
+                },
+            )
+            .expect("failed to open Shellumi window");
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]

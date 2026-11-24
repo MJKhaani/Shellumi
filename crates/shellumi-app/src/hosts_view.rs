@@ -1,6 +1,7 @@
 //! Hosts inventory page and editor rendering.
 use super::*;
 use crate::ui::components::{AppButton, ButtonVariant};
+use crate::ui::icon::{Icon, IconName};
 
 impl Shellumi {
     pub(crate) fn render_hosts_view(
@@ -215,7 +216,10 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div().child("🏷").into_any_element()
+                                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::Tag)
+                                        .size(20.0)
+                                        .active(self.tag_filter_popover_open)
+                                        .into_any_element()
                                 },
                             ),
                     )
@@ -259,7 +263,12 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div().child("📅").into_any_element()
+                                    crate::ui::icon::Icon::new(
+                                        crate::ui::icon::IconName::CalendarSort,
+                                    )
+                                    .size(20.0)
+                                    .active(self.sort_menu_open)
+                                    .into_any_element()
                                 },
                             ),
                     )
@@ -299,7 +308,10 @@ impl Shellumi {
                                         .child(gpui::img(p).size_full())
                                         .into_any_element()
                                 } else {
-                                    div().child("👤+").into_any_element()
+                                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::Profile)
+                                        .size(22.0)
+                                        .active(self.profile_menu_open)
+                                        .into_any_element()
                                 },
                             ),
                     ),
@@ -362,7 +374,9 @@ impl Shellumi {
                                 .child(gpui::img(p).size_full())
                                 .into_any_element()
                         } else {
-                            div().text_base().child("👥").into_any_element()
+                            crate::ui::icon::Icon::new(crate::ui::icon::IconName::InviteMember)
+                                .size(22.0)
+                                .into_any_element()
                         },
                     )
                     .child(
@@ -485,7 +499,11 @@ impl Shellumi {
                                                 .child(gpui::img(p).size_full())
                                                 .into_any_element()
                                         } else {
-                                            div().child("⊞").into_any_element()
+                                            crate::ui::icon::Icon::new(
+                                                crate::ui::icon::IconName::Groups,
+                                            )
+                                            .size(32.0)
+                                            .into_any_element()
                                         },
                                     ),
                             )
@@ -544,7 +562,9 @@ impl Shellumi {
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
-                                div().child("···").into_any_element()
+                                crate::ui::icon::Icon::new(crate::ui::icon::IconName::More)
+                                    .size(20.0)
+                                    .into_any_element()
                             }),
                     );
                 grid = grid.child(card);
@@ -630,14 +650,14 @@ impl Shellumi {
                 ConnectionProtocol::Vnc => rgb(0xbb86fc),
                 ConnectionProtocol::Rdp => rgb(0x3de0d8),
             };
-            let badge_icon = match host.protocol() {
-                ConnectionProtocol::Ssh => "🖧",
-                ConnectionProtocol::Serial => "🔌",
-                ConnectionProtocol::Mosh => "⚡",
-                ConnectionProtocol::Telnet => "⚠️",
-                ConnectionProtocol::Local => ">_",
-                ConnectionProtocol::Vnc => "🖥️",
-                ConnectionProtocol::Rdp => "🪟",
+            let protocol_icon = match host.protocol() {
+                ConnectionProtocol::Ssh => IconName::Ssh,
+                ConnectionProtocol::Serial => IconName::Serial,
+                ConnectionProtocol::Mosh => IconName::Mosh,
+                ConnectionProtocol::Telnet => IconName::Terminal,
+                ConnectionProtocol::Local => IconName::LocalTerminal,
+                ConnectionProtocol::Vnc => IconName::Vnc,
+                ConnectionProtocol::Rdp => IconName::Rdp,
             };
 
             let card = div()
@@ -693,7 +713,7 @@ impl Shellumi {
                                     .child(gpui::img(p).size_full())
                                     .into_any_element()
                             } else {
-                                div().child(badge_icon).into_any_element()
+                                Icon::new(protocol_icon).size(24.0).into_any_element()
                             },
                         ),
                 )
@@ -808,14 +828,14 @@ impl Shellumi {
                         ConnectionProtocol::Vnc => rgb(0xbb86fc),
                         ConnectionProtocol::Rdp => rgb(0x3de0d8),
                     };
-                    let badge_icon = match host.protocol() {
-                        ConnectionProtocol::Ssh => "🖧",
-                        ConnectionProtocol::Serial => "🔌",
-                        ConnectionProtocol::Mosh => "⚡",
-                        ConnectionProtocol::Telnet => "⚠️",
-                        ConnectionProtocol::Local => ">_",
-                        ConnectionProtocol::Vnc => "🖥️",
-                        ConnectionProtocol::Rdp => "🪟",
+                    let protocol_icon = match host.protocol() {
+                        ConnectionProtocol::Ssh => IconName::Ssh,
+                        ConnectionProtocol::Serial => IconName::Serial,
+                        ConnectionProtocol::Mosh => IconName::Mosh,
+                        ConnectionProtocol::Telnet => IconName::Terminal,
+                        ConnectionProtocol::Local => IconName::LocalTerminal,
+                        ConnectionProtocol::Vnc => IconName::Vnc,
+                        ConnectionProtocol::Rdp => IconName::Rdp,
                     };
 
                     let mut row = div()
@@ -853,11 +873,7 @@ impl Shellumi {
                                             .child(gpui::img(p).size_full())
                                             .into_any_element()
                                     } else {
-                                        div()
-                                            .text_sm()
-                                            .text_color(badge_fg)
-                                            .child(badge_icon)
-                                            .into_any_element()
+                                        Icon::new(protocol_icon).size(20.0).into_any_element()
                                     },
                                 )
                                 .child(

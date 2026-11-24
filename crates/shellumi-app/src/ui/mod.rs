@@ -2,6 +2,7 @@
 use super::*;
 
 pub(crate) mod components;
+pub(crate) mod icon;
 pub(crate) mod inspector;
 pub(crate) mod layout;
 
