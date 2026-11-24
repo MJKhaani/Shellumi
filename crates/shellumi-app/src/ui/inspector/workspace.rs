@@ -49,7 +49,7 @@ impl Shellumi {
                     .p_4()
                     .child("The selected workspace layout does not exist or was deleted."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -151,12 +151,7 @@ impl Shellumi {
             .child(self.render_detail_row("Description", desc_str));
         body = body.child(simple_section("Workspace Properties", details_items));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render workspace inspector in Edit or Create mode.
@@ -193,7 +188,7 @@ impl Shellumi {
                 header,
                 div().p_4().child("Form not initialized"),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -313,12 +308,7 @@ impl Shellumi {
                 })),
             );
 
-        InspectorShell::new(
-            header,
-            body,
-            Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, Some(footer), self.active_inspector_width())
     }
 
     /// Open workspace inspector in a specific mode.
@@ -371,10 +361,15 @@ impl Shellumi {
 
     /// Save workspace inspector form data.
     pub(crate) fn save_workspace_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
+
         let Some(form) = &mut self.workspace_form else {
             return;
         };
 
+        let active_vid = self.active_vault_id.clone();
         let name = form.name.read(cx).value().trim().to_string();
         let desc = form.description.read(cx).value().trim().to_string();
         let layout_str = form.layout.clone();
@@ -382,6 +377,11 @@ impl Shellumi {
 
         if name.is_empty() {
             form.error = Some("Workspace name is required.".into());
+            self.inspector_coordinator.fail_save(
+                &active_vid,
+                gen,
+                "Workspace name is required.".into(),
+            );
             cx.notify();
             return;
         }
@@ -439,7 +439,11 @@ impl Shellumi {
                     Ok(saved_id) => {
                         app.workspace_form = None;
                         app.load_workspaces(cx);
-                        app.inspector_coordinator.set_dirty(false);
+                        let target = InspectorTarget::Workspace(Some(saved_id));
+                        let active_vid = app.active_vault_id.clone();
+                        let ok = app
+                            .inspector_coordinator
+                            .complete_save(&active_vid, gen, target);
                         app.open_workspace_inspector_mode(
                             Some(saved_id),
                             crate::ui::inspector::InspectorMode::View,
@@ -447,11 +451,18 @@ impl Shellumi {
                         );
                         app.desktop.message =
                             Some(format!("Workspace '{}' saved successfully", name_for_msg));
+                        if ok {
+                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                                app.apply_navigation_request(req, None, cx);
+                            }
+                        }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.workspace_form {
-                            f.error = Some(err);
+                            f.error = Some(err.clone());
                         }
+                        let active_vid = app.active_vault_id.clone();
+                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
                     }
                 }
                 cx.notify();

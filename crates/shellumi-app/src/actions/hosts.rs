@@ -249,9 +249,13 @@ impl Shellumi {
         if self.saving {
             return;
         }
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
         let Some(form) = &self.form else {
             return;
         };
+        let active_vid = self.active_vault_id.clone();
         let name = form.name.read(cx).value().to_owned();
         let host = form.hostname.read(cx).value().to_owned();
         let username = form.username.read(cx).value().to_owned();
@@ -278,6 +282,11 @@ impl Shellumi {
                 Ok(j) => Some(j),
                 Err(err) => {
                     self.form_error = Some(format!("Invalid jump host: {err}"));
+                    self.inspector_coordinator.fail_save(
+                        &active_vid,
+                        gen,
+                        format!("Invalid jump host: {err}"),
+                    );
                     cx.notify();
                     return;
                 }
@@ -292,6 +301,11 @@ impl Shellumi {
                 Err(_) => {
                     self.form_error =
                         Some("Startup snippet must be a numeric ID (or empty).".into());
+                    self.inspector_coordinator.fail_save(
+                        &active_vid,
+                        gen,
+                        "Startup snippet must be a numeric ID (or empty).".into(),
+                    );
                     cx.notify();
                     return;
                 }
@@ -326,13 +340,20 @@ impl Shellumi {
             }) {
             Ok(destination) => destination,
             Err(error) => {
-                self.form_error = Some(error);
+                self.form_error = Some(error.clone());
+                self.inspector_coordinator
+                    .fail_save(&active_vid, gen, error);
                 cx.notify();
                 return;
             }
         };
         if name.trim().is_empty() || name.chars().any(char::is_control) {
             self.form_error = Some("Enter a display name without control characters.".into());
+            self.inspector_coordinator.fail_save(
+                &active_vid,
+                gen,
+                "Enter a display name without control characters.".into(),
+            );
             cx.notify();
             return;
         }
@@ -477,11 +498,11 @@ impl Shellumi {
                         )
                         .await;
                 }
-                Ok(())
+                Ok::<(), String>(())
             })
         });
         cx.spawn(async move |app, cx| {
-            let result = task.await;
+            let result: Result<(), String> = task.await;
             let _ = app.update(cx, |app, cx| {
                 app.saving = false;
                 match result {
@@ -493,33 +514,41 @@ impl Shellumi {
                         app.sync_scheduler.notify_local_mutation(now);
                         app.form = None;
                         app.load_hosts(cx);
-                        app.inspector_coordinator.set_dirty(false);
-                        if let Some(saved_id) = id {
-                            app.open_host_inspector(
-                                Some(saved_id),
-                                crate::ui::inspector::InspectorMode::View,
-                                cx,
-                            );
+                        let final_host_id = if let Some(saved_id) = id {
+                            Some(saved_id)
                         } else {
-                            let new_id = match &app.hosts {
+                            match &app.hosts {
                                 crate::HostState::Loaded(hosts) => hosts
                                     .iter()
                                     .find(|h| h.name == name_for_lookup)
                                     .map(|h| h.id),
                                 _ => None,
-                            };
-                            app.open_host_inspector(
-                                new_id,
-                                crate::ui::inspector::InspectorMode::View,
-                                cx,
-                            );
-                        }
+                            }
+                        };
+                        let active_vid = app.active_vault_id.clone();
+                        let target =
+                            crate::ui::inspector::coordinator::InspectorTarget::Host(final_host_id);
+                        let ok = app
+                            .inspector_coordinator
+                            .complete_save(&active_vid, gen, target);
+                        app.open_host_inspector(
+                            final_host_id,
+                            crate::ui::inspector::InspectorMode::View,
+                            cx,
+                        );
                         if app.is_active_vault_remote() {
                             app.sync_active_vault(cx);
                         }
+                        if ok {
+                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                                app.apply_navigation_request(req, None, cx);
+                            }
+                        }
                     }
                     Err(error) => {
-                        app.form_error = Some(error);
+                        app.form_error = Some(error.clone());
+                        let active_vid = app.active_vault_id.clone();
+                        app.inspector_coordinator.fail_save(&active_vid, gen, error);
                     }
                 }
                 cx.notify();

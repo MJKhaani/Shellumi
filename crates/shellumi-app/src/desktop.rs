@@ -303,9 +303,25 @@ impl Shellumi {
     pub(super) fn navigate_page(
         &mut self,
         page: &'static str,
-        window: &mut Window,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if !self.inspector_coordinator.request_navigation(
+            crate::ui::inspector::NavigationRequest::SwitchPage(page.to_string()),
+        ) {
+            cx.notify();
+            return;
+        }
+
+        self.form = None;
+        self.group_inspector = None;
+        self.snippet_form = None;
+        self.tunnel_form = None;
+        self.workspace_form = None;
+        self.vault_form = None;
+        self.provider_form = None;
+        self.team_form = None;
+        self.selected_host_id = None;
         self.team_modal = None;
         self.infra_modal = None;
         self.session_replay_modal = None;
@@ -315,7 +331,6 @@ impl Shellumi {
         self.batch_modal = None;
         self.diagnostics_modal = None;
         self.command_palette = None;
-        self.form = None;
         self.desktop.editor = None;
         self.desktop.confirm = None;
         self.desktop.message = None;
@@ -329,7 +344,12 @@ impl Shellumi {
         };
         if page == "Terminal" {
             if let Some(index) = (!self.tabs.is_empty()).then_some(0) {
-                self.select_tab(Some(index), window, cx);
+                if let Some(w) = window {
+                    self.select_tab(Some(index), w, cx);
+                } else {
+                    self.page = None;
+                    self.active_tab_idx = Some(index);
+                }
             }
         }
         if page == "Keychain" || page == "Known Hosts" {

@@ -3630,40 +3630,72 @@ impl HostStore {
                 new_trimmed
             )));
         }
-        self.add_group(new_group).await?;
-        let _ = self
+        let tags_serialized = validated_tags(&new_group.tags)?;
+        let default_port = new_group.default_port.map(|p| i64::from(p.get()));
+
+        let tx = self
             .connection
-            .execute(
-                "UPDATE hosts SET group_name = ?1 WHERE group_name = ?2 AND vault_id = ?3",
-                (new_trimmed, old_trimmed, self.host_vault_id.as_str()),
-            )
-            .await;
-        let _ = self
-            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+
+        tx.execute(
+            "INSERT INTO groups (name, default_username, default_port, tags, identity_id, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (
+                new_trimmed,
+                new_group.default_username.as_deref(),
+                default_port,
+                tags_serialized,
+                new_group.identity_id,
+                self.host_vault_id.as_str(),
+            ),
+        )
+        .await?;
+
+        tx.execute(
+            "UPDATE hosts SET group_name = ?1 WHERE group_name = ?2 AND vault_id = ?3",
+            (new_trimmed, old_trimmed, self.host_vault_id.as_str()),
+        )
+        .await?;
+
+        let deleted = tx
             .execute(
                 "DELETE FROM groups WHERE name = ?1 AND vault_id = ?2",
                 (old_trimmed, self.host_vault_id.as_str()),
             )
-            .await;
+            .await?;
+
+        if deleted == 0 {
+            return Err(StorageError::ItemNotFound(format!(
+                "Group '{}' not found",
+                old_trimmed
+            )));
+        }
+
+        tx.commit().await?;
         Ok(true)
     }
 
     pub async fn delete_group(&mut self, name: &str) -> Result<bool, StorageError> {
         let trimmed = name.trim();
-        let _ = self
+        let tx = self
             .connection
-            .execute(
-                "UPDATE hosts SET group_name = NULL WHERE group_name = ?1 AND vault_id = ?2",
-                (trimmed, self.host_vault_id.as_str()),
-            )
-            .await;
-        let rows = self
-            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+
+        tx.execute(
+            "UPDATE hosts SET group_name = NULL WHERE group_name = ?1 AND vault_id = ?2",
+            (trimmed, self.host_vault_id.as_str()),
+        )
+        .await?;
+
+        let rows = tx
             .execute(
                 "DELETE FROM groups WHERE name = ?1 AND vault_id = ?2",
                 (trimmed, self.host_vault_id.as_str()),
             )
             .await?;
+
+        tx.commit().await?;
         Ok(rows != 0)
     }
 
@@ -5194,6 +5226,26 @@ impl HostStore {
             });
         }
         Ok(list)
+    }
+
+    pub async fn update_cloud_provider(
+        &mut self,
+        provider: &CloudProviderRecord,
+    ) -> Result<bool, StorageError> {
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE cloud_providers SET name = ?1, provider_kind = ?2, config_json = ?3, updated_at = ?4 WHERE id = ?5",
+                (
+                    provider.name.clone(),
+                    provider.provider_kind.clone(),
+                    provider.config_json.clone(),
+                    provider.updated_at,
+                    provider.id.clone(),
+                ),
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     pub async fn update_cloud_provider_sync_time(

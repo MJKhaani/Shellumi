@@ -23,16 +23,16 @@ This file is the **acceptance contract** for the unified-inspector redesign. All
 | INS-003 | U,G | Open group via context menu, then host via grid/list | Same inspector shell and visual hierarchy throughout | **PASS** | `test_ins_003_open_group_then_host_transitions_inspector` |
 | INS-004 | U,G | Host create/view/edit | Identical shell/header/body/footer behavior, correct mode/actions | **PASS** | `test_ins_004_host_crud_and_modes` |
 | INS-005 | U,G | Group create/view/edit | Same inspector shell, no editor modal | **PASS** | `test_ins_005_group_crud_and_modes` |
-| INS-006 | U,G | Identity/snippet/tunnel/workspace/vault/provider/member create/edit | All routine forms hosted only by InspectorShell | **PASS** | `test_phase4_targets_replacement`, `test_phase4_workspace_mode_transitions` |
-| INS-007 | U,G | Close inspector and reopen | Correct target and focus; no invisible stale overlay | **PASS** | `InspectorCoordinator::close()` removes active inspector, reopen sets active |
+| INS-006 | U,G | Identity/snippet/tunnel/workspace/vault/provider/member create/edit | All routine forms hosted only by InspectorShell | **PASS** | `test_phase4_targets_replacement`, `test_phase4_workspace_mode_transitions`; real CRUD for all 9 entities |
+| INS-007 | U,G | Close inspector and reopen | Correct target and focus; no invisible stale overlay | **PASS** | `InspectorCoordinator::close()` removes active inspector; `test_ui_01_at_most_one_inspector_active` |
 | INS-008 | U,G | Edit field then select another object | Save/Discard/Keep Editing guard; never silent loss | **PASS** | `test_ins_008_dirty_edit_triggers_guard_on_navigation` |
-| INS-009 | U,G | Edit field then navigate page/tab | Guard transitions and preserve/resolve draft correctly | **PASS** | `test_phase4_identity_dirty_guard` |
-| INS-010 | U,G | Edit field then switch vault/window/close window | Guard and enforce vault/window scope; no cross-vault leakage | **PASS** | `test_ins_010_switch_vault_preserves_isolation` |
+| INS-009 | U,G | Edit field then navigate page/tab | Guard transitions and preserve/resolve draft correctly | **PASS** | `test_phase4_identity_dirty_guard`, `test_navigation_request_guard_switch_page` |
+| INS-010 | U,G | Edit field then switch vault/window/close window | Guard and enforce vault/window scope; no cross-vault leakage | **PASS** | `test_ins_010_switch_vault_preserves_isolation`, `test_navigation_request_guard_switch_vault` |
 | INS-011 | U,G | Resize while editing and scroll long form | Draft values, caret/focus and scroll remain stable where possible | **PASS** | `InspectorState::draft` retained across layout updates; `min_h_0().overflow_y_scroll()` |
-| INS-012 | U,E | Cancel dirty edit | Persisted object unchanged; re-open shows original value | **PASS** | Coordinator drops draft on Discard; persisted Host/Group/Identity remains unmutated |
-| INS-013 | U,E | Save valid edit/create | Await confirmed backend response; persisted value correct after reload | **PASS** | `AsyncOperationState::Saving` awaits async store, updates view on success |
-| INS-014 | U,G,E | Save invalid/incomplete form | Field errors; disabled Save or clear rejection; no mutation | **PASS** | `ValidationState::Invalid` blocks submission, highlights validation messages |
-| INS-015 | U,G,E | Backend save fails | Error shown in inspector, no false success; fields retained | **PASS** | `AsyncOperationState::Failed` retains active draft and displays error message |
+| INS-012 | U,E | Cancel dirty edit | Persisted object unchanged; re-open shows original value | **PASS** | `confirm_discard()` resets draft; original persisted records intact |
+| INS-013 | U,E | Save valid edit/create | Await confirmed backend response; persisted value correct after reload | **PASS** | Generation-aware `start_save` / `complete_save` awaits async store before updating view |
+| INS-014 | U,G,E | Save invalid/incomplete form | Field errors; disabled Save or clear rejection; no mutation | **PASS** | Form validation blocks dispatch; displays inline errors and retains draft |
+| INS-015 | U,G,E | Backend save fails | Error shown in inspector, no false success; fields retained | **PASS** | `test_fail_save_preserves_dirty_state_and_retains_draft` verifies draft and error display |
 | INS-016 | U,G | Double-click Save rapidly | At most one in-flight mutation/duplicate action | **PASS** | `test_ins_016_double_click_save_prevents_duplicate_submission` |
 | INS-017 | U,G | Async result of object A arrives while B is active | Response cannot mutate B or wrong vault; stale result safely handled | **PASS** | `test_ins_017_stale_async_result_cannot_mutate_current_target` |
 | INS-018 | U,G,E | Deleting selected object externally | Inspector moves to safe not-found/error state, no panic | **PASS** | Delete targets checked against coordinator; closed or marked deleted |
@@ -89,14 +89,14 @@ This file is the **acceptance contract** for the unified-inspector redesign. All
 
 | ID | Layers | Test scenario | Required result | Status | Automated Test / Verification Evidence |
 | --- | --- | --- | --- | --- | --- |
-| DATA-001 | U,G,E | Group Parent Group field changed | Persisted correctly and reflected after reload, or not exposed until functional | **PASS** | Group inspector View/Edit modes correctly persist parent and metadata |
-| DATA-002 | U,G,E | Group Cloud Sync setting changed | Real persisted behavior and correct permissions, or not exposed until functional | **PASS** | Cloud Sync flag truthfully persisted in `shellumi-storage` |
+| DATA-001 | U,G,E | Group Parent Group field changed | Persisted correctly and reflected after reload, or not exposed until functional | **PASS** | Group inspector View/Edit modes correctly persist parent and metadata with vault-scoped `HostStore::set_vault_id` |
+| DATA-002 | U,G,E | Group Cloud Sync setting changed | Real persisted behavior and correct permissions, or not exposed until functional | **PASS** | Cloud Sync flag truthfully persisted in `shellumi-storage` with transactional group updates |
 | DATA-003 | U,E | Delete group fails in database/server | No success toast; object remains, error clear | **PASS** | Awaited backend delete operation (`store.delete_group`); error banner displayed on failure, draft retained |
 | DATA-004 | U,G,E | Delete group succeeds after confirmation | Accurate confirmation/progress/success and list/inspector state | **PASS** | `delete_confirmation_dialog` with non-orphaning group deletion (`UPDATE hosts SET group_name = NULL`), cache reload, and inspector reset |
 | DATA-005 | U,G | Group context menu Quick Connect, Connect, Move, Copy | Fully operational or truthfully absent/disabled; no dead affordances | **PASS** | Dead mock affordances removed; functional "Connect All Hosts", transactional "Rename", and non-orphaning "Delete Group" |
-| DATA-006 | G,N | Notification bell with no backend | Not misleadingly clickable; proper disabled/hidden state if unavailable | **PASS** | Notification bell popup shows real notification status and unread count |
+| DATA-006 | G,N | Notification bell with no backend | Not misleadingly clickable; proper disabled/hidden state if unavailable | **PASS** | Non-functional static notification bell affordance removed (R22) to prevent misleading actionless clicks |
 | DATA-007 | U,E | Two vaults/two windows edit concurrently | Independent state, no leaked selections or secrets, correct storage routing | **PASS** | `test_multi_window_host_mutation_and_inventory_isolation` |
-| DATA-008 | U,E | Read-only team member tries to edit/delete | UI denial plus backend authorization; no privilege escalation | **PASS** | `verifies_team_role_permissions_and_hierarchy` in `shellumi-core` |
+| DATA-008 | U,E | Read-only team member tries to edit/delete | UI denial plus backend authorization; no privilege escalation | **PASS** | `verifies_team_role_permissions_and_hierarchy` in `shellumi-core`, real revocation in `shellumi-storage` |
 | DATA-009 | U,E | Async Save during vault switch | Old-vault outcome cannot mutate newly selected vault inspector | **PASS** | Coordinator validates vault_id and target generation before applying result |
 | DATA-010 | G,N,E | Setup wizard/re-entry in small window | Full-page step workflow, all controls reachable, state preserved | **PASS** | `test_fresh_installation_detection_and_default_vault_creation_flow`, `test_interrupted_setup_recovery_crash_safe` |
 | DATA-011 | E,N | Interrupted first-run setup | Recovery/resume consistent; no overwrite of existing vaults | **PASS** | `test_interrupted_wizard_resumption_and_recovery_code_confirmation` |

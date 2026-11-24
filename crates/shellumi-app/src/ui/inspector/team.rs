@@ -39,19 +39,79 @@ impl Shellumi {
         member_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let m_name = member_id.clone().unwrap_or_else(|| "Collaborator".into());
-        let m_role = "Member".to_string();
+        let member = member_id
+            .as_deref()
+            .and_then(|id| {
+                self.team_members
+                    .iter()
+                    .find(|m| m.id == id || m.user_id == id)
+            })
+            .or_else(|| self.team_members.first())
+            .cloned();
 
-        let badge = div()
-            .px_2()
-            .py_0p5()
-            .rounded_md()
-            .bg(rgb(0x183322))
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(0x3dd68c))
-            .child(m_role.clone());
+        let Some(member) = member else {
+            let close_btn = InspectorShell::close_button(
+                "close-team-inspector-btn",
+                false,
+                |app, _, _, cx| {
+                    app.inspector_close(cx);
+                },
+                cx,
+            );
+            let header = InspectorShell::header(
+                "Team Member".to_string(),
+                Some("Vault Collaborator"),
+                None,
+                None,
+                Some(close_btn),
+            );
+            return InspectorShell::new(
+                header,
+                div()
+                    .p_4()
+                    .text_color(text_secondary())
+                    .child("No team collaborator selected or enrolled yet."),
+                None::<Div>,
+                self.active_inspector_width(),
+            );
+        };
 
+        let mem_id = member.id.clone();
+        let m_name = member.display_name.clone();
+        let user_id = member.user_id.clone();
+        let m_role = member.role.badge_label().to_string();
+        let is_revoked = member.revoked;
+        let enrolled = member.enrolled_at.clone();
+        let pubkey_fp = if !member.public_key.is_empty() {
+            shellumi_core::fingerprint_public_key(&member.public_key)
+                .unwrap_or_else(|_| "ssh-key-configured".into())
+        } else {
+            "None configured".to_string()
+        };
+
+        let badge = if is_revoked {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(rgb(0x3a1e1e))
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(danger())
+                .child("Revoked")
+        } else {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(rgb(0x183322))
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(0x3dd68c))
+                .child(m_role.clone())
+        };
+
+        let edit_mem_id = mem_id.clone();
         let edit_btn = div()
             .id("inspector-edit-team-btn")
             .px_2p5()
@@ -65,11 +125,8 @@ impl Shellumi {
             .text_color(text_primary())
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-            .on_click(cx.listener({
-                let name_clone = m_name.clone();
-                move |app, _, _, cx| {
-                    app.open_team_inspector_mode(Some(name_clone.clone()), InspectorMode::Edit, cx);
-                }
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.open_team_inspector_mode(Some(edit_mem_id.clone()), InspectorMode::Edit, cx);
             }))
             .child("Edit");
 
@@ -92,28 +149,23 @@ impl Shellumi {
         let mut body = div().flex().flex_col().gap_4();
 
         // Action buttons
+        let edit_id_action = mem_id.clone();
+        let delete_id_action = mem_id.clone();
         let delete_name = m_name.clone();
-        let actions_row = div()
-            .flex()
-            .gap_2()
-            .child(
-                AppButton::new(
-                    "team-view-edit-btn",
-                    "Change Role",
-                    ButtonVariant::Secondary,
-                )
-                .on_click(cx.listener({
-                    let name_clone = m_name.clone();
-                    move |app, _, _, cx| {
-                        app.open_team_inspector_mode(
-                            Some(name_clone.clone()),
-                            InspectorMode::Edit,
-                            cx,
-                        );
-                    }
-                })),
+
+        let mut actions_row = div().flex().gap_2().child(
+            AppButton::new(
+                "team-view-edit-btn",
+                "Change Role",
+                ButtonVariant::Secondary,
             )
-            .child(
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.open_team_inspector_mode(Some(edit_id_action.clone()), InspectorMode::Edit, cx);
+            })),
+        );
+
+        if !is_revoked {
+            actions_row = actions_row.child(
                 AppButton::new(
                     "team-view-revoke-btn",
                     "Revoke Access",
@@ -121,27 +173,34 @@ impl Shellumi {
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.delete_confirm = Some(crate::DeleteTarget::TeamMember(
-                        delete_name.clone(),
+                        delete_id_action.clone(),
                         delete_name.clone(),
                     ));
                     cx.notify();
                 })),
             );
+        }
         body = body.child(actions_row);
 
         // Details
         let mut details_items = div().flex().flex_col().gap_1();
         details_items = details_items
-            .child(self.render_detail_row("Display Name / Email", m_name))
-            .child(self.render_detail_row("Assigned Role", m_role));
+            .child(self.render_detail_row("Display Name", m_name))
+            .child(self.render_detail_row("User Identifier", user_id))
+            .child(self.render_detail_row("Assigned Role", m_role))
+            .child(self.render_detail_row(
+                "Access Status",
+                if is_revoked {
+                    "Revoked".to_string()
+                } else {
+                    "Active".to_string()
+                },
+            ))
+            .child(self.render_detail_row("Enrolled At", enrolled))
+            .child(self.render_detail_row("Public Key Fingerprint", pubkey_fp));
         body = body.child(simple_section("Collaborator Details", details_items));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render team member inspector in Edit or Create mode.
@@ -178,7 +237,7 @@ impl Shellumi {
                 header,
                 div().p_4().child("Form not initialized"),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -282,9 +341,11 @@ impl Shellumi {
                 AppButton::new(
                     "team-inspector-save-btn",
                     if is_sending {
-                        "Sending…"
-                    } else {
+                        "Saving…"
+                    } else if is_create {
                         "Send Invitation"
+                    } else {
+                        "Update Role"
                     },
                     ButtonVariant::Primary,
                 )
@@ -297,12 +358,7 @@ impl Shellumi {
                 })),
             );
 
-        InspectorShell::new(
-            header,
-            body,
-            Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, Some(footer), self.active_inspector_width())
     }
 
     /// Open team member inspector in a specific mode.
@@ -319,9 +375,27 @@ impl Shellumi {
             .open(vault_id, target, mode, None)
         {
             if mode == InspectorMode::Edit || mode == InspectorMode::Create {
-                let email_val = member_id.as_deref().unwrap_or("");
-                let email = cx.new(|cx| TextInput::new(cx, email_val, "user@example.com"));
-                let public_key = cx.new(|cx| TextInput::new(cx, "", "ssh-ed25519 ... (optional)"));
+                let existing = member_id.as_deref().and_then(|id| {
+                    self.team_members
+                        .iter()
+                        .find(|m| m.id == id || m.user_id == id)
+                });
+
+                let (initial_email, initial_role, initial_pk) = match existing {
+                    Some(m) => {
+                        let r_str = match m.role {
+                            TeamRole::Administrator => "admin",
+                            TeamRole::Viewer => "viewer",
+                            _ => "editor",
+                        };
+                        (m.user_id.clone(), r_str.to_string(), m.public_key.clone())
+                    }
+                    None => (String::new(), "editor".to_string(), String::new()),
+                };
+
+                let email = cx.new(|cx| TextInput::new(cx, &initial_email, "user@example.com"));
+                let public_key =
+                    cx.new(|cx| TextInput::new(cx, &initial_pk, "ssh-ed25519 ... (optional)"));
 
                 cx.observe(&email, |app, _, cx| app.inspector_mark_dirty(cx))
                     .detach();
@@ -329,9 +403,9 @@ impl Shellumi {
                     .detach();
 
                 self.team_form = Some(TeamFormState {
-                    member_id,
+                    member_id: existing.map(|m| m.id.clone()).or(member_id),
                     email,
-                    role: "editor".into(),
+                    role: initial_role,
                     public_key,
                     error: None,
                     sending: false,
@@ -345,6 +419,10 @@ impl Shellumi {
 
     /// Save / invite team member.
     pub(crate) fn save_team_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
+
         let Some(form) = &mut self.team_form else {
             return;
         };
@@ -352,9 +430,16 @@ impl Shellumi {
         let email = form.email.read(cx).value().trim().to_string();
         let role_str = form.role.clone();
         let pubkey = form.public_key.read(cx).value().trim().to_string();
+        let existing_member_id = form.member_id.clone();
 
         if email.is_empty() {
             form.error = Some("Email or display name is required.".into());
+            let active_vid = self.active_vault_id.clone();
+            self.inspector_coordinator.fail_save(
+                &active_vid,
+                gen,
+                "Email or display name is required.".into(),
+            );
             cx.notify();
             return;
         }
@@ -390,22 +475,33 @@ impl Shellumi {
                     .unwrap_or_default()
                     .as_secs()
                     .to_string();
-                let member = TeamMember {
-                    id: format!("tm-{}", uuid::Uuid::new_v4().as_simple()),
-                    vault_id: active_vault_id,
-                    user_id: email.clone(),
-                    display_name: email,
-                    public_key: pubkey,
-                    role,
-                    enrolled_at: now,
-                    invited_by: "current_user".into(),
-                    revoked: false,
-                    revoked_at: None,
-                };
-                store
-                    .add_team_member(&member)
-                    .await
-                    .map_err(|e| e.to_string())
+
+                if let Some(ref mid) = existing_member_id {
+                    store
+                        .update_team_member_role(mid, role)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok::<String, String>(mid.clone())
+                } else {
+                    let target_id = format!("tm-{}", uuid::Uuid::new_v4().as_simple());
+                    let member = TeamMember {
+                        id: target_id.clone(),
+                        vault_id: active_vault_id,
+                        user_id: email.clone(),
+                        display_name: email,
+                        public_key: pubkey,
+                        role,
+                        enrolled_at: now,
+                        invited_by: "current_user".into(),
+                        revoked: false,
+                        revoked_at: None,
+                    };
+                    store
+                        .add_team_member(&member)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok::<String, String>(target_id)
+                }
             })
         });
 
@@ -416,21 +512,33 @@ impl Shellumi {
                     f.sending = false;
                 }
                 match res {
-                    Ok(_) => {
+                    Ok(target_id) => {
                         app.team_form = None;
-                        app.inspector_coordinator.set_dirty(false);
+                        let target = InspectorTarget::TeamMember(Some(target_id.clone()));
+                        let active_vid = app.active_vault_id.clone();
+                        let ok = app
+                            .inspector_coordinator
+                            .complete_save(&active_vid, gen, target);
+                        app.load_team_members(cx);
                         app.open_team_inspector_mode(
-                            Some(email_for_msg.clone()),
+                            Some(target_id),
                             crate::ui::inspector::InspectorMode::View,
                             cx,
                         );
                         app.desktop.message =
-                            Some(format!("Invitation sent to '{}'", email_for_msg));
+                            Some(format!("Team permissions updated for '{}'", email_for_msg));
+                        if ok {
+                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                                app.apply_navigation_request(req, None, cx);
+                            }
+                        }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.team_form {
-                            f.error = Some(err);
+                            f.error = Some(err.clone());
                         }
+                        let active_vid = app.active_vault_id.clone();
+                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
                     }
                 }
                 cx.notify();
@@ -440,9 +548,58 @@ impl Shellumi {
     }
 
     /// Revoke/delete team member.
-    pub(crate) fn delete_team_member_inspector(&mut self, _id: &str, cx: &mut Context<Self>) {
-        self.inspector_close(cx);
-        self.desktop.message = Some("Team member access revoked".into());
-        cx.notify();
+    pub(crate) fn delete_team_member_inspector(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.active_vault_db_path() else {
+            return;
+        };
+        let key = self.active_vault_key();
+        let id_str = id.to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        let id_str_task = id_str.clone();
+        let now_task = now.clone();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&path, key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .revoke_team_member(&id_str_task, &now_task)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok(_) => {
+                        if let Some(m) = app.team_members.iter_mut().find(|m| m.id == id_str) {
+                            m.revoked = true;
+                            m.revoked_at = Some(now);
+                        }
+                        app.inspector_close(cx);
+                        app.load_team_members(cx);
+                        app.desktop.message =
+                            Some("Team member access revoked successfully".into());
+                    }
+                    Err(e) => {
+                        if let Some(ref mut f) = app.team_form {
+                            f.error = Some(e);
+                        } else {
+                            app.desktop.message = Some(format!("Failed to revoke access: {e}"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }

@@ -504,13 +504,13 @@ impl Shellumi {
                 } else {
                     0.0
                 };
-                let inspector_w = if app.inspector_coordinator.is_open() {
-                    crate::ui::layout::INSPECTOR_PREFERRED_WIDTH
-                } else {
-                    0.0
-                };
-                let canvas_w = (total_w - sidebar_w - inspector_w).max(640.0) as u32;
-                let canvas_h = (total_h - 48.0 - 36.0).max(480.0) as u32;
+                let inspector_open = app.inspector_coordinator.is_open();
+                let geom =
+                    crate::ui::layout::calculate_layout(total_w, sidebar_w, inspector_open, None);
+                let topbar_h: f32 = 48.0;
+                let toolbar_h: f32 = 36.0;
+                let canvas_w = geom.primary_content_width.max(640.0) as u32;
+                let canvas_h = (total_h - topbar_h - toolbar_h).max(480.0) as u32;
                 let w_even = canvas_w & !1;
                 app.remote_desktop_request_resize(tab_idx, w_even, canvas_h, cx);
             }))

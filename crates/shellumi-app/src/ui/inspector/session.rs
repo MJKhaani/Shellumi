@@ -51,7 +51,7 @@ impl Shellumi {
                     .p_4()
                     .child("No active remote desktop session selected."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -221,7 +221,7 @@ impl Shellumi {
                     .bg(surface())
                     .child(footer_buttons),
             ),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            self.active_inspector_width(),
         )
     }
 

@@ -48,7 +48,7 @@ impl Shellumi {
                     .p_4()
                     .child("The selected port forward rule does not exist or was deleted."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -178,12 +178,7 @@ impl Shellumi {
             );
         body = body.child(simple_section("Port Forward Configuration", config_items));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render tunnel inspector in Edit or Create mode.
@@ -198,7 +193,7 @@ impl Shellumi {
                 div().p_4().child("Form not initialized"),
                 div().p_4().child("Tunnel draft state is missing."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -373,7 +368,7 @@ impl Shellumi {
             header,
             form_body,
             Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            self.active_inspector_width(),
         )
     }
 
@@ -505,6 +500,10 @@ impl Shellumi {
 
     /// Save tunnel asynchronously.
     pub(crate) fn save_tunnel_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
+
         let Some(form) = &mut self.tunnel_form else {
             return;
         };
@@ -512,6 +511,7 @@ impl Shellumi {
             return;
         }
 
+        let active_vid = self.active_vault_id.clone();
         let name = form.name.read(cx).value().trim().to_string();
         let bind_str = form.bind_port.read(cx).value().trim().to_string();
         let target_host_str = form.target_host.read(cx).value().trim().to_string();
@@ -523,6 +523,11 @@ impl Shellumi {
 
         if name.is_empty() {
             form.error = Some("Tunnel name is required.".into());
+            self.inspector_coordinator.fail_save(
+                &active_vid,
+                gen,
+                "Tunnel name is required.".into(),
+            );
             cx.notify();
             return;
         }
@@ -531,6 +536,11 @@ impl Shellumi {
             Ok(p) if p > 0 => p,
             _ => {
                 form.error = Some("Invalid bind port (must be between 1 and 65535).".into());
+                self.inspector_coordinator.fail_save(
+                    &active_vid,
+                    gen,
+                    "Invalid bind port (must be between 1 and 65535).".into(),
+                );
                 cx.notify();
                 return;
             }
@@ -543,6 +553,11 @@ impl Shellumi {
                     Ok(p) if p > 0 => p,
                     _ => {
                         form.error = Some("Target port required for local forwarding.".into());
+                        self.inspector_coordinator.fail_save(
+                            &active_vid,
+                            gen,
+                            "Target port required for local forwarding.".into(),
+                        );
                         cx.notify();
                         return;
                     }
@@ -554,6 +569,11 @@ impl Shellumi {
                     Ok(p) if p > 0 => p,
                     _ => {
                         form.error = Some("Target port required for remote forwarding.".into());
+                        self.inspector_coordinator.fail_save(
+                            &active_vid,
+                            gen,
+                            "Target port required for remote forwarding.".into(),
+                        );
                         cx.notify();
                         return;
                     }
@@ -567,6 +587,8 @@ impl Shellumi {
             Err(e) => {
                 if let Some(ref mut f) = self.tunnel_form {
                     f.error = Some(e.to_string());
+                    self.inspector_coordinator
+                        .fail_save(&active_vid, gen, e.to_string());
                     cx.notify();
                 }
                 return;
@@ -621,7 +643,11 @@ impl Shellumi {
                     Ok(saved_id) => {
                         app.tunnel_form = None;
                         app.load_hosts(cx);
-                        app.inspector_coordinator.set_dirty(false);
+                        let target = InspectorTarget::Tunnel(Some(saved_id));
+                        let active_vid = app.active_vault_id.clone();
+                        let ok = app
+                            .inspector_coordinator
+                            .complete_save(&active_vid, gen, target);
                         app.open_tunnel_inspector_mode(
                             Some(saved_id),
                             crate::ui::inspector::InspectorMode::View,
@@ -631,11 +657,18 @@ impl Shellumi {
                             "Port forward '{}' saved successfully",
                             name_for_msg
                         ));
+                        if ok {
+                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                                app.apply_navigation_request(req, None, cx);
+                            }
+                        }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.tunnel_form {
-                            f.error = Some(err);
+                            f.error = Some(err.clone());
                         }
+                        let active_vid = app.active_vault_id.clone();
+                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
                     }
                 }
                 cx.notify();

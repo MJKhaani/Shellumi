@@ -241,12 +241,7 @@ impl Shellumi {
             member_items,
         ));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render group inspector in Edit or Create mode.
@@ -261,7 +256,7 @@ impl Shellumi {
                 div().p_4().child("Group inspector not initialized"),
                 div().p_4().child("Group draft state is missing."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -284,48 +279,10 @@ impl Shellumi {
             Some(back_btn),
         );
 
-        let is_cloud_sync = ins.cloud_sync;
-        let sync_toggle = div()
-            .id("group-cloud-sync-toggle")
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(MacTheme::BORDER))
-            .bg(if is_cloud_sync {
-                rgb(0x103d3d)
-            } else {
-                surface()
-            })
-            .text_color(if is_cloud_sync {
-                rgb(0x3de0d8)
-            } else {
-                text_secondary()
-            })
-            .cursor_pointer()
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-            .on_click(cx.listener(|app, _, _, cx| {
-                if let Some(ins) = &mut app.group_inspector {
-                    ins.cloud_sync = !ins.cloud_sync;
-                    app.inspector_mark_dirty(cx);
-                }
-            }))
-            .child(if is_cloud_sync {
-                "☁ Cloud Sync: Enabled"
-            } else {
-                "○ Cloud Sync: Disabled"
-            });
-
         let mut form_body = div().flex().flex_col().gap_3();
 
         form_body = form_body
             .child(simple_field("Group Name", ins.name.clone()))
-            .child(simple_field(
-                "Parent Group (optional)",
-                ins.parent_group.clone(),
-            ))
             .child(simple_field(
                 "Default Username (optional)",
                 ins.default_username.clone(),
@@ -334,8 +291,7 @@ impl Shellumi {
                 "Default Port (optional, 22)",
                 ins.default_port.clone(),
             ))
-            .child(self.render_group_identity_picker(ins.identity_id, cx))
-            .child(simple_field("Synchronization", sync_toggle));
+            .child(self.render_group_identity_picker(ins.identity_id, cx));
 
         let mut footer = div()
             .p_4()
@@ -374,7 +330,7 @@ impl Shellumi {
             header,
             form_body,
             Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            self.active_inspector_width(),
         )
     }
 

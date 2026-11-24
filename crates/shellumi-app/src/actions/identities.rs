@@ -46,9 +46,13 @@ impl Shellumi {
     }
 
     pub(crate) fn save_identity_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
         let Some(modal) = &self.identity_modal else {
             return;
         };
+        let active_vid = self.active_vault_id.clone();
         let name = modal.name.read(cx).value().trim().to_string();
         let username = modal.username.read(cx).value().trim().to_string();
         let key_path = modal.key_path.read(cx).value().trim().to_string();
@@ -70,6 +74,11 @@ impl Shellumi {
         if name.is_empty() || username.is_empty() {
             if let Some(m) = &mut self.identity_modal {
                 m.error = Some("Identity name and username cannot be empty".into());
+                self.inspector_coordinator.fail_save(
+                    &active_vid,
+                    gen,
+                    "Identity name and username cannot be empty".into(),
+                );
                 cx.notify();
             }
             return;
@@ -203,21 +212,33 @@ impl Shellumi {
             let _ = app.update(cx, |app, cx| {
                 if let Err(err) = res {
                     if let Some(m) = &mut app.identity_modal {
-                        m.error = Some(err);
+                        m.error = Some(err.clone());
                         cx.notify();
                     }
+                    let active_vid = app.active_vault_id.clone();
+                    app.inspector_coordinator.fail_save(&active_vid, gen, err);
                 } else {
                     app.identity_modal = None;
                     app.load_identities(cx);
-                    app.inspector_coordinator.set_dirty(false);
                     let target_id = editing_id
                         .or_else(|| app.identities.iter().find(|i| i.name == name).map(|i| i.id));
+                    let active_vid = app.active_vault_id.clone();
+                    let target =
+                        crate::ui::inspector::coordinator::InspectorTarget::Identity(target_id);
+                    let ok = app
+                        .inspector_coordinator
+                        .complete_save(&active_vid, gen, target);
                     app.open_identity_inspector_mode(
                         target_id,
                         crate::ui::inspector::InspectorMode::View,
                         cx,
                     );
                     app.desktop.message = Some(format!("Identity '{}' saved successfully", name));
+                    if ok {
+                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                            app.apply_navigation_request(req, None, cx);
+                        }
+                    }
                     cx.notify();
                 }
             });

@@ -46,7 +46,7 @@ impl Shellumi {
                     .p_4()
                     .child("The selected identity does not exist or was deleted."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -150,12 +150,7 @@ impl Shellumi {
             .child(self.render_detail_row("Tags", tags_str));
         body = body.child(simple_section("Key Details", details_items));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render identity inspector in Edit or Create mode.
@@ -170,7 +165,7 @@ impl Shellumi {
                 div().p_4().child("Identity form not initialized"),
                 div().p_4().child("Draft state is missing."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -255,7 +250,7 @@ impl Shellumi {
             header,
             form_body,
             Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            self.active_inspector_width(),
         )
     }
 

@@ -119,7 +119,7 @@ impl Shellumi {
                 )),
             )
             .child(button("overview-workspaces", "Manage workspaces").on_click(
-                cx.listener(|app, _, window, cx| app.navigate_page("Workspaces", window, cx)),
+                cx.listener(|app, _, window, cx| app.navigate_page("Workspaces", Some(window), cx)),
             ));
         div()
             .flex()

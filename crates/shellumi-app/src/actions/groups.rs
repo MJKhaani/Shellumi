@@ -42,13 +42,23 @@ impl Shellumi {
     }
 
     pub(crate) fn save_group_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
+
         let Some(inspector) = &self.group_inspector else {
             return;
         };
         let new_name = inspector.name.read(cx).value().trim().to_string();
+        let active_vid = self.active_vault_id.clone();
         if new_name.is_empty() {
             if let Some(ins) = &mut self.group_inspector {
                 ins.error = Some("Group name cannot be empty".into());
+                self.inspector_coordinator.fail_save(
+                    &active_vid,
+                    gen,
+                    "Group name cannot be empty".into(),
+                );
                 cx.notify();
             }
             return;
@@ -85,6 +95,8 @@ impl Shellumi {
             Err(e) => {
                 if let Some(ins) = &mut self.group_inspector {
                     ins.error = Some(e.to_string());
+                    self.inspector_coordinator
+                        .fail_save(&active_vid, gen, e.to_string());
                     cx.notify();
                 }
                 return;
@@ -93,6 +105,7 @@ impl Shellumi {
 
         let is_rename = orig_name != new_name && !orig_name.is_empty();
         let target_group_name = new_name.clone();
+        let active_vault_id = self.active_vault_id.clone();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -101,6 +114,9 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 if is_rename {
                     store
                         .rename_group(&orig_name, &group)
@@ -125,24 +141,38 @@ impl Shellumi {
 
         cx.spawn(async move |app, cx| {
             let res = task.await;
-            let _ = app.update(cx, |app, cx| {
-                if let Err(err) = res {
+            let _ = app.update(cx, |app, cx| match res {
+                Err(err) => {
                     if let Some(ins) = &mut app.group_inspector {
-                        ins.error = Some(err);
+                        ins.error = Some(err.clone());
                         cx.notify();
                     }
-                } else {
+                    let active_vid = app.active_vault_id.clone();
+                    app.inspector_coordinator.fail_save(&active_vid, gen, err);
+                }
+                Ok(()) => {
                     app.group_inspector = None;
                     app.load_hosts(cx);
                     app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
                     app.desktop.message =
                         Some(format!("Group '{}' saved successfully", target_group_name));
-                    app.inspector_coordinator.set_dirty(false);
+                    let target = crate::ui::inspector::coordinator::InspectorTarget::Group(Some(
+                        target_group_name.clone(),
+                    ));
+                    let active_vid = app.active_vault_id.clone();
+                    let ok = app
+                        .inspector_coordinator
+                        .complete_save(&active_vid, gen, target);
                     app.open_group_inspector_mode(
                         &target_group_name,
                         crate::ui::inspector::InspectorMode::View,
                         cx,
                     );
+                    if ok {
+                        if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                            app.apply_navigation_request(req, None, cx);
+                        }
+                    }
                     cx.notify();
                 }
             });
@@ -156,6 +186,7 @@ impl Shellumi {
         let Some(db_path) = self.active_vault_db_path() else {
             return;
         };
+        let active_vault_id = self.active_vault_id.clone();
         let vault_key = self.active_vault_key();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -165,6 +196,9 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
+                    store.set_vault_id(vid);
+                }
                 store
                     .delete_group(&target_name)
                     .await
@@ -185,6 +219,9 @@ impl Shellumi {
                         app.inspector_coordinator.close();
                     }
                     Err(err) => {
+                        if let Some(ins) = &mut app.group_inspector {
+                            ins.error = Some(format!("Failed to delete group: {err}"));
+                        }
                         app.desktop.message =
                             Some(format!("Failed to delete group '{}': {}", name_str, err));
                     }

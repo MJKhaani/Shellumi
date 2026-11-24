@@ -19,7 +19,7 @@ pub enum InspectorTarget {
     Tunnel(Option<i64>),
     Workspace(Option<i64>),
     Vault(Option<String>),
-    Provider(Option<i64>),
+    Provider(Option<String>),
     TeamMember(Option<String>),
     Session(Option<u64>),
 }
@@ -103,6 +103,11 @@ impl InspectorCoordinator {
         self.pending_guard.as_ref()
     }
 
+    /// Take the pending navigation request, if any.
+    pub fn take_pending_guard(&mut self) -> Option<NavigationRequest> {
+        self.pending_guard.take()
+    }
+
     /// Get the active inspector state.
     pub fn active(&self) -> Option<&InspectorState> {
         self.active.as_ref()
@@ -175,14 +180,20 @@ impl InspectorCoordinator {
     /// If dirty, sets `pending_guard` to `SwitchVault(new_vault)` and returns `false`.
     /// If clean, closes any open inspector from the former vault and returns `true`.
     pub fn request_switch_vault(&mut self, new_vault_id: impl Into<String>) -> bool {
-        let new_id = new_vault_id.into();
+        self.request_navigation(NavigationRequest::SwitchVault(new_vault_id.into()))
+    }
+
+    /// Request an arbitrary navigation (e.g. switching page, tab, or window closing).
+    ///
+    /// If dirty, sets `pending_guard = Some(req)` and returns `false`.
+    /// If clean, closes any open inspector and returns `true`.
+    pub fn request_navigation(&mut self, req: NavigationRequest) -> bool {
         if let Some(ref active) = self.active {
             if active.dirty {
-                self.pending_guard = Some(NavigationRequest::SwitchVault(new_id));
+                self.pending_guard = Some(req);
                 return false;
             }
         }
-        // Multi-vault isolation: close inspector when switching vaults
         self.active = None;
         self.pending_guard = None;
         true
@@ -596,13 +607,13 @@ mod tests {
         // 6. Provider replaces Vault
         assert!(coord.open(
             "v1",
-            InspectorTarget::Provider(Some(50)),
+            InspectorTarget::Provider(Some("cp-aws".into())),
             InspectorMode::View,
             None
         ));
         assert_eq!(
             coord.active().unwrap().target,
-            InspectorTarget::Provider(Some(50))
+            InspectorTarget::Provider(Some("cp-aws".into()))
         );
 
         // 7. TeamMember replaces Provider
@@ -704,5 +715,79 @@ mod tests {
         // Close inspector cleanly
         assert!(coord.request_close());
         assert!(!coord.is_open());
+    }
+
+    #[test]
+    fn test_navigation_request_guard_switch_vault() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Host(Some(1)),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        // Attempting to switch vault while dirty is blocked and sets pending guard
+        let switched = coord.request_switch_vault("v2");
+        assert!(!switched);
+        assert!(coord.is_guard_active());
+
+        // Save successfully and take pending guard
+        let gen = coord.start_save().unwrap();
+        let ok = coord.complete_save("v1", gen, InspectorTarget::Host(Some(1)));
+        assert!(ok);
+        assert!(!coord.is_dirty());
+
+        let pending = coord.take_pending_guard();
+        assert_eq!(
+            pending,
+            Some(NavigationRequest::SwitchVault("v2".to_string()))
+        );
+        assert!(!coord.is_guard_active());
+    }
+
+    #[test]
+    fn test_navigation_request_guard_switch_page() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Group(Some("prod".into())),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        let allowed = coord.request_navigation(NavigationRequest::SwitchPage("Settings".into()));
+        assert!(!allowed);
+        assert!(coord.is_guard_active());
+
+        // Confirm discard clears guard and resets active inspector
+        coord.confirm_discard();
+        assert!(!coord.is_guard_active());
+        assert!(!coord.is_dirty());
+        assert!(!coord.is_open());
+    }
+
+    #[test]
+    fn test_fail_save_preserves_dirty_state_and_retains_draft() {
+        let mut coord = InspectorCoordinator::new();
+        coord.open(
+            "v1",
+            InspectorTarget::Provider(Some("cp-aws".into())),
+            InspectorMode::Edit,
+            None,
+        );
+        coord.set_dirty(true);
+
+        let gen = coord.start_save().unwrap();
+        let ok = coord.fail_save("v1", gen, "Invalid API Key".into());
+        assert!(ok);
+        // Dirty state must remain true so user doesn't lose unsaved changes
+        assert!(coord.is_dirty());
+        match &coord.active().unwrap().operation {
+            AsyncOperationState::Error { message, .. } => assert_eq!(message, "Invalid API Key"),
+            _ => panic!("Expected AsyncOperationState::Error"),
+        }
     }
 }

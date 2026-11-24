@@ -704,7 +704,7 @@ pub(crate) struct VaultFormState {
 
 #[allow(dead_code)]
 pub(crate) struct ProviderFormState {
-    pub(crate) id: Option<i64>,
+    pub(crate) id: Option<String>,
     pub(crate) name: Entity<TextInput>,
     pub(crate) provider_type: String,
     pub(crate) api_key: Entity<TextInput>,
@@ -733,7 +733,7 @@ pub(crate) enum DeleteTarget {
     Tunnel(i64, String),
     Workspace(i64, String),
     Vault(String, String),
-    Provider(i64, String),
+    Provider(String, String),
     TeamMember(String, String),
 }
 
@@ -761,6 +761,8 @@ struct Shellumi {
     pub(crate) workspaces: Vec<SavedWorkspace>,
     pub(crate) identities: Vec<SavedIdentity>,
     pub(crate) tunnels: Vec<SavedTunnel>,
+    pub(crate) cloud_providers: Vec<shellumi_storage::CloudProviderRecord>,
+    pub(crate) team_members: Vec<shellumi_core::TeamMember>,
     broadcast_manager: BroadcastManager,
     broadcast_warning: Option<String>,
     sync_status: AppSyncStatus,
@@ -807,7 +809,9 @@ struct Shellumi {
     pub(crate) delete_confirm: Option<DeleteTarget>,
     #[allow(dead_code)]
     pub(crate) inspector_coordinator: ui::inspector::InspectorCoordinator,
+    pub(crate) current_inspector_width: Option<f32>,
     pub(crate) tab_overflow_menu_open: bool,
+    pub(crate) tab_overflow_x: f32,
     pub(crate) rd_display_menu_open: bool,
     pub(crate) rd_keyboard_menu_open: bool,
     pub(crate) rd_more_menu_open: bool,
@@ -1195,6 +1199,8 @@ impl Shellumi {
             workspaces: Vec::new(),
             identities: Vec::new(),
             tunnels: Vec::new(),
+            cloud_providers: Vec::new(),
+            team_members: Vec::new(),
             broadcast_manager: BroadcastManager::new(0),
             broadcast_warning: None,
             sync_status: AppSyncStatus::LocalOnly,
@@ -1256,7 +1262,9 @@ impl Shellumi {
             sftp_modal: None,
             delete_confirm: None,
             inspector_coordinator: ui::inspector::InspectorCoordinator::new(),
+            current_inspector_width: Some(crate::ui::layout::INSPECTOR_PREFERRED_WIDTH),
             tab_overflow_menu_open: false,
+            tab_overflow_x: 220.0,
             snippet_form: None,
             tunnel_form: None,
             workspace_form: None,
@@ -1777,7 +1785,7 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         })
                         .on_click(cx.listener(move |app, _, window, cx| {
-                            app.navigate_page(page, window, cx);
+                            app.navigate_page(page, Some(window), cx);
                         }))
                         .child(icon_element),
                 );
@@ -1815,7 +1823,7 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::TEXT_PRIMARY))
                         })
                         .on_click(cx.listener(|app, _, window, cx| {
-                            app.navigate_page("Settings", window, cx)
+                            app.navigate_page("Settings", Some(window), cx)
                         }))
                         .child(
                             if let Some(icon_path) =
@@ -1944,7 +1952,7 @@ impl Shellumi {
                         }
                     })
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        app.navigate_page(page, window, cx);
+                        app.navigate_page(page, Some(window), cx);
                     }))
                     .child(icon_element)
                     .child(page),
@@ -2030,9 +2038,9 @@ impl Shellumi {
                             .bg(rgb(MacTheme::SURFACE_HOVER))
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     })
-                    .on_click(
-                        cx.listener(|app, _, window, cx| app.navigate_page("Settings", window, cx)),
-                    )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.navigate_page("Settings", Some(window), cx)
+                    }))
                     .child(
                         if let Some(icon_path) =
                             resolve_icon_path("settings", self.page == Some("Settings"), 48)
@@ -2054,7 +2062,11 @@ impl Shellumi {
                     .child("Settings"),
             )
     }
-    fn render_unified_top_bar(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn render_unified_top_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let is_hosts_view = self.page.is_none() && self.active_tab_idx.is_none();
 
         #[cfg(target_os = "macos")]
@@ -2090,7 +2102,7 @@ impl Shellumi {
                         app.page = None;
                         app.active_tab_idx = None;
                         app.vault_dropdown_open = false;
-                        app.navigate_page("Hosts", window, cx);
+                        app.navigate_page("Hosts", Some(window), cx);
                     }))
                     .child(
                         if let Some(icon_path) =
@@ -2173,7 +2185,7 @@ impl Shellumi {
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
             })
             .on_click(cx.listener(|app, _, window, cx| {
-                app.navigate_page("SFTP Files", window, cx);
+                app.navigate_page("SFTP Files", Some(window), cx);
             }))
             .child(
                 if let Some(icon_path) = resolve_icon_path("sftp", is_sftp_active, 48) {
@@ -2196,7 +2208,7 @@ impl Shellumi {
                         .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
                         .cursor_pointer()
                         .on_click(cx.listener(|app, _, window, cx| {
-                            app.navigate_page("Hosts", window, cx);
+                            app.navigate_page("Hosts", Some(window), cx);
                             cx.stop_propagation();
                         }))
                         .child("✕"),
@@ -2310,8 +2322,9 @@ impl Shellumi {
 
         tabs_row = tabs_row.child(sftp_tab);
 
+        let window_w = window.bounds().size.width.to_f64() as f32;
         let total_tabs = self.tabs.len();
-        let max_visible_tabs = 8;
+        let max_visible_tabs = (((window_w - 600.0) / 140.0).floor() as usize).clamp(1, 10);
         let active_idx = self.active_tab_idx;
 
         // When many tabs exist, compute visible slice ensuring active tab is always visible
@@ -2446,6 +2459,7 @@ impl Shellumi {
         }
 
         if overflow_count > 0 {
+            let overflow_btn_x = 220.0 + (visible_indices.len() as f32 * 140.0);
             tabs_row = tabs_row.child(
                 div()
                     .id("topbar-tabs-overflow-btn")
@@ -2472,7 +2486,8 @@ impl Shellumi {
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                     })
                     .cursor_pointer()
-                    .on_click(cx.listener(|app, _, _, cx| {
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.tab_overflow_x = overflow_btn_x;
                         app.tab_overflow_menu_open = !app.tab_overflow_menu_open;
                         cx.notify();
                     }))
@@ -2579,60 +2594,22 @@ impl Shellumi {
             None
         };
 
-        let right_actions = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .id("topbar-command-palette-btn")
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .cursor_pointer()
-                    .hover(|s| {
-                        s.bg(rgb(MacTheme::SURFACE_HOVER))
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    })
-                    .on_click(
-                        cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)),
-                    )
-                    .child("⌘K"),
-            )
-            .child(
-                div()
-                    .id("topbar-notifications-btn")
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .rounded_md()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .cursor_pointer()
-                    .hover(|s| {
-                        s.bg(rgb(MacTheme::SURFACE_HOVER))
-                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    })
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.desktop.message = Some("No unread notifications".into());
-                        cx.notify();
-                    }))
-                    .child(
-                        if let Some(icon_path) = resolve_icon_path("bell", false, 48) {
-                            div()
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .child(gpui::img(icon_path).size_full())
-                                .into_any_element()
-                        } else {
-                            div().child("🔔").into_any_element()
-                        },
-                    ),
-            );
+        let right_actions = div().flex().items_center().gap_2().child(
+            div()
+                .id("topbar-command-palette-btn")
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .text_xs()
+                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                .cursor_pointer()
+                .hover(|s| {
+                    s.bg(rgb(MacTheme::SURFACE_HOVER))
+                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                })
+                .on_click(cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)))
+                .child("⌘K"),
+        );
 
         div()
             .id("unified-topbar")
@@ -2755,7 +2732,12 @@ impl Shellumi {
                                 .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                 .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                 .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.switch_vault(v_id.clone(), v_name.clone(), window, cx);
+                                    app.switch_vault(
+                                        v_id.clone(),
+                                        v_name.clone(),
+                                        Some(window),
+                                        cx,
+                                    );
                                 }))
                                 .child(
                                     div()
@@ -2850,7 +2832,12 @@ impl Shellumi {
                                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
                                     .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                     .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.switch_vault(v_id.clone(), v_name.clone(), window, cx);
+                                        app.switch_vault(
+                                            v_id.clone(),
+                                            v_name.clone(),
+                                            Some(window),
+                                            cx,
+                                        );
                                     }))
                                     .child(
                                         div()
@@ -2998,17 +2985,21 @@ impl Shellumi {
 
     pub(crate) fn render_tab_overflow_popover(
         &self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Stateful<gpui::Div>> {
         if !self.tab_overflow_menu_open {
             return None;
         }
 
+        let window_w = window.bounds().size.width.to_f64() as f32;
+        let left_pos = (window_w - 300.0).min(self.tab_overflow_x).max(180.0);
+
         let mut list = div()
             .id("tab-overflow-popover")
             .absolute()
             .top(px(46.0))
-            .left(px(220.0))
+            .left(px(left_pos))
             .w(px(280.0))
             .max_h(px(320.0))
             .overflow_y_scroll()

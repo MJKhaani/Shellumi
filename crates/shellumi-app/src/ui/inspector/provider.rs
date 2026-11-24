@@ -20,7 +20,7 @@ impl Shellumi {
     /// Render the unified Cloud Provider Inspector for viewing or editing infrastructure sync.
     pub(crate) fn render_provider_inspector(
         &mut self,
-        provider_id: Option<i64>,
+        provider_id: Option<String>,
         mode: InspectorMode,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -35,12 +35,73 @@ impl Shellumi {
     /// Render provider inspector in View mode.
     fn render_provider_view_inspector(
         &mut self,
-        provider_id: Option<i64>,
+        provider_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let p_name = "Cloud Integration".to_string();
-        let p_kind = "AWS / Azure / DO".to_string();
-        let id_val = provider_id.unwrap_or(1);
+        let provider = provider_id
+            .as_deref()
+            .and_then(|id| self.cloud_providers.iter().find(|p| p.id == id))
+            .or_else(|| self.cloud_providers.first())
+            .cloned();
+
+        let Some(provider) = provider else {
+            let close_btn = InspectorShell::close_button(
+                "close-provider-inspector-btn",
+                false,
+                |app, _, _, cx| {
+                    app.inspector_close(cx);
+                },
+                cx,
+            );
+            let header = InspectorShell::header(
+                "Cloud Provider".to_string(),
+                Some("Infrastructure Provider"),
+                None,
+                None,
+                Some(close_btn),
+            );
+            return InspectorShell::new(
+                header,
+                div()
+                    .p_4()
+                    .text_color(text_secondary())
+                    .child("No cloud provider selected or configured yet."),
+                None::<Div>,
+                self.active_inspector_width(),
+            );
+        };
+
+        let p_name = provider.name.clone();
+        let p_kind = provider.provider_kind.to_uppercase();
+        let id_val = provider.id.clone();
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&provider.config_json).unwrap_or_default();
+        let region = cfg
+            .get("region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("us-east-1")
+            .to_string();
+        let api_key = cfg
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let masked_api = if api_key.len() > 6 {
+            format!("{}...{}", &api_key[..3], &api_key[api_key.len() - 3..])
+        } else {
+            "••••••••".to_string()
+        };
+
+        let last_sync_str = match provider.last_synced_at {
+            Some(ts) => format!("Synced (epoch {})", ts),
+            None => "Never synced".to_string(),
+        };
+        let auto_sync_str = if provider.auto_sync {
+            format!("Enabled (every {}m)", provider.sync_interval_mins)
+        } else {
+            "Disabled".to_string()
+        };
 
         let badge = div()
             .px_2()
@@ -52,6 +113,7 @@ impl Shellumi {
             .text_color(rgb(0x389bf2))
             .child(p_kind.clone());
 
+        let edit_id = id_val.clone();
         let edit_btn = div()
             .id("inspector-edit-provider-btn")
             .px_2p5()
@@ -66,7 +128,7 @@ impl Shellumi {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, _, cx| {
-                app.open_provider_inspector_mode(Some(id_val), InspectorMode::Edit, cx);
+                app.open_provider_inspector_mode(Some(edit_id.clone()), InspectorMode::Edit, cx);
             }))
             .child("Edit");
 
@@ -89,6 +151,12 @@ impl Shellumi {
         let mut body = div().flex().flex_col().gap_4();
 
         // Action buttons
+        let sync_name = p_name.clone();
+        let sync_kind = p_kind.clone();
+        let edit_id_action = id_val.clone();
+        let delete_id_action = id_val.clone();
+        let delete_name = p_name.clone();
+
         let actions_row = div()
             .flex()
             .gap_2()
@@ -98,8 +166,12 @@ impl Shellumi {
                     "Sync Inventory",
                     ButtonVariant::Primary,
                 )
-                .on_click(cx.listener(|_app, _, _, _cx| {
-                    // Trigger inventory sync
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.desktop.message = Some(format!(
+                        "Inventory sync initiated for '{}' ({}). Discovered hosts will appear in Discovered tab.",
+                        sync_name, sync_kind
+                    ));
+                    cx.notify();
                 })),
             )
             .child(
@@ -109,15 +181,15 @@ impl Shellumi {
                     ButtonVariant::Secondary,
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.open_provider_inspector_mode(Some(id_val), InspectorMode::Edit, cx);
+                    app.open_provider_inspector_mode(Some(edit_id_action.clone()), InspectorMode::Edit, cx);
                 })),
             )
             .child(
                 AppButton::new("provider-view-delete-btn", "Delete", ButtonVariant::Danger)
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.delete_confirm = Some(crate::DeleteTarget::Provider(
-                            id_val,
-                            "Cloud Integration".into(),
+                            delete_id_action.clone(),
+                            delete_name.clone(),
                         ));
                         cx.notify();
                     })),
@@ -128,21 +200,20 @@ impl Shellumi {
         let mut details_items = div().flex().flex_col().gap_1();
         details_items = details_items
             .child(self.render_detail_row("Integration Name", p_name))
-            .child(self.render_detail_row("Provider Type", p_kind));
+            .child(self.render_detail_row("Provider Type", p_kind))
+            .child(self.render_detail_row("Region", region))
+            .child(self.render_detail_row("API Key / Access Key", masked_api))
+            .child(self.render_detail_row("Sync Status", last_sync_str))
+            .child(self.render_detail_row("Automatic Sync", auto_sync_str));
         body = body.child(simple_section("Provider Settings", details_items));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render provider inspector in Edit or Create mode.
     fn render_provider_edit_inspector(
         &mut self,
-        _provider_id: Option<i64>,
+        _provider_id: Option<String>,
         is_create: bool,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -173,7 +244,7 @@ impl Shellumi {
                 header,
                 div().p_4().child("Form not initialized"),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -318,32 +389,63 @@ impl Shellumi {
                 })),
             );
 
-        InspectorShell::new(
-            header,
-            body,
-            Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, Some(footer), self.active_inspector_width())
     }
 
     /// Open provider inspector in a specific mode.
     pub(crate) fn open_provider_inspector_mode(
         &mut self,
-        provider_id: Option<i64>,
+        provider_id: Option<String>,
         mode: InspectorMode,
         cx: &mut Context<Self>,
     ) {
         let vault_id = self.active_vault_id.clone();
-        let target = InspectorTarget::Provider(provider_id);
+        let target = InspectorTarget::Provider(provider_id.clone());
         if self
             .inspector_coordinator
             .open(vault_id, target, mode, None)
         {
             if mode == InspectorMode::Edit || mode == InspectorMode::Create {
-                let name = cx.new(|cx| TextInput::new(cx, "AWS Production", "Provider name"));
-                let api_key = cx.new(|cx| TextInput::new(cx, "", "AKIA..."));
-                let secret_key = cx.new(|cx| TextInput::new(cx, "", "Secret token"));
-                let region = cx.new(|cx| TextInput::new(cx, "us-east-1", "Region"));
+                let existing = provider_id
+                    .as_deref()
+                    .and_then(|id| self.cloud_providers.iter().find(|p| p.id == id));
+
+                let (initial_name, initial_type, initial_api, initial_secret, initial_region) =
+                    match existing {
+                        Some(rec) => {
+                            let cfg: serde_json::Value =
+                                serde_json::from_str(&rec.config_json).unwrap_or_default();
+                            (
+                                rec.name.clone(),
+                                rec.provider_kind.to_lowercase(),
+                                cfg.get("api_key")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                cfg.get("secret_key")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                cfg.get("region")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("us-east-1")
+                                    .to_string(),
+                            )
+                        }
+                        None => (
+                            "AWS Production".to_string(),
+                            "aws".to_string(),
+                            String::new(),
+                            String::new(),
+                            "us-east-1".to_string(),
+                        ),
+                    };
+
+                let name = cx.new(|cx| TextInput::new(cx, &initial_name, "Provider name"));
+                let api_key = cx.new(|cx| TextInput::new(cx, &initial_api, "AKIA..."));
+                let secret_key =
+                    cx.new(|cx| TextInput::new(cx, &initial_secret, "Secret token").masked());
+                let region = cx.new(|cx| TextInput::new(cx, &initial_region, "Region"));
 
                 cx.observe(&name, |app, _, cx| app.inspector_mark_dirty(cx))
                     .detach();
@@ -357,7 +459,7 @@ impl Shellumi {
                 self.provider_form = Some(ProviderFormState {
                     id: provider_id,
                     name,
-                    provider_type: "aws".into(),
+                    provider_type: initial_type,
                     api_key,
                     secret_key,
                     region,
@@ -373,6 +475,10 @@ impl Shellumi {
 
     /// Save provider inspector form.
     pub(crate) fn save_provider_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
+
         let Some(form) = &mut self.provider_form else {
             return;
         };
@@ -382,9 +488,16 @@ impl Shellumi {
         let api_key = form.api_key.read(cx).value().trim().to_string();
         let secret_key = form.secret_key.read(cx).value().trim().to_string();
         let region = form.region.read(cx).value().trim().to_string();
+        let existing_id = form.id.clone();
 
         if name.is_empty() || api_key.is_empty() || secret_key.is_empty() {
             form.error = Some("Name, API Key, and Secret are required.".into());
+            let active_vault_id = self.active_vault_id.clone();
+            self.inspector_coordinator.fail_save(
+                &active_vault_id,
+                gen,
+                "Name, API Key, and Secret are required.".into(),
+            );
             cx.notify();
             return;
         }
@@ -414,12 +527,15 @@ impl Shellumi {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
+                let target_id = existing_id
+                    .unwrap_or_else(|| format!("cp-{}", uuid::Uuid::new_v4().as_simple()));
                 let rec = CloudProviderRecord {
-                    id: format!("cp-{}", uuid::Uuid::new_v4().as_simple()),
+                    id: target_id.clone(),
                     name,
                     provider_kind: provider_type,
                     config_json: serde_json::json!({
                         "api_key": api_key,
+                        "secret_key": secret_key,
                         "region": region,
                     })
                     .to_string(),
@@ -429,10 +545,23 @@ impl Shellumi {
                     created_at: now,
                     updated_at: now,
                 };
-                store
-                    .create_cloud_provider(&rec)
+                if store
+                    .get_cloud_provider(&target_id)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
+                    store
+                        .update_cloud_provider(&rec)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    store
+                        .create_cloud_provider(&rec)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok::<String, String>(target_id)
             })
         });
 
@@ -443,11 +572,16 @@ impl Shellumi {
                     f.saving = false;
                 }
                 match res {
-                    Ok(_) => {
+                    Ok(saved_id) => {
                         app.provider_form = None;
-                        app.inspector_coordinator.set_dirty(false);
+                        let target = InspectorTarget::Provider(Some(saved_id.clone()));
+                        let active_vid = app.active_vault_id.clone();
+                        let ok = app
+                            .inspector_coordinator
+                            .complete_save(&active_vid, gen, target);
+                        app.load_cloud_providers(cx);
                         app.open_provider_inspector_mode(
-                            Some(1),
+                            Some(saved_id),
                             crate::ui::inspector::InspectorMode::View,
                             cx,
                         );
@@ -455,11 +589,18 @@ impl Shellumi {
                             "Cloud provider '{}' saved successfully",
                             name_for_msg
                         ));
+                        if ok {
+                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                                app.apply_navigation_request(req, None, cx);
+                            }
+                        }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.provider_form {
-                            f.error = Some(err);
+                            f.error = Some(err.clone());
                         }
+                        let active_vid = app.active_vault_id.clone();
+                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
                     }
                 }
                 cx.notify();
@@ -469,9 +610,46 @@ impl Shellumi {
     }
 
     /// Delete cloud provider.
-    pub(crate) fn delete_provider_inspector(&mut self, _id: i64, cx: &mut Context<Self>) {
-        self.inspector_close(cx);
-        self.desktop.message = Some("Cloud provider deleted successfully".into());
-        cx.notify();
+    pub(crate) fn delete_provider_inspector(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(path) = self.active_vault_db_path() else {
+            return;
+        };
+        let key = self.active_vault_key();
+        let id_clone = id.clone();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let mut store = HostStore::open_with_key(&path, key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .delete_cloud_provider(&id_clone)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok(_) => {
+                        app.cloud_providers.retain(|p| p.id != id);
+                        app.inspector_close(cx);
+                        app.desktop.message = Some("Cloud provider deleted successfully".into());
+                    }
+                    Err(e) => {
+                        if let Some(ref mut f) = app.provider_form {
+                            f.error = Some(e);
+                        } else {
+                            app.desktop.message = Some(format!("Failed to delete provider: {e}"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }

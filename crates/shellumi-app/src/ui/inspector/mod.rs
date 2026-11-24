@@ -177,6 +177,11 @@ impl Shellumi {
         cx.notify();
     }
 
+    /// Return active inspector width, or None when in FocusedContent mode (takes w_full).
+    pub(crate) fn active_inspector_width(&self) -> Option<f32> {
+        self.current_inspector_width
+    }
+
     /// Render the unified inspector based on current active target and mode.
     pub(crate) fn render_unified_inspector(
         &mut self,
@@ -188,6 +193,21 @@ impl Shellumi {
         } else {
             return div();
         };
+
+        let bounds = window.bounds();
+        let total_w = bounds.size.width.to_f64() as f32;
+        let sidebar_w = if self.sidebar_visible {
+            crate::ui::layout::DEFAULT_SIDEBAR_WIDTH
+        } else {
+            0.0
+        };
+        let geom = crate::ui::layout::calculate_layout(total_w, sidebar_w, true, None);
+        self.current_inspector_width =
+            if geom.presentation == crate::ui::layout::InspectorPresentation::FocusedContent {
+                None
+            } else {
+                Some(geom.inspector_width)
+            };
 
         match target {
             InspectorTarget::Host(host_id) => self.render_host_inspector(host_id, mode, window, cx),
@@ -239,15 +259,12 @@ impl Shellumi {
             match &target {
                 crate::DeleteTarget::Host(id, _) => {
                     app.delete_host(*id, cx);
-                    app.inspector_close(cx);
                 }
                 crate::DeleteTarget::Group(name) => {
                     app.delete_group_inspector(name, cx);
-                    app.inspector_close(cx);
                 }
                 crate::DeleteTarget::Identity(id, _) => {
                     app.delete_identity(*id, cx);
-                    app.inspector_close(cx);
                 }
                 crate::DeleteTarget::Snippet(id, _) => {
                     app.delete_snippet_inspector(*id, cx);
@@ -262,7 +279,7 @@ impl Shellumi {
                     app.delete_vault_inspector(id, cx);
                 }
                 crate::DeleteTarget::Provider(id, _) => {
-                    app.delete_provider_inspector(*id, cx);
+                    app.delete_provider_inspector(id.clone(), cx);
                 }
                 crate::DeleteTarget::TeamMember(id, _) => {
                     app.delete_team_member_inspector(id, cx);
@@ -325,8 +342,8 @@ impl Shellumi {
         }));
 
         let discard_btn = AppButton::new("guard-discard-btn", "Discard", ButtonVariant::Secondary)
-            .on_click(cx.listener(|app, _, _, cx| {
-                app.inspector_confirm_discard(cx);
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.inspector_confirm_discard(Some(window), cx);
             }));
 
         let save_btn = AppButton::new("guard-save-btn", "Save", ButtonVariant::Primary).on_click(
@@ -361,56 +378,77 @@ impl Shellumi {
         }
     }
 
-    /// Confirm discard of unsaved changes and navigate to requested target.
-    pub(crate) fn inspector_confirm_discard(&mut self, cx: &mut Context<Self>) {
-        if let Some(req) = self.inspector_coordinator.pending_guard().cloned() {
-            self.inspector_coordinator.confirm_discard();
-            match req {
-                crate::ui::inspector::NavigationRequest::SwitchTarget(target, mode) => {
-                    let vault_id = self.active_vault_id.clone();
-                    let _ = self
-                        .inspector_coordinator
-                        .open(vault_id, target.clone(), mode, None);
-                    match target {
-                        InspectorTarget::Host(Some(id)) => {
-                            self.selected_host_id = Some(id);
-                            self.group_inspector = None;
-                        }
-                        InspectorTarget::Host(None) => {
-                            self.selected_host_id = None;
-                            self.edit_host(None, cx);
-                        }
-                        InspectorTarget::Group(Some(name)) => {
-                            self.selected_host_id = None;
-                            self.open_group_inspector(&name, cx);
-                        }
-                        InspectorTarget::Group(None) => {
-                            self.selected_host_id = None;
-                            self.open_group_inspector("", cx);
-                        }
-                        _ => {
-                            self.selected_host_id = None;
-                        }
+    /// Apply confirmed navigation request (target, close, vault, page).
+    pub(crate) fn apply_navigation_request(
+        &mut self,
+        req: crate::ui::inspector::NavigationRequest,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        match req {
+            crate::ui::inspector::NavigationRequest::SwitchTarget(target, mode) => {
+                let vault_id = self.active_vault_id.clone();
+                let _ = self
+                    .inspector_coordinator
+                    .open(vault_id, target.clone(), mode, None);
+                match target {
+                    InspectorTarget::Host(Some(id)) => {
+                        self.selected_host_id = Some(id);
+                        self.group_inspector = None;
+                    }
+                    InspectorTarget::Host(None) => {
+                        self.selected_host_id = None;
+                        self.edit_host(None, cx);
+                    }
+                    InspectorTarget::Group(Some(name)) => {
+                        self.selected_host_id = None;
+                        self.open_group_inspector(&name, cx);
+                    }
+                    InspectorTarget::Group(None) => {
+                        self.selected_host_id = None;
+                        self.open_group_inspector("", cx);
+                    }
+                    _ => {
+                        self.selected_host_id = None;
                     }
                 }
-                crate::ui::inspector::NavigationRequest::CloseInspector => {
-                    self.selected_host_id = None;
-                    self.form = None;
-                    self.group_inspector = None;
-                }
-                crate::ui::inspector::NavigationRequest::SwitchVault(new_vault_id) => {
-                    self.selected_host_id = None;
-                    self.form = None;
-                    self.group_inspector = None;
-                    self.active_vault_id = new_vault_id;
-                    self.load_hosts(cx);
-                }
-                crate::ui::inspector::NavigationRequest::SwitchPage(_) => {
-                    self.selected_host_id = None;
-                    self.form = None;
-                    self.group_inspector = None;
-                }
             }
+            crate::ui::inspector::NavigationRequest::CloseInspector => {
+                self.selected_host_id = None;
+                self.form = None;
+                self.group_inspector = None;
+                self.snippet_form = None;
+                self.tunnel_form = None;
+                self.workspace_form = None;
+                self.vault_form = None;
+                self.provider_form = None;
+                self.team_form = None;
+            }
+            crate::ui::inspector::NavigationRequest::SwitchVault(new_vault_id) => {
+                let vname = self
+                    .available_vaults
+                    .iter()
+                    .find(|v| v.id == new_vault_id)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_else(|| new_vault_id.clone());
+                self.switch_vault(new_vault_id, vname, window, cx);
+            }
+            crate::ui::inspector::NavigationRequest::SwitchPage(page_name) => {
+                let leaked: &'static str = Box::leak(page_name.into_boxed_str());
+                self.navigate_page(leaked, window, cx);
+            }
+        }
+    }
+
+    /// Confirm discard of unsaved changes and navigate to requested target.
+    pub(crate) fn inspector_confirm_discard(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(req) = self.inspector_coordinator.pending_guard().cloned() {
+            self.inspector_coordinator.confirm_discard();
+            self.apply_navigation_request(req, window, cx);
         }
         cx.notify();
     }

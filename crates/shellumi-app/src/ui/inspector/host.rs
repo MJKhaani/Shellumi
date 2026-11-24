@@ -53,7 +53,7 @@ impl Shellumi {
                     .p_4()
                     .child("The selected host does not exist or was deleted."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -198,7 +198,7 @@ impl Shellumi {
                     .hover(|s| s.underline())
                     .on_click(cx.listener(move |app, _, _, cx| {
                         if let Some(ref g_name) = group_for_nav {
-                            app.open_group_inspector(g_name, cx);
+                            app.inspector_select_group(g_name, cx);
                         }
                     }))
                     .child(group_name_str),
@@ -316,12 +316,7 @@ impl Shellumi {
             );
         body = body.child(delete_row);
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render host inspector in Edit or Create mode.
@@ -336,7 +331,7 @@ impl Shellumi {
                 div().p_4().child("Form not initialized"),
                 div().p_4().child("Host form data is missing."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -503,7 +498,7 @@ impl Shellumi {
             header,
             form_body,
             Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
+            self.active_inspector_width(),
         )
     }
 

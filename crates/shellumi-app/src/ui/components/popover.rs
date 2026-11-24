@@ -108,9 +108,7 @@ pub fn action_menu(items: Vec<MenuItem>, min_width: Option<f32>) -> Div {
             .text_color(fg_color)
             .flex()
             .items_center()
-            .justify_between()
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)));
+            .justify_between();
 
         let mut left = div().flex().items_center().gap_2();
         if let Some(ic) = item.icon {

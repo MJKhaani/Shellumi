@@ -130,14 +130,25 @@ impl Shellumi {
                     .await
                     .map_err(|error| error.to_string())?;
                 let tunnels = store.list_tunnels().await.unwrap_or_default();
-                Ok::<_, String>((hosts, snippets, workspaces, identities, tunnels, key))
+                let cloud_providers = store.list_cloud_providers().await.unwrap_or_default();
+                let team_members = store.list_team_members(&active_vault_id).await.unwrap_or_default();
+                Ok::<_, String>((hosts, snippets, workspaces, identities, tunnels, cloud_providers, team_members, key))
             })
         });
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
                 match result {
-                    Ok((hosts, snippets, workspaces, identities, tunnels, key)) => {
+                    Ok((
+                        hosts,
+                        snippets,
+                        workspaces,
+                        identities,
+                        tunnels,
+                        cloud_providers,
+                        team_members,
+                        key,
+                    )) => {
                         if let Some(k) = key {
                             app.active_vault_keys.insert(app.active_vault_id.clone(), k);
                         }
@@ -146,6 +157,8 @@ impl Shellumi {
                         app.workspaces = workspaces;
                         app.identities = identities;
                         app.tunnels = tunnels;
+                        app.cloud_providers = cloud_providers;
+                        app.team_members = team_members;
                         app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
                         app.load_vault_list(cx);
                     }
@@ -244,6 +257,69 @@ impl Shellumi {
             let _ = app.update(cx, |app, cx| {
                 if let Ok(ids) = res {
                     app.identities = ids;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn load_cloud_providers(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.active_vault_db_path() else {
+            return;
+        };
+        let in_memory_key = self.active_vault_key();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open_with_key(&path, in_memory_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .list_cloud_providers()
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Ok(providers) = res {
+                    app.cloud_providers = providers;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn load_team_members(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let in_memory_key = self.active_vault_key();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open_with_key(&path, in_memory_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .list_team_members(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                if let Ok(members) = res {
+                    app.team_members = members;
                     cx.notify();
                 }
             });

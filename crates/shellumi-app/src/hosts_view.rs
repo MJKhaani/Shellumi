@@ -770,24 +770,31 @@ impl Shellumi {
                     .overflow_hidden()
                     .bg(rgb(MacTheme::SURFACE));
 
-                list_col = list_col.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .px_4()
-                        .py_2()
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                        .bg(rgb(MacTheme::INPUT_BG))
-                        .border_b_1()
-                        .border_color(rgb(MacTheme::BORDER))
-                        .child(div().flex_1().min_w(px(180.0)).child("NAME"))
-                        .child(div().w(px(140.0)).child("GROUP"))
-                        .child(div().w(px(90.0)).child("PROTOCOL"))
-                        .child(div().w(px(200.0)).child("DESTINATION / USER"))
-                        .child(div().w(px(140.0)).child("TAGS")),
-                );
+                let show_tags = viewport_w >= 1100.0;
+                let show_dest = viewport_w >= 900.0;
+
+                let mut header_row = div()
+                    .flex()
+                    .items_center()
+                    .px_4()
+                    .py_2()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .bg(rgb(MacTheme::INPUT_BG))
+                    .border_b_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .child(div().flex_1().min_w(px(120.0)).child("NAME"))
+                    .child(div().w(px(120.0)).child("GROUP"))
+                    .child(div().w(px(75.0)).child("PROTOCOL"));
+
+                if show_dest {
+                    header_row = header_row.child(div().w(px(180.0)).child("DESTINATION / USER"));
+                }
+                if show_tags {
+                    header_row = header_row.child(div().w(px(120.0)).child("TAGS"));
+                }
+                list_col = list_col.child(header_row);
 
                 for (l_idx, host) in filtered.iter().enumerate() {
                     let id = host.id;
@@ -811,102 +818,107 @@ impl Shellumi {
                         ConnectionProtocol::Rdp => "🪟",
                     };
 
-                    list_col = list_col.child(
-                        div()
-                            .id(("host-list-row", l_idx))
-                            .flex()
-                            .items_center()
-                            .px_4()
-                            .py_2p5()
-                            .border_b_1()
-                            .border_color(rgb(MacTheme::BORDER))
-                            .bg(if is_sel {
-                                rgb(MacTheme::SURFACE_ACTIVE)
-                            } else {
-                                rgb(MacTheme::SURFACE)
-                            })
-                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.inspector_select_host(id, cx);
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(180.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        if let Some(p) =
-                                            resolve_icon_path(resolve_host_os_icon(host), false, 48)
-                                        {
-                                            div()
-                                                .w(px(22.0))
-                                                .h(px(22.0))
-                                                .child(gpui::img(p).size_full())
-                                                .into_any_element()
-                                        } else {
-                                            div()
-                                                .text_sm()
-                                                .text_color(badge_fg)
-                                                .child(badge_icon)
-                                                .into_any_element()
-                                        },
-                                    )
-                                    .child(
+                    let mut row = div()
+                        .id(("host-list-row", l_idx))
+                        .flex()
+                        .items_center()
+                        .px_4()
+                        .py_2p5()
+                        .border_b_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .bg(if is_sel {
+                            rgb(MacTheme::SURFACE_ACTIVE)
+                        } else {
+                            rgb(MacTheme::SURFACE)
+                        })
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.inspector_select_host(id, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(120.0))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    if let Some(p) =
+                                        resolve_icon_path(resolve_host_os_icon(host), false, 48)
+                                    {
+                                        div()
+                                            .w(px(22.0))
+                                            .h(px(22.0))
+                                            .child(gpui::img(p).size_full())
+                                            .into_any_element()
+                                    } else {
                                         div()
                                             .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                            .truncate()
-                                            .child(host.name.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(140.0))
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .truncate()
-                                    .child(host.group_name.clone().unwrap_or_else(|| "—".into())),
-                            )
-                            .child(
-                                div()
-                                    .w(px(90.0))
-                                    .text_xs()
-                                    .text_color(badge_fg)
-                                    .child(host.protocol().display_name()),
-                            )
-                            .child(
-                                div()
-                                    .w(px(200.0))
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .truncate()
-                                    .child(format!(
-                                        "{}@{}",
-                                        if host.destination.username().is_empty() {
-                                            "default"
-                                        } else {
-                                            host.destination.username()
-                                        },
-                                        host.destination.host()
-                                    )),
-                            )
-                            .child(div().w(px(140.0)).flex().flex_wrap().gap_1().children(
-                                host.tags.iter().map(|t| {
+                                            .text_color(badge_fg)
+                                            .child(badge_icon)
+                                            .into_any_element()
+                                    },
+                                )
+                                .child(
                                     div()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .rounded_sm()
-                                        .bg(rgb(MacTheme::INPUT_BG))
-                                        .text_xs()
-                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                        .child(t.clone())
-                                }),
-                            )),
-                    );
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .truncate()
+                                        .child(host.name.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(120.0))
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .truncate()
+                                .child(host.group_name.clone().unwrap_or_else(|| "—".into())),
+                        )
+                        .child(
+                            div()
+                                .w(px(75.0))
+                                .text_xs()
+                                .text_color(badge_fg)
+                                .child(host.protocol().display_name()),
+                        );
+
+                    if show_dest {
+                        row = row.child(
+                            div()
+                                .w(px(180.0))
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .truncate()
+                                .child(format!(
+                                    "{}@{}",
+                                    if host.destination.username().is_empty() {
+                                        "default"
+                                    } else {
+                                        host.destination.username()
+                                    },
+                                    host.destination.host()
+                                )),
+                        );
+                    }
+                    if show_tags {
+                        row = row.child(div().w(px(120.0)).flex().flex_wrap().gap_1().children(
+                            host.tags.iter().map(|t| {
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(rgb(MacTheme::INPUT_BG))
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child(t.clone())
+                            }),
+                        ));
+                    }
+
+                    list_col = list_col.child(row);
                 }
 
                 if filtered.is_empty() {
@@ -1101,26 +1113,6 @@ impl Shellumi {
         }
         if let Some(modal) = &self.setup_wizard_modal {
             result = result.child(self.render_setup_wizard_modal(modal, cx));
-        }
-        if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
-            result = result.child(dropdown);
-        }
-        if let Some(overflow) = self.render_tab_overflow_popover(cx) {
-            result = result.child(overflow);
-        }
-        if let Some(modal) = &self.invite_modal {
-            result = result.child(self.render_invite_team_modal(modal, cx));
-        }
-        if !self.inspector_coordinator.is_open() {
-            if let Some(modal) = &self.infra_modal {
-                result = result.child(self.render_infra_modal(modal, cx));
-            }
-            if let Some(modal) = &self.tunnel_modal {
-                result = result.child(self.render_tunnel_modal(modal, cx));
-            }
-            if let Some(modal) = &self.identity_modal {
-                result = result.child(self.render_identity_modal(modal, cx));
-            }
         }
         if let Some(ctx_menu) = self.render_group_context_menu(cx) {
             result = result.child(ctx_menu);

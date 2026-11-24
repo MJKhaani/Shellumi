@@ -120,7 +120,6 @@ pub fn toggle_switch(
         .items_center()
         .justify_between()
         .py_1()
-        .cursor_pointer()
         .child(
             div()
                 .text_sm()

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 //! Vault inspector rendering and actions for View, Edit, and Create modes.
 
+use crate::data_path;
 use crate::theme::{
     accent_blue, caption, danger, subheader, surface, text_primary, text_secondary, MacTheme,
 };
@@ -14,6 +15,7 @@ use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
+use shellumi_core::{VaultContext, VaultId, VaultLocation, VaultManifest};
 use shellumi_storage::HostStore;
 
 impl Shellumi {
@@ -52,7 +54,7 @@ impl Shellumi {
                     .p_4()
                     .child("The requested vault does not exist or has been removed."),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -170,12 +172,7 @@ impl Shellumi {
         }
         body = body.child(simple_section("Vault Security & Sync", details_items));
 
-        InspectorShell::new(
-            header,
-            body,
-            None::<Div>,
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
 
     /// Render vault inspector in Edit or Create mode.
@@ -208,7 +205,7 @@ impl Shellumi {
                 header,
                 div().p_4().child("Form not initialized"),
                 None::<Div>,
-                Some(layout::INSPECTOR_PREFERRED_WIDTH),
+                self.active_inspector_width(),
             );
         };
 
@@ -360,12 +357,7 @@ impl Shellumi {
                 })),
             );
 
-        InspectorShell::new(
-            header,
-            body,
-            Some(footer),
-            Some(layout::INSPECTOR_PREFERRED_WIDTH),
-        )
+        InspectorShell::new(header, body, Some(footer), self.active_inspector_width())
     }
 
     /// Open vault inspector in a specific mode.
@@ -395,7 +387,8 @@ impl Shellumi {
 
                 let name = cx.new(|cx| TextInput::new(cx, name_val, "Vault name"));
                 let server_url = cx.new(|cx| TextInput::new(cx, url_val, "https://example.com"));
-                let passphrase = cx.new(|cx| TextInput::new(cx, "", "Encryption passphrase"));
+                let passphrase =
+                    cx.new(|cx| TextInput::new(cx, "", "Encryption passphrase").masked());
 
                 cx.observe(&name, |app, _, cx| app.inspector_mark_dirty(cx))
                     .detach();
@@ -422,6 +415,10 @@ impl Shellumi {
 
     /// Save vault form.
     pub(crate) fn save_vault_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(gen) = self.inspector_coordinator.start_save() else {
+            return;
+        };
+
         let Some(form) = &mut self.vault_form else {
             return;
         };
@@ -429,27 +426,62 @@ impl Shellumi {
         let name = form.name.read(cx).value().trim().to_string();
         let is_remote = form.is_remote;
         let server_url = form.server_url.read(cx).value().trim().to_string();
-        let _passphrase = form.passphrase.read(cx).value().trim().to_string();
+        let passphrase = form.passphrase.read(cx).value().trim().to_string();
         let existing_vault_id = form.vault_id.clone();
+        let active_vid = self.active_vault_id.clone();
 
         if name.is_empty() {
             form.error = Some("Vault name is required.".into());
+            self.inspector_coordinator.fail_save(
+                &active_vid,
+                gen,
+                "Vault name is required.".into(),
+            );
             cx.notify();
             return;
         }
 
         if is_remote && server_url.is_empty() {
             form.error = Some("Remote server URL is required for remote vaults.".into());
+            self.inspector_coordinator.fail_save(
+                &active_vid,
+                gen,
+                "Remote server URL is required for remote vaults.".into(),
+            );
             cx.notify();
             return;
         }
 
+        if existing_vault_id.is_none() && !is_remote {
+            if passphrase.is_empty() {
+                form.error = Some("Passphrase is required to encrypt a new vault.".into());
+                self.inspector_coordinator.fail_save(
+                    &active_vid,
+                    gen,
+                    "Passphrase is required to encrypt a new vault.".into(),
+                );
+                cx.notify();
+                return;
+            }
+            if let Err(err) = shellumi_core::validate_vault_password(&passphrase) {
+                let msg = format!("Password does not meet security requirements: {err}");
+                form.error = Some(msg.clone());
+                self.inspector_coordinator.fail_save(&active_vid, gen, msg);
+                cx.notify();
+                return;
+            }
+        }
+
         form.saving = true;
         form.error = None;
-        let Some(db_path) = self.active_vault_db_path() else {
+        let Some(db_path) = self
+            .database
+            .clone()
+            .or_else(|| self.active_vault_db_path())
+        else {
             return;
         };
-        let vault_key = self.active_vault_key();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let name_for_msg = name.clone();
         cx.notify();
 
@@ -458,32 +490,139 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                if let Some(target_id) = existing_vault_id {
+                    let vid = VaultId::new(&target_id).map_err(|e| e.to_string())?;
+                    let location = if is_remote {
+                        let conn_id = shellumi_core::ServerConnectionId::new(&server_url)
+                            .map_err(|e| e.to_string())?;
+                        let remote_id = VaultId::new(&target_id).map_err(|e| e.to_string())?;
+                        VaultLocation::Remote {
+                            server: conn_id,
+                            server_vault_id: remote_id,
+                        }
+                    } else {
+                        VaultLocation::Local
+                    };
+                    let reg_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path),
+                        shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                    );
+                    let mut reg_store = HostStore::open_with_key(
+                        reg_db_path
+                            .to_str()
+                            .ok_or_else(|| "Invalid UTF-8 path".to_string())?,
+                        default_key.as_ref(),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
-                let target_id = existing_vault_id
-                    .unwrap_or_else(|| format!("vault-{}", uuid::Uuid::new_v4().as_simple()));
-                let vid = shellumi_core::VaultId::new(&target_id).map_err(|e| e.to_string())?;
-
-                let location = if is_remote {
-                    let conn_id = shellumi_core::ServerConnectionId::new(&server_url)
+                    let context = VaultContext::new(vid, location);
+                    reg_store
+                        .register_vault_context(&name, &context)
+                        .await
                         .map_err(|e| e.to_string())?;
-                    let remote_id =
-                        shellumi_core::VaultId::new(&target_id).map_err(|e| e.to_string())?;
-                    shellumi_core::VaultLocation::Remote {
-                        server: conn_id,
-                        server_vault_id: remote_id,
-                    }
+                    Ok::<(String, Option<shellumi_core::VaultKey>), String>((target_id, None))
                 } else {
-                    shellumi_core::VaultLocation::Local
-                };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let target_id = format!("vlt-{}-{}", now.as_secs(), now.subsec_nanos());
+                    let local_vault_id = VaultId::new(&target_id).map_err(|e| e.to_string())?;
 
-                let context = shellumi_core::VaultContext::new(vid, location);
-                store
-                    .register_vault_context(&name, &context)
+                    let cred_store = shellumi_core::default_credential_store();
+                    let recovery_code = shellumi_core::VaultKey::generate_recovery_code()
+                        .map_err(|e| e.to_string())?;
+                    let (key, primary_env, recovery_env) =
+                        shellumi_core::VaultKeyManager::provision_new_vault(
+                            cred_store.as_ref(),
+                            &local_vault_id,
+                            &passphrase,
+                            false,
+                            Some(&recovery_code),
+                        )
+                        .map_err(|e| e.to_string())?;
+
+                    let manifest = VaultManifest::new(
+                        local_vault_id.as_str().to_string(),
+                        name.clone(),
+                        primary_env.clone(),
+                        recovery_env.clone(),
+                        false,
+                    );
+                    let manifest_path = data_path::resolve_manifest_file(
+                        std::path::Path::new(&db_path),
+                        local_vault_id.as_str(),
+                    );
+                    manifest
+                        .save_to_path(&manifest_path)
+                        .map_err(|e| format!("Failed to save vault manifest: {e}"))?;
+
+                    let new_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path),
+                        local_vault_id.as_str(),
+                    );
+                    if let Err(e) = data_path::prepare_parent(&new_db_path) {
+                        let _ = std::fs::remove_file(&manifest_path);
+                        return Err(e);
+                    }
+                    let new_db_str = new_db_path
+                        .to_str()
+                        .ok_or_else(|| "Invalid UTF-8 path for new vault database".to_string())?;
+                    let mut new_store = match HostStore::open_with_key(new_db_str, Some(&key)).await
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            let _ = std::fs::remove_file(&manifest_path);
+                            let _ = std::fs::remove_file(&new_db_path);
+                            return Err(format!("Failed to initialize encrypted database: {err}"));
+                        }
+                    };
+                    new_store.set_vault_id(local_vault_id.clone());
+
+                    let reg_db_path = data_path::resolve_vault_db_file(
+                        std::path::Path::new(&db_path),
+                        shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                    );
+                    let mut reg_store = match HostStore::open_with_key(
+                        reg_db_path.to_str().unwrap(),
+                        default_key.as_ref(),
+                    )
                     .await
-                    .map_err(|e| e.to_string())?;
-                Ok::<String, String>(target_id)
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            let _ = std::fs::remove_file(&manifest_path);
+                            let _ = std::fs::remove_file(&new_db_path);
+                            return Err(format!("Failed to open default registry database: {err}"));
+                        }
+                    };
+
+                    let location = if is_remote {
+                        let conn_id = shellumi_core::ServerConnectionId::new(&server_url)
+                            .map_err(|e| e.to_string())?;
+                        let remote_id = VaultId::new(&target_id).map_err(|e| e.to_string())?;
+                        VaultLocation::Remote {
+                            server: conn_id,
+                            server_vault_id: remote_id,
+                        }
+                    } else {
+                        VaultLocation::Local
+                    };
+
+                    let context = VaultContext::new(local_vault_id.clone(), location);
+                    if let Err(e) = reg_store.register_vault_context(&name, &context).await {
+                        let _ = std::fs::remove_file(&manifest_path);
+                        let _ = std::fs::remove_file(&new_db_path);
+                        return Err(format!("Failed to register vault context: {e}"));
+                    }
+
+                    if let Ok(env_json) = serde_json::to_string(&primary_env) {
+                        let _ = new_store
+                            .save_vault_recovery_envelope(local_vault_id.as_str(), &env_json)
+                            .await;
+                    }
+
+                    Ok::<(String, Option<shellumi_core::VaultKey>), String>((target_id, Some(key)))
+                }
             })
         });
 
@@ -494,10 +633,17 @@ impl Shellumi {
                     f.saving = false;
                 }
                 match res {
-                    Ok(saved_id) => {
+                    Ok((saved_id, opt_key)) => {
+                        if let Some(key) = opt_key {
+                            app.active_vault_keys.insert(saved_id.clone(), key);
+                        }
                         app.vault_form = None;
                         app.load_vault_list(cx);
-                        app.inspector_coordinator.set_dirty(false);
+                        let target = InspectorTarget::Vault(Some(saved_id.clone()));
+                        let active_vid = app.active_vault_id.clone();
+                        let ok = app
+                            .inspector_coordinator
+                            .complete_save(&active_vid, gen, target);
                         app.open_vault_inspector_mode(
                             Some(saved_id),
                             crate::ui::inspector::InspectorMode::View,
@@ -505,11 +651,18 @@ impl Shellumi {
                         );
                         app.desktop.message =
                             Some(format!("Vault '{}' saved successfully", name_for_msg));
+                        if ok {
+                            if let Some(req) = app.inspector_coordinator.take_pending_guard() {
+                                app.apply_navigation_request(req, None, cx);
+                            }
+                        }
                     }
                     Err(err) => {
                         if let Some(ref mut f) = app.vault_form {
-                            f.error = Some(err);
+                            f.error = Some(err.clone());
                         }
+                        let active_vid = app.active_vault_id.clone();
+                        app.inspector_coordinator.fail_save(&active_vid, gen, err);
                     }
                 }
                 cx.notify();

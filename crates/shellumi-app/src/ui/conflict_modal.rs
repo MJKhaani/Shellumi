@@ -21,25 +21,19 @@ impl Shellumi {
             .occlude()
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000bb))
+            .bg(rgb(MacTheme::WINDOW_BG))
             .flex()
-            .items_center()
-            .justify_center()
-            .p_4();
+            .flex_col()
+            .p_0();
 
         let mut modal_box = div()
             .id("conflict-modal-container")
             .w_full()
-            .max_w(px(880.0))
             .h_full()
-            .max_h(px(580.0))
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::SURFACE))
-            .border_1()
-            .border_color(rgb(MacTheme::SEPARATOR))
-            .rounded_xl()
-            .p_5()
+            .p_6()
             .gap_4();
 
         // Header

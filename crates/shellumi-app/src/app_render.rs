@@ -155,26 +155,26 @@ impl Render for Shellumi {
             }))
             .on_action(cx.listener(|_app, _: &Quit, _, cx| cx.quit()))
             .on_action(cx.listener(|app, _: &AboutApp, window, cx| {
-                app.navigate_page("Settings", window, cx);
+                app.navigate_page("Settings", Some(window), cx);
             }))
             .on_action(cx.listener(|app, _: &OpenVaultsMenu, _, cx| {
                 app.vault_dropdown_open = true;
                 cx.notify();
             }))
             .on_action(cx.listener(|app, _: &OpenSftpMenu, window, cx| {
-                app.navigate_page("SFTP Files", window, cx);
+                app.navigate_page("SFTP Files", Some(window), cx);
             }))
             .on_action(cx.listener(|app, _: &OpenSettingsMenu, window, cx| {
-                app.navigate_page("Settings", window, cx);
+                app.navigate_page("Settings", Some(window), cx);
             }))
             .on_action(cx.listener(|app, _: &OpenShortcutsHelp, window, cx| {
-                app.navigate_page("Settings", window, cx);
+                app.navigate_page("Settings", Some(window), cx);
             }))
             .on_action(cx.listener(|app, _: &RunSetupWizard, _, cx| {
                 app.open_setup_wizard(cx);
             }));
 
-        root = root.child(self.render_unified_top_bar(cx));
+        root = root.child(self.render_unified_top_bar(window, cx));
 
         if let Some(page) = self.page {
             let body = self.render_desktop_page(page, cx);
@@ -184,14 +184,14 @@ impl Render for Shellumi {
                 container = container.child(self.workspace_sidebar(page, cx));
             }
             container = container.child(body);
-            if self.inspector_coordinator.is_open() {
+            if self.inspector_coordinator.is_open() && page != "Hosts" {
                 container = container.child(self.render_unified_inspector(window, cx));
             }
             let mut result = root.child(container);
             if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
                 result = result.child(dropdown);
             }
-            if let Some(overflow) = self.render_tab_overflow_popover(cx) {
+            if let Some(overflow) = self.render_tab_overflow_popover(window, cx) {
                 result = result.child(overflow);
             }
             if let Some(guard) = self.render_unsaved_changes_guard(cx) {
@@ -1359,7 +1359,7 @@ impl Render for Shellumi {
                 if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
                     result = result.child(dropdown);
                 }
-                if let Some(overflow) = self.render_tab_overflow_popover(cx) {
+                if let Some(overflow) = self.render_tab_overflow_popover(window, cx) {
                     result = result.child(overflow);
                 }
                 return result;

@@ -137,7 +137,7 @@ impl Shellumi {
         &mut self,
         vault_id: String,
         vault_name: String,
-        window: &mut Window,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let is_locked = self
@@ -152,6 +152,22 @@ impl Shellumi {
             self.open_unlock_vault_modal(vault_id, vault_name, cx);
             return;
         }
+
+        if !self.inspector_coordinator.request_switch_vault(&vault_id) {
+            self.vault_dropdown_open = false;
+            cx.notify();
+            return;
+        }
+
+        self.form = None;
+        self.group_inspector = None;
+        self.snippet_form = None;
+        self.tunnel_form = None;
+        self.workspace_form = None;
+        self.vault_form = None;
+        self.provider_form = None;
+        self.team_form = None;
+        self.selected_host_id = None;
 
         self.active_vault_id = vault_id;
         self.active_vault = vault_name;
