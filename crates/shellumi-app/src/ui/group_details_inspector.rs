@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Group details inspector rendering.
 use super::*;
 

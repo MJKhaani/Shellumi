@@ -88,7 +88,7 @@ impl Shellumi {
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(MacTheme::ACCENT_BLUE)).text_color(rgb(0xffffff)))
-                            .on_click(cx.listener(|app, _, _, cx| app.edit_host(None, cx)))
+                            .on_click(cx.listener(|app, _, _, cx| app.inspector_new_host(cx)))
                             .child(if let Some(p) = resolve_icon_path("add_host", false, 48) {
                                 div()
                                     .w(px(20.0))
@@ -408,14 +408,11 @@ impl Shellumi {
         } else {
             MacTheme::SIDEBAR_WIDTH
         };
-        let inspector_width = if self.group_inspector.is_some() {
-            320.0
-        } else {
-            0.0
-        } + if selected.is_some() { 290.0 } else { 0.0 };
-        let grid_width =
-            (window.viewport_size().width.to_f64() as f32 - sidebar_width - inspector_width - 48.0)
-                .max(1.0);
+        let is_inspector_open = self.inspector_coordinator.is_open();
+        let viewport_w = window.viewport_size().width.to_f64() as f32;
+        let layout_calc =
+            ui::layout::calculate_layout(viewport_w, sidebar_width, is_inspector_open, None);
+        let grid_width = (layout_calc.primary_content_width - 48.0).max(1.0);
         let card_width = responsive_card_width(grid_width, 280.0, 12.0);
 
         // Groups cards section (only shown when no group filter is selected and no search query)
@@ -672,12 +669,7 @@ impl Shellumi {
                     }
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if app.selected_host_id == Some(select_host_id) {
-                        app.selected_host_id = None;
-                    } else {
-                        app.selected_host_id = Some(select_host_id);
-                    }
-                    cx.notify();
+                    app.inspector_select_host(select_host_id, cx);
                 }))
                 .child(
                     div()
@@ -789,11 +781,11 @@ impl Shellumi {
                         .bg(rgb(MacTheme::INPUT_BG))
                         .border_b_1()
                         .border_color(rgb(MacTheme::BORDER))
-                        .child(div().w(px(220.0)).child("NAME"))
+                        .child(div().flex_1().min_w(px(180.0)).child("NAME"))
                         .child(div().w(px(140.0)).child("GROUP"))
                         .child(div().w(px(90.0)).child("PROTOCOL"))
-                        .child(div().flex_1().child("DESTINATION / USER"))
-                        .child(div().w(px(160.0)).child("TAGS")),
+                        .child(div().w(px(200.0)).child("DESTINATION / USER"))
+                        .child(div().w(px(140.0)).child("TAGS")),
                 );
 
                 for (l_idx, host) in filtered.iter().enumerate() {
@@ -835,16 +827,12 @@ impl Shellumi {
                             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                             .cursor_pointer()
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                if app.selected_host_id == Some(id) {
-                                    app.selected_host_id = None;
-                                } else {
-                                    app.selected_host_id = Some(id);
-                                }
-                                cx.notify();
+                                app.inspector_select_host(id, cx);
                             }))
                             .child(
                                 div()
-                                    .w(px(220.0))
+                                    .flex_1()
+                                    .min_w(px(180.0))
                                     .flex()
                                     .items_center()
                                     .gap_2()
@@ -891,7 +879,7 @@ impl Shellumi {
                             )
                             .child(
                                 div()
-                                    .flex_1()
+                                    .w(px(200.0))
                                     .text_xs()
                                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                                     .truncate()
@@ -905,7 +893,7 @@ impl Shellumi {
                                         host.destination.host()
                                     )),
                             )
-                            .child(div().w(px(160.0)).flex().flex_wrap().gap_1().children(
+                            .child(div().w(px(140.0)).flex().flex_wrap().gap_1().children(
                                 host.tags.iter().map(|t| {
                                     div()
                                         .px_1p5()
@@ -936,182 +924,9 @@ impl Shellumi {
             }
         };
 
-        // Slide-over Inspector Drawer (right side)
-        let inspector_panel = if let Some(host) = selected {
-            let edit_host = host.clone();
-            let connect_host = host.clone();
-            let sftp_host = host.clone();
-            let id = host.id;
-            Some(
-                div()
-                    .id("host-inspector-panel")
-                    .w(px(290.0))
-                    .flex_shrink_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(rgb(MacTheme::BORDER))
-                    .bg(rgb(MacTheme::SURFACE))
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .truncate()
-                                    .child(host.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .id("close-inspector")
-                                    .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.selected_host_id = None;
-                                        cx.notify();
-                                    }))
-                                    .child("✕"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(rgb(MacTheme::INPUT_BG))
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                            .child("💬")
-                            .child("Personal")
-                            .child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child("⌵")),
-                    )
-                    .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
-                    .child(host_detail(
-                        "Protocol",
-                        host.protocol().display_name().to_string(),
-                    ))
-                    .child(host_detail(
-                        "Address",
-                        format_endpoint(
-                            host.destination.username(),
-                            host.destination.host(),
-                            host.destination.port().get(),
-                        ),
-                    ))
-                    .child(host_detail(
-                        "Group",
-                        host.group_name.clone().unwrap_or_else(|| "—".into()),
-                    ))
-                    .child(host_detail(
-                        "Tags",
-                        if host.tags.is_empty() {
-                            "—".into()
-                        } else {
-                            host.tags.join(", ")
-                        },
-                    ))
-                    .child(div().flex_1())
-                    .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
-                    .child(
-                        div()
-                            .id("connect-selected")
-                            .w_full()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(MacTheme::ACCENT_BLUE))
-                            .text_color(rgb(0xffffff))
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x389bf2)))
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.connect(&connect_host, window, cx)
-                            }))
-                            .child(if host.protocol().is_graphical() {
-                                "Connect Desktop"
-                            } else {
-                                "Connect"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("edit-selected")
-                                    .flex_1()
-                                    .py_1p5()
-                                    .rounded_md()
-                                    .bg(rgb(MacTheme::INPUT_BG))
-                                    .border_1()
-                                    .border_color(rgb(MacTheme::BORDER))
-                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .text_xs()
-                                    .text_center()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.edit_host(Some(&edit_host), cx)
-                                    }))
-                                    .child("Edit"),
-                            )
-                            .children(if host.protocol().supports_sftp() {
-                                Some(
-                                    div()
-                                        .id("sftp-selected")
-                                        .flex_1()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .bg(rgb(MacTheme::INPUT_BG))
-                                        .border_1()
-                                        .border_color(rgb(MacTheme::BORDER))
-                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                        .text_xs()
-                                        .text_center()
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.connect_sftp(&sftp_host, window, cx)
-                                        }))
-                                        .child("SFTP"),
-                                )
-                            } else {
-                                None
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("delete-selected")
-                            .py_1()
-                            .text_xs()
-                            .text_center()
-                            .text_color(rgb(MacTheme::DANGER))
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
-                            .on_click(cx.listener(move |app, _, _, cx| app.delete_host(id, cx)))
-                            .child("Delete host"),
-                    ),
-            )
-        } else {
-            None
-        };
-
-        let group_inspector_panel = if self.group_inspector.is_some() {
-            Some(self.render_group_details_inspector(cx))
+        // Unified Inspector Drawer (right side)
+        let inspector_panel = if self.inspector_coordinator.is_open() {
+            Some(self.render_unified_inspector(window, cx))
         } else {
             None
         };
@@ -1149,7 +964,6 @@ impl Shellumi {
             .h_full()
             .flex()
             .child(content_scroll)
-            .children(group_inspector_panel)
             .children(inspector_panel);
 
         let mut body = div()
@@ -1214,7 +1028,12 @@ impl Shellumi {
             row = row.child(sidebar);
         }
         let mut result = root.child(row.child(body));
-        result = self.render_host_editor(result, window, cx);
+        if let Some(guard) = self.render_unsaved_changes_guard(cx) {
+            result = result.child(guard);
+        }
+        if let Some(confirm) = self.render_delete_confirm_dialog(cx) {
+            result = result.child(confirm);
+        }
         if let Some(modal) = &self.conflict_modal {
             result = result.child(self.render_conflict_modal(modal, cx));
         }

@@ -13,7 +13,7 @@ use super::drafts::InspectorDraft;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectorTarget {
     Host(Option<i64>),
-    Group(Option<i64>),
+    Group(Option<String>),
     Identity(Option<i64>),
     Snippet(Option<i64>),
     Tunnel(Option<i64>),
@@ -163,6 +163,11 @@ impl InspectorCoordinator {
         self.active = None;
         self.pending_guard = None;
         true
+    }
+
+    /// Alias for `close()` to check unsaved changes before closing.
+    pub fn request_close(&mut self) -> bool {
+        self.close()
     }
 
     /// Request switching the active vault.
@@ -323,13 +328,13 @@ mod tests {
         // 1. Select group
         assert!(coord.open(
             "vault-1",
-            InspectorTarget::Group(Some(10)),
+            InspectorTarget::Group(Some("prod-servers".to_string())),
             InspectorMode::View,
             None
         ));
         assert_eq!(
             coord.active().unwrap().target,
-            InspectorTarget::Group(Some(10))
+            InspectorTarget::Group(Some("prod-servers".to_string()))
         );
         assert!(coord.is_open());
 

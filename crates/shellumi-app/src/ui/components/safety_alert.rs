@@ -83,6 +83,55 @@ pub fn alert_dialog(
         .child(div().mt_2().child(actions))
 }
 
+/// A standard unsaved changes guard alert dialog with custom button elements.
+pub fn unsaved_changes_guard_dialog(
+    object_name: impl Into<SharedString>,
+    keep_editing_btn: impl IntoElement,
+    discard_btn: impl IntoElement,
+    save_btn: impl IntoElement,
+) -> Div {
+    let title = "Unsaved Changes";
+    let message = format!(
+        "You have unsaved changes to \"{}\". Do you want to save your changes before leaving?",
+        object_name.into()
+    );
+
+    let actions = div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .child(keep_editing_btn)
+        .child(discard_btn)
+        .child(save_btn);
+
+    alert_backdrop(alert_dialog(title, message, None, false, actions))
+}
+
+/// A standard delete confirmation alert dialog with custom button elements.
+pub fn delete_confirmation_dialog(
+    object_type: &str,
+    object_name: &str,
+    confirm_btn: impl IntoElement,
+    cancel_btn: impl IntoElement,
+) -> Div {
+    let title = format!("Delete {}?", object_type);
+    let message = format!(
+        "Are you sure you want to permanently delete \"{}\"? This action cannot be undone.",
+        object_name
+    );
+
+    let actions = div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .child(cancel_btn)
+        .child(confirm_btn);
+
+    alert_backdrop(alert_dialog(title, message, None, true, actions))
+}
+
 /// A standard unsaved changes guard alert dialog.
 pub fn unsaved_changes_guard_alert(
     object_name: impl Into<SharedString>,

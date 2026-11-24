@@ -627,6 +627,7 @@ enum HostSortMode {
     Oldest,
 }
 
+#[allow(dead_code)]
 struct GroupInspectorState {
     original_name: String,
     name: Entity<TextInput>,
@@ -653,6 +654,12 @@ struct InviteTeamModalState {
     emails: Vec<Entity<TextInput>>,
     #[allow(dead_code)]
     status_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum DeleteTarget {
+    Host(i64, String),
+    Group(String),
 }
 
 struct Shellumi {
@@ -721,6 +728,7 @@ struct Shellumi {
     identity_modal: Option<IdentityModalState>,
     sftp_context_menu: Option<SftpContextMenuState>,
     sftp_modal: Option<SftpModalState>,
+    pub(crate) delete_confirm: Option<DeleteTarget>,
     #[allow(dead_code)]
     pub(crate) inspector_coordinator: ui::inspector::InspectorCoordinator,
 }
@@ -1159,6 +1167,7 @@ impl Shellumi {
             identity_modal: None,
             sftp_context_menu: None,
             sftp_modal: None,
+            delete_confirm: None,
             inspector_coordinator: ui::inspector::InspectorCoordinator::new(),
         }
     }
@@ -1228,6 +1237,7 @@ fn group_matches(host_group: Option<&str>, selected_group: Option<&str>) -> bool
     selected_group.is_none_or(|group| host_group == Some(group))
 }
 
+#[allow(dead_code)]
 fn host_detail(label: &'static str, value: String) -> gpui::Div {
     div()
         .flex()

@@ -175,6 +175,7 @@ impl Shellumi {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_host_rd_resolution(
         &mut self,
         width: u16,
@@ -192,6 +193,7 @@ impl Shellumi {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_host_rd_color_depth(&mut self, depth: u8, cx: &mut Context<Self>) {
         if let Some(form) = &mut self.form {
             form.rd_color_depth = depth;
@@ -199,6 +201,7 @@ impl Shellumi {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn toggle_host_rd_view_only(&mut self, cx: &mut Context<Self>) {
         if let Some(form) = &mut self.form {
             form.rd_view_only = !form.rd_view_only;
@@ -206,6 +209,7 @@ impl Shellumi {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn toggle_host_rd_tls_strict(&mut self, cx: &mut Context<Self>) {
         if let Some(form) = &mut self.form {
             form.rd_tls_strict = !form.rd_tls_strict;

@@ -67,7 +67,7 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
 - **Phase 0:** Baseline, inventory, documentation, and test verification.
 - **Phase 1:** Centralized design tokens, layout primitives, `InspectorShell`, and shared controls. (COMPLETED)
 - **Phase 2:** Single `InspectorCoordinator`, draft state machine, and guarded navigation. (COMPLETED)
-- **Phase 3:** Hosts and Groups end-to-end migration into the unified Inspector.
+- **Phase 3:** Hosts and Groups end-to-end migration into the unified Inspector. (COMPLETED)
 - **Phase 4:** Identities, Snippets, Tunnels, Workspaces, Vaults, Providers, and Team Members migration.
 - **Phase 5:** Top bar, tabs overflow, responsive pages, and minimum-viewport adaptations.
 - **Phase 6:** Remote Desktop compact toolbar, session inspector, canvas bounds, and coordinate mapping.
@@ -85,6 +85,23 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
   - Integration into `Shellumi` struct in `crates/shellumi-app/src/main.rs`.
 - **Automated Verification:**
   - 6 dedicated state machine unit tests covering `INS-001`, `INS-002`, `INS-008`, `INS-010`, `INS-016`, `INS-017`.
+  - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
+  - Clean `cargo fmt --all -- --check`.
+
+### Phase 3: Hosts and Groups Inspector Migration
+- **Implemented:**
+  - `crates/shellumi-app/src/ui/inspector/host.rs`: Unified Host Inspector supporting View mode (protocol badge, endpoint, group link, tags, identities, proxy, RDP/VNC settings, quick actions: Connect, SFTP, Edit, Duplicate, Delete) and Edit/Create modes (sticky header, category tabs, form fields, sticky footer with Cancel/Save and validation notices).
+  - `crates/shellumi-app/src/ui/inspector/group.rs`: Unified Group Inspector supporting View mode (group details, default credentials, scrollable member hosts list where clicking a host replaces the inspector with that host) and Edit/Create modes (name, default user/port, identity picker).
+  - `crates/shellumi-app/src/hosts_view.rs`:
+    - Eliminated `UI-01`: Removed concurrent side-by-side group and host inspector rendering; single `render_unified_inspector` guarantees `inspector_count <= 1`.
+    - Eliminated `UI-02`: Layout calculation uses `ui::layout::calculate_layout`, subtracting inspector width at most once.
+    - Eliminated `UI-03`: List view Name column is fluid (`flex_1().min_w(px(180.0))`), with fixed-width secondary columns preventing narrow-width overflow.
+    - Eliminated floating `render_host_editor` modal dialog; all creation/editing routed into the unified Inspector.
+  - Standardized destructive action safety alerts via `delete_confirmation_dialog` for host and group deletions.
+  - Standardized unsaved changes guard alert via `unsaved_changes_guard_dialog`.
+- **Automated Verification:**
+  - 11 dedicated inspector unit tests passing (`INS-001`, `INS-002`, `INS-003`, `INS-004`, `INS-005`, `INS-008`, `INS-010`, `INS-016`, `INS-017`, `UI-01`, `UI-02`).
+  - 6 layout geometry tests passing (`test_standard_laptop_1280x800_with_inspector`, etc.).
   - Zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
   - Clean `cargo fmt --all -- --check`.
 

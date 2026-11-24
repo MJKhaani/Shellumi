@@ -33,6 +33,22 @@ pub fn form_section(
     s.child(content)
 }
 
+/// A simple form section with just a title and content.
+pub fn simple_section(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
+    form_section(title, None::<SharedString>, content)
+}
+
+/// A simple form field with just a label and input widget.
+pub fn simple_field(label: impl Into<SharedString>, input_widget: impl IntoElement) -> Div {
+    form_field(
+        label,
+        false,
+        input_widget,
+        None::<SharedString>,
+        None::<SharedString>,
+    )
+}
+
 /// A structured form field container with label, required indicator, input widget, and optional error.
 pub fn form_field(
     label: impl Into<SharedString>,
@@ -128,6 +144,11 @@ pub fn toggle_switch(
                         .ml(circle_margin),
                 ),
         )
+}
+
+/// An inline error notice with error styling.
+pub fn error_notice(message: impl Into<SharedString>) -> Div {
+    inline_notice(None, message, false)
 }
 
 /// An inline notice or warning card within an inspector or form.

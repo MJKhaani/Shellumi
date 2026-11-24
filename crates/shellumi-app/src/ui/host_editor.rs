@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Host editor overlay rendering.
 use super::*;
 

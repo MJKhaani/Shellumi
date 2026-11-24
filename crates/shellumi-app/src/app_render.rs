@@ -106,7 +106,7 @@ impl Render for Shellumi {
                 app.trigger_quick_connect(window, cx);
             }))
             .on_action(cx.listener(|app, _: &NewHost, _, cx| {
-                app.edit_host(None, cx);
+                app.inspector_new_host(cx);
             }))
             .on_action(cx.listener(|app, _: &OpenVaultInNewWindow, _, cx| {
                 app.open_vault_in_new_window(

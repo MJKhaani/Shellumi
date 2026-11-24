@@ -86,7 +86,12 @@ impl Shellumi {
                                 .items_center()
                                 .justify_between()
                                 .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.open_group_inspector(&name_for_edit, cx);
+                                    app.group_context_menu = None;
+                                    app.open_group_inspector_mode(
+                                        &name_for_edit,
+                                        crate::ui::inspector::InspectorMode::Edit,
+                                        cx,
+                                    );
                                 }))
                                 .child(
                                     div()
@@ -192,7 +197,10 @@ impl Shellumi {
                                 .items_center()
                                 .gap_2()
                                 .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.delete_group_inspector(&name_for_del, cx);
+                                    app.group_context_menu = None;
+                                    app.delete_confirm =
+                                        Some(crate::DeleteTarget::Group(name_for_del.clone()));
+                                    cx.notify();
                                 }))
                                 .child("🗑️")
                                 .child("Remove"),

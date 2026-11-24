@@ -281,7 +281,7 @@ impl Shellumi {
             }
             PaletteAction::AddNewHost => {
                 self.active_tab_idx = None;
-                self.edit_host(None, cx);
+                self.inspector_new_host(cx);
             }
             PaletteAction::AddNewSnippet => {
                 self.snippets_panel_open = true;

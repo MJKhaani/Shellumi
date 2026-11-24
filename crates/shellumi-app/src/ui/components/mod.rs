@@ -9,10 +9,14 @@ pub mod safety_alert;
 pub mod status;
 
 pub use button::{AppButton, ButtonSize, ButtonVariant, IconButton};
-pub use form::{form_field, form_section, inline_notice, toggle_switch, validation_message};
+pub use form::{
+    error_notice, form_field, form_section, inline_notice, simple_field, simple_section,
+    toggle_switch, validation_message,
+};
 pub use inspector_shell::InspectorShell;
 pub use popover::{action_menu, MenuItem, PopoverAnchor};
 pub use safety_alert::{
-    alert_backdrop, alert_dialog, delete_confirmation_alert, unsaved_changes_guard_alert,
+    alert_backdrop, alert_dialog, delete_confirmation_alert, delete_confirmation_dialog,
+    unsaved_changes_guard_alert, unsaved_changes_guard_dialog,
 };
 pub use status::{empty_state, error_state, status_indicator, StatusKind};
