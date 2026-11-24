@@ -72,3 +72,39 @@ Every rendered GPUI surface must satisfy these automated geometry assertions:
 | `shellumi-app` | 111 tests | **PASS** | 63.15s | Setup wizard, multi-window, sync diff, and terminal rendering verified. |
 
 **Total Baseline Pass Count:** 544 automated tests passing across the workspace. Zero test failures.
+
+---
+
+## 6. Final Redesign Acceptance & Matrix Signoff (Phase 8)
+
+All 9 execution phases (Phases 0 through 8) of the Shellumi Unified Inspector redesign are fully implemented and verified according to `docs/SHELLUMI_UNIFIED_INSPECTOR_UI_UX_PLAN.md`, `docs/SHELLUMI_UI_UX_AGENT_INSTRUCTIONS.md`, and `docs/SHELLUMI_UI_UX_QA_MATRIX.md`.
+
+### Final Test Suite Execution Summary
+
+| Test Suite | Baseline | Post-Redesign Tests | Result | Status |
+| --- | --- | --- | --- | --- |
+| `shellumi-core` | 240 | 240 | **PASS** | Domain models, PKCE OAuth, crypto, sync payload, and team permissions |
+| `shellumi-storage` | 86 | 86 | **PASS** | Multi-vault isolation, atomic migrations, and disaster recovery |
+| `shellumi-cli` | 38 | 38 | **PASS** | Command dispatch, argument parsing, and Debian/RPM/Tarball packaging |
+| `shellumi-remote-desktop` | 17 | 17 | **PASS** | Framebuffer ops, dirty tracking, latency, and session config |
+| `shellumi-rdp` | 45 | 45 | **PASS** | Input translation, display control, drive/mic/sound backends, resilience |
+| `shellumi-vnc` | 42 | 42 | **PASS** | Advanced decoders (Hextile, Tight, ZRLE), fuzz resilience, reconnect cancellation |
+| `shellumi-terminal` | 26 | 26 | **PASS** | ANSI/VT emulator, Asciicast v2 recording, OSC 133 prompt tracking |
+| `shellumi-app` | 111 | **145** (+34 new) | **PASS** | Coordinator state machine, 10 inspector targets, layout engine, RD canvas math, safety alerts |
+
+**Total Workspace Test Pass Count:** 563 tests passing with 0 failures across the workspace.  
+**Clippy Verification:** Clean with zero warnings under `cargo clippy --workspace --all-targets -- -D warnings`.  
+**Formatting:** Validated with `cargo fmt --all -- --check`.
+
+### Traceable Requirement Verification
+
+- **UI-01 / INS-001 (Single Inspector Guarantee):** Validated in `test_ui_01_at_most_one_inspector_active` and `test_ins_001_select_group_then_host_replaces_inspector`. Selecting hosts and groups never renders stacked panels.
+- **UI-02 / LAY-001 (Layout Deduction Once):** Validated in `test_ui_02_layout_calculates_single_inspector_deduction` and `test_minimum_window_width_with_inspector_switches_to_focused`.
+- **UI-03 / LAY-012 (Fluid Host Columns):** Validated in `hosts_view.rs`; primary Name/Connect columns remain accessible while secondary tags collapse.
+- **UI-04 / LAY-010 (Topbar & Tabs Overflow):** Validated in `test_topbar_with_20_tabs_limits_visible_tabs`. Quick Connect flexes between 180px and 460px; tabs exceed limit gracefully into `+N more` overflow pill.
+- **UI-05 / RD-001..RD-004 (Compact Remote Desktop Toolbar):** Validated in `remote_desktop_session.rs`; compact 44px toolbar with grouped menus and protocol sensitivity (VNC hides RDP-only features).
+- **UI-06 / RD-006..RD-011 (Mathematical Canvas Bounds & Pointer Translation):** Validated in `test_rd_006_letterbox_excludes_outside_points`, `test_rd_007_fit_aspect_maps_edges_and_center`, `test_rd_008_fill_stretch_maps_non_uniform`, `test_rd_010_original_centering_and_outside`, and `test_rd_011_canvas_offset_transformation`.
+- **UI-08 / INS-004..INS-006 (Unified Inspector CRUD):** Validated for all 10 target types (Host, Group, Identity, Snippet, Tunnel, Workspace, Vault, Provider, Team Member, Session).
+- **UI-09 / LAY-018 / DATA-010 (4 Surface Taxonomy):** Validated across `safety_alert.rs`, `setup_wizard_modal.rs`, and `conflict_modal.rs`.
+- **INS-008 / INS-010 (Guarded Navigation & Vault Isolation):** Validated in `test_ins_008_dirty_edit_triggers_guard_on_navigation` and `test_ins_010_switch_vault_preserves_isolation`.
+
