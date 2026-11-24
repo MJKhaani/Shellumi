@@ -15,7 +15,7 @@ use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
-use shellumi_core::{VaultContext, VaultId, VaultLocation, VaultManifest};
+use shellumi_core::{VaultContext, VaultId, VaultKey, VaultLocation, VaultManifest};
 use shellumi_storage::HostStore;
 
 impl Shellumi {
@@ -143,20 +143,37 @@ impl Shellumi {
                 })),
             );
 
-        if !is_active {
-            let delete_id = v_id.clone();
-            let delete_name = v_name.clone();
-            actions_row = actions_row.child(
-                AppButton::new("vault-view-delete-btn", "Delete", ButtonVariant::Danger).on_click(
-                    cx.listener(move |app, _, _, cx| {
+        let is_default =
+            v_id == shellumi_storage::LEGACY_LOCAL_VAULT_ID || data_path::is_default_vault(&v_id);
+        if !is_active && !is_default {
+            let unregister_id = v_id.clone();
+            actions_row = actions_row
+                .child(
+                    AppButton::new(
+                        "vault-view-unregister-btn",
+                        "Unregister",
+                        ButtonVariant::Secondary,
+                    )
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.unregister_vault_inspector(&unregister_id, cx);
+                    })),
+                )
+                .child({
+                    let delete_id = v_id.clone();
+                    let delete_name = v_name.clone();
+                    AppButton::new(
+                        "vault-view-delete-btn",
+                        "Delete (Archive)",
+                        ButtonVariant::Danger,
+                    )
+                    .on_click(cx.listener(move |app, _, _, cx| {
                         app.delete_confirm = Some(crate::DeleteTarget::Vault(
                             delete_id.clone(),
                             delete_name.clone(),
                         ));
                         cx.notify();
-                    }),
-                ),
-            );
+                    }))
+                });
         }
 
         body = body.child(actions_row);
@@ -693,38 +710,104 @@ impl Shellumi {
                             let new_primary = key
                                 .wrap_with_password(&vid, &passphrase)
                                 .map_err(|e| format!("Failed to re-wrap key: {e}"))?;
+
+                            // Pre-commit verification: verify new password unwraps identical DEK
+                            let test_unwrapped = VaultKey::unwrap_with_password(
+                                &vid,
+                                &passphrase,
+                                &new_primary,
+                            )
+                            .map_err(|e| {
+                                format!("Verification of rotated key envelope failed: {e}")
+                            })?;
+                            if test_unwrapped.expose_bytes() != key.expose_bytes() {
+                                return Err(
+                                    "Cryptographic verification failed: new password does not decrypt identical DEK"
+                                        .into(),
+                                );
+                            }
+
                             let manifest_path = data_path::resolve_manifest_file(
                                 std::path::Path::new(&db_path),
                                 vid.as_str(),
                             );
+                            let original_manifest_bytes = if manifest_path.exists() {
+                                Some(std::fs::read(&manifest_path).map_err(|e| {
+                                    format!("Failed to read manifest for backup: {e}")
+                                })?)
+                            } else {
+                                None
+                            };
+
                             if manifest_path.exists() {
-                                if let Ok(mut manifest) =
-                                    VaultManifest::load_from_path(&manifest_path)
-                                {
-                                    manifest.name = name.clone();
-                                    manifest.primary_envelope = new_primary.clone();
-                                    let _ = manifest.save_to_path(&manifest_path);
+                                let mut manifest = VaultManifest::load_from_path(&manifest_path)
+                                    .map_err(|e| format!("Failed to parse manifest: {e}"))?;
+                                manifest.name = name.clone();
+                                manifest
+                                    .change_password(&key, &passphrase)
+                                    .map_err(|e| {
+                                        format!("Failed to update primary envelope revision: {e}")
+                                    })?;
+                                manifest.save_to_path(&manifest_path).map_err(|e| {
+                                    format!("Failed to save rotated manifest atomically: {e}")
+                                })?;
+                            }
+
+                            let env_json = serde_json::to_string(&new_primary)
+                                .map_err(|e| format!("Failed to serialize recovery envelope: {e}"))?;
+
+                            let target_db = data_path::resolve_vault_db_file(
+                                std::path::Path::new(&db_path),
+                                vid.as_str(),
+                            );
+                            if let Some(target_db_str) = target_db.to_str() {
+                                if target_db.exists() {
+                                    match HostStore::open_with_key(target_db_str, Some(&key)).await
+                                    {
+                                        Ok(mut target_store) => {
+                                            if let Err(e) = target_store
+                                                .save_vault_recovery_envelope(vid.as_str(), &env_json)
+                                                .await
+                                            {
+                                                if let Some(bytes) = &original_manifest_bytes {
+                                                    let _ = std::fs::write(&manifest_path, bytes);
+                                                }
+                                                return Err(format!(
+                                                    "Failed to persist recovery envelope in target vault: {e}"
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(bytes) = &original_manifest_bytes {
+                                                let _ = std::fs::write(&manifest_path, bytes);
+                                            }
+                                            return Err(format!(
+                                                "Failed to open target database for envelope update: {e}"
+                                            ));
+                                        }
+                                    }
                                 }
                             }
-                            if let Ok(env_json) = serde_json::to_string(&new_primary) {
-                                let target_db = data_path::resolve_vault_db_file(
-                                    std::path::Path::new(&db_path),
-                                    vid.as_str(),
-                                );
-                                if let Ok(mut target_store) = HostStore::open_with_key(
-                                    target_db.to_str().unwrap(),
-                                    Some(&key),
-                                )
+
+                            if let Err(e) = reg_store
+                                .save_vault_recovery_envelope(vid.as_str(), &env_json)
                                 .await
-                                {
-                                    let _ = target_store
-                                        .save_vault_recovery_envelope(vid.as_str(), &env_json)
-                                        .await;
+                            {
+                                if let Some(bytes) = &original_manifest_bytes {
+                                    let _ = std::fs::write(&manifest_path, bytes);
                                 }
-                                let _ = reg_store
-                                    .save_vault_recovery_envelope(vid.as_str(), &env_json)
-                                    .await;
+                                return Err(format!(
+                                    "Failed to persist recovery envelope in registry: {e}"
+                                ));
                             }
+
+                            // Synchronize OS credential store
+                            let cred_store = shellumi_core::default_credential_store();
+                            let _ = cred_store.set_secret(
+                                "shellumi",
+                                &format!("vault_passphrase_{}", vid.as_str()),
+                                &passphrase,
+                            );
                         }
                     }
 
@@ -902,15 +985,162 @@ impl Shellumi {
         .detach();
     }
 
-    /// Delete a vault by unregistering its context.
+    /// Delete a vault by quarantining its files and unregistering its context.
     pub(crate) fn delete_vault_inspector(&mut self, id: &str, cx: &mut Context<Self>) {
         if id == self.active_vault_id {
-            self.desktop.message = Some("Cannot delete the currently active vault.".into());
+            self.desktop.message = Some(
+                "Cannot delete the currently active vault. Please switch to another vault first."
+                    .into(),
+            );
             cx.notify();
             return;
         }
-        if id == shellumi_storage::LEGACY_LOCAL_VAULT_ID {
+        if id == shellumi_storage::LEGACY_LOCAL_VAULT_ID || data_path::is_default_vault(id) {
             self.desktop.message = Some("Cannot delete the default local vault.".into());
+            cx.notify();
+            return;
+        }
+        if !data_path::is_safe_vault_id(id) {
+            self.desktop.message = Some(format!("Invalid or unsafe vault identifier '{id}'."));
+            cx.notify();
+            return;
+        }
+
+        let Some(db_path) = self
+            .database
+            .clone()
+            .or_else(|| self.active_vault_db_path())
+        else {
+            return;
+        };
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let target_key = self.vault_key_for(id);
+        let id_string = id.to_string();
+        let id_string_task = id_string.clone();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let reg_db_path = data_path::resolve_vault_db_file(
+                    std::path::Path::new(&db_path),
+                    shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                );
+                let mut reg_store = HostStore::open_with_key(
+                    reg_db_path
+                        .to_str()
+                        .ok_or_else(|| "Invalid UTF-8 path for registry database".to_string())?,
+                    default_key.as_ref(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                let _ = reg_store
+                    .get_vault_context(&id_string_task)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("Vault context '{}' was not found in registry", id_string_task)
+                    })?;
+
+                // Check pending unsynced changes if key is loaded
+                let target_db = data_path::resolve_vault_db_file(
+                    std::path::Path::new(&db_path),
+                    &id_string_task,
+                );
+                if target_db.exists() {
+                    if let Some(k) = &target_key {
+                        if let Ok(store) = HostStore::open_with_key(
+                            target_db.to_str().unwrap(),
+                            Some(k),
+                        ).await {
+                            if let Ok(mutations) =
+                                store.get_pending_mutations(&id_string_task).await
+                            {
+                                if !mutations.is_empty() {
+                                    return Err(
+                                        "Vault has pending unsynced local mutations. Please sync or export before deleting."
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 1. Quarantine physical files first (crash-safe staging)
+                let q_dir = data_path::quarantine_vault_files(
+                    std::path::Path::new(&db_path),
+                    &id_string_task,
+                    "User requested vault deletion",
+                )?;
+
+                // 2. Unregister vault context from registry database
+                let unregistered = reg_store
+                    .unregister_vault_context(&id_string_task)
+                    .await;
+
+                match unregistered {
+                    Ok(true) => {
+                        // Success: files remain staged in quarantine for disaster recovery
+                        Ok::<(), String>(())
+                    }
+                    Ok(false) => {
+                        // Rollback quarantine: restore files back to original paths
+                        let _ = data_path::restore_quarantined_vault(&q_dir);
+                        Err(format!(
+                            "Vault context '{}' was not found in registry; rollback complete",
+                            id_string_task
+                        ))
+                    }
+                    Err(e) => {
+                        // Rollback quarantine on database failure
+                        let _ = data_path::restore_quarantined_vault(&q_dir);
+                        Err(format!(
+                            "Failed to unregister vault context: {e}; rollback complete"
+                        ))
+                    }
+                }
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let res = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match res {
+                    Ok(_) => {
+                        app.active_vault_keys.remove(&id_string);
+                        app.available_vaults.retain(|v| v.id != id_string);
+                        app.load_vault_list(cx);
+                        app.inspector_close(cx);
+                        app.desktop.message = Some(format!(
+                            "Vault '{}' moved to quarantine and unregistered successfully",
+                            id_string
+                        ));
+                    }
+                    Err(e) => {
+                        app.desktop.message = Some(format!("Failed to delete vault: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Unregister a vault context without modifying or moving disk files.
+    pub(crate) fn unregister_vault_inspector(&mut self, id: &str, cx: &mut Context<Self>) {
+        if id == self.active_vault_id {
+            self.desktop.message = Some(
+                "Cannot unregister the currently active vault. Please switch to another vault first."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if id == shellumi_storage::LEGACY_LOCAL_VAULT_ID || data_path::is_default_vault(id) {
+            self.desktop.message = Some("Cannot unregister the default local vault.".into());
             cx.notify();
             return;
         }
@@ -951,22 +1181,10 @@ impl Shellumi {
 
                 if !unregistered {
                     return Err(format!(
-                        "Vault context '{}' was not found or already deleted",
+                        "Vault context '{}' was not found or already unregistered",
                         id_string_task
                     ));
                 }
-
-                // Delete physical database file and manifest file if present
-                let target_db = data_path::resolve_vault_db_file(
-                    std::path::Path::new(&db_path),
-                    &id_string_task,
-                );
-                let target_manifest = data_path::resolve_manifest_file(
-                    std::path::Path::new(&db_path),
-                    &id_string_task,
-                );
-                let _ = std::fs::remove_file(target_db);
-                let _ = std::fs::remove_file(target_manifest);
 
                 Ok::<(), String>(())
             })
@@ -981,11 +1199,13 @@ impl Shellumi {
                         app.available_vaults.retain(|v| v.id != id_string);
                         app.load_vault_list(cx);
                         app.inspector_close(cx);
-                        app.desktop.message =
-                            Some(format!("Vault '{}' removed successfully", id_string));
+                        app.desktop.message = Some(format!(
+                            "Vault '{}' unregistered (data files preserved)",
+                            id_string
+                        ));
                     }
                     Err(e) => {
-                        app.desktop.message = Some(format!("Failed to delete vault: {e}"));
+                        app.desktop.message = Some(format!("Failed to unregister vault: {e}"));
                     }
                 }
                 cx.notify();

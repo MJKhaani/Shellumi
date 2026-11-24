@@ -7313,6 +7313,7 @@ dependencies = [
  "gpui",
  "hex",
  "image",
+ "serde",
  "serde_json",
  "shellumi-core",
  "shellumi-rdp",

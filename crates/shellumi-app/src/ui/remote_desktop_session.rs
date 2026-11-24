@@ -492,25 +492,38 @@ impl Shellumi {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, window, cx| {
-                let vp = window.viewport_size();
-                let total_w = vp.width.to_f64() as f32;
-                let total_h = vp.height.to_f64() as f32;
-                let sidebar_w = if app.sidebar_visible {
-                    if app.sidebar_collapsed {
-                        56.0
-                    } else {
-                        crate::theme::MacTheme::SIDEBAR_WIDTH
-                    }
+                let (canvas_w, canvas_h) = if let Some(b) = app.rd_canvas_bounds.get(&tab_idx) {
+                    (
+                        (f32::from(b.size.width) as u32).max(640),
+                        (f32::from(b.size.height) as u32).max(480),
+                    )
                 } else {
-                    0.0
+                    let vp = window.viewport_size();
+                    let total_w = vp.width.to_f64() as f32;
+                    let total_h = vp.height.to_f64() as f32;
+                    let sidebar_w = if app.sidebar_visible {
+                        if app.sidebar_collapsed {
+                            56.0
+                        } else {
+                            crate::theme::MacTheme::SIDEBAR_WIDTH
+                        }
+                    } else {
+                        0.0
+                    };
+                    let inspector_open = app.inspector_coordinator.is_open();
+                    let geom = crate::ui::layout::calculate_layout(
+                        total_w,
+                        sidebar_w,
+                        inspector_open,
+                        None,
+                    );
+                    let topbar_h: f32 = 48.0;
+                    let toolbar_h: f32 = 36.0;
+                    (
+                        geom.primary_content_width.max(640.0) as u32,
+                        (total_h - topbar_h - toolbar_h).max(480.0) as u32,
+                    )
                 };
-                let inspector_open = app.inspector_coordinator.is_open();
-                let geom =
-                    crate::ui::layout::calculate_layout(total_w, sidebar_w, inspector_open, None);
-                let topbar_h: f32 = 48.0;
-                let toolbar_h: f32 = 36.0;
-                let canvas_w = geom.primary_content_width.max(640.0) as u32;
-                let canvas_h = (total_h - topbar_h - toolbar_h).max(480.0) as u32;
                 let w_even = canvas_w & !1;
                 app.remote_desktop_request_resize(tab_idx, w_even, canvas_h, cx);
             }))

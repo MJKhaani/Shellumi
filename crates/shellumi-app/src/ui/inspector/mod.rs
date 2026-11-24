@@ -434,8 +434,22 @@ impl Shellumi {
                 self.switch_vault(new_vault_id, vname, window, cx);
             }
             crate::ui::inspector::NavigationRequest::SwitchPage(page_name) => {
-                let leaked: &'static str = Box::leak(page_name.into_boxed_str());
-                self.navigate_page(leaked, window, cx);
+                let canonical = match page_name.as_str() {
+                    "Hosts" => "Hosts",
+                    "Logs" | "Session Logs" => "Session Logs",
+                    "Terminal" => "Terminal",
+                    "Keychain" => "Keychain",
+                    "Known Hosts" => "Known Hosts",
+                    "SFTP Files" => "SFTP Files",
+                    "Settings" => "Settings",
+                    "Overview" => "Overview",
+                    "Workspaces" => "Workspaces",
+                    "Port Forwarding" => "Port Forwarding",
+                    "Vaults" => "Vaults",
+                    "Integrations" => "Integrations",
+                    _ => "Hosts",
+                };
+                self.navigate_page(canonical, window, cx);
             }
             crate::ui::inspector::NavigationRequest::SwitchTab(idx) => {
                 if let Some(win) = window {
@@ -449,11 +463,19 @@ impl Shellumi {
             crate::ui::inspector::NavigationRequest::CloseTab(tab_id) => {
                 if let Some(win) = window {
                     self.close_tab(tab_id, win, cx);
+                } else {
+                    self.pending_window_action = Some(crate::PendingWindowAction::CloseTab(tab_id));
+                    cx.notify();
                 }
             }
             crate::ui::inspector::NavigationRequest::CloseWindow => {
                 self.inspector_coordinator.close();
-                cx.notify();
+                if let Some(_win) = window {
+                    cx.quit();
+                } else {
+                    self.pending_window_action = Some(crate::PendingWindowAction::CloseWindow);
+                    cx.notify();
+                }
             }
         }
     }

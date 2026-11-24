@@ -5015,6 +5015,58 @@ impl HostStore {
         Ok(rows > 0)
     }
 
+    /// Revokes a team member and increments the shared vault epoch and audit record atomically.
+    /// Rotates the active key epoch and cryptographically invalidates subsequent epochs for the member.
+    pub async fn revoke_team_member_with_rotation(
+        &mut self,
+        vault_id: &str,
+        member_id: &str,
+        revoked_at: &str,
+        actor_id: &str,
+    ) -> Result<u64, StorageError> {
+        let member = self.get_team_member(member_id).await?.ok_or_else(|| {
+            StorageError::InvalidCollaboration(CollaborationError::MemberNotFound(
+                member_id.to_string(),
+            ))
+        })?;
+        if member.revoked {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::MemberRevoked(format!(
+                    "Team member '{member_id}' is already revoked"
+                )),
+            ));
+        }
+
+        let updated = self.revoke_team_member(member_id, revoked_at).await?;
+        if !updated {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::MemberNotFound(format!(
+                    "Failed to revoke team member '{member_id}'"
+                )),
+            ));
+        }
+
+        let new_epoch = self
+            .increment_shared_vault_epoch(vault_id, revoked_at)
+            .await?;
+
+        let audit = SharingAuditRecord::new(
+            format!("aud-{revoked_at}-{}", uuid::Uuid::new_v4().as_simple()),
+            vault_id,
+            AuditAction::MemberRevoked,
+            actor_id,
+            Some(member_id.to_string()),
+            Some(format!(
+                "Revoked access for '{}' ({}) and rotated key to epoch {new_epoch}",
+                member.display_name, member.user_id
+            )),
+            revoked_at,
+        );
+        self.log_audit_event(&audit).await?;
+
+        Ok(new_epoch)
+    }
+
     pub async fn log_audit_event(
         &mut self,
         record: &SharingAuditRecord,

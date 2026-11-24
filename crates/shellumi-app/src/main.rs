@@ -824,6 +824,8 @@ struct Shellumi {
     pub(crate) vault_form: Option<VaultFormState>,
     pub(crate) provider_form: Option<ProviderFormState>,
     pub(crate) team_form: Option<TeamFormState>,
+    pub(crate) pending_window_action: Option<PendingWindowAction>,
+    pub(crate) rd_canvas_bounds: std::collections::HashMap<usize, gpui::Bounds<gpui::Pixels>>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -965,6 +967,14 @@ enum SplitDirection {
     Grid,
     Horizontal,
     Vertical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum PendingWindowAction {
+    CloseTab(u64),
+    CloseWindow,
+    QuitApp,
 }
 
 struct TerminalPane {
@@ -1275,6 +1285,8 @@ impl Shellumi {
             vault_form: None,
             provider_form: None,
             team_form: None,
+            pending_window_action: None,
+            rd_canvas_bounds: std::collections::HashMap::new(),
             rd_display_menu_open: false,
             rd_keyboard_menu_open: false,
             rd_more_menu_open: false,

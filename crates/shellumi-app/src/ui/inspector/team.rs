@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 //! Team member and invitation inspector rendering and actions for View, Edit, and Create modes.
 
+use crate::data_path;
 use crate::theme::{
     accent_blue, caption, danger, subheader, surface, text_primary, text_secondary, MacTheme,
 };
@@ -14,7 +15,8 @@ use gpui::{
     div, prelude::*, px, rgb, Context, Div, FontWeight, IntoElement, ParentElement, Stateful,
     Styled, Window,
 };
-use shellumi_core::{AuditAction, SharingAuditRecord, TeamMember, TeamRole};
+use shellumi_core::server::ShellumiServerClient;
+use shellumi_core::{AuditAction, SharingAuditRecord, TeamMember, TeamRole, VaultLocation};
 use shellumi_storage::HostStore;
 
 impl Shellumi {
@@ -557,13 +559,14 @@ impl Shellumi {
         .detach();
     }
 
-    /// Revoke/delete team member.
+    /// Revoke/delete team member with cryptographic key rotation.
     pub(crate) fn delete_team_member_inspector(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(path) = self.active_vault_db_path() else {
             return;
         };
         let active_vault_id = self.active_vault_id.clone();
         let active_vault_id_task = active_vault_id.clone();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let key = self.active_vault_key();
         let id_str = id.to_string();
         let now = std::time::SystemTime::now()
@@ -578,38 +581,141 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
+                let reg_db_path = data_path::resolve_vault_db_file(
+                    std::path::Path::new(&path),
+                    shellumi_storage::LEGACY_LOCAL_VAULT_ID,
+                );
+                let reg_store = HostStore::open_with_key(
+                    reg_db_path
+                        .to_str()
+                        .ok_or_else(|| "Invalid UTF-8 path for registry database".to_string())?,
+                    default_key.as_ref(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                let target_ctx = reg_store
+                    .get_vault_context(&active_vault_id_task)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
                 let mut store = HostStore::open_with_key(&path, key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
                 }
-                let revoked = store
-                    .revoke_team_member(&id_str_task, &now_task)
+
+                let member = store
+                    .get_team_member(&id_str_task)
                     .await
-                    .map_err(|e| e.to_string())?;
-                if !revoked {
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("Team member '{}' not found", id_str_task)
+                    })?;
+                if member.revoked {
                     return Err(format!(
-                        "Team member '{}' not found or access is already revoked",
+                        "Team member '{}' access is already revoked",
                         id_str_task
                     ));
                 }
+
+                // If remote shared vault, enforce server-side member revocation & key epoch rotation first
+                if let Some(ctx) = target_ctx {
+                    if let VaultLocation::Remote {
+                        server,
+                        server_vault_id,
+                    } = ctx.location()
+                    {
+                        let conn_record = reg_store
+                            .get_vault_server_connection(server.as_str())
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| {
+                                format!(
+                                    "Server connection record '{}' not found: cannot enforce server-side revocation",
+                                    server.as_str()
+                                )
+                            })?;
+
+                        let cred_store = shellumi_core::default_credential_store();
+                        let token_sec = conn_record
+                            .resolve_auth_token(&*cred_store)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Server connection '{}' is unauthenticated: cannot revoke remote member without valid token",
+                                    server.as_str()
+                                )
+                            })?;
+
+                        let mut client = ShellumiServerClient::new(&conn_record.base_url);
+                        client.set_token(token_sec.expose_secret().to_string());
+                        if let Some(dev_id_str) = &conn_record.device_id {
+                            if let Ok(dev_uuid) = uuid::Uuid::parse_str(dev_id_str) {
+                                client.set_device_id(dev_uuid);
+                            }
+                        }
+
+                        let remote_vault_uuid = uuid::Uuid::parse_str(server_vault_id.as_str())
+                            .map_err(|e| format!("Invalid remote vault UUID: {e}"))?;
+
+                        // Revoke member on remote server if user identifier is valid UUID
+                        if let Ok(user_uuid) = uuid::Uuid::parse_str(&member.user_id) {
+                            client
+                                .remove_member(remote_vault_uuid, user_uuid)
+                                .map_err(|e| format!("Server rejected member revocation: {e}"))?;
+                        } else if let Ok(member_uuid) = uuid::Uuid::parse_str(&member.id) {
+                            client
+                                .remove_member(remote_vault_uuid, member_uuid)
+                                .map_err(|e| format!("Server rejected member revocation: {e}"))?;
+                        }
+
+                        let vault_id_obj = shellumi_core::VaultId::new(&active_vault_id_task)
+                            .map_err(|e| format!("Invalid vault ID: {e}"))?;
+
+                        // Rotate epoch on remote server and re-wrap for active devices
+                        let new_epoch = store
+                            .rotate_vault_key_epoch(&vault_id_obj, remote_vault_uuid, &client)
+                            .await
+                            .map_err(|e| format!("Remote key epoch rotation failed: {e}"))?;
+
+                        // Update local team member table and log audit
+                        store
+                            .revoke_team_member(&id_str_task, &now_task)
+                            .await
+                            .map_err(|e| e.to_string())?;
+
+                        let audit = SharingAuditRecord::new(
+                            format!("aud-{}-{}", now_task, uuid::Uuid::new_v4().as_simple()),
+                            &active_vault_id_task,
+                            AuditAction::MemberRevoked,
+                            "local_owner",
+                            Some(id_str_task.clone()),
+                            Some(format!(
+                                "Revoked access and rotated remote sharing key to epoch {new_epoch}"
+                            )),
+                            &now_task,
+                        );
+                        store
+                            .log_audit_event(&audit)
+                            .await
+                            .map_err(|e| e.to_string())?;
+
+                        return Ok::<u64, String>(new_epoch as u64);
+                    }
+                }
+
+                // Local shared vault revocation and cryptographic epoch rotation
                 let new_epoch = store
-                    .increment_shared_vault_epoch(&active_vault_id_task, &now_task)
+                    .revoke_team_member_with_rotation(
+                        &active_vault_id_task,
+                        &id_str_task,
+                        &now_task,
+                        "local_owner",
+                    )
                     .await
-                    .unwrap_or(2);
-                let audit = SharingAuditRecord::new(
-                    format!("aud-{}-{}", now_task, uuid::Uuid::new_v4().as_simple()),
-                    &active_vault_id_task,
-                    AuditAction::MemberRevoked,
-                    "local_owner",
-                    Some(id_str_task.clone()),
-                    Some(format!(
-                        "Revoked access and rotated sharing key to epoch {new_epoch}"
-                    )),
-                    &now_task,
-                );
-                let _ = store.log_audit_event(&audit).await;
+                    .map_err(|e| e.to_string())?;
+
                 Ok::<u64, String>(new_epoch)
             })
         });

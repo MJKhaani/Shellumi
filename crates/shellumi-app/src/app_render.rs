@@ -3,6 +3,21 @@ use super::*;
 
 impl Render for Shellumi {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(action) = self.pending_window_action.take() {
+            match action {
+                PendingWindowAction::CloseTab(tab_id) => {
+                    self.close_tab(tab_id, window, cx);
+                }
+                PendingWindowAction::CloseWindow => {
+                    self.inspector_coordinator.close();
+                    cx.quit();
+                }
+                PendingWindowAction::QuitApp => {
+                    cx.quit();
+                }
+            }
+        }
+
         let mut root = div()
             .id("shellumi-root")
             .track_focus(&self.focus)
@@ -153,7 +168,16 @@ impl Render for Shellumi {
             .on_action(cx.listener(|app, _: &ToggleSidebarCollapse, _, cx| {
                 app.toggle_sidebar_collapsed(cx);
             }))
-            .on_action(cx.listener(|_app, _: &Quit, _, cx| cx.quit()))
+            .on_action(cx.listener(|app, _: &Quit, _window, cx| {
+                if !app
+                    .inspector_coordinator
+                    .request_navigation(crate::ui::inspector::NavigationRequest::CloseWindow)
+                {
+                    cx.notify();
+                    return;
+                }
+                cx.quit();
+            }))
             .on_action(cx.listener(|app, _: &AboutApp, window, cx| {
                 app.navigate_page("Settings", Some(window), cx);
             }))

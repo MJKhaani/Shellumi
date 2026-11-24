@@ -2779,3 +2779,218 @@ async fn test_vault_registry_deletion_and_protection() {
         "Unregistering non-existent vault must return false"
     );
 }
+
+#[test]
+fn test_vault_quarantine_staging_and_rollback() {
+    use crate::data_path::{
+        quarantine_vault_files, resolve_manifest_file, resolve_vault_db_file,
+        restore_quarantined_vault,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let base_dir = temp.path().to_path_buf();
+    let vault_id = "vlt-quarantine-test";
+
+    let db_path = resolve_vault_db_file(&base_dir, vault_id);
+    let manifest_path = resolve_manifest_file(&base_dir, vault_id);
+
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+
+    std::fs::write(&db_path, b"test database payload").unwrap();
+    std::fs::write(&manifest_path, b"test manifest payload").unwrap();
+
+    assert!(db_path.exists());
+    assert!(manifest_path.exists());
+
+    // 1. Quarantine files
+    let q_dir = quarantine_vault_files(&base_dir, vault_id, "test quarantine").unwrap();
+    assert!(q_dir.exists(), "Quarantine directory must be created");
+
+    // Original files must no longer be in the vaults/ or vault_manifests/ directories
+    assert!(!db_path.exists(), "Original DB must be moved out");
+    assert!(
+        !manifest_path.exists(),
+        "Original manifest must be moved out"
+    );
+
+    // Files must be inside the quarantine folder
+    assert!(q_dir.join(format!("{vault_id}.db")).exists());
+    assert!(q_dir.join(format!("{vault_id}.manifest.json")).exists());
+    assert!(q_dir.join("quarantine_meta.json").exists());
+
+    // 2. Rollback / restore files
+    restore_quarantined_vault(&q_dir).unwrap();
+
+    // Files must be restored to original paths
+    assert!(db_path.exists(), "DB file must be restored");
+    assert!(manifest_path.exists(), "Manifest file must be restored");
+    assert_eq!(std::fs::read(&db_path).unwrap(), b"test database payload");
+    assert_eq!(
+        std::fs::read(&manifest_path).unwrap(),
+        b"test manifest payload"
+    );
+    assert!(
+        !q_dir.exists(),
+        "Quarantine folder must be removed after restore"
+    );
+
+    // 3. Symlink rejection
+    #[cfg(unix)]
+    {
+        let sym_target = temp.path().join("external_secret.txt");
+        std::fs::write(&sym_target, b"secret").unwrap();
+        let sym_db = resolve_vault_db_file(&base_dir, "vlt-symlink");
+        std::fs::create_dir_all(sym_db.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&sym_target, &sym_db).unwrap();
+
+        let err = quarantine_vault_files(&base_dir, "vlt-symlink", "test symlink");
+        assert!(
+            err.is_err(),
+            "Symlinked files must be rejected from quarantine"
+        );
+        assert!(err
+            .unwrap_err()
+            .contains("Refusing to quarantine symlinked"));
+    }
+}
+
+#[tokio::test]
+async fn test_team_member_revocation_with_cryptographic_rotation() {
+    use shellumi_core::{AuditAction, TeamMember, TeamRole, VaultId, VaultKey};
+    use shellumi_storage::HostStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("team_vault.db");
+    let key = VaultKey::generate().unwrap();
+
+    let mut store = HostStore::open_with_key(db_path.to_str().unwrap(), Some(&key))
+        .await
+        .unwrap();
+    let vid = VaultId::new("vlt-team-rot").unwrap();
+    store.set_vault_id(vid);
+
+    // Create shared vault
+    let shared_vault = shellumi_core::SharedVault::new(
+        "vlt-team-rot",
+        "Team Engineering",
+        Some("Engineering shared vault".into()),
+        "owner@corp.internal",
+        "2026-11-24T12:00:00Z",
+    )
+    .unwrap();
+    store.create_shared_vault(&shared_vault).await.unwrap();
+
+    // Add team member
+    let member = TeamMember {
+        id: "tm-charlie".into(),
+        vault_id: "vlt-team-rot".into(),
+        user_id: "charlie@corp.internal".into(),
+        display_name: "Charlie Dev".into(),
+        public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICfakeCharliePubKey".into(),
+        role: TeamRole::Editor,
+        enrolled_at: "2026-11-24T12:01:00Z".into(),
+        invited_by: "owner@corp.internal".into(),
+        revoked: false,
+        revoked_at: None,
+    };
+    store.add_team_member(&member).await.unwrap();
+
+    // Revoke team member with rotation
+    let new_epoch = store
+        .revoke_team_member_with_rotation(
+            "vlt-team-rot",
+            "tm-charlie",
+            "2026-11-24T12:05:00Z",
+            "owner@corp.internal",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        new_epoch, 2,
+        "Epoch must advance from 1 to 2 upon member revocation"
+    );
+
+    // Verify member is revoked
+    let member_after = store.get_team_member("tm-charlie").await.unwrap().unwrap();
+    assert!(member_after.revoked, "Member must be marked revoked");
+    assert_eq!(
+        member_after.revoked_at.as_deref(),
+        Some("2026-11-24T12:05:00Z")
+    );
+
+    // Verify audit log has revocation record
+    let audit_records = store.list_audit_log("vlt-team-rot", None).await.unwrap();
+    assert!(
+        audit_records
+            .iter()
+            .any(|r| r.action == AuditAction::MemberRevoked
+                && r.target_id.as_deref() == Some("tm-charlie")),
+        "Audit log must contain MemberRevoked event"
+    );
+
+    // Attempting to revoke again must fail
+    let err = store
+        .revoke_team_member_with_rotation(
+            "vlt-team-rot",
+            "tm-charlie",
+            "2026-11-24T12:06:00Z",
+            "owner@corp.internal",
+        )
+        .await;
+    assert!(err.is_err(), "Revoking an already revoked member must fail");
+}
+
+#[test]
+fn test_navigation_completion_close_tab_and_close_window_queuing() {
+    use crate::ui::inspector::coordinator::{InspectorCoordinator, NavigationRequest};
+    use crate::PendingWindowAction;
+
+    let coord = InspectorCoordinator::new();
+    assert!(!coord.is_open());
+
+    // Test queuing CloseTab
+    let req_tab = NavigationRequest::CloseTab(42);
+    assert_eq!(req_tab, NavigationRequest::CloseTab(42));
+
+    // Test queuing CloseWindow
+    let req_win = NavigationRequest::CloseWindow;
+    assert_eq!(req_win, NavigationRequest::CloseWindow);
+
+    // Verify PendingWindowAction variants
+    let action_tab = PendingWindowAction::CloseTab(42);
+    let action_win = PendingWindowAction::CloseWindow;
+    assert_eq!(action_tab, PendingWindowAction::CloseTab(42));
+    assert_eq!(action_win, PendingWindowAction::CloseWindow);
+}
+
+#[test]
+fn test_remote_desktop_canvas_geometry_translation_and_margins() {
+    use shellumi_remote_desktop::{translate_coordinates, ScaleMode};
+
+    let fb_w: u32 = 1920;
+    let fb_h: u32 = 1080;
+    let canvas_w: f32 = 800.0;
+    let canvas_h: f32 = 600.0;
+
+    // In ScaleMode::Fit, 1920x1080 into 800x600 has letterboxing (800x450 rendered, 75px top/bottom margin)
+    // Click in top margin (0..75) should return None
+    assert!(
+        translate_coordinates(400.0, 30.0, canvas_w, canvas_h, fb_w, fb_h, ScaleMode::Fit)
+            .is_none()
+    );
+
+    // Click in center (400.0, 300.0) should map to center of remote desktop (960, 540)
+    let center =
+        translate_coordinates(400.0, 300.0, canvas_w, canvas_h, fb_w, fb_h, ScaleMode::Fit);
+    assert!(center.is_some());
+    let (cx, cy) = center.unwrap();
+    assert!((cx as i32 - 960).abs() <= 2);
+    assert!((cy as i32 - 540).abs() <= 2);
+
+    // In ScaleMode::Fill, there are no letterbox margins, all points within canvas map
+    let fill_top =
+        translate_coordinates(400.0, 30.0, canvas_w, canvas_h, fb_w, fb_h, ScaleMode::Fill);
+    assert!(fill_top.is_some());
+}

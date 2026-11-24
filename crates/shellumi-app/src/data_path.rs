@@ -173,6 +173,198 @@ pub(crate) fn prepare_parent(path: &Path) -> Result<(), String> {
     })
 }
 
+pub(crate) fn resolve_quarantine_dir(base_path: &Path) -> PathBuf {
+    let root = resolve_root_dir(base_path);
+    root.join("quarantine")
+}
+
+pub(crate) fn is_safe_vault_id(vault_id: &str) -> bool {
+    !vault_id.is_empty()
+        && !vault_id.contains("..")
+        && !vault_id.contains('/')
+        && !vault_id.contains('\\')
+        && vault_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct VaultQuarantineRecord {
+    pub vault_id: String,
+    pub original_db_path: String,
+    pub original_manifest_path: Option<String>,
+    pub quarantined_at: String,
+    pub reason: String,
+}
+
+pub(crate) fn quarantine_vault_files(
+    base_path: &Path,
+    vault_id: &str,
+    reason: &str,
+) -> Result<PathBuf, String> {
+    if !is_safe_vault_id(vault_id) {
+        return Err(format!("Invalid or unsafe vault ID '{vault_id}'"));
+    }
+    if is_default_vault(vault_id) {
+        return Err("Cannot quarantine default vault".into());
+    }
+
+    let target_db = resolve_vault_db_file(base_path, vault_id);
+    let target_manifest = resolve_manifest_file(base_path, vault_id);
+
+    // Verify paths are not symlinks (prevent symlink redirection attacks)
+    if let Ok(meta) = std::fs::symlink_metadata(&target_db) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to quarantine symlinked database file: {}",
+                target_db.display()
+            ));
+        }
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&target_manifest) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to quarantine symlinked manifest file: {}",
+                target_manifest.display()
+            ));
+        }
+    }
+
+    let quarantine_root = resolve_quarantine_dir(base_path);
+    std::fs::create_dir_all(&quarantine_root)
+        .map_err(|e| format!("Failed to create quarantine root directory: {e}"))?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let q_folder_name = format!("{vault_id}_{now_secs}_{}", uuid::Uuid::new_v4().as_simple());
+    let q_dir = quarantine_root.join(&q_folder_name);
+    std::fs::create_dir_all(&q_dir)
+        .map_err(|e| format!("Failed to create quarantine vault folder: {e}"))?;
+
+    let mut moved_db = false;
+    let mut moved_manifest = false;
+
+    let q_db = q_dir.join(format!("{vault_id}.db"));
+    if target_db.exists() {
+        std::fs::rename(&target_db, &q_db)
+            .or_else(|_| {
+                std::fs::copy(&target_db, &q_db)?;
+                std::fs::remove_file(&target_db)
+            })
+            .map_err(|e| format!("Failed to quarantine database file: {e}"))?;
+        moved_db = true;
+    }
+
+    let q_manifest = q_dir.join(format!("{vault_id}.manifest.json"));
+    if target_manifest.exists() {
+        std::fs::rename(&target_manifest, &q_manifest)
+            .or_else(|_| {
+                std::fs::copy(&target_manifest, &q_manifest)?;
+                std::fs::remove_file(&target_manifest)
+            })
+            .map_err(|e| format!("Failed to quarantine manifest file: {e}"))?;
+        moved_manifest = true;
+    }
+
+    // Quarantine any SQLite WAL / SHM files
+    let wal = PathBuf::from(format!("{}-wal", target_db.display()));
+    if wal.exists() {
+        let q_wal = q_dir.join(format!("{vault_id}.db-wal"));
+        let _ = std::fs::rename(&wal, &q_wal);
+    }
+    let shm = PathBuf::from(format!("{}-shm", target_db.display()));
+    if shm.exists() {
+        let q_shm = q_dir.join(format!("{vault_id}.db-shm"));
+        let _ = std::fs::rename(&shm, &q_shm);
+    }
+
+    let record = VaultQuarantineRecord {
+        vault_id: vault_id.to_string(),
+        original_db_path: target_db.to_string_lossy().to_string(),
+        original_manifest_path: if moved_manifest {
+            Some(target_manifest.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        quarantined_at: now_secs.to_string(),
+        reason: reason.to_string(),
+    };
+    let meta_path = q_dir.join("quarantine_meta.json");
+    let record_json = serde_json::to_string_pretty(&record)
+        .map_err(|e| format!("Failed to serialize quarantine metadata: {e}"))?;
+    std::fs::write(&meta_path, record_json)
+        .map_err(|e| format!("Failed to write quarantine metadata: {e}"))?;
+
+    tracing::info!(
+        vault_id = %vault_id,
+        quarantine_dir = %q_dir.display(),
+        moved_db = moved_db,
+        moved_manifest = moved_manifest,
+        "Quarantined vault files securely"
+    );
+
+    Ok(q_dir)
+}
+
+pub(crate) fn restore_quarantined_vault(q_dir: &Path) -> Result<(), String> {
+    let meta_path = q_dir.join("quarantine_meta.json");
+    if !meta_path.exists() {
+        return Err("Quarantine metadata file not found".into());
+    }
+    let record_str = std::fs::read_to_string(&meta_path)
+        .map_err(|e| format!("Failed to read quarantine metadata: {e}"))?;
+    let record: VaultQuarantineRecord = serde_json::from_str(&record_str)
+        .map_err(|e| format!("Failed to parse quarantine metadata: {e}"))?;
+
+    let q_db = q_dir.join(format!("{}.db", record.vault_id));
+    let target_db = PathBuf::from(&record.original_db_path);
+    if q_db.exists() {
+        if let Some(parent) = target_db.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::rename(&q_db, &target_db)
+            .or_else(|_| {
+                std::fs::copy(&q_db, &target_db)?;
+                std::fs::remove_file(&q_db)
+            })
+            .map_err(|e| format!("Failed to restore database from quarantine: {e}"))?;
+    }
+
+    if let Some(orig_manifest) = record.original_manifest_path {
+        let q_manifest = q_dir.join(format!("{}.manifest.json", record.vault_id));
+        let target_manifest = PathBuf::from(orig_manifest);
+        if q_manifest.exists() {
+            if let Some(parent) = target_manifest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::rename(&q_manifest, &target_manifest)
+                .or_else(|_| {
+                    std::fs::copy(&q_manifest, &target_manifest)?;
+                    std::fs::remove_file(&q_manifest)
+                })
+                .map_err(|e| format!("Failed to restore manifest from quarantine: {e}"))?;
+        }
+    }
+
+    // Remove quarantine folder
+    let _ = std::fs::remove_dir_all(q_dir);
+    tracing::info!(
+        vault_id = %record.vault_id,
+        "Restored quarantined vault files"
+    );
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) fn purge_quarantined_vault(q_dir: &Path) -> Result<(), String> {
+    if !q_dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(q_dir).map_err(|e| format!("Failed to purge quarantine directory: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
