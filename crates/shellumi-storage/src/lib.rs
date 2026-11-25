@@ -5379,22 +5379,93 @@ impl HostStore {
         user_id: &str,
         authorized_at: &str,
     ) -> Result<(), StorageError> {
-        self.connection
-            .execute(
-                "INSERT INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, NULL)
-                 ON CONFLICT(vault_id, device_id) DO UPDATE SET
-                    user_id = excluded.user_id,
-                    revoked = 0,
-                    revoked_at = NULL",
-                (
-                    vault_id.to_string(),
-                    device_id.to_string(),
-                    user_id.to_string(),
-                    authorized_at.to_string(),
-                ),
+        let tx = self.connection.transaction().await?;
+
+        let mut dev_rows = tx
+            .query(
+                "SELECT user_id, revoked FROM enrolled_devices WHERE device_id = ?1",
+                (device_id.to_string(),),
             )
             .await?;
+        let Some(dev_row) = dev_rows.next().await? else {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::InvalidAction(format!("Device '{device_id}' does not exist")),
+            ));
+        };
+        let dev_user: String = dev_row.get(0)?;
+        let dev_revoked: i64 = dev_row.get(1)?;
+        drop(dev_rows);
+
+        if dev_user != user_id {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::Unauthorized(format!(
+                    "Device '{device_id}' belongs to user '{dev_user}', not '{user_id}'"
+                )),
+            ));
+        }
+        if dev_revoked != 0 {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::Unauthorized(format!(
+                    "Device '{device_id}' is globally revoked and cannot be authorized"
+                )),
+            ));
+        }
+
+        let mut member_rows = tx
+            .query(
+                "SELECT revoked FROM team_members WHERE vault_id = ?1 AND user_id = ?2 LIMIT 1",
+                (vault_id.to_string(), user_id.to_string()),
+            )
+            .await?;
+        let Some(member_row) = member_rows.next().await? else {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::Unauthorized(format!(
+                    "User '{user_id}' is not a member of vault '{vault_id}'"
+                )),
+            ));
+        };
+        let member_revoked: i64 = member_row.get(0)?;
+        drop(member_rows);
+        if member_revoked != 0 {
+            return Err(StorageError::InvalidCollaboration(
+                CollaborationError::Unauthorized(format!(
+                    "User '{user_id}' membership in vault '{vault_id}' is revoked"
+                )),
+            ));
+        }
+
+        let mut auth_rows = tx
+            .query(
+                "SELECT revoked FROM vault_device_authorizations WHERE vault_id = ?1 AND device_id = ?2",
+                (vault_id.to_string(), device_id.to_string()),
+            )
+            .await?;
+        if let Some(auth_row) = auth_rows.next().await? {
+            let auth_revoked: i64 = auth_row.get(0)?;
+            if auth_revoked != 0 {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::Unauthorized(format!(
+                        "Device '{device_id}' authorization for vault '{vault_id}' was revoked and cannot be reactivated"
+                    )),
+                ));
+            }
+        }
+        drop(auth_rows);
+
+        tx.execute(
+            "INSERT INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, 0, NULL)
+             ON CONFLICT(vault_id, device_id) DO UPDATE SET
+                user_id = excluded.user_id",
+            (
+                vault_id.to_string(),
+                device_id.to_string(),
+                user_id.to_string(),
+                authorized_at.to_string(),
+            ),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 

@@ -820,6 +820,22 @@ pub async fn reconcile_pending_rotations_at_startup(
             continue;
         }
 
+        let _startup_lock = match RotationLockGuard::acquire(base_path, &journal.vault_id) {
+            Ok(guard) => guard,
+            Err(lock_err) => {
+                pending.push(PendingRotationRecovery {
+                    vault_id: journal.vault_id.clone(),
+                    journal_path: jpath,
+                    is_corrupted: false,
+                    stage: Some(journal.stage),
+                    reason: format!(
+                        "Vault rotation is currently locked by another process: {lock_err}"
+                    ),
+                });
+                continue;
+            }
+        };
+
         let (manifest_path, target_db_path, registry_db_path) =
             match validate_and_resolve_journal_paths(base_path, &journal) {
                 Ok(paths) => paths,
@@ -2080,6 +2096,104 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(pending[0].is_corrupted);
         assert!(pending[0].reason.contains("does not match expected path"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn subprocess_startup_recovery_worker() {
+        let Ok(recovery_dir) = std::env::var("SHELLUMI_RECOVERY_RACE_DIR") else {
+            return;
+        };
+        let expect_locked = std::env::var("SHELLUMI_EXPECT_LOCKED").as_deref() == Ok("1");
+        let base_path = PathBuf::from(recovery_dir);
+        let cred_store = FaultyCredentialStore::new();
+        let pending = reconcile_pending_rotations_at_startup(&base_path, &cred_store)
+            .await
+            .unwrap();
+        if expect_locked {
+            assert_eq!(pending.len(), 1);
+            assert!(
+                pending[0].reason.contains("locked by another process"),
+                "Expected lock contention message, got: {}",
+                pending[0].reason
+            );
+        } else {
+            assert!(
+                pending.is_empty(),
+                "Expected clean recovery after lock release, got: {pending:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_two_process_startup_recovery_race() {
+        let exe = std::env::current_exe().unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("shellumi-race-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let cred_store = FaultyCredentialStore::new();
+        let vault_id = "vlt-race";
+        let (_def_dek, _sec_dek, _def_pass, _old_pass, _sec_rec) =
+            setup_two_vault_fixture(&temp_dir, &cred_store, vault_id, false).await;
+
+        let mpath = data_path::resolve_manifest_file(&temp_dir, vault_id);
+        let orig_manifest_str = std::fs::read_to_string(&mpath).unwrap();
+        let jpath = rotation_journal_path(&temp_dir, vault_id);
+        let journal = PasswordRotationJournal {
+            journal_version: 2,
+            vault_id: vault_id.to_string(),
+            stage: PasswordRotationStage::Prepared,
+            original_manifest_backup: Some(orig_manifest_str),
+            staged_manifest_json: None,
+            new_primary_envelope_json: None,
+            original_registry_envelope: None,
+            original_target_db_envelope: None,
+            original_registry_state: None,
+            original_target_db_state: None,
+            target_db_path: None,
+            registry_db_path: None,
+            manifest_path: None,
+            had_keychain_secret: false,
+            remember_in_keychain: false,
+            updated_at: 1000,
+        };
+        write_rotation_journal_file(&jpath, &journal).unwrap();
+
+        // Process A holds the cross-process lock
+        let lock_a = RotationLockGuard::acquire(&temp_dir, vault_id).unwrap();
+        let status_locked = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "vault_rotation::tests::subprocess_startup_recovery_worker",
+                "--nocapture",
+            ])
+            .env("SHELLUMI_RECOVERY_RACE_DIR", &temp_dir)
+            .env("SHELLUMI_EXPECT_LOCKED", "1")
+            .status()
+            .unwrap();
+        assert!(status_locked.success());
+        assert!(
+            jpath.exists(),
+            "Journal must NOT be deleted while Process A holds lock"
+        );
+
+        // Process A releases the lock -> Process B can now reconcile cleanly
+        drop(lock_a);
+        let status_unlocked = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "vault_rotation::tests::subprocess_startup_recovery_worker",
+                "--nocapture",
+            ])
+            .env("SHELLUMI_RECOVERY_RACE_DIR", &temp_dir)
+            .env("SHELLUMI_EXPECT_LOCKED", "0")
+            .status()
+            .unwrap();
+        assert!(status_unlocked.success());
+        assert!(
+            !jpath.exists(),
+            "Journal should be cleaned after lock release"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
