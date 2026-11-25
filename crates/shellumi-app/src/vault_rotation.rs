@@ -79,16 +79,21 @@ pub enum RotationFaultPoint {
     BeforeJournalCreate,
     AfterJournalCreate,
     BeforeManifestUpdate,
+    AfterManifestWriteBeforeStage,
     AfterManifestUpdate,
     BeforeTargetDbUpdate,
+    AfterTargetDbWriteBeforeStage,
     AfterTargetDbUpdate,
     BeforeRegistryUpdate,
+    AfterRegistryWriteBeforeStage,
     AfterRegistryUpdate,
     BeforeCredentialStoreUpdate,
+    AfterCredentialStoreWriteBeforeStage,
     AfterCredentialStoreUpdate,
     BeforeCommitVerify,
     AfterCommitVerify,
     BeforeJournalComplete,
+    AfterCompletedBeforeJournalDelete,
     AfterJournalComplete,
     BeforeRollback,
     AfterRollback,
@@ -454,6 +459,10 @@ pub async fn rotate_vault_password(
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
         write_durable_file(&manifest_path, &staged_manifest_json)?;
+        check_fault(
+            req.fault_hook,
+            RotationFaultPoint::AfterManifestWriteBeforeStage,
+        )?;
         journal.stage = PasswordRotationStage::ManifestSaved;
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
@@ -474,6 +483,10 @@ pub async fn rotate_vault_password(
             )
             .await?;
         }
+        check_fault(
+            req.fault_hook,
+            RotationFaultPoint::AfterTargetDbWriteBeforeStage,
+        )?;
         journal.stage = PasswordRotationStage::TargetDbUpdated;
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
@@ -492,6 +505,10 @@ pub async fn rotate_vault_password(
             original_registry_envelope.is_some(),
         )
         .await?;
+        check_fault(
+            req.fault_hook,
+            RotationFaultPoint::AfterRegistryWriteBeforeStage,
+        )?;
         journal.stage = PasswordRotationStage::RegistryUpdated;
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
@@ -518,6 +535,10 @@ pub async fn rotate_vault_password(
                 return Err("OS credential store verification mismatch after rotation.".into());
             }
         }
+        check_fault(
+            req.fault_hook,
+            RotationFaultPoint::AfterCredentialStoreWriteBeforeStage,
+        )?;
         journal.stage = PasswordRotationStage::CredentialStoreUpdated;
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
@@ -559,6 +580,10 @@ pub async fn rotate_vault_password(
         journal.stage = PasswordRotationStage::Completed;
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
+        check_fault(
+            req.fault_hook,
+            RotationFaultPoint::AfterCompletedBeforeJournalDelete,
+        )?;
         std::fs::remove_file(&journal_path)
             .map_err(|e| format!("Failed to remove completed rotation journal: {e}"))?;
         check_fault(req.fault_hook, RotationFaultPoint::AfterJournalComplete)?;
@@ -908,10 +933,8 @@ pub async fn reconcile_pending_rotations_at_startup(
                             if fail_reason.is_empty() {
                                 completed_ok = true;
                             }
-                        } else if journal.remember_in_keychain {
-                            fail_reason = "Completed rotation journal found but keychain key is unavailable for verification.".into();
                         } else {
-                            completed_ok = true;
+                            fail_reason = "Completed rotation journal found; password or recovery code required to verify encrypted database and envelopes before removing journal.".into();
                         }
                     }
                     Ok(_) => {
@@ -1829,12 +1852,18 @@ mod tests {
 
         let target_point = match crash_point_str.as_str() {
             "AfterJournalCreate" => RotationFaultPoint::AfterJournalCreate,
+            "AfterManifestWriteBeforeStage" => RotationFaultPoint::AfterManifestWriteBeforeStage,
             "AfterManifestUpdate" => RotationFaultPoint::AfterManifestUpdate,
+            "AfterTargetDbWriteBeforeStage" => RotationFaultPoint::AfterTargetDbWriteBeforeStage,
             "AfterTargetDbUpdate" => RotationFaultPoint::AfterTargetDbUpdate,
+            "AfterRegistryWriteBeforeStage" => RotationFaultPoint::AfterRegistryWriteBeforeStage,
             "AfterRegistryUpdate" => RotationFaultPoint::AfterRegistryUpdate,
             "AfterCredentialStoreUpdate" => RotationFaultPoint::AfterCredentialStoreUpdate,
             "AfterCommitVerify" => RotationFaultPoint::AfterCommitVerify,
             "BeforeJournalComplete" => RotationFaultPoint::BeforeJournalComplete,
+            "AfterCompletedBeforeJournalDelete" => {
+                RotationFaultPoint::AfterCompletedBeforeJournalDelete
+            }
             "BeforeRollback" => RotationFaultPoint::BeforeRollback,
             "AfterRollback" => RotationFaultPoint::AfterRollback,
             other => panic!("Unknown crash point: {other}"),
@@ -1872,12 +1901,16 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let points = [
             "AfterJournalCreate",
+            "AfterManifestWriteBeforeStage",
             "AfterManifestUpdate",
+            "AfterTargetDbWriteBeforeStage",
             "AfterTargetDbUpdate",
+            "AfterRegistryWriteBeforeStage",
             "AfterRegistryUpdate",
             "AfterCredentialStoreUpdate",
             "AfterCommitVerify",
             "BeforeJournalComplete",
+            "AfterCompletedBeforeJournalDelete",
             "BeforeRollback",
             "AfterRollback",
         ];

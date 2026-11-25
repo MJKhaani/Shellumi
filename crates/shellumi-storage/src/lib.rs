@@ -5272,53 +5272,102 @@ impl HostStore {
                 "Cannot save device with invalid X25519 key: {e}"
             )))
         })?;
-        self.connection
-            .execute(
-                "INSERT INTO enrolled_devices (device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(device_id) DO UPDATE SET
-                    device_name = excluded.device_name,
-                    signing_public_key = CASE WHEN excluded.signing_public_key != '' THEN excluded.signing_public_key ELSE enrolled_devices.signing_public_key END,
-                    agreement_public_key = excluded.agreement_public_key,
-                    signing_key_ref = COALESCE(excluded.signing_key_ref, enrolled_devices.signing_key_ref),
-                    agreement_key_ref = COALESCE(excluded.agreement_key_ref, enrolled_devices.agreement_key_ref),
-                    revoked = excluded.revoked,
-                    revoked_at = excluded.revoked_at,
-                    verified = excluded.verified",
-                (
-                    device.device_id.clone(),
-                    device.vault_id.clone(),
-                    device.user_id.clone(),
-                    device.device_name.clone(),
-                    device.signing_public_key.clone(),
-                    device.agreement_public_key.clone(),
-                    device.signing_key_ref.clone(),
-                    device.agreement_key_ref.clone(),
-                    device.enrolled_at.clone(),
-                    if device.revoked { 1i64 } else { 0i64 },
-                    device.revoked_at.clone(),
-                    if device.verified { 1i64 } else { 0i64 },
-                ),
+        let tx = self.connection.transaction().await?;
+        let mut existing_rows = tx
+            .query(
+                "SELECT user_id, signing_public_key, agreement_public_key, revoked FROM enrolled_devices WHERE device_id = ?1",
+                (device.device_id.clone(),),
             )
             .await?;
-        self.connection
-            .execute(
-                "INSERT INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(vault_id, device_id) DO UPDATE SET
-                    user_id = excluded.user_id,
-                    revoked = excluded.revoked,
-                    revoked_at = excluded.revoked_at",
-                (
-                    device.vault_id.clone(),
-                    device.device_id.clone(),
-                    device.user_id.clone(),
-                    device.enrolled_at.clone(),
-                    if device.revoked { 1i64 } else { 0i64 },
-                    device.revoked_at.clone(),
-                ),
-            )
-            .await?;
+        if let Some(row) = existing_rows.next().await? {
+            let existing_uid: String = row.get(0)?;
+            let existing_sig_pk: String = row.get(1)?;
+            let existing_agr_pk: String = row.get(2)?;
+            let existing_revoked: i64 = row.get(3)?;
+            if existing_uid != device.user_id {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::Unauthorized(format!(
+                        "Device '{}' belongs to user '{}', cannot reassign to '{}'",
+                        device.device_id, existing_uid, device.user_id
+                    )),
+                ));
+            }
+            if existing_revoked != 0 && !device.revoked {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::Unauthorized(format!(
+                        "Device '{}' is globally revoked and cannot be reactivated",
+                        device.device_id
+                    )),
+                ));
+            }
+            if !existing_sig_pk.is_empty()
+                && !device.signing_public_key.is_empty()
+                && existing_sig_pk != device.signing_public_key
+            {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::Unauthorized(format!(
+                        "Unexpected signing public key change for device '{}'",
+                        device.device_id
+                    )),
+                ));
+            }
+            if existing_agr_pk != device.agreement_public_key {
+                return Err(StorageError::InvalidCollaboration(
+                    CollaborationError::Unauthorized(format!(
+                        "Unexpected X25519 agreement key change for device '{}'",
+                        device.device_id
+                    )),
+                ));
+            }
+        }
+        drop(existing_rows);
+
+        tx.execute(
+            "INSERT INTO enrolled_devices (device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(device_id) DO UPDATE SET
+                device_name = excluded.device_name,
+                signing_public_key = CASE WHEN excluded.signing_public_key != '' THEN excluded.signing_public_key ELSE enrolled_devices.signing_public_key END,
+                agreement_public_key = excluded.agreement_public_key,
+                signing_key_ref = COALESCE(excluded.signing_key_ref, enrolled_devices.signing_key_ref),
+                agreement_key_ref = COALESCE(excluded.agreement_key_ref, enrolled_devices.agreement_key_ref),
+                revoked = excluded.revoked,
+                revoked_at = excluded.revoked_at,
+                verified = excluded.verified",
+            (
+                device.device_id.clone(),
+                device.vault_id.clone(),
+                device.user_id.clone(),
+                device.device_name.clone(),
+                device.signing_public_key.clone(),
+                device.agreement_public_key.clone(),
+                device.signing_key_ref.clone(),
+                device.agreement_key_ref.clone(),
+                device.enrolled_at.clone(),
+                if device.revoked { 1i64 } else { 0i64 },
+                device.revoked_at.clone(),
+                if device.verified { 1i64 } else { 0i64 },
+            ),
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(vault_id, device_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                revoked = excluded.revoked,
+                revoked_at = excluded.revoked_at",
+            (
+                device.vault_id.clone(),
+                device.device_id.clone(),
+                device.user_id.clone(),
+                device.enrolled_at.clone(),
+                if device.revoked { 1i64 } else { 0i64 },
+                device.revoked_at.clone(),
+            ),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5414,8 +5463,14 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified
-                 FROM enrolled_devices WHERE vault_id = ?1 AND user_id = ?2 ORDER BY enrolled_at ASC",
+                "SELECT d.device_id, a.vault_id, d.user_id, d.device_name, d.signing_public_key, d.agreement_public_key, d.signing_key_ref, d.agreement_key_ref, d.enrolled_at,
+                        CASE WHEN d.revoked = 1 OR a.revoked = 1 THEN 1 ELSE 0 END AS effective_revoked,
+                        COALESCE(a.revoked_at, d.revoked_at),
+                        d.verified
+                 FROM enrolled_devices d
+                 INNER JOIN vault_device_authorizations a ON a.device_id = d.device_id
+                 WHERE a.vault_id = ?1 AND d.user_id = ?2
+                 ORDER BY d.enrolled_at ASC",
                 (vault_id, user_id),
             )
             .await?;
