@@ -778,8 +778,51 @@ pub async fn reconcile_pending_rotations_at_startup(
 
     for jpath in paths {
         let inferred_vid = infer_vault_id_from_journal_path(&jpath);
+        if !is_safe_vault_id(&inferred_vid) {
+            pending.push(PendingRotationRecovery {
+                vault_id: inferred_vid,
+                journal_path: jpath,
+                is_corrupted: true,
+                stage: None,
+                reason: "Unsafe vault ID inferred from rotation journal filename.".into(),
+            });
+            continue;
+        }
+
+        // Acquire per-vault OS lock BEFORE reading journal contents to prevent TOCTOU races.
+        let _startup_lock = match RotationLockGuard::acquire(base_path, &inferred_vid) {
+            Ok(guard) => guard,
+            Err(lock_err) => {
+                pending.push(PendingRotationRecovery {
+                    vault_id: inferred_vid,
+                    journal_path: jpath,
+                    is_corrupted: false,
+                    stage: None,
+                    reason: format!(
+                        "Vault rotation is currently locked by another process: {lock_err}"
+                    ),
+                });
+                continue;
+            }
+        };
+
+        if let Err(sym_err) = reject_if_symlink(&jpath) {
+            pending.push(PendingRotationRecovery {
+                vault_id: inferred_vid,
+                journal_path: jpath,
+                is_corrupted: true,
+                stage: None,
+                reason: sym_err,
+            });
+            continue;
+        }
+
         let raw = match std::fs::read_to_string(&jpath) {
             Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Another process finished and removed the journal before we acquired the lock.
+                continue;
+            }
             Err(e) => {
                 pending.push(PendingRotationRecovery {
                     vault_id: inferred_vid,
@@ -819,22 +862,6 @@ pub async fn reconcile_pending_rotations_at_startup(
             });
             continue;
         }
-
-        let _startup_lock = match RotationLockGuard::acquire(base_path, &journal.vault_id) {
-            Ok(guard) => guard,
-            Err(lock_err) => {
-                pending.push(PendingRotationRecovery {
-                    vault_id: journal.vault_id.clone(),
-                    journal_path: jpath,
-                    is_corrupted: false,
-                    stage: Some(journal.stage),
-                    reason: format!(
-                        "Vault rotation is currently locked by another process: {lock_err}"
-                    ),
-                });
-                continue;
-            }
-        };
 
         let (manifest_path, target_db_path, registry_db_path) =
             match validate_and_resolve_journal_paths(base_path, &journal) {
