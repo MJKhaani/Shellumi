@@ -610,6 +610,7 @@ const TABLES: &[&str] = &[
     "sync_snapshots",
     "shared_vaults",
     "team_members",
+    "enrolled_devices",
     "shared_vault_key_envelopes",
     "sharing_audit_log",
     "shared_session_logs",
