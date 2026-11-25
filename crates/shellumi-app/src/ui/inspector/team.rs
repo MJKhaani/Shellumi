@@ -164,6 +164,19 @@ impl Shellumi {
             })),
         );
 
+        if !is_revoked && !member.is_enrolled() {
+            actions_row = actions_row.child(
+                AppButton::new(
+                    "team-view-enroll-device-btn",
+                    "Enroll Current Device",
+                    ButtonVariant::Primary,
+                )
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.enroll_current_device("default".to_string(), "This Device".to_string(), cx);
+                })),
+            );
+        }
+
         if !is_revoked {
             actions_row = actions_row.child(
                 AppButton::new(
@@ -189,6 +202,19 @@ impl Shellumi {
             .child(self.render_detail_row("User Identifier", user_id))
             .child(self.render_detail_row("Assigned Role", m_role))
             .child(self.render_detail_row("Access Status", member.enrollment_label().to_owned()))
+            .child(
+                self.render_detail_row(
+                    "X25519 Agreement Key",
+                    member
+                        .agreement_public_key
+                        .as_deref()
+                        .map(|k| {
+                            let prefix: String = k.chars().take(16).collect();
+                            format!("{prefix}...")
+                        })
+                        .unwrap_or_else(|| "Not enrolled".to_string()),
+                ),
+            )
             .child(self.render_detail_row("Invited At", enrolled))
             .child(self.render_detail_row("SSH Key Fingerprint", pubkey_fp));
         body = body.child(simple_section("Collaborator Details", details_items));
