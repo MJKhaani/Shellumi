@@ -2575,11 +2575,21 @@ impl HostStore {
             tx.execute("PRAGMA user_version = 27", ()).await?;
         }
         if version < 28 {
-            tx.execute(
-                "ALTER TABLE enrollment_operations ADD COLUMN registration_intent TEXT",
-                (),
-            )
-            .await?;
+            let mut columns = tx
+                .query("PRAGMA table_info(enrollment_operations)", ())
+                .await?;
+            let mut has_intent = false;
+            while let Some(column) = columns.next().await? {
+                has_intent |= column.get::<String>(1)? == "registration_intent";
+            }
+            drop(columns);
+            if !has_intent {
+                tx.execute(
+                    "ALTER TABLE enrollment_operations ADD COLUMN registration_intent TEXT",
+                    (),
+                )
+                .await?;
+            }
             tx.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS enrollment_active_member
                  ON enrollment_operations (vault_id, member_id)

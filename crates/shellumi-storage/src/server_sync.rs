@@ -3576,6 +3576,41 @@ mod tests {
             .fail_set
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
+        // Keep the restart fixture focused on the accepted invitation with a recoverable outcome.
+        store
+            .connection
+            .execute(
+                "DELETE FROM enrollment_operations WHERE member_id != 'mem-keychain-failure'",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let mut store = HostStore::open(db_file.to_str().unwrap()).await.unwrap();
+        store.set_vault_id(VaultId::new(local_vault_id).unwrap());
+        assert_eq!(
+            store
+                .recover_incomplete_enrollments(&binding, &mut auth_client, &cred_store)
+                .await
+                .unwrap(),
+            1
+        );
+        let after_keychain_recovery = store
+            .list_enrolled_devices_for_user(local_vault_id, &user_id.to_string())
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        store
+            .revoke_device_with_server(
+                local_vault_id,
+                "mem-keychain-failure",
+                Uuid::parse_str(&after_keychain_recovery.device_id).unwrap(),
+                &auth_client,
+            )
+            .await
+            .unwrap();
+
         // 5. Reject forged user binding from server
         *transport.forge_wrong_user.lock().unwrap() = true;
         assert!(store
@@ -3724,6 +3759,43 @@ mod tests {
             .execute(
                 "UPDATE enrollment_operations SET registration_intent = ?1 WHERE operation_id = ?2",
                 (original, op.operation_id.as_str()),
+            )
+            .await
+            .unwrap();
+        // Fail the authorization write after the journal and member writes have begun.
+        store
+            .connection
+            .execute(
+                "ALTER TABLE vault_device_authorizations RENAME TO interrupted_authorizations",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .recover_incomplete_enrollments(&binding, &mut auth_client, &cred_store)
+            .await
+            .is_err());
+        let pending = store
+            .list_incomplete_enrollment_operations(local_vault_id)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].stage, "RegistrationIntent");
+        assert_eq!(
+            store
+                .get_team_member("mem-alice")
+                .await
+                .unwrap()
+                .unwrap()
+                .agreement_public_key,
+            Some(dev2.agreement_public_key.clone())
+        );
+        assert_eq!(request_count(), before);
+        store
+            .connection
+            .execute(
+                "ALTER TABLE interrupted_authorizations RENAME TO vault_device_authorizations",
+                (),
             )
             .await
             .unwrap();
