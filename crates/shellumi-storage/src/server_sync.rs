@@ -795,6 +795,40 @@ impl HostStore {
                 StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
             })?;
 
+        if let Some(ctx) = self.get_vault_context(local_vault_id).await? {
+            match ctx.location() {
+                shellumi_core::VaultLocation::Remote {
+                    server,
+                    server_vault_id,
+                } => {
+                    if server.as_str() != connection_id {
+                        return Err(StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "Vault '{local_vault_id}' is bound to server connection '{}', not '{connection_id}'",
+                                server.as_str()
+                            )),
+                        ));
+                    }
+                    if server_vault_id.as_str() != accept_resp.vault_id.to_string() {
+                        return Err(StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "Accepted invitation vault '{}' does not match vault context remote vault '{}'",
+                                accept_resp.vault_id,
+                                server_vault_id.as_str()
+                            )),
+                        ));
+                    }
+                }
+                shellumi_core::VaultLocation::Local => {
+                    return Err(StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(format!(
+                            "Cannot accept remote invitation into local-only vault '{local_vault_id}'"
+                        )),
+                    ));
+                }
+            }
+        }
+
         if let Some(sv) = self.get_shared_vault(local_vault_id).await? {
             if Uuid::parse_str(&sv.id).is_ok() && sv.id != accept_resp.vault_id.to_string() {
                 return Err(StorageError::InvalidCollaboration(
@@ -812,6 +846,20 @@ impl HostStore {
             ))
         })?;
 
+        let op_id = format!("enroll:{local_vault_id}:{member_id}");
+        let op_ts = current_timestamp().to_string();
+        self.save_enrollment_operation_progress(
+            &op_id,
+            local_vault_id,
+            &me.user_id.to_string(),
+            member_id,
+            "InvitationAccepted",
+            None,
+            None,
+            &op_ts,
+        )
+        .await?;
+
         // 3. Enroll device locally and register with server challenge-response
         let device = self
             .enroll_device_for_authenticated_user(
@@ -825,7 +873,20 @@ impl HostStore {
             )
             .await?;
 
-        // 4. Persist/update member record with DeviceEnrolled status
+        let op_ts2 = current_timestamp().to_string();
+        self.save_enrollment_operation_progress(
+            &op_id,
+            local_vault_id,
+            &me.user_id.to_string(),
+            member_id,
+            "DeviceRegistered",
+            Some(&device.device_id),
+            None,
+            &op_ts2,
+        )
+        .await?;
+
+        // 4. Persist/update member record with DeviceEnrolled status and verified role
         let now_str = current_timestamp().to_string();
         let existing = self.get_team_member(member_id).await?;
         let mut member = if let Some(mut m) = existing {
@@ -851,14 +912,30 @@ impl HostStore {
         if member.id == member_id && self.get_team_member(member_id).await?.is_none() {
             self.add_team_member(&member).await?;
         } else {
-            self.update_team_member_enrollment(
+            self.update_team_member_enrollment_with_role(
                 &member.id,
+                local_vault_id,
+                role,
                 EnrollmentStatus::DeviceEnrolled,
                 Some(&device.agreement_public_key),
             )
             .await?;
             member.enrollment_status = EnrollmentStatus::DeviceEnrolled;
+            member.role = role;
         }
+
+        let op_ts3 = current_timestamp().to_string();
+        self.save_enrollment_operation_progress(
+            &op_id,
+            local_vault_id,
+            &me.user_id.to_string(),
+            member_id,
+            "Completed",
+            Some(&device.device_id),
+            None,
+            &op_ts3,
+        )
+        .await?;
 
         Ok((member, device))
     }

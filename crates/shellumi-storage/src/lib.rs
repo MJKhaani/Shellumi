@@ -22,7 +22,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -1002,6 +1002,20 @@ impl HostStore {
             )
             .await?;
             tx.execute(
+                "CREATE TABLE IF NOT EXISTS enrollment_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    device_id TEXT,
+                    error_message TEXT,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
                 "CREATE TABLE sharing_audit_log (
                     id TEXT PRIMARY KEY,
                     vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
@@ -1670,6 +1684,20 @@ impl HostStore {
                         revoked INTEGER NOT NULL DEFAULT 0,
                         revoked_at TEXT,
                         PRIMARY KEY (vault_id, device_id)
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS enrollment_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        vault_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        member_id TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        device_id TEXT,
+                        error_message TEXT,
+                        updated_at TEXT NOT NULL
                     )",
                     (),
                 )
@@ -2463,6 +2491,20 @@ impl HostStore {
                 (),
             )
             .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS enrollment_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    device_id TEXT,
+                    error_message TEXT,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
             tx.execute("PRAGMA user_version = 25", ()).await?;
         }
         if version < 26 {
@@ -2480,12 +2522,43 @@ impl HostStore {
             )
             .await?;
             tx.execute(
+                "CREATE TABLE IF NOT EXISTS enrollment_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    device_id TEXT,
+                    error_message TEXT,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
                 "INSERT OR IGNORE INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
                  SELECT vault_id, device_id, user_id, enrolled_at, revoked, revoked_at FROM enrolled_devices",
                 (),
             )
             .await?;
             tx.execute("PRAGMA user_version = 26", ()).await?;
+        }
+        if version < 27 {
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS enrollment_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    device_id TEXT,
+                    error_message TEXT,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 27", ()).await?;
         }
         tx.commit().await?;
         tracing::debug!(
@@ -5257,6 +5330,77 @@ impl HostStore {
             )
             .await?;
         Ok(rows > 0)
+    }
+
+    /// Atomically updates a team member's verified role, enrollment status, and agreement key scoped to vault_id.
+    pub async fn update_team_member_enrollment_with_role(
+        &mut self,
+        member_id: &str,
+        vault_id: &str,
+        role: TeamRole,
+        status: EnrollmentStatus,
+        agreement_public_key: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        if let Some(pk) = agreement_public_key {
+            shellumi_core::server::crypto::validate_x25519_agreement_public_key(pk).map_err(
+                |e| {
+                    StorageError::InvalidCollaboration(CollaborationError::InvalidAction(format!(
+                        "Invalid X25519 agreement public key: {e}"
+                    )))
+                },
+            )?;
+        }
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE team_members SET role = ?1, enrollment_status = ?2, agreement_public_key = COALESCE(?3, agreement_public_key) WHERE id = ?4 AND vault_id = ?5",
+                (
+                    role.as_str().to_string(),
+                    status.as_str().to_string(),
+                    agreement_public_key.map(str::to_string),
+                    member_id,
+                    vault_id,
+                ),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Records non-secret enrollment operation progress for retry-safe recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_enrollment_operation_progress(
+        &mut self,
+        operation_id: &str,
+        vault_id: &str,
+        user_id: &str,
+        member_id: &str,
+        stage: &str,
+        device_id: Option<&str>,
+        error_message: Option<&str>,
+        updated_at: &str,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO enrollment_operations (operation_id, vault_id, user_id, member_id, stage, device_id, error_message, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(operation_id) DO UPDATE SET
+                    stage = excluded.stage,
+                    device_id = COALESCE(excluded.device_id, enrollment_operations.device_id),
+                    error_message = excluded.error_message,
+                    updated_at = excluded.updated_at",
+                (
+                    operation_id.to_string(),
+                    vault_id.to_string(),
+                    user_id.to_string(),
+                    member_id.to_string(),
+                    stage.to_string(),
+                    device_id.map(str::to_string),
+                    error_message.map(str::to_string),
+                    updated_at.to_string(),
+                ),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Persists or updates an enrolled device record.

@@ -426,6 +426,110 @@ impl Shellumi {
         .detach();
     }
 
+    /// Vault-aware, authenticated X25519 enrollment for the selected team member.
+    /// Resolves the active vault's `VaultContext`, server connection, and member record
+    /// without hardcoding connection, vault, or member IDs.
+    pub(crate) fn enroll_member_device(
+        &mut self,
+        member_id: String,
+        device_label: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reg_path) = self.registry_db_path() else {
+            return;
+        };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        let active_vault_id = self.active_vault_id.clone();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_key = self.active_vault_key();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let ctx = reg_store
+                    .get_vault_context(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("Vault context '{active_vault_id}' not found in registry")
+                    })?;
+                let server_conn_id = match ctx.location() {
+                    shellumi_core::VaultLocation::Remote { server, .. } => {
+                        server.as_str().to_string()
+                    }
+                    shellumi_core::VaultLocation::Local => {
+                        return Err(format!(
+                            "Vault '{active_vault_id}' is local-only and has no Shellumi Server binding."
+                        ));
+                    }
+                };
+                let conn = reg_store
+                    .get_vault_server_connection(&server_conn_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Server connection '{server_conn_id}' not found"))?;
+
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn
+                    .resolve_auth_token(&*cred_store)
+                    .ok_or_else(|| "Server connection missing auth token".to_string())?;
+                let mut client = ShellumiServerClient::new(&conn.base_url);
+                client.set_token(token_sec.expose_secret().to_string());
+
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let _device = vault_store
+                    .enroll_additional_device_for_member(
+                        &server_conn_id,
+                        &active_vault_id,
+                        &member_id,
+                        &device_label,
+                        &mut client,
+                        &*cred_store,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let updated_members = vault_store
+                    .list_team_members(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(updated_members)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                match result {
+                    Ok(members) => {
+                        app.team_members = members;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        app.sync_status = AppSyncStatus::UpToDate {
+                            last_sync_time: now,
+                        };
+                    }
+                    Err(e) => {
+                        app.sync_status =
+                            AppSyncStatus::Error(format!("Member device enrollment failed: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Subscribes to Phase 11 WebSocket notification events for the active remote vault.
     pub(crate) fn listen_server_ws_events(&mut self, cx: &mut Context<Self>) {
         if !self.is_active_vault_remote() {

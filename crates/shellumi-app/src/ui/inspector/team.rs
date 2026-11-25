@@ -165,14 +165,15 @@ impl Shellumi {
         );
 
         if !is_revoked && !member.is_enrolled() {
+            let enroll_mem_id = mem_id.clone();
             actions_row = actions_row.child(
                 AppButton::new(
                     "team-view-enroll-device-btn",
                     "Enroll Current Device",
                     ButtonVariant::Primary,
                 )
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.enroll_current_device("default".to_string(), "This Device".to_string(), cx);
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.enroll_member_device(enroll_mem_id.clone(), "This Device".to_string(), cx);
                 })),
             );
         }
