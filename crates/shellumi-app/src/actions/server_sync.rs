@@ -435,13 +435,21 @@ impl Shellumi {
         device_label: String,
         cx: &mut Context<Self>,
     ) {
+        if self.team_enrollment_busy {
+            return;
+        }
         let Some(reg_path) = self.registry_db_path() else {
             return;
         };
         let Some(vault_db_path) = self.active_vault_db_path() else {
             return;
         };
+        self.team_enrollment_busy = true;
+        self.team_enrollment_error = None;
+        cx.notify();
         let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_guard = active_vault_id.clone();
+        let gen = self.vault_load_generation;
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let active_key = self.active_vault_key();
 
@@ -492,16 +500,33 @@ impl Shellumi {
                     .list_team_members(&active_vault_id)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<_, String>(updated_members)
+                let updated_devices = vault_store
+                    .list_enrolled_devices_for_vault(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let updated_incomplete = vault_store
+                    .list_incomplete_enrollment_operations(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((updated_members, updated_devices, updated_incomplete))
             })
         });
 
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
+                app.team_enrollment_busy = false;
+                if app.active_vault_id != active_vault_id_guard || app.vault_load_generation != gen
+                {
+                    cx.notify();
+                    return;
+                }
                 match result {
-                    Ok(members) => {
+                    Ok((members, devices, incomplete)) => {
                         app.team_members = members;
+                        app.enrolled_devices = devices;
+                        app.incomplete_enrollments = incomplete;
+                        app.team_enrollment_error = None;
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -511,8 +536,446 @@ impl Shellumi {
                         };
                     }
                     Err(e) => {
-                        app.sync_status =
-                            AppSyncStatus::Error(format!("Member device enrollment failed: {e}"));
+                        let msg = format!("Member device enrollment failed: {e}");
+                        app.team_enrollment_error = Some(msg.clone());
+                        app.sync_status = AppSyncStatus::Error(msg);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Accepts a server-backed invitation token for the selected member using a registry-verified binding.
+    pub(crate) fn accept_team_invitation(
+        &mut self,
+        member_id: String,
+        display_name: String,
+        ssh_public_key: String,
+        invite_token: String,
+        device_label: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.team_enrollment_busy {
+            return;
+        }
+        if invite_token.trim().is_empty() {
+            self.team_enrollment_error = Some("Invitation token is required.".into());
+            cx.notify();
+            return;
+        }
+        let Some(reg_path) = self.registry_db_path() else {
+            return;
+        };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        self.team_enrollment_busy = true;
+        self.team_enrollment_error = None;
+        cx.notify();
+        let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_guard = active_vault_id.clone();
+        let gen = self.vault_load_generation;
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_key = self.active_vault_key();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let binding = reg_store
+                    .resolve_verified_remote_vault_binding(&active_vault_id, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let conn = reg_store
+                    .get_vault_server_connection(&binding.server_connection_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "Server connection '{}' not found",
+                            binding.server_connection_id
+                        )
+                    })?;
+
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn
+                    .resolve_auth_token(&*cred_store)
+                    .ok_or_else(|| "Server connection missing auth token".to_string())?;
+                let mut client = ShellumiServerClient::new(&conn.base_url);
+                client.set_token(token_sec.expose_secret().to_string());
+
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let _ = vault_store
+                    .accept_invitation_and_enroll_device_with_binding(
+                        &binding,
+                        &member_id,
+                        &display_name,
+                        &ssh_public_key,
+                        invite_token.trim(),
+                        &device_label,
+                        &mut client,
+                        &*cred_store,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let members = vault_store
+                    .list_team_members(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let devices = vault_store
+                    .list_enrolled_devices_for_vault(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let incomplete = vault_store
+                    .list_incomplete_enrollment_operations(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((members, devices, incomplete))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                app.team_enrollment_busy = false;
+                if app.active_vault_id != active_vault_id_guard || app.vault_load_generation != gen
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok((members, devices, incomplete)) => {
+                        app.team_members = members;
+                        app.enrolled_devices = devices;
+                        app.incomplete_enrollments = incomplete;
+                        app.team_enrollment_error = None;
+                        app.team_invite_token_input = None;
+                        app.desktop.message =
+                            Some("Invitation accepted and current device enrolled.".into());
+                    }
+                    Err(e) => {
+                        app.team_enrollment_error =
+                            Some(format!("Invitation acceptance failed: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Replaces cryptographic credentials for an enrolled device.
+    pub(crate) fn replace_member_device_keys(
+        &mut self,
+        member_id: String,
+        device_id: String,
+        device_label: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.team_enrollment_busy {
+            return;
+        }
+        let Some(reg_path) = self.registry_db_path() else {
+            return;
+        };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        self.team_enrollment_busy = true;
+        self.team_enrollment_error = None;
+        cx.notify();
+        let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_guard = active_vault_id.clone();
+        let gen = self.vault_load_generation;
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_key = self.active_vault_key();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let binding = reg_store
+                    .resolve_verified_remote_vault_binding(&active_vault_id, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let conn = reg_store
+                    .get_vault_server_connection(&binding.server_connection_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "Server connection '{}' not found",
+                            binding.server_connection_id
+                        )
+                    })?;
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn
+                    .resolve_auth_token(&*cred_store)
+                    .ok_or_else(|| "Server connection missing auth token".to_string())?;
+                let mut client = ShellumiServerClient::new(&conn.base_url);
+                client.set_token(token_sec.expose_secret().to_string());
+
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let device_uuid = uuid::Uuid::parse_str(&device_id)
+                    .map_err(|e| format!("Invalid device UUID '{device_id}': {e}"))?;
+                let _ = vault_store
+                    .replace_device_keys_for_member(
+                        &binding.server_connection_id,
+                        &active_vault_id,
+                        &member_id,
+                        device_uuid,
+                        &device_label,
+                        &mut client,
+                        &*cred_store,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let members = vault_store
+                    .list_team_members(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let devices = vault_store
+                    .list_enrolled_devices_for_vault(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((members, devices))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                app.team_enrollment_busy = false;
+                if app.active_vault_id != active_vault_id_guard || app.vault_load_generation != gen
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok((members, devices)) => {
+                        app.team_members = members;
+                        app.enrolled_devices = devices;
+                        app.team_enrollment_error = None;
+                        app.desktop.message = Some("Device cryptographic keys replaced.".into());
+                    }
+                    Err(e) => {
+                        app.team_enrollment_error =
+                            Some(format!("Device key replacement failed: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Revokes an enrolled device with the server and reconciles vault authorization.
+    pub(crate) fn revoke_member_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        if self.team_enrollment_busy {
+            return;
+        }
+        let Some(reg_path) = self.registry_db_path() else {
+            return;
+        };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        self.team_enrollment_busy = true;
+        self.team_enrollment_error = None;
+        cx.notify();
+        let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_guard = active_vault_id.clone();
+        let gen = self.vault_load_generation;
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_key = self.active_vault_key();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let binding = reg_store
+                    .resolve_verified_remote_vault_binding(&active_vault_id, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let conn = reg_store
+                    .get_vault_server_connection(&binding.server_connection_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "Server connection '{}' not found",
+                            binding.server_connection_id
+                        )
+                    })?;
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn
+                    .resolve_auth_token(&*cred_store)
+                    .ok_or_else(|| "Server connection missing auth token".to_string())?;
+                let mut client = ShellumiServerClient::new(&conn.base_url);
+                client.set_token(token_sec.expose_secret().to_string());
+
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                vault_store
+                    .revoke_device_with_server(
+                        &active_vault_id,
+                        &device_id,
+                        binding.remote_vault_id,
+                        &client,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let devices = vault_store
+                    .list_enrolled_devices_for_vault(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(devices)
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                app.team_enrollment_busy = false;
+                if app.active_vault_id != active_vault_id_guard || app.vault_load_generation != gen
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(devices) => {
+                        app.enrolled_devices = devices;
+                        app.team_enrollment_error = None;
+                        app.desktop.message = Some("Device revoked.".into());
+                    }
+                    Err(e) => {
+                        app.team_enrollment_error = Some(format!("Device revocation failed: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Resumes any interrupted enrollment operations for the active vault.
+    pub(crate) fn resume_incomplete_enrollments(&mut self, cx: &mut Context<Self>) {
+        if self.team_enrollment_busy {
+            return;
+        }
+        let Some(reg_path) = self.registry_db_path() else {
+            return;
+        };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        self.team_enrollment_busy = true;
+        self.team_enrollment_error = None;
+        cx.notify();
+        let active_vault_id = self.active_vault_id.clone();
+        let active_vault_id_guard = active_vault_id.clone();
+        let gen = self.vault_load_generation;
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let active_key = self.active_vault_key();
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let binding = reg_store
+                    .resolve_verified_remote_vault_binding(&active_vault_id, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let conn = reg_store
+                    .get_vault_server_connection(&binding.server_connection_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "Server connection '{}' not found",
+                            binding.server_connection_id
+                        )
+                    })?;
+                let cred_store = shellumi_core::default_credential_store();
+                let token_sec = conn
+                    .resolve_auth_token(&*cred_store)
+                    .ok_or_else(|| "Server connection missing auth token".to_string())?;
+                let mut client = ShellumiServerClient::new(&conn.base_url);
+                client.set_token(token_sec.expose_secret().to_string());
+
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let count = vault_store
+                    .recover_incomplete_enrollments(
+                        &binding.server_connection_id,
+                        &active_vault_id,
+                        binding.remote_vault_id,
+                        &mut client,
+                        &*cred_store,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let members = vault_store
+                    .list_team_members(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let devices = vault_store
+                    .list_enrolled_devices_for_vault(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let incomplete = vault_store
+                    .list_incomplete_enrollment_operations(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((count, members, devices, incomplete))
+            })
+        });
+
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                app.team_enrollment_busy = false;
+                if app.active_vault_id != active_vault_id_guard || app.vault_load_generation != gen
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok((count, members, devices, incomplete)) => {
+                        app.team_members = members;
+                        app.enrolled_devices = devices;
+                        app.incomplete_enrollments = incomplete;
+                        app.team_enrollment_error = None;
+                        app.desktop.message =
+                            Some(format!("Recovered {count} interrupted enrollment(s)."));
+                    }
+                    Err(e) => {
+                        app.team_enrollment_error =
+                            Some(format!("Enrollment recovery failed: {e}"));
                     }
                 }
                 cx.notify();

@@ -332,18 +332,29 @@ impl Shellumi {
                 let store = HostStore::open_with_key(&path, in_memory_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                store
+                let members = store
                     .list_team_members(&active_vault_id_task)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                let devices = store
+                    .list_enrolled_devices_for_vault(&active_vault_id_task)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let incomplete = store
+                    .list_incomplete_enrollment_operations(&active_vault_id_task)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((members, devices, incomplete))
             })
         });
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
                 if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
-                    if let Ok(members) = res {
+                    if let Ok((members, devices, incomplete)) = res {
                         app.team_members = members;
+                        app.enrolled_devices = devices;
+                        app.incomplete_enrollments = incomplete;
                         cx.notify();
                     }
                 }

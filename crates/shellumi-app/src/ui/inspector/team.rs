@@ -148,6 +148,39 @@ impl Shellumi {
 
         let mut body = div().flex().flex_col().gap_4();
 
+        if let Some(ref err_msg) = self.team_enrollment_error {
+            body = body.child(error_notice(err_msg.clone()));
+        }
+
+        if !self.incomplete_enrollments.is_empty() {
+            let count = self.incomplete_enrollments.len();
+            let busy = self.team_enrollment_busy;
+            body = body.child(simple_section(
+                "Interrupted Enrollment Recovery",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_xs().text_color(text_secondary()).child(format!(
+                        "{count} incomplete enrollment operation(s) detected for this vault."
+                    )))
+                    .child(
+                        AppButton::new(
+                            "team-resume-enrollment-btn",
+                            if busy {
+                                "Resuming..."
+                            } else {
+                                "Resume Enrollment"
+                            },
+                            ButtonVariant::Primary,
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.resume_incomplete_enrollments(cx);
+                        })),
+                    ),
+            ));
+        }
+
         // Action buttons
         let edit_id_action = mem_id.clone();
         let delete_id_action = mem_id.clone();
@@ -166,10 +199,15 @@ impl Shellumi {
 
         if !is_revoked && !member.is_enrolled() {
             let enroll_mem_id = mem_id.clone();
+            let busy = self.team_enrollment_busy;
             actions_row = actions_row.child(
                 AppButton::new(
                     "team-view-enroll-device-btn",
-                    "Enroll Current Device",
+                    if busy {
+                        "Enrolling..."
+                    } else {
+                        "Enroll Current Device"
+                    },
                     ButtonVariant::Primary,
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
@@ -219,6 +257,152 @@ impl Shellumi {
             .child(self.render_detail_row("Invited At", enrolled))
             .child(self.render_detail_row("SSH Key Fingerprint", pubkey_fp));
         body = body.child(simple_section("Collaborator Details", details_items));
+
+        // Recipient-side Invitation Acceptance (when not yet enrolled)
+        if !is_revoked && !member.is_enrolled() {
+            let token_input = self
+                .team_invite_token_input
+                .get_or_insert_with(|| {
+                    cx.new(|cx| TextInput::new(cx, "", "Paste server invitation token"))
+                })
+                .clone();
+            let accept_mem_id = mem_id.clone();
+            let accept_name = member.display_name.clone();
+            let accept_ssh = member.public_key.clone();
+            let busy = self.team_enrollment_busy;
+            body = body.child(simple_section(
+                "Accept Server Invitation",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(simple_field("Invitation Token", token_input.clone()))
+                    .child(
+                        AppButton::new(
+                            "team-accept-invite-btn",
+                            if busy {
+                                "Accepting..."
+                            } else {
+                                "Accept Invitation & Enroll Device"
+                            },
+                            ButtonVariant::Primary,
+                        )
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            let tok = token_input.read(cx).value().to_string();
+                            app.accept_team_invitation(
+                                accept_mem_id.clone(),
+                                accept_name.clone(),
+                                accept_ssh.clone(),
+                                tok,
+                                "This Device".to_string(),
+                                cx,
+                            );
+                        })),
+                    ),
+            ));
+        }
+
+        // Enrolled Devices for this collaborator
+        let member_devices: Vec<_> = self
+            .enrolled_devices
+            .iter()
+            .filter(|d| d.user_id == member.user_id)
+            .cloned()
+            .collect();
+        let mut dev_list = div().flex().flex_col().gap_2();
+        if member_devices.is_empty() {
+            dev_list = dev_list.child(
+                div()
+                    .text_xs()
+                    .text_color(text_secondary())
+                    .child("No enrolled devices registered for this collaborator in this vault."),
+            );
+        } else {
+            for dev in member_devices {
+                let status_str = if dev.revoked {
+                    "Revoked"
+                } else if dev.verified {
+                    "Verified"
+                } else {
+                    "Pending"
+                };
+                let dev_id_replace = dev.device_id.clone();
+                let dev_id_revoke = dev.device_id.clone();
+                let dev_name = dev.device_name.clone();
+                let mem_for_replace = mem_id.clone();
+                let mut row = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .p_2()
+                    .rounded_md()
+                    .bg(surface())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(text_primary())
+                                    .child(format!("{} ({status_str})", dev.device_name)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_secondary())
+                                    .child(format!("ID: {}", dev.device_id)),
+                            ),
+                    );
+                if !dev.revoked {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                AppButton::new(
+                                    gpui::SharedString::from(format!(
+                                        "replace-dev-{}",
+                                        dev.device_id
+                                    )),
+                                    "Replace Keys",
+                                    ButtonVariant::Secondary,
+                                )
+                                .on_click(cx.listener(
+                                    move |app, _, _, cx| {
+                                        app.replace_member_device_keys(
+                                            mem_for_replace.clone(),
+                                            dev_id_replace.clone(),
+                                            dev_name.clone(),
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                            .child(
+                                AppButton::new(
+                                    gpui::SharedString::from(format!(
+                                        "revoke-dev-{}",
+                                        dev.device_id
+                                    )),
+                                    "Revoke",
+                                    ButtonVariant::Danger,
+                                )
+                                .on_click(cx.listener(
+                                    move |app, _, _, cx| {
+                                        app.revoke_member_device(dev_id_revoke.clone(), cx);
+                                    },
+                                )),
+                            ),
+                    );
+                }
+                dev_list = dev_list.child(row);
+            }
+        }
+        body = body.child(simple_section("Enrolled Devices", dev_list));
 
         InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }
