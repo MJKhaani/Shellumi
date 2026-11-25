@@ -769,6 +769,7 @@ impl Shellumi {
                     Ok((members, devices)) => {
                         app.team_members = members;
                         app.enrolled_devices = devices;
+                        app.pending_device_replace = None;
                         app.team_enrollment_error = None;
                         app.desktop.message = Some("Device cryptographic keys replaced.".into());
                     }

@@ -375,12 +375,12 @@ impl Shellumi {
                                 )
                                 .on_click(cx.listener(
                                     move |app, _, _, cx| {
-                                        app.replace_member_device_keys(
+                                        app.pending_device_replace = Some((
                                             mem_for_replace.clone(),
                                             dev_id_replace.clone(),
                                             dev_name.clone(),
-                                            cx,
-                                        );
+                                        ));
+                                        cx.notify();
                                     },
                                 )),
                             )
@@ -459,6 +459,95 @@ impl Shellumi {
                             ),
                     ),
             ));
+        }
+
+        if let Some((confirm_mem_id, confirm_dev_id, confirm_dev_name)) =
+            self.pending_device_replace.clone()
+        {
+            body = body.child(simple_section(
+                "Confirm Key Replacement",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_secondary())
+                            .child(format!(
+                                "Replace keys for '{confirm_dev_name}' ({confirm_dev_id})? A new device identity will be enrolled and verified before the old device is revoked globally across vaults."
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                AppButton::new(
+                                    "confirm-device-replace-btn",
+                                    "Confirm Replace Keys",
+                                    ButtonVariant::Primary,
+                                )
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.replace_member_device_keys(
+                                        confirm_mem_id.clone(),
+                                        confirm_dev_id.clone(),
+                                        confirm_dev_name.clone(),
+                                        cx,
+                                    );
+                                })),
+                            )
+                            .child(
+                                AppButton::new(
+                                    "cancel-device-replace-btn",
+                                    "Cancel",
+                                    ButtonVariant::Secondary,
+                                )
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.pending_device_replace = None;
+                                    cx.notify();
+                                })),
+                            ),
+                    ),
+            ));
+        }
+
+        if let Some((invite_id, invite_token, expires_at)) = self.last_created_invite.clone() {
+            let mut inv_box = div().flex().flex_col().gap_2().child(
+                div()
+                    .text_xs()
+                    .text_color(text_primary())
+                    .child(format!("Invite ID: {invite_id} (expires at {expires_at})")),
+            );
+            let mut btn_row = div().flex().gap_2();
+            if let Some(tok) = invite_token {
+                btn_row = btn_row.child(
+                    AppButton::new(
+                        "copy-invite-token-btn",
+                        "Copy Invite Token",
+                        ButtonVariant::Primary,
+                    )
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(tok.clone()));
+                        app.desktop.message =
+                            Some("Server invitation token copied to clipboard.".into());
+                        cx.notify();
+                    })),
+                );
+            }
+            btn_row = btn_row.child(
+                AppButton::new(
+                    "dismiss-invite-meta-btn",
+                    "Dismiss",
+                    ButtonVariant::Secondary,
+                )
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.last_created_invite = None;
+                    cx.notify();
+                })),
+            );
+            inv_box = inv_box.child(btn_row);
+            body = body.child(simple_section("Server Invitation Created", inv_box));
         }
 
         InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
@@ -745,11 +834,16 @@ impl Shellumi {
                         .update_team_member_role(mid, role)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<(String, bool), String>((mid.clone(), false))
+                    Ok::<(String, bool, Option<(String, Option<String>, i64)>), String>((
+                        mid.clone(),
+                        false,
+                        None,
+                    ))
                 } else {
                     // For remote vaults, require verified binding and server invitation creation;
                     // never silently fall back to a local-only record when a remote vault fails.
                     let mut created_on_server = false;
+                    let mut invite_meta: Option<(String, Option<String>, i64)> = None;
                     if let Some(ref rp) = reg_path {
                         let reg_store = HostStore::open_with_key(rp, default_key.as_ref())
                             .await
@@ -788,7 +882,7 @@ impl Shellumi {
                                     &conn.base_url,
                                 );
                                 client.set_token(token_sec.expose_secret().to_string());
-                                let _invite_resp = client
+                                let invite_resp = client
                                     .create_invite(
                                         binding.remote_vault_id,
                                         &shellumi_core::server::types::CreateInviteRequest {
@@ -801,6 +895,11 @@ impl Shellumi {
                                         format!("Server invitation creation failed: {e}")
                                     })?;
                                 created_on_server = true;
+                                invite_meta = Some((
+                                    invite_resp.invite_id.to_string(),
+                                    invite_resp.invite_token,
+                                    invite_resp.expires_at,
+                                ));
                             }
                         }
                     }
@@ -828,7 +927,11 @@ impl Shellumi {
                         .add_team_member(&member)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<(String, bool), String>((target_id, created_on_server))
+                    Ok::<(String, bool, Option<(String, Option<String>, i64)>), String>((
+                        target_id,
+                        created_on_server,
+                        invite_meta,
+                    ))
                 }
             })
         });
@@ -840,7 +943,8 @@ impl Shellumi {
                     f.sending = false;
                 }
                 match res {
-                    Ok((target_id, created_on_server)) => {
+                    Ok((target_id, created_on_server, invite_meta)) => {
+                        app.last_created_invite = invite_meta;
                         let target = InspectorTarget::TeamMember(Some(target_id.clone()));
                         let ok =
                             app.inspector_coordinator

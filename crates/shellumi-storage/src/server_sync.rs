@@ -929,7 +929,31 @@ impl HostStore {
         )
         .await?;
 
-        // 3. Enroll device locally and register with server challenge-response
+        // 3. Verify authoritative server membership BEFORE registering any device
+        if let Some(ref binding_ctx) = self.get_vault_context(local_vault_id).await? {
+            if let shellumi_core::VaultLocation::Remote {
+                server_vault_id, ..
+            } = binding_ctx.location()
+            {
+                if let Ok(remote_uuid) = Uuid::parse_str(server_vault_id.as_str()) {
+                    let members = client.list_members(remote_uuid).map_err(|e| {
+                        StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+                    })?;
+                    if members.members.is_empty()
+                        || !members.members.iter().any(|m| m.user_id == me.user_id)
+                    {
+                        return Err(StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "User '{}' not found in authoritative server membership for remote vault '{}'",
+                                me.user_id, remote_uuid
+                            )),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 4. Enroll device locally and register with server challenge-response
         let device = self
             .enroll_device_for_authenticated_user(
                 connection_id,
@@ -1412,6 +1436,9 @@ impl HostStore {
         let me = client.me().map_err(|e| {
             StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
         })?;
+        let global_devices = client.list_devices().map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
         let recipient_devices = client
             .list_recipient_devices(remote_vault_id)
             .map_err(|e| {
@@ -1563,6 +1590,9 @@ impl HostStore {
                 .devices
                 .iter()
                 .any(|d| d.user_id == me.user_id)
+                || global_devices
+                    .iter()
+                    .any(|d| d.user_id == me.user_id && d.revoked_at.is_none())
             {
                 let msg = "Manual intervention required: server already has registered device(s) for this user, refusing to generate a duplicate identity during recovery".to_string();
                 self.save_enrollment_operation_progress(
