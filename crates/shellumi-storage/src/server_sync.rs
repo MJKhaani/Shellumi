@@ -962,12 +962,42 @@ impl HostStore {
         let member = self.get_team_member(member_id).await?.ok_or_else(|| {
             StorageError::ItemNotFound(format!("Team member '{member_id}' not found"))
         })?;
+        if member.vault_id != local_vault_id {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(format!(
+                    "Team member '{member_id}' belongs to vault '{}', not '{local_vault_id}'",
+                    member.vault_id
+                )),
+            ));
+        }
         if member.revoked {
             return Err(StorageError::InvalidCollaboration(
                 shellumi_core::CollaborationError::Unauthorized(
                     "Cannot enroll a device for a revoked team member".into(),
                 ),
             ));
+        }
+
+        if let Some(ctx) = self.get_vault_context(local_vault_id).await? {
+            match ctx.location() {
+                shellumi_core::VaultLocation::Remote { server, .. } => {
+                    if server.as_str() != connection_id {
+                        return Err(StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "Vault '{local_vault_id}' is bound to connection '{}', not '{connection_id}'",
+                                server.as_str()
+                            )),
+                        ));
+                    }
+                }
+                shellumi_core::VaultLocation::Local => {
+                    return Err(StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(
+                            "Cannot enroll remote device for local-only vault".into(),
+                        ),
+                    ));
+                }
+            }
         }
 
         let me = client.me().map_err(|e| {
@@ -1146,7 +1176,7 @@ impl HostStore {
             }
         }
 
-        // Mark local devices absent from server recipient list as revoked
+        // Revoke per-vault authorization for local devices absent from this vault's server recipient list
         let active_server_ids: std::collections::HashSet<String> = recipient_devices
             .devices
             .iter()
@@ -1155,7 +1185,7 @@ impl HostStore {
         for local_dev in self.list_enrolled_devices_for_vault(local_vault_id).await? {
             if !local_dev.revoked && !active_server_ids.contains(&local_dev.device_id) {
                 let _ = self
-                    .revoke_enrolled_device(&local_dev.device_id, &now_str)
+                    .revoke_device_for_vault(local_vault_id, &local_dev.device_id, &now_str)
                     .await?;
             }
         }
@@ -1196,6 +1226,112 @@ impl HostStore {
         }
 
         Ok(())
+    }
+
+    /// Reconciles and recovers any incomplete `enrollment_operations` for `local_vault_id`
+    /// against authoritative server state without generating conflicting device identities.
+    pub async fn recover_incomplete_enrollments<T: HttpTransport>(
+        &mut self,
+        connection_id: &str,
+        local_vault_id: &str,
+        remote_vault_id: Uuid,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<usize, StorageError> {
+        let ops = self
+            .list_incomplete_enrollment_operations(local_vault_id)
+            .await?;
+        if ops.is_empty() {
+            return Ok(0);
+        }
+        let me = client.me().map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        let recipient_devices = client
+            .list_recipient_devices(remote_vault_id)
+            .map_err(|e| {
+                StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+            })?;
+        let now_str = current_timestamp().to_string();
+        let mut recovered = 0usize;
+
+        for op in ops {
+            if op.user_id != me.user_id.to_string() {
+                continue;
+            }
+            let Some(member) = self.get_team_member(&op.member_id).await? else {
+                continue;
+            };
+            if member.vault_id != local_vault_id || member.revoked {
+                continue;
+            }
+
+            if let Some(ref dev_id) = op.device_id {
+                if let Some(rd) = recipient_devices
+                    .devices
+                    .iter()
+                    .find(|d| d.device_id.to_string() == *dev_id && d.user_id == me.user_id)
+                {
+                    let existing_devs =
+                        self.list_enrolled_devices_for_vault(local_vault_id).await?;
+                    if let Some(local_dev) = existing_devs.iter().find(|d| d.device_id == *dev_id) {
+                        if let Some(ref key_ref) = local_dev.agreement_key_ref {
+                            if credentials
+                                .get_secret("org.shellumi.device.x25519", key_ref)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {
+                                self.update_team_member_enrollment(
+                                    &member.id,
+                                    EnrollmentStatus::DeviceEnrolled,
+                                    Some(&rd.agreement_public_key),
+                                )
+                                .await?;
+                                self.save_enrollment_operation_progress(
+                                    &op.operation_id,
+                                    local_vault_id,
+                                    &op.user_id,
+                                    &op.member_id,
+                                    "Completed",
+                                    Some(dev_id),
+                                    None,
+                                    &now_str,
+                                )
+                                .await?;
+                                recovered += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let dev = self
+                .enroll_additional_device_for_member(
+                    connection_id,
+                    local_vault_id,
+                    &op.member_id,
+                    "Recovered Device",
+                    client,
+                    credentials,
+                )
+                .await?;
+            self.save_enrollment_operation_progress(
+                &op.operation_id,
+                local_vault_id,
+                &op.user_id,
+                &op.member_id,
+                "Completed",
+                Some(&dev.device_id),
+                None,
+                &now_str,
+            )
+            .await?;
+            recovered += 1;
+        }
+
+        Ok(recovered)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3434,6 +3570,64 @@ mod tests {
                 .await
                 .unwrap();
             assert!(devs_b_after[0].revoked);
+
+            // 5. enroll_additional_device_for_member rejects cross-vault member_id
+            let cross_vault_enroll_err = store
+                .enroll_additional_device_for_member(
+                    "conn-1",
+                    &vault_a.to_string(),
+                    "mem-other-vault",
+                    "Extra Device",
+                    &mut alice_client,
+                    &cred_store,
+                )
+                .await
+                .unwrap_err();
+            assert!(cross_vault_enroll_err
+                .to_string()
+                .contains("belongs to vault"));
+
+            // 6. Interrupted enrollment operation recovery via recover_incomplete_enrollments
+            store
+                .save_enrollment_operation_progress(
+                    "op-interrupted-1",
+                    &vault_a.to_string(),
+                    &alice_id.to_string(),
+                    "mem-alice-a",
+                    "InvitationAccepted",
+                    None,
+                    None,
+                    "1006",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .list_incomplete_enrollment_operations(&vault_a.to_string())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let recovered_count = store
+                .recover_incomplete_enrollments(
+                    "conn-1",
+                    &vault_a.to_string(),
+                    vault_a,
+                    &mut alice_client,
+                    &cred_store,
+                )
+                .await
+                .unwrap();
+            assert_eq!(recovered_count, 1);
+            assert_eq!(
+                store
+                    .list_incomplete_enrollment_operations(&vault_a.to_string())
+                    .await
+                    .unwrap()
+                    .len(),
+                0
+            );
 
             let _ = std::fs::remove_file(&db_file);
         }

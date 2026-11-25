@@ -35,6 +35,19 @@ pub enum VaultEnvelopeState {
     Present(String),
 }
 
+/// Non-secret progress record for an in-flight or interrupted device enrollment operation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnrollmentOperationRecord {
+    pub operation_id: String,
+    pub vault_id: String,
+    pub user_id: String,
+    pub member_id: String,
+    pub stage: String,
+    pub device_id: Option<String>,
+    pub error_message: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Debug)]
 pub enum StorageError {
     Database(turso::Error),
@@ -5401,6 +5414,35 @@ impl HostStore {
             )
             .await?;
         Ok(())
+    }
+
+    /// Lists all incomplete enrollment operations (`stage != 'Completed'`) for a vault.
+    pub async fn list_incomplete_enrollment_operations(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<EnrollmentOperationRecord>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT operation_id, vault_id, user_id, member_id, stage, device_id, error_message, updated_at
+                 FROM enrollment_operations WHERE vault_id = ?1 AND stage != 'Completed' ORDER BY updated_at ASC",
+                (vault_id,),
+            )
+            .await?;
+        let mut ops = Vec::new();
+        while let Some(row) = rows.next().await? {
+            ops.push(EnrollmentOperationRecord {
+                operation_id: row.get(0)?,
+                vault_id: row.get(1)?,
+                user_id: row.get(2)?,
+                member_id: row.get(3)?,
+                stage: row.get(4)?,
+                device_id: row.get(5)?,
+                error_message: row.get(6)?,
+                updated_at: row.get(7)?,
+            });
+        }
+        Ok(ops)
     }
 
     /// Persists or updates an enrolled device record.
