@@ -485,6 +485,7 @@ impl Shellumi {
                         display_name: email,
                         public_key: pubkey,
                         agreement_public_key: None,
+                        enrollment_status: shellumi_core::EnrollmentStatus::InvitationPending,
                         role,
                         enrolled_at: now,
                         invited_by: "current_user".into(),

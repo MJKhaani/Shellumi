@@ -64,8 +64,9 @@ pub use bench::{
     BenchmarkCategory, BenchmarkMetric, BenchmarkReport, BenchmarkRunner, BenchmarkStatus,
 };
 pub use collaboration::{
-    AuditAction, CollaborationError, LogBookmark, LogComment, MultiplayerParticipant,
-    MultiplayerSession, SharedSessionLog, SharedVault, SharingAuditRecord, TeamMember, TeamRole,
+    AuditAction, AuthorizedRecipientDevice, CollaborationError, EnrolledDevice, EnrollmentStatus,
+    LogBookmark, LogComment, MultiplayerParticipant, MultiplayerSession, SharedSessionLog,
+    SharedVault, SharingAuditRecord, TeamMember, TeamRole,
 };
 #[cfg(target_os = "macos")]
 pub use credential::MacOsKeychainStore;

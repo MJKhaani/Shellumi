@@ -2889,6 +2889,7 @@ async fn test_team_member_revocation_with_cryptographic_rotation() {
         display_name: "Charlie Dev".into(),
         public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICfakeCharliePubKey".into(),
         agreement_public_key: None,
+        enrollment_status: shellumi_core::EnrollmentStatus::LegacyRequiresMigration,
         role: TeamRole::Editor,
         enrolled_at: "2026-11-24T12:01:00Z".into(),
         invited_by: "owner@corp.internal".into(),

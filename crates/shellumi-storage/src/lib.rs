@@ -11,17 +11,18 @@ pub use server_sync::{
     VaultSyncStateRecord,
 };
 use shellumi_core::{
-    resolve_effective_tags, validate_jump_host, AuditAction, CollaborationError, DestinationError,
-    ForwardingType, GroupError, HostGroup, LogBookmark, LogComment, PortForwardRule,
-    SessionRecordingSummary, SharedSessionLog, SharedVault, SharingAuditRecord, Snippet,
-    SnippetError, SnippetVariable, SshDestination, TeamMember, TeamRole, TransferDirection,
-    TunnelError, WorkspaceError, WorkspaceSession,
+    resolve_effective_tags, validate_jump_host, AuditAction, AuthorizedRecipientDevice,
+    CollaborationError, DestinationError, EnrolledDevice, EnrollmentStatus, ForwardingType,
+    GroupError, HostGroup, LogBookmark, LogComment, PortForwardRule, SessionRecordingSummary,
+    SharedSessionLog, SharedVault, SharingAuditRecord, Snippet, SnippetError, SnippetVariable,
+    SshDestination, TeamMember, TeamRole, TransferDirection, TunnelError, WorkspaceError,
+    WorkspaceSession,
 };
 use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -951,11 +952,30 @@ impl HostStore {
                     display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
                     public_key TEXT NOT NULL,
                     agreement_public_key TEXT,
+                    enrollment_status TEXT NOT NULL DEFAULT 'legacy_requires_migration',
                     role TEXT NOT NULL,
                     enrolled_at TEXT NOT NULL,
                     invited_by TEXT NOT NULL,
                     revoked INTEGER NOT NULL DEFAULT 0,
                     revoked_at TEXT
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS enrolled_devices (
+                    device_id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    device_name TEXT NOT NULL,
+                    signing_public_key TEXT NOT NULL,
+                    agreement_public_key TEXT NOT NULL,
+                    signing_key_ref TEXT,
+                    agreement_key_ref TEXT,
+                    enrolled_at TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT,
+                    verified INTEGER NOT NULL DEFAULT 0
                 )",
                 (),
             )
@@ -1591,12 +1611,31 @@ impl HostStore {
                         user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
                         display_name TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
                         public_key TEXT NOT NULL,
-                    agreement_public_key TEXT,
+                        agreement_public_key TEXT,
+                        enrollment_status TEXT NOT NULL DEFAULT 'legacy_requires_migration',
                         role TEXT NOT NULL,
                         enrolled_at TEXT NOT NULL,
                         invited_by TEXT NOT NULL,
                         revoked INTEGER NOT NULL DEFAULT 0,
                         revoked_at TEXT
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS enrolled_devices (
+                        device_id TEXT PRIMARY KEY,
+                        vault_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        device_name TEXT NOT NULL,
+                        signing_public_key TEXT NOT NULL,
+                        agreement_public_key TEXT NOT NULL,
+                        signing_key_ref TEXT,
+                        agreement_key_ref TEXT,
+                        enrolled_at TEXT NOT NULL,
+                        revoked INTEGER NOT NULL DEFAULT 0,
+                        revoked_at TEXT,
+                        verified INTEGER NOT NULL DEFAULT 0
                     )",
                     (),
                 )
@@ -2343,6 +2382,41 @@ impl HostStore {
                 .await?;
             }
             tx.execute("PRAGMA user_version = 24", ()).await?;
+        }
+        if version < 25 {
+            let mut columns = tx.query("PRAGMA table_info(team_members)", ()).await?;
+            let mut has_enrollment_status = false;
+            while let Some(row) = columns.next().await? {
+                let name: String = row.get(1)?;
+                has_enrollment_status |= name == "enrollment_status";
+            }
+            drop(columns);
+            if !has_enrollment_status {
+                tx.execute(
+                    "ALTER TABLE team_members ADD COLUMN enrollment_status TEXT NOT NULL DEFAULT 'legacy_requires_migration'",
+                    (),
+                )
+                .await?;
+            }
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS enrolled_devices (
+                    device_id TEXT PRIMARY KEY,
+                    vault_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    device_name TEXT NOT NULL,
+                    signing_public_key TEXT NOT NULL,
+                    agreement_public_key TEXT NOT NULL,
+                    signing_key_ref TEXT,
+                    agreement_key_ref TEXT,
+                    enrolled_at TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT,
+                    verified INTEGER NOT NULL DEFAULT 0
+                )",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 25", ()).await?;
         }
         tx.commit().await?;
         tracing::debug!(
@@ -4941,8 +5015,8 @@ impl HostStore {
     pub async fn add_team_member(&mut self, member: &TeamMember) -> Result<(), StorageError> {
         self.connection
             .execute(
-                "INSERT INTO team_members (id, vault_id, user_id, display_name, public_key, agreement_public_key, role, enrolled_at, invited_by, revoked, revoked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO team_members (id, vault_id, user_id, display_name, public_key, agreement_public_key, enrollment_status, role, enrolled_at, invited_by, revoked, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 (
                     member.id.clone(),
                     member.vault_id.clone(),
@@ -4950,6 +5024,7 @@ impl HostStore {
                     member.display_name.clone(),
                     member.public_key.clone(),
                     member.agreement_public_key.clone(),
+                    member.enrollment_status.as_str().to_string(),
                     member.role.to_string(),
                     member.enrolled_at.clone(),
                     member.invited_by.clone(),
@@ -4965,7 +5040,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, vault_id, user_id, display_name, public_key, agreement_public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE id = ?1",
+                "SELECT id, vault_id, user_id, display_name, public_key, agreement_public_key, enrollment_status, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE id = ?1",
                 (id,),
             )
             .await?;
@@ -4976,13 +5051,16 @@ impl HostStore {
             let display_name: String = row.get(3)?;
             let public_key: String = row.get(4)?;
             let agreement_public_key: Option<String> = row.get(5)?;
-            let role_str: String = row.get(6)?;
-            let enrolled_at: String = row.get(7)?;
-            let invited_by: String = row.get(8)?;
-            let revoked_int: i64 = row.get(9)?;
-            let revoked_at: Option<String> = row.get(10)?;
+            let status_str: String = row.get(6)?;
+            let role_str: String = row.get(7)?;
+            let enrolled_at: String = row.get(8)?;
+            let invited_by: String = row.get(9)?;
+            let revoked_int: i64 = row.get(10)?;
+            let revoked_at: Option<String> = row.get(11)?;
 
             let role = TeamRole::from_str(&role_str).unwrap_or(TeamRole::Viewer);
+            let enrollment_status = EnrollmentStatus::from_str(&status_str)
+                .unwrap_or(EnrollmentStatus::LegacyRequiresMigration);
 
             Ok(Some(TeamMember {
                 id,
@@ -4991,6 +5069,7 @@ impl HostStore {
                 display_name,
                 public_key,
                 agreement_public_key,
+                enrollment_status,
                 role,
                 enrolled_at,
                 invited_by,
@@ -5006,7 +5085,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, vault_id, user_id, display_name, public_key, agreement_public_key, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
+                "SELECT id, vault_id, user_id, display_name, public_key, agreement_public_key, enrollment_status, role, enrolled_at, invited_by, revoked, revoked_at FROM team_members WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
                 (vault_id,),
             )
             .await?;
@@ -5018,13 +5097,16 @@ impl HostStore {
             let display_name: String = row.get(3)?;
             let public_key: String = row.get(4)?;
             let agreement_public_key: Option<String> = row.get(5)?;
-            let role_str: String = row.get(6)?;
-            let enrolled_at: String = row.get(7)?;
-            let invited_by: String = row.get(8)?;
-            let revoked_int: i64 = row.get(9)?;
-            let revoked_at: Option<String> = row.get(10)?;
+            let status_str: String = row.get(6)?;
+            let role_str: String = row.get(7)?;
+            let enrolled_at: String = row.get(8)?;
+            let invited_by: String = row.get(9)?;
+            let revoked_int: i64 = row.get(10)?;
+            let revoked_at: Option<String> = row.get(11)?;
 
             let role = TeamRole::from_str(&role_str).unwrap_or(TeamRole::Viewer);
+            let enrollment_status = EnrollmentStatus::from_str(&status_str)
+                .unwrap_or(EnrollmentStatus::LegacyRequiresMigration);
 
             list.push(TeamMember {
                 id,
@@ -5033,6 +5115,7 @@ impl HostStore {
                 display_name,
                 public_key,
                 agreement_public_key,
+                enrollment_status,
                 role,
                 enrolled_at,
                 invited_by,
@@ -5041,6 +5124,196 @@ impl HostStore {
             });
         }
         Ok(list)
+    }
+
+    /// Updates a team member's authenticated enrollment status and optional X25519 agreement key.
+    pub async fn update_team_member_enrollment(
+        &mut self,
+        member_id: &str,
+        status: EnrollmentStatus,
+        agreement_public_key: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        if let Some(pk) = agreement_public_key {
+            shellumi_core::server::crypto::validate_x25519_agreement_public_key(pk).map_err(
+                |e| {
+                    StorageError::InvalidCollaboration(CollaborationError::InvalidAction(format!(
+                        "Invalid X25519 agreement public key: {e}"
+                    )))
+                },
+            )?;
+        }
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE team_members SET enrollment_status = ?1, agreement_public_key = COALESCE(?2, agreement_public_key) WHERE id = ?3",
+                (status.as_str().to_string(), agreement_public_key.map(str::to_string), member_id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Persists or updates an enrolled device record.
+    pub async fn save_enrolled_device(
+        &mut self,
+        device: &EnrolledDevice,
+    ) -> Result<(), StorageError> {
+        shellumi_core::server::crypto::validate_x25519_agreement_public_key(
+            &device.agreement_public_key,
+        )
+        .map_err(|e| {
+            StorageError::InvalidCollaboration(CollaborationError::InvalidAction(format!(
+                "Cannot save device with invalid X25519 key: {e}"
+            )))
+        })?;
+        self.connection
+            .execute(
+                "INSERT INTO enrolled_devices (device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(device_id) DO UPDATE SET
+                    device_name = excluded.device_name,
+                    signing_public_key = excluded.signing_public_key,
+                    agreement_public_key = excluded.agreement_public_key,
+                    signing_key_ref = excluded.signing_key_ref,
+                    agreement_key_ref = excluded.agreement_key_ref,
+                    revoked = excluded.revoked,
+                    revoked_at = excluded.revoked_at,
+                    verified = excluded.verified",
+                (
+                    device.device_id.clone(),
+                    device.vault_id.clone(),
+                    device.user_id.clone(),
+                    device.device_name.clone(),
+                    device.signing_public_key.clone(),
+                    device.agreement_public_key.clone(),
+                    device.signing_key_ref.clone(),
+                    device.agreement_key_ref.clone(),
+                    device.enrolled_at.clone(),
+                    if device.revoked { 1i64 } else { 0i64 },
+                    device.revoked_at.clone(),
+                    if device.verified { 1i64 } else { 0i64 },
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Lists all enrolled devices for a vault.
+    pub async fn list_enrolled_devices_for_vault(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<EnrolledDevice>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified
+                 FROM enrolled_devices WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
+                (vault_id,),
+            )
+            .await?;
+        let mut devices = Vec::new();
+        while let Some(row) = rows.next().await? {
+            devices.push(EnrolledDevice {
+                device_id: row.get(0)?,
+                vault_id: row.get(1)?,
+                user_id: row.get(2)?,
+                device_name: row.get(3)?,
+                signing_public_key: row.get(4)?,
+                agreement_public_key: row.get(5)?,
+                signing_key_ref: row.get(6)?,
+                agreement_key_ref: row.get(7)?,
+                enrolled_at: row.get(8)?,
+                revoked: row.get::<i64>(9)? != 0,
+                revoked_at: row.get(10)?,
+                verified: row.get::<i64>(11)? != 0,
+            });
+        }
+        Ok(devices)
+    }
+
+    /// Lists all enrolled devices for a user within a vault.
+    pub async fn list_enrolled_devices_for_user(
+        &self,
+        vault_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<EnrolledDevice>, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified
+                 FROM enrolled_devices WHERE vault_id = ?1 AND user_id = ?2 ORDER BY enrolled_at ASC",
+                (vault_id, user_id),
+            )
+            .await?;
+        let mut devices = Vec::new();
+        while let Some(row) = rows.next().await? {
+            devices.push(EnrolledDevice {
+                device_id: row.get(0)?,
+                vault_id: row.get(1)?,
+                user_id: row.get(2)?,
+                device_name: row.get(3)?,
+                signing_public_key: row.get(4)?,
+                agreement_public_key: row.get(5)?,
+                signing_key_ref: row.get(6)?,
+                agreement_key_ref: row.get(7)?,
+                enrolled_at: row.get(8)?,
+                revoked: row.get::<i64>(9)? != 0,
+                revoked_at: row.get(10)?,
+                verified: row.get::<i64>(11)? != 0,
+            });
+        }
+        Ok(devices)
+    }
+
+    /// Marks an enrolled device as revoked locally.
+    pub async fn revoke_enrolled_device(
+        &mut self,
+        device_id: &str,
+        revoked_at: &str,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE enrolled_devices SET revoked = 1, revoked_at = ?1 WHERE device_id = ?2 AND revoked = 0",
+                (revoked_at, device_id),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Service contract for Issue 3 (epoch-key encryption):
+    /// Returns the authenticated, active, non-revoked recipient devices for a shared vault
+    /// whose owning team member is active and enrolled, with validated 32-byte X25519 keys.
+    pub async fn list_authorized_recipient_devices(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<AuthorizedRecipientDevice>, StorageError> {
+        let members = self.list_team_members(vault_id).await?;
+        let devices = self.list_enrolled_devices_for_vault(vault_id).await?;
+        let mut authorized = Vec::new();
+        for member in members {
+            if !member.is_enrolled() {
+                continue;
+            }
+            for dev in devices
+                .iter()
+                .filter(|d| d.user_id == member.user_id && !d.revoked && d.verified)
+            {
+                if shellumi_core::server::crypto::validate_x25519_agreement_public_key(
+                    &dev.agreement_public_key,
+                )
+                .is_ok()
+                {
+                    authorized.push(AuthorizedRecipientDevice {
+                        member_id: member.id.clone(),
+                        user_id: member.user_id.clone(),
+                        device_id: dev.device_id.clone(),
+                        device_name: dev.device_name.clone(),
+                        agreement_public_key: dev.agreement_public_key.clone(),
+                    });
+                }
+            }
+        }
+        Ok(authorized)
     }
 
     pub async fn update_team_member_role(

@@ -315,6 +315,37 @@ pub fn generate_device_x25519_keypair() -> Result<(Zeroizing<[u8; 32]>, String),
     Ok((Zeroizing::new(secret_bytes), public_b64))
 }
 
+/// Validates that a base64-encoded public key is a valid, contributory 32-byte X25519 agreement key.
+/// Explicitly rejects OpenSSH public keys, malformed base64, wrong lengths, and low-order points.
+pub fn validate_x25519_agreement_public_key(key_b64: &str) -> Result<[u8; 32], CryptoError> {
+    let trimmed = key_b64.trim();
+    if trimmed.starts_with("ssh-")
+        || trimmed.starts_with("ecdsa-sha2-")
+        || trimmed.starts_with("sk-ssh-")
+    {
+        return Err(CryptoError::KeyGen(
+            "OpenSSH public keys cannot be used as X25519 agreement keys".to_string(),
+        ));
+    }
+    let bytes = BASE64_STANDARD
+        .decode(trimmed)
+        .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+    if bytes.len() != 32 {
+        return Err(CryptoError::InvalidPublicKeyLength(bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    let pk = X25519PublicKey::from(arr);
+    let probe_secret = X25519StaticSecret::from([7u8; 32]);
+    let shared = probe_secret.diffie_hellman(&pk);
+    if !shared.was_contributory() {
+        return Err(CryptoError::KeyGen(
+            "Non-contributory or low-order X25519 public key rejected".to_string(),
+        ));
+    }
+    Ok(arr)
+}
+
 /// Derives an AES-256-GCM wrapping key using HKDF-SHA256 from an X25519 shared secret.
 fn derive_wrap_key(
     shared_secret: &[u8; 32],

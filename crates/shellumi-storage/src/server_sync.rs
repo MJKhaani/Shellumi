@@ -15,12 +15,13 @@ use serde::{Deserialize, Serialize};
 use shellumi_core::server::{
     canonical_mutation_preimage, compute_ciphertext_digest, generate_device_ed25519_keypair_pkcs8,
     generate_device_x25519_keypair, keypair_from_pkcs8, sign_device_challenge, sign_message,
-    wrap_dek_for_recipient, CommitBatchRequest, DeviceChallengeRequest, DeviceResponse,
-    KeyEnvelopeItem, MutationItem, RegisterDeviceRequest, RotateKeyEpochRequest,
-    ShellumiServerClient, SyncChangeItem, CURRENT_PROTOCOL_VERSION,
+    validate_x25519_agreement_public_key, wrap_dek_for_recipient, AcceptInviteRequest,
+    CommitBatchRequest, DeviceChallengeRequest, DeviceResponse, KeyEnvelopeItem, MutationItem,
+    RegisterDeviceRequest, RotateKeyEpochRequest, ShellumiServerClient, SyncChangeItem,
+    CURRENT_PROTOCOL_VERSION,
 };
 use shellumi_core::sync::{decrypt_entity, encrypt_entity, HttpTransport};
-use shellumi_core::VaultId;
+use shellumi_core::{EnrolledDevice, EnrollmentStatus, TeamMember, TeamRole, VaultId};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -726,6 +727,404 @@ impl HostStore {
             .await?;
 
         Ok(resp.active_key_epoch)
+    }
+
+    /// Accepts a team invitation as an authenticated recipient, generates local signing and
+    /// X25519 agreement keys, stores private keys in `credentials`, registers the device via
+    /// server challenge-response, verifies server identity binding, and marks the member/device
+    /// as `EnrollmentStatus::DeviceEnrolled`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_invitation_and_enroll_device<T: HttpTransport>(
+        &mut self,
+        connection_id: &str,
+        local_vault_id: &str,
+        member_id: &str,
+        display_name: &str,
+        ssh_public_key: &str,
+        invite_token: &str,
+        device_label: &str,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(TeamMember, EnrolledDevice), StorageError> {
+        if client.token().is_none() {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(
+                    "Authenticated session token is required to accept an invitation".into(),
+                ),
+            ));
+        }
+
+        // 1. Verify authenticated user identity from server
+        let me = client.me().map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+
+        // 2. Accept invitation on server
+        let accept_resp = client
+            .accept_invite(&AcceptInviteRequest {
+                invite_token: invite_token.to_string(),
+            })
+            .map_err(|e| {
+                StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+            })?;
+
+        let role = accept_resp
+            .role
+            .parse::<TeamRole>()
+            .unwrap_or(TeamRole::Viewer);
+
+        // 3. Enroll device locally and register with server challenge-response
+        let device = self
+            .enroll_device_for_authenticated_user(
+                connection_id,
+                local_vault_id,
+                &me.user_id.to_string(),
+                me.user_id,
+                device_label,
+                client,
+                credentials,
+            )
+            .await?;
+
+        // 4. Persist/update member record with DeviceEnrolled status
+        let now_str = current_timestamp().to_string();
+        let existing = self.get_team_member(member_id).await?;
+        let mut member = if let Some(mut m) = existing {
+            m.agreement_public_key = Some(device.agreement_public_key.clone());
+            m.enrollment_status = EnrollmentStatus::DeviceEnrolled;
+            m.role = role;
+            m
+        } else {
+            TeamMember::new(
+                member_id,
+                local_vault_id,
+                me.user_id.to_string(),
+                display_name,
+                ssh_public_key,
+                role,
+                &now_str,
+                "server_invite",
+            )
+            .with_agreement_key(device.agreement_public_key.clone())
+            .with_enrollment_status(EnrollmentStatus::DeviceEnrolled)
+        };
+
+        if member.id == member_id && self.get_team_member(member_id).await?.is_none() {
+            self.add_team_member(&member).await?;
+        } else {
+            self.update_team_member_enrollment(
+                &member.id,
+                EnrollmentStatus::DeviceEnrolled,
+                Some(&device.agreement_public_key),
+            )
+            .await?;
+            member.enrollment_status = EnrollmentStatus::DeviceEnrolled;
+        }
+
+        Ok((member, device))
+    }
+
+    /// Enrolls an additional authenticated device for an existing user/member.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enroll_additional_device_for_member<T: HttpTransport>(
+        &mut self,
+        connection_id: &str,
+        local_vault_id: &str,
+        member_id: &str,
+        device_label: &str,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<EnrolledDevice, StorageError> {
+        if client.token().is_none() {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(
+                    "Authenticated session token is required to enroll a device".into(),
+                ),
+            ));
+        }
+
+        let member = self.get_team_member(member_id).await?.ok_or_else(|| {
+            StorageError::ItemNotFound(format!("Team member '{member_id}' not found"))
+        })?;
+        if member.revoked {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(
+                    "Cannot enroll a device for a revoked team member".into(),
+                ),
+            ));
+        }
+
+        let me = client.me().map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        if me.user_id.to_string() != member.user_id && me.username != member.user_id {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(
+                    "Authenticated server user does not match target member identity".into(),
+                ),
+            ));
+        }
+
+        let device = self
+            .enroll_device_for_authenticated_user(
+                connection_id,
+                local_vault_id,
+                &member.user_id,
+                me.user_id,
+                device_label,
+                client,
+                credentials,
+            )
+            .await?;
+
+        self.update_team_member_enrollment(
+            &member.id,
+            EnrollmentStatus::DeviceEnrolled,
+            Some(&device.agreement_public_key),
+        )
+        .await?;
+
+        Ok(device)
+    }
+
+    /// Replaces a device's cryptographic keys by enrolling a new device and revoking the old one.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replace_device_keys_for_member<T: HttpTransport>(
+        &mut self,
+        connection_id: &str,
+        local_vault_id: &str,
+        member_id: &str,
+        old_device_id: Uuid,
+        new_device_label: &str,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<EnrolledDevice, StorageError> {
+        let new_device = self
+            .enroll_additional_device_for_member(
+                connection_id,
+                local_vault_id,
+                member_id,
+                new_device_label,
+                client,
+                credentials,
+            )
+            .await?;
+
+        client.revoke_device(old_device_id).map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        let now_str = current_timestamp().to_string();
+        let _ = self
+            .revoke_enrolled_device(&old_device_id.to_string(), &now_str)
+            .await?;
+
+        Ok(new_device)
+    }
+
+    /// Revokes a specific enrolled device on the server and locally, updating member status if no
+    /// active verified devices remain.
+    pub async fn revoke_device_with_server<T: HttpTransport>(
+        &mut self,
+        local_vault_id: &str,
+        member_id: &str,
+        device_id: Uuid,
+        client: &ShellumiServerClient<T>,
+    ) -> Result<(), StorageError> {
+        client.revoke_device(device_id).map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        let now_str = current_timestamp().to_string();
+        let _ = self
+            .revoke_enrolled_device(&device_id.to_string(), &now_str)
+            .await?;
+
+        if let Some(member) = self.get_team_member(member_id).await? {
+            let remaining = self
+                .list_enrolled_devices_for_user(local_vault_id, &member.user_id)
+                .await?;
+            let has_active = remaining.iter().any(|d| !d.revoked && d.verified);
+            if !has_active {
+                self.update_team_member_enrollment(
+                    member_id,
+                    EnrollmentStatus::DeviceRevoked,
+                    None,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Synchronizes local `team_members` and `enrolled_devices` with authoritative server state.
+    pub async fn sync_team_enrollment_from_server<T: HttpTransport>(
+        &mut self,
+        local_vault_id: &str,
+        remote_vault_id: Uuid,
+        client: &ShellumiServerClient<T>,
+    ) -> Result<(), StorageError> {
+        let server_members = client.list_members(remote_vault_id).map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        let recipient_devices = client
+            .list_recipient_devices(remote_vault_id)
+            .map_err(|e| {
+                StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+            })?;
+
+        let now_str = current_timestamp().to_string();
+        let local_members = self.list_team_members(local_vault_id).await?;
+
+        // Persist authoritative server recipient devices
+        for rd in &recipient_devices.devices {
+            if validate_x25519_agreement_public_key(&rd.agreement_public_key).is_err() {
+                tracing::warn!(
+                    device_id = %rd.device_id,
+                    "Ignoring server recipient device with invalid X25519 agreement key"
+                );
+                continue;
+            }
+            let dev = EnrolledDevice {
+                device_id: rd.device_id.to_string(),
+                vault_id: local_vault_id.to_string(),
+                user_id: rd.user_id.to_string(),
+                device_name: rd.device_name.clone(),
+                signing_public_key: String::new(),
+                agreement_public_key: rd.agreement_public_key.clone(),
+                signing_key_ref: None,
+                agreement_key_ref: None,
+                enrolled_at: now_str.clone(),
+                revoked: false,
+                revoked_at: None,
+                verified: true,
+            };
+            self.save_enrolled_device(&dev).await?;
+        }
+
+        // Mark local devices absent from server recipient list as revoked
+        let active_server_ids: std::collections::HashSet<String> = recipient_devices
+            .devices
+            .iter()
+            .map(|d| d.device_id.to_string())
+            .collect();
+        for local_dev in self.list_enrolled_devices_for_vault(local_vault_id).await? {
+            if !local_dev.revoked && !active_server_ids.contains(&local_dev.device_id) {
+                let _ = self
+                    .revoke_enrolled_device(&local_dev.device_id, &now_str)
+                    .await?;
+            }
+        }
+
+        // Update local member enrollment status from authoritative server state
+        for lm in &local_members {
+            if lm.revoked {
+                continue;
+            }
+            let matching_server = server_members
+                .members
+                .iter()
+                .find(|sm| sm.user_id.to_string() == lm.user_id || sm.username == lm.user_id);
+            let matching_dev = recipient_devices.devices.iter().find(|rd| {
+                (rd.user_id.to_string() == lm.user_id
+                    || matching_server.is_some_and(|sm| sm.user_id == rd.user_id))
+                    && validate_x25519_agreement_public_key(&rd.agreement_public_key).is_ok()
+            });
+
+            if let Some(dev) = matching_dev {
+                self.update_team_member_enrollment(
+                    &lm.id,
+                    EnrollmentStatus::DeviceEnrolled,
+                    Some(&dev.agreement_public_key),
+                )
+                .await?;
+            } else if matching_server.is_some() {
+                let target_status = if lm.agreement_public_key.is_none()
+                    && lm.enrollment_status == EnrollmentStatus::LegacyRequiresMigration
+                {
+                    EnrollmentStatus::LegacyRequiresMigration
+                } else {
+                    EnrollmentStatus::DeviceEnrollmentPending
+                };
+                self.update_team_member_enrollment(&lm.id, target_status, None)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn enroll_device_for_authenticated_user<T: HttpTransport>(
+        &mut self,
+        connection_id: &str,
+        local_vault_id: &str,
+        member_user_id: &str,
+        expected_server_user_id: Uuid,
+        device_label: &str,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<EnrolledDevice, StorageError> {
+        let reg_resp = self
+            .enroll_device_using_credentials(connection_id, client, device_label, credentials)
+            .await?;
+
+        if reg_resp.user_id != expected_server_user_id {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(
+                    "Server bound registered device to a different user identity".into(),
+                ),
+            ));
+        }
+
+        validate_x25519_agreement_public_key(&reg_resp.agreement_public_key).map_err(|e| {
+            StorageError::InvalidCollaboration(shellumi_core::CollaborationError::InvalidAction(
+                format!("Registered device returned invalid X25519 key: {e}"),
+            ))
+        })?;
+
+        // Verify device appears in server device listing for the authenticated user
+        let devices = client.list_devices().map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        let verified_on_server = devices.iter().any(|d| {
+            d.device_id == reg_resp.device_id
+                && d.user_id == expected_server_user_id
+                && d.agreement_public_key == reg_resp.agreement_public_key
+                && d.revoked_at.is_none()
+        });
+        if !verified_on_server {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(
+                    "Registered device could not be verified in authenticated server device list"
+                        .into(),
+                ),
+            ));
+        }
+
+        let conn = self
+            .get_vault_server_connection(connection_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::ItemNotFound(format!(
+                    "Server connection '{connection_id}' missing after enrollment"
+                ))
+            })?;
+
+        let enrolled = EnrolledDevice {
+            device_id: reg_resp.device_id.to_string(),
+            vault_id: local_vault_id.to_string(),
+            user_id: member_user_id.to_string(),
+            device_name: reg_resp.device_name,
+            signing_public_key: reg_resp.signing_public_key,
+            agreement_public_key: reg_resp.agreement_public_key,
+            signing_key_ref: conn.device_signing_key,
+            agreement_key_ref: conn.device_agreement_key,
+            enrolled_at: reg_resp.created_at.to_string(),
+            revoked: false,
+            revoked_at: None,
+            verified: true,
+        };
+        self.save_enrolled_device(&enrolled).await?;
+        Ok(enrolled)
     }
 }
 
@@ -2155,5 +2554,540 @@ mod tests {
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
         assert!(err_msg.contains("Server instance mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_x25519_team_device_enrollment_lifecycle_and_security() {
+        use shellumi_core::server::crypto::{
+            unwrap_dek_for_device, validate_x25519_agreement_public_key, verify_device_signature,
+            wrap_dek_for_recipient,
+        };
+        use shellumi_core::server::types::{
+            AcceptInviteResponse, DeviceChallengeResponse, MeResponse, RecipientDeviceResponse,
+            RecipientDevicesResponse, VaultMemberListResponse, VaultMemberResponse,
+        };
+        use shellumi_core::{
+            resolve_secret_from_ref, CredentialError, CredentialStore, EphemeralCredentialStore,
+            SecretString, SharedVault,
+        };
+        use std::sync::{Arc, Mutex};
+
+        struct StatefulEnrollmentTransport {
+            user_id: Uuid,
+            username: String,
+            vault_id: Uuid,
+            server_instance_id: Uuid,
+            expected_invite_token: String,
+            devices: Mutex<Vec<DeviceResponse>>,
+            forge_wrong_user: Mutex<bool>,
+            omit_from_list: Mutex<bool>,
+        }
+
+        #[derive(Clone)]
+        struct SharedTransport(Arc<StatefulEnrollmentTransport>);
+
+        impl HttpTransport for SharedTransport {
+            fn send(&self, request: HttpRequest) -> Result<HttpResponse, SyncError> {
+                let method = request.method.as_str();
+                let url = request.url.as_str();
+                let auth_ok = request.headers.iter().any(|(k, v)| {
+                    k.eq_ignore_ascii_case("Authorization") && v.starts_with("Bearer ")
+                });
+                if !auth_ok && !url.ends_with("/capabilities") {
+                    return Ok(HttpResponse::new(
+                        401,
+                        br#"{"error":"unauthorized","message":"missing bearer token"}"#.to_vec(),
+                    ));
+                }
+
+                if method == "GET" && url.ends_with("/api/v1/me") {
+                    let resp = MeResponse {
+                        user_id: self.0.user_id,
+                        username: self.0.username.clone(),
+                        email: self.0.username.clone(),
+                        organizations: vec![],
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&resp).unwrap()));
+                }
+
+                if method == "POST" && url.ends_with("/api/v1/invites/accept") {
+                    let req: AcceptInviteRequest = serde_json::from_slice(&request.body).unwrap();
+                    if req.invite_token != self.0.expected_invite_token {
+                        return Ok(HttpResponse::new(
+                            403,
+                            br#"{"error":"forbidden","message":"invalid invite token"}"#.to_vec(),
+                        ));
+                    }
+                    let resp = AcceptInviteResponse {
+                        vault_id: self.0.vault_id,
+                        role: "editor".to_string(),
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&resp).unwrap()));
+                }
+
+                if method == "POST" && url.ends_with("/api/v1/devices/challenge") {
+                    let resp = DeviceChallengeResponse {
+                        challenge: "nonce-test-challenge-001".to_string(),
+                        expires_at: 9_999_999_999,
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&resp).unwrap()));
+                }
+
+                if method == "POST" && url.ends_with("/api/v1/devices") {
+                    let req: RegisterDeviceRequest = serde_json::from_slice(&request.body).unwrap();
+                    // Server verifies Ed25519 challenge signature & contributory X25519 key
+                    let challenge = req.challenge.as_deref().unwrap_or("");
+                    let sig = req.challenge_signature.as_deref().unwrap_or("");
+                    let preimage = format!("shellumi-device-challenge:{challenge}");
+                    if verify_device_signature(&req.signing_public_key, preimage.as_bytes(), sig)
+                        .is_err()
+                    {
+                        return Ok(HttpResponse::new(
+                            400,
+                            br#"{"error":"bad_request","message":"invalid challenge signature"}"#
+                                .to_vec(),
+                        ));
+                    }
+                    if validate_x25519_agreement_public_key(&req.agreement_public_key).is_err() {
+                        return Ok(HttpResponse::new(
+                            400,
+                            br#"{"error":"bad_request","message":"invalid agreement key"}"#
+                                .to_vec(),
+                        ));
+                    }
+                    let bound_user = if *self.0.forge_wrong_user.lock().unwrap() {
+                        Uuid::new_v4()
+                    } else {
+                        self.0.user_id
+                    };
+                    let dev = DeviceResponse {
+                        device_id: Uuid::new_v4(),
+                        user_id: bound_user,
+                        device_name: req.device_name,
+                        signing_public_key: req.signing_public_key,
+                        agreement_public_key: req.agreement_public_key,
+                        created_at: 2000,
+                        last_seen_at: Some(2000),
+                        revoked_at: None,
+                    };
+                    self.0.devices.lock().unwrap().push(dev.clone());
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&dev).unwrap()));
+                }
+
+                if method == "GET" && url.ends_with("/api/v1/devices") {
+                    let list = if *self.0.omit_from_list.lock().unwrap() {
+                        Vec::new()
+                    } else {
+                        self.0.devices.lock().unwrap().clone()
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&list).unwrap()));
+                }
+
+                if method == "DELETE" && url.contains("/api/v1/devices/") {
+                    let id_str = url.rsplit('/').next().unwrap_or("");
+                    let target_id = Uuid::parse_str(id_str).unwrap();
+                    let mut devs = self.0.devices.lock().unwrap();
+                    for d in devs.iter_mut() {
+                        if d.device_id == target_id {
+                            d.revoked_at = Some(3000);
+                        }
+                    }
+                    return Ok(HttpResponse::new(204, Vec::new()));
+                }
+
+                if method == "GET" && url.ends_with("/capabilities") {
+                    let caps = CapabilitiesResponse {
+                        protocol_version: 1,
+                        server_instance_id: self.0.server_instance_id,
+                        server_version: "1.0.0".to_string(),
+                        min_protocol_version: 1,
+                        supported_features: vec![],
+                        supported_e2ee_suites: vec![],
+                        websocket: None,
+                        limits: ServerLimits {
+                            max_request_bytes: 1_000_000,
+                            max_record_bytes: 1_000_000,
+                            max_mutations_per_commit: 100,
+                            max_change_page: 100,
+                        },
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&caps).unwrap()));
+                }
+
+                if method == "GET" && url.ends_with("/members") {
+                    let resp = VaultMemberListResponse {
+                        members: vec![VaultMemberResponse {
+                            vault_id: self.0.vault_id,
+                            user_id: self.0.user_id,
+                            username: self.0.username.clone(),
+                            role: "editor".to_string(),
+                            joined_at: 2000,
+                        }],
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&resp).unwrap()));
+                }
+
+                if method == "GET" && url.ends_with("/recipient-devices") {
+                    let devs: Vec<RecipientDeviceResponse> = self
+                        .0
+                        .devices
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|d| d.revoked_at.is_none())
+                        .map(|d| RecipientDeviceResponse {
+                            device_id: d.device_id,
+                            user_id: d.user_id,
+                            device_name: d.device_name.clone(),
+                            agreement_public_key: d.agreement_public_key.clone(),
+                            key_fingerprint: "fp".to_string(),
+                        })
+                        .collect();
+                    let resp = RecipientDevicesResponse {
+                        vault_id: self.0.vault_id,
+                        devices: devs,
+                    };
+                    return Ok(HttpResponse::new(200, serde_json::to_vec(&resp).unwrap()));
+                }
+
+                Ok(HttpResponse::new(404, b"{}".to_vec()))
+            }
+        }
+
+        struct FailingCredentialStore {
+            inner: EphemeralCredentialStore,
+            fail_set: std::sync::atomic::AtomicBool,
+        }
+        impl CredentialStore for FailingCredentialStore {
+            fn set_secret(
+                &self,
+                service: &str,
+                account: &str,
+                secret: &str,
+            ) -> Result<(), CredentialError> {
+                if self.fail_set.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(CredentialError::Storage("Keychain locked".into()));
+                }
+                self.inner.set_secret(service, account, secret)
+            }
+            fn get_secret(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<SecretString>, CredentialError> {
+                self.inner.get_secret(service, account)
+            }
+            fn delete_secret(&self, service: &str, account: &str) -> Result<bool, CredentialError> {
+                self.inner.delete_secret(service, account)
+            }
+        }
+
+        let db_file = std::env::temp_dir().join(format!(
+            "shellumi_enroll_test_{}.db",
+            Uuid::new_v4().as_simple()
+        ));
+        let mut store = HostStore::open(db_file.to_str().unwrap()).await.unwrap();
+        let local_vault_id = "sv-enroll";
+        store
+            .create_shared_vault(
+                &SharedVault::new(local_vault_id, "Platform Team", None, "owner", "1000").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let user_id = Uuid::new_v4();
+        let remote_vault_id = Uuid::new_v4();
+        let transport = Arc::new(StatefulEnrollmentTransport {
+            user_id,
+            username: "alice@corp.internal".into(),
+            vault_id: remote_vault_id,
+            server_instance_id: Uuid::new_v4(),
+            expected_invite_token: "tok-valid-123".into(),
+            devices: Mutex::new(Vec::new()),
+            forge_wrong_user: Mutex::new(false),
+            omit_from_list: Mutex::new(false),
+        });
+        let cred_store = FailingCredentialStore {
+            inner: EphemeralCredentialStore::new(),
+            fail_set: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        // 1. Invitation created locally starts as InvitationPending (never Enrolled)
+        let ssh_pk = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyForAlice";
+        let invited = TeamMember::new(
+            "mem-alice",
+            local_vault_id,
+            user_id.to_string(),
+            "Alice",
+            ssh_pk,
+            TeamRole::Editor,
+            "1000",
+            "owner",
+        );
+        assert_eq!(
+            invited.enrollment_status,
+            EnrollmentStatus::InvitationPending
+        );
+        assert!(!invited.is_enrolled());
+        assert_eq!(invited.enrollment_label(), "Invitation pending");
+        store.add_team_member(&invited).await.unwrap();
+
+        // 2. Reject OpenSSH key & invalid/non-contributory X25519 keys as agreement keys
+        assert!(validate_x25519_agreement_public_key(ssh_pk).is_err());
+        assert!(validate_x25519_agreement_public_key(&BASE64_STANDARD.encode([0u8; 32])).is_err());
+        assert!(store
+            .update_team_member_enrollment(
+                "mem-alice",
+                EnrollmentStatus::DeviceEnrolled,
+                Some(ssh_pk),
+            )
+            .await
+            .is_err());
+
+        // 3. Reject unauthorized enrollment (no token)
+        let mut unauth_client = ShellumiServerClient::with_transport(
+            "https://srv.local",
+            SharedTransport(Arc::clone(&transport)),
+        );
+        assert!(store
+            .accept_invitation_and_enroll_device(
+                "conn-1",
+                local_vault_id,
+                "mem-alice",
+                "Alice",
+                ssh_pk,
+                "tok-valid-123",
+                "MacBook Pro",
+                &mut unauth_client,
+                &cred_store,
+            )
+            .await
+            .is_err());
+
+        // 4. Keychain write failure aborts enrollment without marking member enrolled
+        let mut auth_client = ShellumiServerClient::with_transport(
+            "https://srv.local",
+            SharedTransport(Arc::clone(&transport)),
+        );
+        auth_client.set_token("jwt-alice");
+        cred_store
+            .fail_set
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(store
+            .accept_invitation_and_enroll_device(
+                "conn-1",
+                local_vault_id,
+                "mem-alice",
+                "Alice",
+                ssh_pk,
+                "tok-valid-123",
+                "MacBook Pro",
+                &mut auth_client,
+                &cred_store,
+            )
+            .await
+            .is_err());
+        assert!(!store
+            .get_team_member("mem-alice")
+            .await
+            .unwrap()
+            .unwrap()
+            .is_enrolled());
+        cred_store
+            .fail_set
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // 5. Reject forged user binding from server
+        *transport.forge_wrong_user.lock().unwrap() = true;
+        assert!(store
+            .accept_invitation_and_enroll_device(
+                "conn-1",
+                local_vault_id,
+                "mem-alice",
+                "Alice",
+                ssh_pk,
+                "tok-valid-123",
+                "MacBook Pro",
+                &mut auth_client,
+                &cred_store,
+            )
+            .await
+            .is_err());
+        *transport.forge_wrong_user.lock().unwrap() = false;
+
+        // 6. Complete authenticated invitation acceptance + device 1 enrollment
+        let (member, dev1) = store
+            .accept_invitation_and_enroll_device(
+                "conn-1",
+                local_vault_id,
+                "mem-alice",
+                "Alice",
+                ssh_pk,
+                "tok-valid-123",
+                "MacBook Pro",
+                &mut auth_client,
+                &cred_store,
+            )
+            .await
+            .expect("Authenticated enrollment must succeed");
+        assert!(member.is_enrolled());
+        assert_eq!(member.enrollment_label(), "Enrolled");
+        assert!(dev1.verified);
+
+        // 7. Verify public/private key correspondence: wrap DEK with registered X25519 pk, unwrap with stored private key
+        let content_key = [42u8; 32];
+        let (wrapped_b64, ephem_b64) =
+            wrap_dek_for_recipient(&content_key, &dev1.agreement_public_key, remote_vault_id, 1)
+                .unwrap();
+        let priv_secret =
+            resolve_secret_from_ref(&cred_store, dev1.agreement_key_ref.as_deref().unwrap())
+                .unwrap()
+                .unwrap();
+        let priv_bytes = BASE64_STANDARD
+            .decode(priv_secret.expose_secret().trim())
+            .unwrap();
+        let mut priv_arr = [0u8; 32];
+        priv_arr.copy_from_slice(&priv_bytes);
+        let unwrapped =
+            unwrap_dek_for_device(&wrapped_b64, &ephem_b64, &priv_arr, remote_vault_id, 1).unwrap();
+        assert_eq!(*unwrapped, content_key);
+
+        // 8. Enroll a second device for the same user
+        let dev2 = store
+            .enroll_additional_device_for_member(
+                "conn-1",
+                local_vault_id,
+                "mem-alice",
+                "Workstation Linux",
+                &mut auth_client,
+                &cred_store,
+            )
+            .await
+            .unwrap();
+        assert_ne!(dev1.device_id, dev2.device_id);
+        assert_ne!(dev1.agreement_public_key, dev2.agreement_public_key);
+
+        let authorized = store
+            .list_authorized_recipient_devices(local_vault_id)
+            .await
+            .unwrap();
+        assert_eq!(authorized.len(), 2);
+
+        // 9. Restart persistence: reopen HostStore from disk and verify enrollment & devices persist
+        drop(store);
+        let mut reopened = HostStore::open(db_file.to_str().unwrap()).await.unwrap();
+        let persisted_member = reopened
+            .get_team_member("mem-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(persisted_member.is_enrolled());
+        assert_eq!(
+            reopened
+                .list_authorized_recipient_devices(local_vault_id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // 10. Revoke device 1 -> device 2 remains active and member stays enrolled
+        reopened
+            .revoke_device_with_server(
+                local_vault_id,
+                "mem-alice",
+                Uuid::parse_str(&dev1.device_id).unwrap(),
+                &auth_client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .list_authorized_recipient_devices(local_vault_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(reopened
+            .get_team_member("mem-alice")
+            .await
+            .unwrap()
+            .unwrap()
+            .is_enrolled());
+
+        // 11. Revoke device 2 -> member transitions to DeviceRevoked & 0 authorized devices
+        reopened
+            .revoke_device_with_server(
+                local_vault_id,
+                "mem-alice",
+                Uuid::parse_str(&dev2.device_id).unwrap(),
+                &auth_client,
+            )
+            .await
+            .unwrap();
+        let after_revoke = reopened
+            .get_team_member("mem-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_revoke.enrollment_status,
+            EnrollmentStatus::DeviceRevoked
+        );
+        assert!(!after_revoke.is_enrolled());
+        assert!(reopened
+            .list_authorized_recipient_devices(local_vault_id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // 12. Migrate an existing legacy member preserving SSH key and upgrading to DeviceEnrolled
+        let legacy_ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILegacyMemberKey";
+        let legacy_member = TeamMember {
+            id: "mem-legacy".into(),
+            vault_id: local_vault_id.into(),
+            user_id: user_id.to_string(),
+            display_name: "Legacy Alice".into(),
+            public_key: legacy_ssh.into(),
+            agreement_public_key: None,
+            enrollment_status: EnrollmentStatus::LegacyRequiresMigration,
+            role: TeamRole::Owner,
+            enrolled_at: "900".into(),
+            invited_by: "owner".into(),
+            revoked: false,
+            revoked_at: None,
+        };
+        assert_eq!(
+            legacy_member.enrollment_label(),
+            "Legacy member (migration required)"
+        );
+        reopened.add_team_member(&legacy_member).await.unwrap();
+
+        let migrated_dev = reopened
+            .enroll_additional_device_for_member(
+                "conn-1",
+                local_vault_id,
+                "mem-legacy",
+                "Migrated Device",
+                &mut auth_client,
+                &cred_store,
+            )
+            .await
+            .unwrap();
+        let migrated_member = reopened
+            .get_team_member("mem-legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated_member.public_key, legacy_ssh);
+        assert_eq!(migrated_member.role, TeamRole::Owner);
+        assert!(migrated_member.is_enrolled());
+        assert_eq!(
+            migrated_member.agreement_public_key.as_deref(),
+            Some(migrated_dev.agreement_public_key.as_str())
+        );
+
+        let _ = std::fs::remove_file(&db_file);
     }
 }

@@ -127,6 +127,102 @@ impl FromStr for TeamRole {
     }
 }
 
+/// Explicit authenticated device/invitation enrollment state for a team member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EnrollmentStatus {
+    InvitationPending,
+    InvitationAccepted,
+    DeviceEnrollmentPending,
+    DeviceEnrolled,
+    DeviceAuthorizationFailed,
+    DeviceRevoked,
+    #[default]
+    LegacyRequiresMigration,
+}
+
+impl EnrollmentStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvitationPending => "invitation_pending",
+            Self::InvitationAccepted => "invitation_accepted",
+            Self::DeviceEnrollmentPending => "device_enrollment_pending",
+            Self::DeviceEnrolled => "device_enrolled",
+            Self::DeviceAuthorizationFailed => "device_authorization_failed",
+            Self::DeviceRevoked => "device_revoked",
+            Self::LegacyRequiresMigration => "legacy_requires_migration",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::InvitationPending => "Invitation pending",
+            Self::InvitationAccepted => "Invitation accepted",
+            Self::DeviceEnrollmentPending => "Device enrollment pending",
+            Self::DeviceEnrolled => "Enrolled",
+            Self::DeviceAuthorizationFailed => "Device authorization failed",
+            Self::DeviceRevoked => "Device revoked",
+            Self::LegacyRequiresMigration => "Legacy member (migration required)",
+        }
+    }
+}
+
+impl fmt::Display for EnrollmentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EnrollmentStatus {
+    type Err = CollaborationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "invitation_pending" => Ok(Self::InvitationPending),
+            "invitation_accepted" => Ok(Self::InvitationAccepted),
+            "device_enrollment_pending" => Ok(Self::DeviceEnrollmentPending),
+            "device_enrolled" => Ok(Self::DeviceEnrolled),
+            "device_authorization_failed" => Ok(Self::DeviceAuthorizationFailed),
+            "device_revoked" => Ok(Self::DeviceRevoked),
+            "legacy_requires_migration" => Ok(Self::LegacyRequiresMigration),
+            other => Err(CollaborationError::InvalidAction(format!(
+                "unknown enrollment status: {other}"
+            ))),
+        }
+    }
+}
+
+/// An authenticated device enrolled for a team member/user, with independent key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrolledDevice {
+    pub device_id: String,
+    pub vault_id: String,
+    pub user_id: String,
+    pub device_name: String,
+    pub signing_public_key: String,
+    pub agreement_public_key: String,
+    #[serde(default)]
+    pub signing_key_ref: Option<String>,
+    #[serde(default)]
+    pub agreement_key_ref: Option<String>,
+    pub enrolled_at: String,
+    pub revoked: bool,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub verified: bool,
+}
+
+/// Service contract for Issue 3 (epoch-key encryption): an authenticated, active, non-revoked
+/// recipient device belonging to an active team member, with a validated 32-byte X25519 key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizedRecipientDevice {
+    pub member_id: String,
+    pub user_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub agreement_public_key: String,
+}
+
 /// A team collaborator enrolled in a shared vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamMember {
@@ -137,6 +233,8 @@ pub struct TeamMember {
     pub public_key: String,
     #[serde(default)]
     pub agreement_public_key: Option<String>,
+    #[serde(default)]
+    pub enrollment_status: EnrollmentStatus,
     pub role: TeamRole,
     pub enrolled_at: String,
     pub invited_by: String,
@@ -145,15 +243,28 @@ pub struct TeamMember {
 }
 
 impl TeamMember {
-    /// Legacy member rows do not attest ownership of a recipient device.
+    /// Returns the explicit enrollment status label for UI presentation.
+    /// Never reports "Enrolled" unless authenticated device enrollment succeeded.
     pub fn enrollment_label(&self) -> &'static str {
         if self.revoked {
             "Revoked"
-        } else if self.agreement_public_key.is_none() {
-            "Pending device enrollment"
+        } else if self.enrollment_status == EnrollmentStatus::DeviceEnrolled
+            && self.agreement_public_key.is_some()
+        {
+            "Enrolled"
+        } else if self.enrollment_status == EnrollmentStatus::DeviceEnrolled {
+            "Device enrollment pending"
         } else {
-            "Device ownership unverified"
+            self.enrollment_status.label()
         }
+    }
+
+    /// Returns true only when the member is active, authenticated enrollment is complete,
+    /// and a valid agreement key is bound.
+    pub fn is_enrolled(&self) -> bool {
+        !self.revoked
+            && self.enrollment_status == EnrollmentStatus::DeviceEnrolled
+            && self.agreement_public_key.is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -174,6 +285,7 @@ impl TeamMember {
             display_name: display_name.into(),
             public_key: public_key.into(),
             agreement_public_key: None,
+            enrollment_status: EnrollmentStatus::InvitationPending,
             role,
             enrolled_at: enrolled_at.into(),
             invited_by: invited_by.into(),
@@ -185,6 +297,12 @@ impl TeamMember {
     /// Sets the device key-agreement public key (base64-encoded 32-byte X25519) for wrapping vault DEKs.
     pub fn with_agreement_key(mut self, key: impl Into<String>) -> Self {
         self.agreement_public_key = Some(key.into());
+        self
+    }
+
+    /// Sets the explicit enrollment status for this member.
+    pub fn with_enrollment_status(mut self, status: EnrollmentStatus) -> Self {
+        self.enrollment_status = status;
         self
     }
 
