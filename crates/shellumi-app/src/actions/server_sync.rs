@@ -784,10 +784,24 @@ impl Shellumi {
     }
 
     /// Revokes an enrolled device with the server and reconciles vault authorization.
-    pub(crate) fn revoke_member_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn revoke_member_device(
+        &mut self,
+        member_id: String,
+        device_id: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.team_enrollment_busy {
             return;
         }
+        let device_uuid = match uuid::Uuid::parse_str(&device_id) {
+            Ok(u) => u,
+            Err(e) => {
+                self.team_enrollment_error =
+                    Some(format!("Invalid device UUID '{device_id}': {e}"));
+                cx.notify();
+                return;
+            }
+        };
         let Some(reg_path) = self.registry_db_path() else {
             return;
         };
@@ -836,19 +850,18 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 vault_store
-                    .revoke_device_with_server(
-                        &active_vault_id,
-                        &device_id,
-                        binding.remote_vault_id,
-                        &client,
-                    )
+                    .revoke_device_with_server(&active_vault_id, &member_id, device_uuid, &client)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let members = vault_store
+                    .list_team_members(&active_vault_id)
                     .await
                     .map_err(|e| e.to_string())?;
                 let devices = vault_store
                     .list_enrolled_devices_for_vault(&active_vault_id)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<_, String>(devices)
+                Ok::<_, String>((members, devices))
             })
         });
 
@@ -862,10 +875,12 @@ impl Shellumi {
                     return;
                 }
                 match result {
-                    Ok(devices) => {
+                    Ok((members, devices)) => {
+                        app.team_members = members;
                         app.enrolled_devices = devices;
+                        app.pending_device_revoke = None;
                         app.team_enrollment_error = None;
-                        app.desktop.message = Some("Device revoked.".into());
+                        app.desktop.message = Some("Device revoked globally on server.".into());
                     }
                     Err(e) => {
                         app.team_enrollment_error = Some(format!("Device revocation failed: {e}"));

@@ -329,7 +329,9 @@ impl Shellumi {
                 let dev_id_replace = dev.device_id.clone();
                 let dev_id_revoke = dev.device_id.clone();
                 let dev_name = dev.device_name.clone();
+                let dev_name_revoke = dev.device_name.clone();
                 let mem_for_replace = mem_id.clone();
+                let mem_for_revoke = mem_id.clone();
                 let mut row = div()
                     .flex()
                     .items_center()
@@ -393,7 +395,12 @@ impl Shellumi {
                                 )
                                 .on_click(cx.listener(
                                     move |app, _, _, cx| {
-                                        app.revoke_member_device(dev_id_revoke.clone(), cx);
+                                        app.pending_device_revoke = Some((
+                                            mem_for_revoke.clone(),
+                                            dev_id_revoke.clone(),
+                                            dev_name_revoke.clone(),
+                                        ));
+                                        cx.notify();
                                     },
                                 )),
                             ),
@@ -403,6 +410,56 @@ impl Shellumi {
             }
         }
         body = body.child(simple_section("Enrolled Devices", dev_list));
+
+        if let Some((confirm_mem_id, confirm_dev_id, confirm_dev_name)) =
+            self.pending_device_revoke.clone()
+        {
+            body = body.child(simple_section(
+                "Confirm Device Revocation",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(danger())
+                            .child(format!(
+                                "Revoke device '{confirm_dev_name}' ({confirm_dev_id})? This globally revokes the device on Shellumi Server and removes its access across vaults."
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                AppButton::new(
+                                    "confirm-device-revoke-btn",
+                                    "Confirm Revoke",
+                                    ButtonVariant::Danger,
+                                )
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.revoke_member_device(
+                                        confirm_mem_id.clone(),
+                                        confirm_dev_id.clone(),
+                                        cx,
+                                    );
+                                })),
+                            )
+                            .child(
+                                AppButton::new(
+                                    "cancel-device-revoke-btn",
+                                    "Cancel",
+                                    ButtonVariant::Secondary,
+                                )
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.pending_device_revoke = None;
+                                    cx.notify();
+                                })),
+                            ),
+                    ),
+            ));
+        }
 
         InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
     }

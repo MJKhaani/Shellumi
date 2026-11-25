@@ -409,8 +409,9 @@ impl Shellumi {
                     modal.is_loading = false;
                     match result {
                         Ok(()) => {
-                            modal.status_message =
-                                Some(format!("Invited member '{display_name}' as {role}."));
+                            modal.status_message = Some(format!(
+                                "Saved local collaborator '{display_name}' ({role}). Use Team Inspector on a remote-bound vault to send a server invitation."
+                            ));
                             modal
                                 .invite_user_id
                                 .update(cx, |input, cx| input.set_value("", cx));

@@ -1059,8 +1059,8 @@ impl HostStore {
         let members = client.list_members(binding.remote_vault_id).map_err(|e| {
             StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
         })?;
-        if !members.members.is_empty()
-            && !members
+        if members.members.is_empty()
+            || !members
                 .members
                 .iter()
                 .any(|m| m.user_id.to_string() == member.user_id)
@@ -1211,6 +1211,42 @@ impl HostStore {
         device_id: Uuid,
         client: &ShellumiServerClient<T>,
     ) -> Result<(), StorageError> {
+        let member = self.get_team_member(member_id).await?.ok_or_else(|| {
+            StorageError::ItemNotFound(format!("Team member '{member_id}' not found"))
+        })?;
+        if member.vault_id != local_vault_id {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(format!(
+                    "Team member '{member_id}' belongs to vault '{}', not '{local_vault_id}'",
+                    member.vault_id
+                )),
+            ));
+        }
+        let me = client.me().map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        if member.user_id != me.user_id.to_string() {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(format!(
+                    "Authenticated user '{}' is not authorized to revoke member '{}' device",
+                    me.user_id, member.user_id
+                )),
+            ));
+        }
+        let local_devs = self
+            .list_enrolled_devices_for_user(local_vault_id, &member.user_id)
+            .await?;
+        if !local_devs
+            .iter()
+            .any(|d| d.device_id == device_id.to_string())
+        {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(format!(
+                    "Device '{device_id}' is not authorized for member '{member_id}' in vault '{local_vault_id}'"
+                )),
+            ));
+        }
+
         client.revoke_device(device_id).map_err(|e| {
             StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
         })?;
@@ -1219,19 +1255,13 @@ impl HostStore {
             .revoke_enrolled_device(&device_id.to_string(), &now_str)
             .await?;
 
-        if let Some(member) = self.get_team_member(member_id).await? {
-            let remaining = self
-                .list_enrolled_devices_for_user(local_vault_id, &member.user_id)
+        let remaining = self
+            .list_enrolled_devices_for_user(local_vault_id, &member.user_id)
+            .await?;
+        let has_active = remaining.iter().any(|d| !d.revoked && d.verified);
+        if !has_active {
+            self.update_team_member_enrollment(member_id, EnrollmentStatus::DeviceRevoked, None)
                 .await?;
-            let has_active = remaining.iter().any(|d| !d.revoked && d.verified);
-            if !has_active {
-                self.update_team_member_enrollment(
-                    member_id,
-                    EnrollmentStatus::DeviceRevoked,
-                    None,
-                )
-                .await?;
-            }
         }
         Ok(())
     }
@@ -1443,8 +1473,7 @@ impl HostStore {
                         shellumi_core::CollaborationError::Unauthorized(msg),
                     ));
                 };
-                let Some(secret_str) = credentials
-                    .get_secret("org.shellumi.device.x25519", key_ref)
+                let Some(secret_str) = shellumi_core::resolve_secret_from_ref(credentials, key_ref)
                     .ok()
                     .flatten()
                 else {
@@ -1515,6 +1544,27 @@ impl HostStore {
                     "Manual intervention required: cannot safely resume stage '{}' without registered device ID",
                     op.stage
                 );
+                self.save_enrollment_operation_progress(
+                    &op.operation_id,
+                    local_vault_id,
+                    &op.user_id,
+                    &op.member_id,
+                    &op.stage,
+                    None,
+                    Some(&msg),
+                    &now_str,
+                )
+                .await?;
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(msg),
+                ));
+            }
+            if recipient_devices
+                .devices
+                .iter()
+                .any(|d| d.user_id == me.user_id)
+            {
+                let msg = "Manual intervention required: server already has registered device(s) for this user, refusing to generate a duplicate identity during recovery".to_string();
                 self.save_enrollment_operation_progress(
                     &op.operation_id,
                     local_vault_id,
@@ -3833,6 +3883,34 @@ mod tests {
                     .len(),
                 1
             );
+            let ambiguous_err = store
+                .recover_incomplete_enrollments(
+                    "conn-1",
+                    &vault_a.to_string(),
+                    vault_a,
+                    &mut alice_client,
+                    &cred_store,
+                )
+                .await
+                .unwrap_err();
+            assert!(ambiguous_err
+                .to_string()
+                .contains("refusing to generate a duplicate identity"));
+
+            // Now record the known registered device_id -> recovery verifies key correspondence and completes
+            store
+                .save_enrollment_operation_progress(
+                    "op-interrupted-1",
+                    &vault_a.to_string(),
+                    &alice_id.to_string(),
+                    "mem-alice-a",
+                    "DeviceRegistered",
+                    Some(&alice_dev.device_id),
+                    None,
+                    "1007",
+                )
+                .await
+                .unwrap();
             let recovered_count = store
                 .recover_incomplete_enrollments(
                     "conn-1",
