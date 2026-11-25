@@ -754,27 +754,11 @@ impl HostStore {
             ));
         }
 
-        // 1. Verify authenticated user identity from server and local vault connection binding
+        // 1. Verify authenticated user identity from server and validate existing local member BEFORE accepting
         let me = client.me().map_err(|e| {
             StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
         })?;
 
-        // 2. Accept invitation on server
-        let accept_resp = client
-            .accept_invite(&AcceptInviteRequest {
-                invite_token: invite_token.to_string(),
-            })
-            .map_err(|e| {
-                StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
-            })?;
-
-        let role = accept_resp.role.parse::<TeamRole>().map_err(|_| {
-            StorageError::InvalidCollaboration(shellumi_core::CollaborationError::Unauthorized(
-                format!("Server returned invalid team role '{}'", accept_resp.role),
-            ))
-        })?;
-
-        // Validate existing member identity BEFORE enrolling device
         let existing = self.get_team_member(member_id).await?;
         if let Some(ref m) = existing {
             if m.vault_id != local_vault_id {
@@ -801,6 +785,32 @@ impl HostStore {
                 ));
             }
         }
+
+        // 2. Accept invitation on server
+        let accept_resp = client
+            .accept_invite(&AcceptInviteRequest {
+                invite_token: invite_token.to_string(),
+            })
+            .map_err(|e| {
+                StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+            })?;
+
+        if let Some(sv) = self.get_shared_vault(local_vault_id).await? {
+            if Uuid::parse_str(&sv.id).is_ok() && sv.id != accept_resp.vault_id.to_string() {
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(format!(
+                        "Accepted invitation vault '{}' does not match local shared vault '{}'",
+                        accept_resp.vault_id, sv.id
+                    )),
+                ));
+            }
+        }
+
+        let role = accept_resp.role.parse::<TeamRole>().map_err(|_| {
+            StorageError::InvalidCollaboration(shellumi_core::CollaborationError::Unauthorized(
+                format!("Server returned invalid team role '{}'", accept_resp.role),
+            ))
+        })?;
 
         // 3. Enroll device locally and register with server challenge-response
         let device = self
@@ -3148,5 +3158,207 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_file);
+        // --- Additional Issue 2 Security Checks (Invitation Binding & Per-Vault Authorization) ---
+        {
+            let db_file = std::env::temp_dir()
+                .join(format!("shellumi-issue2-sec-{}.db", uuid::Uuid::new_v4()));
+            let _ = std::fs::remove_file(&db_file);
+            let mut store = HostStore::open_with_key(db_file.to_str().unwrap(), None)
+                .await
+                .unwrap();
+            let cred_store = shellumi_core::EphemeralCredentialStore::new();
+            let transport = transport.clone();
+
+            let alice_id = transport.user_id;
+            let bob_id = Uuid::new_v4();
+            let vault_a = transport.vault_id;
+            let vault_b = Uuid::new_v4();
+
+            store
+                .create_shared_vault(
+                    &shellumi_core::SharedVault::new(
+                        vault_a.to_string(),
+                        "Vault A",
+                        Some("desc".into()),
+                        "1000",
+                        "https://server.test",
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            store
+                .create_shared_vault(
+                    &shellumi_core::SharedVault::new(
+                        vault_b.to_string(),
+                        "Vault B",
+                        Some("desc".into()),
+                        "1000",
+                        "https://server.test",
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderTestKeyForUnitTestsOnly";
+
+            let other_vault_mem = TeamMember::new(
+                "mem-other-vault",
+                vault_b.to_string(),
+                alice_id.to_string(),
+                "Alice",
+                ssh_key,
+                TeamRole::Editor,
+                "1000",
+                "owner",
+            );
+            store.add_team_member(&other_vault_mem).await.unwrap();
+
+            let mut alice_client = ShellumiServerClient::with_transport(
+                "https://server.test",
+                SharedTransport(transport.clone()),
+            );
+            alice_client.set_token("alice-tok");
+
+            // 1. Existing member belonging to another vault must be rejected BEFORE accept_invite
+            let err = store
+                .accept_invitation_and_enroll_device(
+                    "conn-1",
+                    &vault_a.to_string(),
+                    "mem-other-vault",
+                    "Alice",
+                    ssh_key,
+                    "tok-valid-123",
+                    "Alice Mac",
+                    &mut alice_client,
+                    &cred_store,
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("belongs to vault"));
+
+            // 2. Existing member belonging to another user must be rejected
+            let bob_mem = TeamMember::new(
+                "mem-bob",
+                vault_a.to_string(),
+                bob_id.to_string(),
+                "Bob",
+                ssh_key,
+                TeamRole::Editor,
+                "1000",
+                "owner",
+            );
+            store.add_team_member(&bob_mem).await.unwrap();
+            let err = store
+                .accept_invitation_and_enroll_device(
+                    "conn-1",
+                    &vault_a.to_string(),
+                    "mem-bob",
+                    "Alice",
+                    ssh_key,
+                    "tok-valid-123",
+                    "Alice Mac",
+                    &mut alice_client,
+                    &cred_store,
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("belongs to user"));
+
+            // 3. Valid invitation for vault A succeeds
+            let (alice_mem, alice_dev) = store
+                .accept_invitation_and_enroll_device(
+                    "conn-1",
+                    &vault_a.to_string(),
+                    "mem-alice-a",
+                    "Alice",
+                    ssh_key,
+                    "tok-valid-123",
+                    "Alice Mac",
+                    &mut alice_client,
+                    &cred_store,
+                )
+                .await
+                .unwrap();
+            assert!(alice_mem.is_enrolled());
+            assert!(alice_dev.agreement_key_ref.is_some());
+
+            // 4. authorize_device_for_vault: cross-user, multi-vault, per-vault revocation, reactivation rejection, global revocation
+            let cross_user_err = store
+                .authorize_device_for_vault(
+                    &vault_b.to_string(),
+                    &alice_dev.device_id,
+                    &bob_id.to_string(),
+                    "1001",
+                )
+                .await
+                .unwrap_err();
+            assert!(cross_user_err.to_string().contains("belongs to user"));
+
+            store
+                .authorize_device_for_vault(
+                    &vault_b.to_string(),
+                    &alice_dev.device_id,
+                    &alice_id.to_string(),
+                    "1002",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .list_enrolled_devices_for_user(&vault_a.to_string(), &alice_id.to_string())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                store
+                    .list_enrolled_devices_for_user(&vault_b.to_string(), &alice_id.to_string())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            assert!(store
+                .revoke_device_for_vault(&vault_a.to_string(), &alice_dev.device_id, "1003")
+                .await
+                .unwrap());
+            let devs_a = store
+                .list_enrolled_devices_for_user(&vault_a.to_string(), &alice_id.to_string())
+                .await
+                .unwrap();
+            let devs_b = store
+                .list_enrolled_devices_for_user(&vault_b.to_string(), &alice_id.to_string())
+                .await
+                .unwrap();
+            assert!(devs_a[0].revoked);
+            assert!(!devs_b[0].revoked);
+
+            let reactivate_err = store
+                .authorize_device_for_vault(
+                    &vault_a.to_string(),
+                    &alice_dev.device_id,
+                    &alice_id.to_string(),
+                    "1004",
+                )
+                .await
+                .unwrap_err();
+            assert!(reactivate_err.to_string().contains("cannot be reactivated"));
+
+            assert!(store
+                .revoke_enrolled_device(&alice_dev.device_id, "1005")
+                .await
+                .unwrap());
+            let devs_b_after = store
+                .list_enrolled_devices_for_user(&vault_b.to_string(), &alice_id.to_string())
+                .await
+                .unwrap();
+            assert!(devs_b_after[0].revoked);
+
+            let _ = std::fs::remove_file(&db_file);
+        }
     }
 }
