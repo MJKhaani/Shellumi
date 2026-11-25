@@ -227,10 +227,15 @@ pub(crate) struct VaultQuarantineRecord {
 pub(crate) enum PasswordRotationStage {
     #[serde(alias = "Initiated")]
     Prepared,
+    ManifestWritePending,
     ManifestSaved,
+    TargetEnvelopeWritePending,
     TargetDbUpdated,
+    RegistryWritePending,
     RegistryUpdated,
+    CredentialStoreWritePending,
     CredentialStoreUpdated,
+    CommitVerificationPending,
     Verified,
     RollingBack,
     Completed,
@@ -248,6 +253,10 @@ pub(crate) struct PasswordRotationJournal {
     pub new_primary_envelope_json: Option<String>,
     pub original_registry_envelope: Option<String>,
     pub original_target_db_envelope: Option<String>,
+    #[serde(default)]
+    pub original_registry_state: Option<shellumi_storage::VaultEnvelopeState>,
+    #[serde(default)]
+    pub original_target_db_state: Option<shellumi_storage::VaultEnvelopeState>,
     #[serde(default)]
     pub target_db_path: Option<String>,
     #[serde(default)]

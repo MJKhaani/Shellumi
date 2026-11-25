@@ -22,10 +22,18 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
+
+/// Exact state of a vault's `recovery_envelope` column in `vault_contexts`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VaultEnvelopeState {
+    RowMissing,
+    Null,
+    Present(String),
+}
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -981,6 +989,19 @@ impl HostStore {
             )
             .await?;
             tx.execute(
+                "CREATE TABLE IF NOT EXISTS vault_device_authorizations (
+                    vault_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    authorized_at TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT,
+                    PRIMARY KEY (vault_id, device_id)
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
                 "CREATE TABLE sharing_audit_log (
                     id TEXT PRIMARY KEY,
                     vault_id TEXT NOT NULL REFERENCES shared_vaults(id) ON DELETE CASCADE,
@@ -1636,6 +1657,19 @@ impl HostStore {
                         revoked INTEGER NOT NULL DEFAULT 0,
                         revoked_at TEXT,
                         verified INTEGER NOT NULL DEFAULT 0
+                    )",
+                    (),
+                )
+                .await?;
+                tx.execute(
+                    "CREATE TABLE IF NOT EXISTS vault_device_authorizations (
+                        vault_id TEXT NOT NULL,
+                        device_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        authorized_at TEXT NOT NULL,
+                        revoked INTEGER NOT NULL DEFAULT 0,
+                        revoked_at TEXT,
+                        PRIMARY KEY (vault_id, device_id)
                     )",
                     (),
                 )
@@ -2416,7 +2450,42 @@ impl HostStore {
                 (),
             )
             .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS vault_device_authorizations (
+                    vault_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    authorized_at TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT,
+                    PRIMARY KEY (vault_id, device_id)
+                )",
+                (),
+            )
+            .await?;
             tx.execute("PRAGMA user_version = 25", ()).await?;
+        }
+        if version < 26 {
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS vault_device_authorizations (
+                    vault_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    authorized_at TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    revoked_at TEXT,
+                    PRIMARY KEY (vault_id, device_id)
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "INSERT OR IGNORE INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
+                 SELECT vault_id, device_id, user_id, enrolled_at, revoked, revoked_at FROM enrolled_devices",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 26", ()).await?;
         }
         tx.commit().await?;
         tracing::debug!(
@@ -2592,6 +2661,21 @@ impl HostStore {
         Ok(rows > 0)
     }
 
+    /// Clears a recovery envelope (sets it to NULL) for a vault context.
+    pub async fn clear_vault_recovery_envelope(
+        &mut self,
+        vault_id: &str,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_contexts SET recovery_envelope = NULL WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
     /// Retrieves a recovery envelope for a vault context.
     pub async fn get_vault_recovery_envelope(
         &self,
@@ -2609,6 +2693,29 @@ impl HostStore {
             Ok(env)
         } else {
             Ok(None)
+        }
+    }
+
+    /// Retrieves the exact recovery envelope state (row missing, NULL, or present) for a vault context.
+    pub async fn get_vault_recovery_envelope_state(
+        &self,
+        vault_id: &str,
+    ) -> Result<VaultEnvelopeState, StorageError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT recovery_envelope FROM vault_contexts WHERE id = ?1",
+                (vault_id,),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let env: Option<String> = row.get(0)?;
+            Ok(match env {
+                Some(s) => VaultEnvelopeState::Present(s),
+                None => VaultEnvelopeState::Null,
+            })
+        } else {
+            Ok(VaultEnvelopeState::RowMissing)
         }
     }
 
@@ -5171,10 +5278,10 @@ impl HostStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(device_id) DO UPDATE SET
                     device_name = excluded.device_name,
-                    signing_public_key = excluded.signing_public_key,
+                    signing_public_key = CASE WHEN excluded.signing_public_key != '' THEN excluded.signing_public_key ELSE enrolled_devices.signing_public_key END,
                     agreement_public_key = excluded.agreement_public_key,
-                    signing_key_ref = excluded.signing_key_ref,
-                    agreement_key_ref = excluded.agreement_key_ref,
+                    signing_key_ref = COALESCE(excluded.signing_key_ref, enrolled_devices.signing_key_ref),
+                    agreement_key_ref = COALESCE(excluded.agreement_key_ref, enrolled_devices.agreement_key_ref),
                     revoked = excluded.revoked,
                     revoked_at = excluded.revoked_at,
                     verified = excluded.verified",
@@ -5194,10 +5301,72 @@ impl HostStore {
                 ),
             )
             .await?;
+        self.connection
+            .execute(
+                "INSERT INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(vault_id, device_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    revoked = excluded.revoked,
+                    revoked_at = excluded.revoked_at",
+                (
+                    device.vault_id.clone(),
+                    device.device_id.clone(),
+                    device.user_id.clone(),
+                    device.enrolled_at.clone(),
+                    if device.revoked { 1i64 } else { 0i64 },
+                    device.revoked_at.clone(),
+                ),
+            )
+            .await?;
         Ok(())
     }
 
-    /// Lists all enrolled devices for a vault.
+    /// Authorizes an existing enrolled device for an additional vault.
+    pub async fn authorize_device_for_vault(
+        &mut self,
+        vault_id: &str,
+        device_id: &str,
+        user_id: &str,
+        authorized_at: &str,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO vault_device_authorizations (vault_id, device_id, user_id, authorized_at, revoked, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, NULL)
+                 ON CONFLICT(vault_id, device_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    revoked = 0,
+                    revoked_at = NULL",
+                (
+                    vault_id.to_string(),
+                    device_id.to_string(),
+                    user_id.to_string(),
+                    authorized_at.to_string(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Revokes a device's authorization for a specific vault without revoking it globally.
+    pub async fn revoke_device_for_vault(
+        &mut self,
+        vault_id: &str,
+        device_id: &str,
+        revoked_at: &str,
+    ) -> Result<bool, StorageError> {
+        let rows = self
+            .connection
+            .execute(
+                "UPDATE vault_device_authorizations SET revoked = 1, revoked_at = ?1 WHERE vault_id = ?2 AND device_id = ?3",
+                (revoked_at.to_string(), vault_id.to_string(), device_id.to_string()),
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Lists all enrolled devices authorized for a vault.
     pub async fn list_enrolled_devices_for_vault(
         &self,
         vault_id: &str,
@@ -5205,8 +5374,14 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT device_id, vault_id, user_id, device_name, signing_public_key, agreement_public_key, signing_key_ref, agreement_key_ref, enrolled_at, revoked, revoked_at, verified
-                 FROM enrolled_devices WHERE vault_id = ?1 ORDER BY enrolled_at ASC",
+                "SELECT d.device_id, a.vault_id, d.user_id, d.device_name, d.signing_public_key, d.agreement_public_key, d.signing_key_ref, d.agreement_key_ref, d.enrolled_at,
+                        CASE WHEN d.revoked = 1 OR a.revoked = 1 THEN 1 ELSE 0 END AS effective_revoked,
+                        COALESCE(a.revoked_at, d.revoked_at),
+                        d.verified
+                 FROM enrolled_devices d
+                 INNER JOIN vault_device_authorizations a ON a.device_id = d.device_id
+                 WHERE a.vault_id = ?1
+                 ORDER BY d.enrolled_at ASC",
                 (vault_id,),
             )
             .await?;

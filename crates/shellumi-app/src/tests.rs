@@ -3460,6 +3460,8 @@ fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
         new_primary_envelope_json: None,
         original_registry_envelope: None,
         original_target_db_envelope: None,
+        original_registry_state: None,
+        original_target_db_state: None,
         target_db_path: None,
         registry_db_path: None,
         manifest_path: None,

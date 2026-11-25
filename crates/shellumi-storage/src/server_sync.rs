@@ -754,7 +754,7 @@ impl HostStore {
             ));
         }
 
-        // 1. Verify authenticated user identity from server
+        // 1. Verify authenticated user identity from server and local vault connection binding
         let me = client.me().map_err(|e| {
             StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
         })?;
@@ -768,10 +768,39 @@ impl HostStore {
                 StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
             })?;
 
-        let role = accept_resp
-            .role
-            .parse::<TeamRole>()
-            .unwrap_or(TeamRole::Viewer);
+        let role = accept_resp.role.parse::<TeamRole>().map_err(|_| {
+            StorageError::InvalidCollaboration(shellumi_core::CollaborationError::Unauthorized(
+                format!("Server returned invalid team role '{}'", accept_resp.role),
+            ))
+        })?;
+
+        // Validate existing member identity BEFORE enrolling device
+        let existing = self.get_team_member(member_id).await?;
+        if let Some(ref m) = existing {
+            if m.vault_id != local_vault_id {
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(format!(
+                        "Member '{member_id}' belongs to vault '{}', not '{local_vault_id}'",
+                        m.vault_id
+                    )),
+                ));
+            }
+            if m.user_id != me.user_id.to_string() {
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(format!(
+                        "Member '{member_id}' belongs to user '{}', not authenticated user '{}'",
+                        m.user_id, me.user_id
+                    )),
+                ));
+            }
+            if m.revoked {
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(format!(
+                        "Member '{member_id}' is revoked and cannot enroll"
+                    )),
+                ));
+            }
+        }
 
         // 3. Enroll device locally and register with server challenge-response
         let device = self
@@ -974,7 +1003,8 @@ impl HostStore {
         let now_str = current_timestamp().to_string();
         let local_members = self.list_team_members(local_vault_id).await?;
 
-        // Persist authoritative server recipient devices
+        // Persist authoritative server recipient devices without overwriting local private-key refs
+        let existing_devices = self.list_enrolled_devices_for_vault(local_vault_id).await?;
         for rd in &recipient_devices.devices {
             if validate_x25519_agreement_public_key(&rd.agreement_public_key).is_err() {
                 tracing::warn!(
@@ -983,21 +1013,50 @@ impl HostStore {
                 );
                 continue;
             }
-            let dev = EnrolledDevice {
-                device_id: rd.device_id.to_string(),
-                vault_id: local_vault_id.to_string(),
-                user_id: rd.user_id.to_string(),
-                device_name: rd.device_name.clone(),
-                signing_public_key: String::new(),
-                agreement_public_key: rd.agreement_public_key.clone(),
-                signing_key_ref: None,
-                agreement_key_ref: None,
-                enrolled_at: now_str.clone(),
-                revoked: false,
-                revoked_at: None,
-                verified: true,
-            };
-            self.save_enrolled_device(&dev).await?;
+            let dev_id_str = rd.device_id.to_string();
+            if let Some(existing) = existing_devices.iter().find(|d| d.device_id == dev_id_str) {
+                if existing.revoked {
+                    continue;
+                }
+                if existing.agreement_public_key != rd.agreement_public_key {
+                    return Err(StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(format!(
+                            "Server reported unexpected X25519 key replacement for device '{dev_id_str}'"
+                        )),
+                    ));
+                }
+                let updated = EnrolledDevice {
+                    device_id: dev_id_str,
+                    vault_id: local_vault_id.to_string(),
+                    user_id: rd.user_id.to_string(),
+                    device_name: rd.device_name.clone(),
+                    signing_public_key: existing.signing_public_key.clone(),
+                    agreement_public_key: rd.agreement_public_key.clone(),
+                    signing_key_ref: existing.signing_key_ref.clone(),
+                    agreement_key_ref: existing.agreement_key_ref.clone(),
+                    enrolled_at: existing.enrolled_at.clone(),
+                    revoked: false,
+                    revoked_at: None,
+                    verified: true,
+                };
+                self.save_enrolled_device(&updated).await?;
+            } else {
+                let dev = EnrolledDevice {
+                    device_id: dev_id_str,
+                    vault_id: local_vault_id.to_string(),
+                    user_id: rd.user_id.to_string(),
+                    device_name: rd.device_name.clone(),
+                    signing_public_key: String::new(),
+                    agreement_public_key: rd.agreement_public_key.clone(),
+                    signing_key_ref: None,
+                    agreement_key_ref: None,
+                    enrolled_at: now_str.clone(),
+                    revoked: false,
+                    revoked_at: None,
+                    verified: true,
+                };
+                self.save_enrolled_device(&dev).await?;
+            }
         }
 
         // Mark local devices absent from server recipient list as revoked

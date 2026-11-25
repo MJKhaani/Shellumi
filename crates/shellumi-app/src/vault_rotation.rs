@@ -14,7 +14,7 @@ use crate::data_path::{
 use shellumi_core::{
     validate_vault_password, CredentialStore, VaultId, VaultKey, VaultKeyManager, VaultManifest,
 };
-use shellumi_storage::{HostStore, LEGACY_LOCAL_VAULT_ID};
+use shellumi_storage::{HostStore, VaultEnvelopeState, LEGACY_LOCAL_VAULT_ID};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -25,10 +25,11 @@ static ACTIVE_ROTATIONS: LazyLock<Mutex<HashSet<String>>> =
 
 struct RotationLockGuard {
     vault_id: String,
+    _file_lock: std::fs::File,
 }
 
 impl RotationLockGuard {
-    fn acquire(vault_id: &str) -> Result<Self, String> {
+    fn acquire(base_path: &Path, vault_id: &str) -> Result<Self, String> {
         let mut guard = ACTIVE_ROTATIONS
             .lock()
             .map_err(|_| "Password rotation lock poisoned".to_string())?;
@@ -37,9 +38,29 @@ impl RotationLockGuard {
                 "A password rotation is already in progress for vault '{vault_id}'."
             ));
         }
+
+        let manifest_dir = data_path::resolve_manifest_dir(base_path);
+        std::fs::create_dir_all(&manifest_dir)
+            .map_err(|e| format!("Failed to create manifest directory for rotation lock: {e}"))?;
+        let lock_path = manifest_dir.join(format!("{vault_id}.rotation.lock"));
+        reject_if_symlink(&lock_path)?;
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| format!("Failed to open rotation lock file: {e}"))?;
+        lock_file.try_lock().map_err(|e| {
+            format!(
+                "A password rotation is already in progress for vault '{vault_id}' (cross-process lock): {e}"
+            )
+        })?;
+
         guard.insert(vault_id.to_string());
         Ok(Self {
             vault_id: vault_id.to_string(),
+            _file_lock: lock_file,
         })
     }
 }
@@ -199,11 +220,11 @@ async fn write_db_envelope(
     Ok(())
 }
 
-async fn read_db_envelope(
+async fn read_db_envelope_state(
     db_path: &Path,
     db_key: Option<&VaultKey>,
     vault_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<VaultEnvelopeState, String> {
     let path_str = db_path
         .to_str()
         .ok_or_else(|| "Invalid UTF-8 database path".to_string())?;
@@ -211,14 +232,46 @@ async fn read_db_envelope(
         .await
         .map_err(|e| format!("Failed to open database {}: {e}", db_path.display()))?;
     store
-        .get_vault_recovery_envelope(vault_id)
+        .get_vault_recovery_envelope_state(vault_id)
         .await
         .map_err(|e| {
             format!(
-                "Failed to read recovery envelope from {}: {e}",
+                "Failed to read recovery envelope state from {}: {e}",
                 db_path.display()
             )
         })
+}
+
+async fn restore_db_envelope_state(
+    db_path: &Path,
+    db_key: Option<&VaultKey>,
+    vault_id: &str,
+    state: &VaultEnvelopeState,
+) -> Result<(), String> {
+    match state {
+        VaultEnvelopeState::Present(env) => {
+            write_db_envelope(db_path, db_key, vault_id, env, false).await
+        }
+        VaultEnvelopeState::Null => {
+            let path_str = db_path
+                .to_str()
+                .ok_or_else(|| "Invalid UTF-8 database path".to_string())?;
+            let mut store = HostStore::open_with_key(path_str, db_key)
+                .await
+                .map_err(|e| format!("Failed to open database {}: {e}", db_path.display()))?;
+            store
+                .clear_vault_recovery_envelope(vault_id)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to clear recovery envelope in {}: {e}",
+                        db_path.display()
+                    )
+                })?;
+            Ok(())
+        }
+        VaultEnvelopeState::RowMissing => Ok(()),
+    }
 }
 
 /// Executes a full transactional vault password rotation across manifest, target DB,
@@ -230,7 +283,7 @@ pub async fn rotate_vault_password(
         return Err(format!("Invalid vault ID '{}'.", req.vault_id));
     }
     let vid = VaultId::new(req.vault_id).map_err(|e| e.to_string())?;
-    let _lock = RotationLockGuard::acquire(req.vault_id)?;
+    let _lock = RotationLockGuard::acquire(req.base_path, req.vault_id)?;
 
     let journal_path = rotation_journal_path(req.base_path, req.vault_id);
     if journal_path.exists() {
@@ -295,14 +348,22 @@ pub async fn rotate_vault_password(
         req.default_vault_key
     };
 
-    let original_target_db_envelope = if !is_same_db {
-        read_db_envelope(&target_db_path, Some(&dek), req.vault_id).await?
+    let original_target_db_state = if !is_same_db {
+        read_db_envelope_state(&target_db_path, Some(&dek), req.vault_id).await?
     } else {
-        None
+        VaultEnvelopeState::RowMissing
+    };
+    let original_target_db_envelope = match &original_target_db_state {
+        VaultEnvelopeState::Present(s) => Some(s.clone()),
+        _ => None,
     };
 
-    let original_registry_envelope =
-        read_db_envelope(&registry_db_path, reg_key, req.vault_id).await?;
+    let original_registry_state =
+        read_db_envelope_state(&registry_db_path, reg_key, req.vault_id).await?;
+    let original_registry_envelope = match &original_registry_state {
+        VaultEnvelopeState::Present(s) => Some(s.clone()),
+        _ => None,
+    };
 
     // 4. Inspect OS credential store state
     let keychain_result = VaultKeyManager::retrieve_key(req.cred_store, &vid);
@@ -372,6 +433,8 @@ pub async fn rotate_vault_password(
         new_primary_envelope_json: Some(new_primary_envelope_json.clone()),
         original_registry_envelope: original_registry_envelope.clone(),
         original_target_db_envelope: original_target_db_envelope.clone(),
+        original_registry_state: Some(original_registry_state.clone()),
+        original_target_db_state: Some(original_target_db_state.clone()),
         target_db_path: Some(target_db_path.to_string_lossy().into_owned()),
         registry_db_path: Some(registry_db_path.to_string_lossy().into_owned()),
         manifest_path: Some(manifest_path.to_string_lossy().into_owned()),
@@ -381,19 +444,26 @@ pub async fn rotate_vault_password(
     };
     write_rotation_journal_file(&journal_path, &journal)?;
 
-    // 7. Execute staged writes; roll back on any failure
+    // 7. Execute staged writes with write-ahead intent; roll back on any failure
     let commit_res: Result<(), String> = (async {
         check_fault(req.fault_hook, RotationFaultPoint::AfterJournalCreate)?;
-        // Stage: ManifestSaved
+
+        // Stage: ManifestWritePending -> ManifestSaved
         check_fault(req.fault_hook, RotationFaultPoint::BeforeManifestUpdate)?;
+        journal.stage = PasswordRotationStage::ManifestWritePending;
+        journal.updated_at = now_secs();
+        write_rotation_journal_file(&journal_path, &journal)?;
         write_durable_file(&manifest_path, &staged_manifest_json)?;
         journal.stage = PasswordRotationStage::ManifestSaved;
         journal.updated_at = now_secs();
         write_rotation_journal_file(&journal_path, &journal)?;
         check_fault(req.fault_hook, RotationFaultPoint::AfterManifestUpdate)?;
 
-        // Stage: TargetDbUpdated
+        // Stage: TargetEnvelopeWritePending -> TargetDbUpdated
         check_fault(req.fault_hook, RotationFaultPoint::BeforeTargetDbUpdate)?;
+        journal.stage = PasswordRotationStage::TargetEnvelopeWritePending;
+        journal.updated_at = now_secs();
+        write_rotation_journal_file(&journal_path, &journal)?;
         if !is_same_db {
             write_db_envelope(
                 &target_db_path,
@@ -409,8 +479,11 @@ pub async fn rotate_vault_password(
         write_rotation_journal_file(&journal_path, &journal)?;
         check_fault(req.fault_hook, RotationFaultPoint::AfterTargetDbUpdate)?;
 
-        // Stage: RegistryUpdated
+        // Stage: RegistryWritePending -> RegistryUpdated
         check_fault(req.fault_hook, RotationFaultPoint::BeforeRegistryUpdate)?;
+        journal.stage = PasswordRotationStage::RegistryWritePending;
+        journal.updated_at = now_secs();
+        write_rotation_journal_file(&journal_path, &journal)?;
         write_db_envelope(
             &registry_db_path,
             reg_key,
@@ -424,11 +497,14 @@ pub async fn rotate_vault_password(
         write_rotation_journal_file(&journal_path, &journal)?;
         check_fault(req.fault_hook, RotationFaultPoint::AfterRegistryUpdate)?;
 
-        // Stage: CredentialStoreUpdated
+        // Stage: CredentialStoreWritePending -> CredentialStoreUpdated
         check_fault(
             req.fault_hook,
             RotationFaultPoint::BeforeCredentialStoreUpdate,
         )?;
+        journal.stage = PasswordRotationStage::CredentialStoreWritePending;
+        journal.updated_at = now_secs();
+        write_rotation_journal_file(&journal_path, &journal)?;
         if original_manifest.remember_in_keychain {
             VaultKeyManager::provision_key(req.cred_store, &vid, &dek)
                 .map_err(|e| format!("Failed to update OS credential store: {e}"))?;
@@ -450,8 +526,11 @@ pub async fn rotate_vault_password(
             RotationFaultPoint::AfterCredentialStoreUpdate,
         )?;
 
-        // Stage: Verified
+        // Stage: CommitVerificationPending -> Verified
         check_fault(req.fault_hook, RotationFaultPoint::BeforeCommitVerify)?;
+        journal.stage = PasswordRotationStage::CommitVerificationPending;
+        journal.updated_at = now_secs();
+        write_rotation_journal_file(&journal_path, &journal)?;
         let reloaded_manifest = VaultManifest::load_from_path(&manifest_path)
             .map_err(|e| format!("Commit verification failed loading manifest: {e}"))?;
         let reloaded_dek = reloaded_manifest
@@ -461,9 +540,9 @@ pub async fn rotate_vault_password(
             return Err("Commit verification failed: DEK mismatch on disk manifest.".into());
         }
         verify_encrypted_records_readable(&target_db_path, &dek).await?;
-        if original_registry_envelope.is_some() {
-            let reg_env = read_db_envelope(&registry_db_path, reg_key, req.vault_id).await?;
-            if reg_env.as_deref() != Some(new_primary_envelope_json.as_str()) {
+        if !matches!(original_registry_state, VaultEnvelopeState::RowMissing) {
+            let reg_env = read_db_envelope_state(&registry_db_path, reg_key, req.vault_id).await?;
+            if reg_env != VaultEnvelopeState::Present(new_primary_envelope_json.clone()) {
                 return Err(
                     "Commit verification failed: registry envelope does not match committed envelope."
                         .into(),
@@ -552,7 +631,10 @@ async fn rollback_rotation(
 
     // 2. Restore target DB envelope if modified/separate
     if target_db_path != registry_db_path {
-        if let Some(ref orig_target_env) = journal.original_target_db_envelope {
+        if let Some(ref orig_state) = journal.original_target_db_state {
+            restore_db_envelope_state(target_db_path, Some(dek), &journal.vault_id, orig_state)
+                .await?;
+        } else if let Some(ref orig_target_env) = journal.original_target_db_envelope {
             write_db_envelope(
                 target_db_path,
                 Some(dek),
@@ -565,7 +647,9 @@ async fn rollback_rotation(
     }
 
     // 3. Restore registry DB envelope
-    if let Some(ref orig_reg_env) = journal.original_registry_envelope {
+    if let Some(ref orig_state) = journal.original_registry_state {
+        restore_db_envelope_state(registry_db_path, reg_key, &journal.vault_id, orig_state).await?;
+    } else if let Some(ref orig_reg_env) = journal.original_registry_envelope {
         write_db_envelope(
             registry_db_path,
             reg_key,
@@ -697,101 +781,224 @@ pub async fn reconcile_pending_rotations_at_startup(
             }
         };
 
-        if !is_safe_vault_id(&journal.vault_id) {
+        if !is_safe_vault_id(&journal.vault_id) || journal.vault_id != inferred_vid {
             pending.push(PendingRotationRecovery {
                 vault_id: inferred_vid,
                 journal_path: jpath,
                 is_corrupted: true,
                 stage: Some(journal.stage),
                 reason: format!(
-                    "Unsafe vault ID '{}' in rotation journal.",
+                    "Unsafe or mismatched vault ID '{}' in rotation journal.",
                     journal.vault_id
                 ),
             });
             continue;
         }
 
-        let manifest_path = journal
-            .manifest_path
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_path::resolve_manifest_file(base_path, &journal.vault_id));
+        let (manifest_path, target_db_path, registry_db_path) =
+            match validate_and_resolve_journal_paths(base_path, &journal) {
+                Ok(paths) => paths,
+                Err(err) => {
+                    pending.push(PendingRotationRecovery {
+                        vault_id: journal.vault_id.clone(),
+                        journal_path: jpath,
+                        is_corrupted: true,
+                        stage: Some(journal.stage),
+                        reason: err,
+                    });
+                    continue;
+                }
+            };
+
+        let vid = VaultId::new(&journal.vault_id).map_err(|e| e.to_string())?;
+        let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).map_err(|e| e.to_string())?;
+        let vault_key = VaultKeyManager::retrieve_key(cred_store, &vid)
+            .ok()
+            .flatten();
+        let default_key = if journal.vault_id == LEGACY_LOCAL_VAULT_ID {
+            vault_key.clone()
+        } else {
+            VaultKeyManager::retrieve_key(cred_store, &default_vid)
+                .ok()
+                .flatten()
+        };
 
         match journal.stage {
             PasswordRotationStage::Completed => {
-                if VaultManifest::load_from_path(&manifest_path).is_ok() {
-                    let _ = std::fs::remove_file(&jpath);
+                let mut completed_ok = false;
+                let mut fail_reason = String::new();
+                match VaultManifest::load_from_path(&manifest_path) {
+                    Ok(m) if m.vault_id == journal.vault_id => {
+                        let env_matches =
+                            journal
+                                .new_primary_envelope_json
+                                .as_deref()
+                                .is_none_or(|expected| {
+                                    serde_json::to_string(&m.primary_envelope).ok().as_deref()
+                                        == Some(expected)
+                                });
+                        if !env_matches {
+                            fail_reason = "Completed rotation journal manifest envelope mismatch."
+                                .to_string();
+                        } else if let Some(ref vkey) = vault_key {
+                            let is_same_db = target_db_path == registry_db_path;
+                            let reg_key = if is_same_db {
+                                Some(vkey)
+                            } else {
+                                default_key.as_ref()
+                            };
+                            if let Some(ref hist) = m.key_revision {
+                                if let Err(e) = hist.verify(&journal.vault_id, "key", vkey) {
+                                    fail_reason =
+                                        format!("Completed rotation key revision invalid: {e}");
+                                }
+                            }
+                            if fail_reason.is_empty() {
+                                if let Err(e) =
+                                    verify_encrypted_records_readable(&target_db_path, vkey).await
+                                {
+                                    fail_reason = e;
+                                } else if let Some(ref new_env_str) =
+                                    journal.new_primary_envelope_json
+                                {
+                                    if !is_same_db
+                                        && !matches!(
+                                            journal.original_target_db_state,
+                                            Some(VaultEnvelopeState::RowMissing)
+                                        )
+                                    {
+                                        match read_db_envelope_state(
+                                            &target_db_path,
+                                            Some(vkey),
+                                            &journal.vault_id,
+                                        )
+                                        .await
+                                        {
+                                            Ok(VaultEnvelopeState::Present(ref s))
+                                                if s == new_env_str => {}
+                                            Ok(_) => {
+                                                fail_reason = "Completed rotation target DB envelope mismatch.".into();
+                                            }
+                                            Err(e) => fail_reason = e,
+                                        }
+                                    }
+                                    if fail_reason.is_empty()
+                                        && !matches!(
+                                            journal.original_registry_state,
+                                            Some(VaultEnvelopeState::RowMissing)
+                                        )
+                                    {
+                                        match read_db_envelope_state(
+                                            &registry_db_path,
+                                            reg_key,
+                                            &journal.vault_id,
+                                        )
+                                        .await
+                                        {
+                                            Ok(VaultEnvelopeState::Present(ref s))
+                                                if s == new_env_str => {}
+                                            Ok(_) => {
+                                                fail_reason = "Completed rotation registry DB envelope mismatch.".into();
+                                            }
+                                            Err(e) => fail_reason = e,
+                                        }
+                                    }
+                                }
+                            }
+                            if fail_reason.is_empty() {
+                                completed_ok = true;
+                            }
+                        } else if journal.remember_in_keychain {
+                            fail_reason = "Completed rotation journal found but keychain key is unavailable for verification.".into();
+                        } else {
+                            completed_ok = true;
+                        }
+                    }
+                    Ok(_) => {
+                        fail_reason =
+                            "Completed rotation journal found but manifest vault ID mismatched."
+                                .into();
+                    }
+                    Err(e) => {
+                        fail_reason = format!(
+                            "Completed rotation journal found but manifest is unreadable: {e}"
+                        );
+                    }
+                }
+
+                if completed_ok {
+                    if let Err(e) = std::fs::remove_file(&jpath) {
+                        pending.push(PendingRotationRecovery {
+                            vault_id: journal.vault_id.clone(),
+                            journal_path: jpath,
+                            is_corrupted: false,
+                            stage: Some(journal.stage),
+                            reason: format!(
+                                "Completed rotation verified but failed to remove journal: {e}"
+                            ),
+                        });
+                    }
                 } else {
                     pending.push(PendingRotationRecovery {
                         vault_id: journal.vault_id.clone(),
                         journal_path: jpath,
                         is_corrupted: false,
                         stage: Some(journal.stage),
-                        reason: "Completed rotation journal found but manifest is unreadable."
-                            .into(),
+                        reason: fail_reason,
                     });
                 }
             }
             PasswordRotationStage::Prepared => {
-                // No store was mutated yet. Verify manifest is intact, then remove journal.
-                if VaultManifest::load_from_path(&manifest_path).is_ok() {
+                // Verify manifest on disk was NOT modified before cleaning Prepared journal.
+                let disk_manifest_raw = std::fs::read_to_string(&manifest_path).ok();
+                let matches_original = disk_manifest_raw
+                    .as_deref()
+                    .is_some_and(|raw| journal.original_manifest_backup.as_deref() == Some(raw))
+                    && VaultManifest::load_from_path(&manifest_path).is_ok();
+                if matches_original {
                     std::fs::remove_file(&jpath)
                         .map_err(|e| format!("Failed to clean Prepared journal: {e}"))?;
-                } else if let Some(ref backup) = journal.original_manifest_backup {
-                    write_durable_file(&manifest_path, backup)?;
-                    std::fs::remove_file(&jpath)
-                        .map_err(|e| format!("Failed to clean Prepared journal: {e}"))?;
+                } else if let Some(ref vkey) = vault_key {
+                    match reconcile_with_keys(
+                        base_path,
+                        &jpath,
+                        &mut journal,
+                        vkey,
+                        default_key.as_ref(),
+                        cred_store,
+                    )
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(err) => pending.push(PendingRotationRecovery {
+                            vault_id: journal.vault_id.clone(),
+                            journal_path: jpath,
+                            is_corrupted: false,
+                            stage: Some(journal.stage),
+                            reason: err,
+                        }),
+                    }
                 } else {
                     pending.push(PendingRotationRecovery {
                         vault_id: journal.vault_id.clone(),
                         journal_path: jpath,
                         is_corrupted: false,
                         stage: Some(journal.stage),
-                        reason: "Manifest missing and no backup in journal.".into(),
+                        reason: "Prepared rotation journal found with modified or unreadable manifest; password required to reconcile.".into(),
                     });
                 }
             }
-            PasswordRotationStage::ManifestSaved => {
-                // Only manifest was touched; DBs and credential store were not modified.
-                if let Some(ref backup) = journal.original_manifest_backup {
-                    write_durable_file(&manifest_path, backup)?;
-                    VaultManifest::load_from_path(&manifest_path)
-                        .map_err(|e| format!("Restored manifest invalid: {e}"))?;
-                    std::fs::remove_file(&jpath)
-                        .map_err(|e| format!("Failed to remove reconciled journal: {e}"))?;
-                    tracing::info!(
-                        vault_id = %journal.vault_id,
-                        "Startup recovery restored original manifest from ManifestSaved stage"
-                    );
-                } else {
-                    pending.push(PendingRotationRecovery {
-                        vault_id: journal.vault_id.clone(),
-                        journal_path: jpath,
-                        is_corrupted: false,
-                        stage: Some(journal.stage),
-                        reason: "Original manifest backup missing in journal.".into(),
-                    });
-                }
-            }
-            PasswordRotationStage::TargetDbUpdated
+            PasswordRotationStage::ManifestWritePending
+            | PasswordRotationStage::ManifestSaved
+            | PasswordRotationStage::TargetEnvelopeWritePending
+            | PasswordRotationStage::TargetDbUpdated
+            | PasswordRotationStage::RegistryWritePending
             | PasswordRotationStage::RegistryUpdated
+            | PasswordRotationStage::CredentialStoreWritePending
             | PasswordRotationStage::CredentialStoreUpdated
+            | PasswordRotationStage::CommitVerificationPending
             | PasswordRotationStage::Verified
             | PasswordRotationStage::RollingBack => {
-                // Try automatic reconciliation if keys are in OS credential store
-                let vid = VaultId::new(&journal.vault_id).map_err(|e| e.to_string())?;
-                let default_vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).map_err(|e| e.to_string())?;
-                let vault_key = VaultKeyManager::retrieve_key(cred_store, &vid)
-                    .ok()
-                    .flatten();
-                let default_key = if journal.vault_id == LEGACY_LOCAL_VAULT_ID {
-                    vault_key.clone()
-                } else {
-                    VaultKeyManager::retrieve_key(cred_store, &default_vid)
-                        .ok()
-                        .flatten()
-                };
-
                 if let Some(ref vkey) = vault_key {
                     match reconcile_with_keys(
                         base_path,
@@ -848,7 +1055,7 @@ pub async fn reconcile_rotation_with_password(
     if !is_safe_vault_id(vault_id) {
         return Err(format!("Invalid vault ID '{vault_id}'."));
     }
-    let _lock = RotationLockGuard::acquire(vault_id)?;
+    let _lock = RotationLockGuard::acquire(base_path, vault_id)?;
 
     let jpath = rotation_journal_path(base_path, vault_id);
     if !jpath.exists() {
@@ -909,6 +1116,62 @@ pub async fn reconcile_rotation_with_password(
     reconcile_with_keys(base_path, &jpath, &mut journal, &dek, reg_key, cred_store).await
 }
 
+fn validate_and_resolve_journal_paths(
+    base_path: &Path,
+    journal: &PasswordRotationJournal,
+) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    if journal.journal_version != 2 {
+        return Err(format!(
+            "Unsupported rotation journal version {} (expected 2).",
+            journal.journal_version
+        ));
+    }
+    if !is_safe_vault_id(&journal.vault_id) {
+        return Err(format!(
+            "Unsafe vault ID '{}' in rotation journal.",
+            journal.vault_id
+        ));
+    }
+
+    let expected_manifest = data_path::resolve_manifest_file(base_path, &journal.vault_id);
+    let expected_target_db = data_path::resolve_vault_db_file(base_path, &journal.vault_id);
+    let expected_registry_db = data_path::resolve_vault_db_file(base_path, LEGACY_LOCAL_VAULT_ID);
+
+    reject_if_symlink(&expected_manifest)?;
+    reject_if_symlink(&expected_target_db)?;
+    reject_if_symlink(&expected_registry_db)?;
+
+    if let Some(ref recorded) = journal.manifest_path {
+        if Path::new(recorded) != expected_manifest.as_path() {
+            return Err(format!(
+                "Journal manifest_path '{}' does not match expected path '{}'.",
+                recorded,
+                expected_manifest.display()
+            ));
+        }
+    }
+    if let Some(ref recorded) = journal.target_db_path {
+        if Path::new(recorded) != expected_target_db.as_path() {
+            return Err(format!(
+                "Journal target_db_path '{}' does not match expected path '{}'.",
+                recorded,
+                expected_target_db.display()
+            ));
+        }
+    }
+    if let Some(ref recorded) = journal.registry_db_path {
+        if Path::new(recorded) != expected_registry_db.as_path() {
+            return Err(format!(
+                "Journal registry_db_path '{}' does not match expected path '{}'.",
+                recorded,
+                expected_registry_db.display()
+            ));
+        }
+    }
+
+    Ok((expected_manifest, expected_target_db, expected_registry_db))
+}
+
 async fn reconcile_with_keys(
     base_path: &Path,
     journal_path: &Path,
@@ -917,21 +1180,8 @@ async fn reconcile_with_keys(
     reg_key: Option<&VaultKey>,
     cred_store: &dyn CredentialStore,
 ) -> Result<RotationReconciliationOutcome, String> {
-    let manifest_path = journal
-        .manifest_path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_path::resolve_manifest_file(base_path, &journal.vault_id));
-    let target_db_path = journal
-        .target_db_path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_path::resolve_vault_db_file(base_path, &journal.vault_id));
-    let registry_db_path = journal
-        .registry_db_path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_path::resolve_vault_db_file(base_path, LEGACY_LOCAL_VAULT_ID));
+    let (manifest_path, target_db_path, registry_db_path) =
+        validate_and_resolve_journal_paths(base_path, journal)?;
 
     let is_same_db = target_db_path == registry_db_path;
     let effective_reg_key = if is_same_db { Some(dek) } else { reg_key };
@@ -983,10 +1233,15 @@ async fn reconcile_with_keys(
             })
         }
         PasswordRotationStage::Prepared
+        | PasswordRotationStage::ManifestWritePending
         | PasswordRotationStage::ManifestSaved
+        | PasswordRotationStage::TargetEnvelopeWritePending
         | PasswordRotationStage::TargetDbUpdated
+        | PasswordRotationStage::RegistryWritePending
         | PasswordRotationStage::RegistryUpdated
+        | PasswordRotationStage::CredentialStoreWritePending
         | PasswordRotationStage::CredentialStoreUpdated
+        | PasswordRotationStage::CommitVerificationPending
         | PasswordRotationStage::RollingBack => {
             // Rollback to original consistent state
             rollback_rotation(
@@ -1406,6 +1661,8 @@ mod tests {
             original_target_db_envelope: Some(
                 serde_json::to_string(&orig_manifest.primary_envelope).unwrap(),
             ),
+            original_registry_state: None,
+            original_target_db_state: None,
             target_db_path: Some(
                 data_path::resolve_vault_db_file(&temp_dir, sec_id)
                     .to_string_lossy()
@@ -1516,7 +1773,7 @@ mod tests {
 
         // 3. Concurrent rotation lock prevents simultaneous rotations on same vault
         {
-            let _lock = RotationLockGuard::acquire(sec_id).unwrap();
+            let _lock = RotationLockGuard::acquire(&temp_dir, sec_id).unwrap();
             let conc_err = rotate_vault_password(PasswordRotationRequest {
                 base_path: &temp_dir,
                 vault_id: sec_id,
@@ -1540,6 +1797,256 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(pending[0].is_corrupted);
         assert!(jpath.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn subprocess_crash_worker() {
+        let Ok(crash_dir) = std::env::var("SHELLUMI_CRASH_DIR") else {
+            return;
+        };
+        let Ok(crash_point_str) = std::env::var("SHELLUMI_CRASH_POINT") else {
+            return;
+        };
+        let base_path = PathBuf::from(crash_dir);
+        let vault_id = "vlt-crash";
+        let old_pass = "SecondaryPass123!@#";
+        let new_pass = "CrashNewPass456!@#";
+        let def_pass = "DefaultPass123!@#";
+
+        let def_manifest = VaultManifest::load_from_path(&data_path::resolve_manifest_file(
+            &base_path,
+            LEGACY_LOCAL_VAULT_ID,
+        ))
+        .unwrap();
+        let def_dek = def_manifest.unlock(def_pass).unwrap();
+        let sec_manifest =
+            VaultManifest::load_from_path(&data_path::resolve_manifest_file(&base_path, vault_id))
+                .unwrap();
+        let sec_dek = sec_manifest.unlock(old_pass).unwrap();
+        let cred_store = FaultyCredentialStore::new();
+
+        let target_point = match crash_point_str.as_str() {
+            "AfterJournalCreate" => RotationFaultPoint::AfterJournalCreate,
+            "AfterManifestUpdate" => RotationFaultPoint::AfterManifestUpdate,
+            "AfterTargetDbUpdate" => RotationFaultPoint::AfterTargetDbUpdate,
+            "AfterRegistryUpdate" => RotationFaultPoint::AfterRegistryUpdate,
+            "AfterCredentialStoreUpdate" => RotationFaultPoint::AfterCredentialStoreUpdate,
+            "AfterCommitVerify" => RotationFaultPoint::AfterCommitVerify,
+            "BeforeJournalComplete" => RotationFaultPoint::BeforeJournalComplete,
+            "BeforeRollback" => RotationFaultPoint::BeforeRollback,
+            "AfterRollback" => RotationFaultPoint::AfterRollback,
+            other => panic!("Unknown crash point: {other}"),
+        };
+
+        let hook: Box<FaultInjector> = Box::new(move |pt| {
+            if pt == target_point {
+                std::process::abort();
+            }
+            if matches!(
+                target_point,
+                RotationFaultPoint::BeforeRollback | RotationFaultPoint::AfterRollback
+            ) && pt == RotationFaultPoint::AfterTargetDbUpdate
+            {
+                return Err("Trigger rollback before aborting".into());
+            }
+            Ok(())
+        });
+
+        let _ = rotate_vault_password(PasswordRotationRequest {
+            base_path: &base_path,
+            vault_id,
+            old_password: old_pass,
+            new_password: new_pass,
+            expected_in_memory_key: Some(&sec_dek),
+            default_vault_key: Some(&def_dek),
+            cred_store: &cred_store,
+            fault_hook: Some(hook.as_ref()),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_subprocess_crash_recovery_at_every_persistence_boundary() {
+        let exe = std::env::current_exe().unwrap();
+        let points = [
+            "AfterJournalCreate",
+            "AfterManifestUpdate",
+            "AfterTargetDbUpdate",
+            "AfterRegistryUpdate",
+            "AfterCredentialStoreUpdate",
+            "AfterCommitVerify",
+            "BeforeJournalComplete",
+            "BeforeRollback",
+            "AfterRollback",
+        ];
+
+        for point in points {
+            let temp_dir = std::env::temp_dir()
+                .join(format!("shellumi-crash-{}-{point}", uuid::Uuid::new_v4()));
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            let cred_store = FaultyCredentialStore::new();
+            let new_pass = "CrashNewPass456!@#";
+            let vault_id = "vlt-crash";
+
+            let (def_dek, sec_dek, _def_pass, old_pass, sec_rec) =
+                setup_two_vault_fixture(&temp_dir, &cred_store, vault_id, false).await;
+
+            let status = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "vault_rotation::tests::subprocess_crash_worker",
+                    "--nocapture",
+                ])
+                .env("SHELLUMI_CRASH_DIR", &temp_dir)
+                .env("SHELLUMI_CRASH_POINT", point)
+                .status()
+                .unwrap();
+            assert!(
+                !status.success(),
+                "Subprocess must terminate abnormally at {point}"
+            );
+
+            // Fresh process recovery: startup reconciliation
+            let pending = reconcile_pending_rotations_at_startup(&temp_dir, &cred_store)
+                .await
+                .unwrap();
+            if !pending.is_empty() {
+                assert_eq!(pending.len(), 1);
+                let try_old = reconcile_rotation_with_password(
+                    &temp_dir,
+                    vault_id,
+                    &old_pass,
+                    Some(&def_dek),
+                    &cred_store,
+                )
+                .await;
+                if try_old.is_err() {
+                    reconcile_rotation_with_password(
+                        &temp_dir,
+                        vault_id,
+                        new_pass,
+                        Some(&def_dek),
+                        &cred_store,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+
+            // Repeat startup reconciliation to prove idempotency
+            let pending2 = reconcile_pending_rotations_at_startup(&temp_dir, &cred_store)
+                .await
+                .unwrap();
+            assert!(
+                pending2.is_empty(),
+                "Second recovery pass must be empty at {point}"
+            );
+            assert!(!rotation_journal_path(&temp_dir, vault_id).exists());
+
+            // Verify DEK, encrypted records, and recovery code are intact
+            let m = VaultManifest::load_from_path(&data_path::resolve_manifest_file(
+                &temp_dir, vault_id,
+            ))
+            .unwrap();
+            let rec_dek = m.unlock(&sec_rec).unwrap();
+            assert_eq!(rec_dek.expose_bytes(), sec_dek.expose_bytes());
+            verify_encrypted_records_readable(
+                &data_path::resolve_vault_db_file(&temp_dir, vault_id),
+                &sec_dek,
+            )
+            .await
+            .unwrap();
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_null_original_envelope_and_journal_path_validation() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("shellumi-null-env-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let cred_store = FaultyCredentialStore::new();
+        let new_pass = "NullNewPass456!@#";
+        let vault_id = "vlt-null";
+
+        let (def_dek, sec_dek, _def_pass, old_pass, _sec_rec) =
+            setup_two_vault_fixture(&temp_dir, &cred_store, vault_id, false).await;
+
+        // Clear recovery_envelope to NULL in default.db
+        let def_db = data_path::resolve_vault_db_file(&temp_dir, LEGACY_LOCAL_VAULT_ID);
+        let mut def_store = HostStore::open_with_key(def_db.to_str().unwrap(), Some(&def_dek))
+            .await
+            .unwrap();
+        def_store
+            .clear_vault_recovery_envelope(vault_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            def_store
+                .get_vault_recovery_envelope_state(vault_id)
+                .await
+                .unwrap(),
+            VaultEnvelopeState::Null
+        );
+
+        // Inject failure after registry update -> rollback must restore NULL, not leave new envelope
+        let hook: Box<FaultInjector> = Box::new(|pt| {
+            if pt == RotationFaultPoint::AfterRegistryUpdate {
+                Err("Injected failure after registry update".into())
+            } else {
+                Ok(())
+            }
+        });
+        let err = rotate_vault_password(PasswordRotationRequest {
+            base_path: &temp_dir,
+            vault_id,
+            old_password: &old_pass,
+            new_password: new_pass,
+            expected_in_memory_key: Some(&sec_dek),
+            default_vault_key: Some(&def_dek),
+            cred_store: &cred_store,
+            fault_hook: Some(hook.as_ref()),
+        })
+        .await;
+        assert!(err.is_err());
+        assert_eq!(
+            def_store
+                .get_vault_recovery_envelope_state(vault_id)
+                .await
+                .unwrap(),
+            VaultEnvelopeState::Null
+        );
+
+        // Path traversal in journal must be rejected as corrupted
+        let jpath = rotation_journal_path(&temp_dir, vault_id);
+        let forged = PasswordRotationJournal {
+            journal_version: 2,
+            vault_id: vault_id.to_string(),
+            stage: PasswordRotationStage::Prepared,
+            original_manifest_backup: None,
+            staged_manifest_json: None,
+            new_primary_envelope_json: None,
+            original_registry_envelope: None,
+            original_target_db_envelope: None,
+            original_registry_state: None,
+            original_target_db_state: None,
+            target_db_path: None,
+            registry_db_path: None,
+            manifest_path: Some("/etc/passwd".to_string()),
+            had_keychain_secret: false,
+            remember_in_keychain: false,
+            updated_at: 1000,
+        };
+        write_rotation_journal_file(&jpath, &forged).unwrap();
+        let pending = reconcile_pending_rotations_at_startup(&temp_dir, &cred_store)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].is_corrupted);
+        assert!(pending[0].reason.contains("does not match expected path"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
