@@ -260,9 +260,17 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
         &mut self,
         req: &RegisterDeviceRequest,
     ) -> Result<DeviceResponse, ServerError> {
-        let resp: DeviceResponse = self.send_request("POST", "api/v1/devices", Some(req))?;
+        let resp = self.submit_device_registration(req)?;
         self.set_device_id(resp.device_id);
         Ok(resp)
+    }
+
+    /// Submits registration without changing the active device identity.
+    pub fn submit_device_registration(
+        &self,
+        req: &RegisterDeviceRequest,
+    ) -> Result<DeviceResponse, ServerError> {
+        self.send_request("POST", "api/v1/devices", Some(req))
     }
 
     /// Revokes a registered device (`DELETE /api/v1/devices/{device_id}`).

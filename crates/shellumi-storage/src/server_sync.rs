@@ -58,9 +58,28 @@ struct InvitationCheckpoint {
 struct RegistrationIntent {
     scope: EnrollmentScope,
     role: TeamRole,
+    #[serde(default)]
+    local_vault_id: Option<String>,
+    #[serde(default)]
+    account_id: Option<Uuid>,
+    #[serde(default)]
+    device_label: String,
+    #[serde(default)]
+    initialize_connection: bool,
     key_id: Uuid,
     signing_public_key: String,
     agreement_public_key: String,
+}
+
+impl RegistrationIntent {
+    fn matches(&self, binding: &VerifiedRemoteVaultBinding, user: Uuid) -> bool {
+        binding.matches_scope(&self.scope)
+            && self
+                .local_vault_id
+                .as_ref()
+                .is_none_or(|vault| vault == &binding.local_vault_id)
+            && self.account_id.is_none_or(|account| account == user)
+    }
 }
 
 /// Persistent record of a remote Shellumi Server connection.
@@ -252,6 +271,41 @@ pub struct ServerSyncReport {
     pub has_conflicts: bool,
 }
 
+// A single app process can have several windows and storage handles for the same device.
+static DEVICE_CHANGES: std::sync::Mutex<Vec<(Uuid, Uuid)>> = std::sync::Mutex::new(Vec::new());
+
+struct DeviceChangeGuard((Uuid, Uuid));
+
+impl DeviceChangeGuard {
+    fn acquire(binding: &VerifiedRemoteVaultBinding, device: Uuid) -> Result<Self, StorageError> {
+        let server = binding
+            .server_instance_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| enrollment_denied("Unknown server identity for device change"))?;
+        let key = (server, device);
+        let mut active = DEVICE_CHANGES
+            .lock()
+            .map_err(|_| enrollment_denied("Device change lock unavailable"))?;
+        if active.contains(&key) {
+            return Err(enrollment_denied(
+                "Another change is already in progress for this device",
+            ));
+        }
+        active.push(key);
+        Ok(Self(key))
+    }
+}
+
+impl Drop for DeviceChangeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = DEVICE_CHANGES.lock() {
+            active.retain(|key| *key != self.0);
+        }
+    }
+}
+
 fn current_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -279,6 +333,10 @@ fn enrollment_network_error(error: shellumi_core::server::ServerError) -> Storag
 }
 
 impl VerifiedRemoteVaultBinding {
+    pub fn local_vault_id(&self) -> &str {
+        &self.local_vault_id
+    }
+
     pub fn server_connection_id(&self) -> &str {
         &self.server_connection_id
     }
@@ -302,6 +360,17 @@ impl VerifiedRemoteVaultBinding {
         scope.connection_id == self.server_connection_id
             && scope.remote_vault_id == self.remote_vault_id
             && Some(scope.server_instance_id.as_str()) == self.server_instance_id.as_deref()
+    }
+
+    /// Verifies the authenticated account and its live membership in this bound vault.
+    pub fn authenticate_vault_member<T: HttpTransport>(
+        &self,
+        store: &HostStore,
+        client: &ShellumiServerClient<T>,
+    ) -> Result<Uuid, StorageError> {
+        let user = self.authenticate(store, client)?;
+        self.verify_membership(client, user, None)?;
+        Ok(user)
     }
 
     fn authenticate<T: HttpTransport>(
@@ -802,10 +871,104 @@ impl HostStore {
             role,
             None,
             device_label,
+            false,
             client,
             credentials,
         )
         .await
+    }
+
+    /// Initializes the device identity of a newly staged connection in the encrypted registry.
+    pub async fn enroll_initial_connection_device<T: HttpTransport>(
+        &mut self,
+        binding: &VerifiedRemoteVaultBinding,
+        client: &mut ShellumiServerClient<T>,
+        vault_name: &str,
+        device_label: &str,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<EnrolledDevice, StorageError> {
+        let user = binding.authenticate(self, client)?;
+        let role = binding.verify_membership(client, user, None)?;
+        self.verify_connection_initialization(binding, client, credentials)
+            .await?;
+        let member_id = format!("connection-owner:{}:{user}", binding.local_vault_id);
+        let now = current_timestamp().to_string();
+        if self
+            .get_shared_vault(&binding.local_vault_id)
+            .await?
+            .is_none()
+        {
+            self.create_shared_vault(
+                &shellumi_core::SharedVault::new(
+                    &binding.local_vault_id,
+                    vault_name,
+                    None,
+                    user.to_string(),
+                    &now,
+                )
+                .map_err(StorageError::InvalidCollaboration)?,
+            )
+            .await?;
+        }
+        if self.get_team_member(&member_id).await?.is_none() {
+            self.add_team_member(&TeamMember::new(
+                &member_id,
+                &binding.local_vault_id,
+                user.to_string(),
+                user.to_string(),
+                "",
+                role,
+                now,
+                user.to_string(),
+            ))
+            .await?;
+        }
+        self.enroll_device_for_authenticated_user(
+            binding,
+            &member_id,
+            user,
+            role,
+            None,
+            device_label,
+            true,
+            client,
+            credentials,
+        )
+        .await
+    }
+
+    async fn verify_connection_initialization<T: HttpTransport>(
+        &self,
+        binding: &VerifiedRemoteVaultBinding,
+        client: &ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<String, StorageError> {
+        let conn = self
+            .get_vault_server_connection(&binding.server_connection_id)
+            .await?
+            .filter(|conn| {
+                conn.device_id.is_none()
+                    && conn.device_signing_key.is_none()
+                    && conn.device_agreement_key.is_none()
+            })
+            .ok_or_else(|| {
+                enrollment_denied("Connection already has device credentials or is unavailable")
+            })?;
+        let token = conn
+            .resolve_auth_token(credentials)
+            .ok_or_else(|| enrollment_denied("Protected connection session is unavailable"))?;
+        if client.token() != Some(token.expose_secret()) {
+            return Err(enrollment_denied(
+                "Connection enrollment authentication changed",
+            ));
+        }
+        conn.auth_token
+            .filter(|reference| {
+                reference.starts_with("keychain://") || reference.starts_with("env://")
+            })
+            .ok_or_else(|| {
+                enrollment_denied("Connection session does not have a protected reference")
+            })
     }
 
     /// Rotates the key epoch for a remote vault:
@@ -999,6 +1162,7 @@ impl HostStore {
                 role,
                 Some(&op_id),
                 device_label,
+                false,
                 client,
                 credentials,
             )
@@ -1079,6 +1243,7 @@ impl HostStore {
             role,
             None,
             device_label,
+            false,
             client,
             credentials,
         )
@@ -1096,47 +1261,10 @@ impl HostStore {
         client: &mut ShellumiServerClient<T>,
         credentials: &dyn shellumi_core::CredentialStore,
     ) -> Result<EnrolledDevice, StorageError> {
-        let user = binding.authenticate(self, client)?;
-        let user_id = user.to_string();
-        let old_id = old_device_id.to_string();
-        let member = self
-            .get_team_member(member_id)
-            .await?
-            .filter(|member| {
-                member.vault_id == binding.local_vault_id
-                    && member.user_id == user_id
-                    && !member.revoked
-            })
-            .ok_or_else(|| enrollment_denied("Replacement member is not authorized"))?;
-        let local_devices = self
-            .list_enrolled_devices_for_user(&binding.local_vault_id, &member.user_id)
+        let _change = DeviceChangeGuard::acquire(binding, old_device_id)?;
+        self.verify_device_revocation(binding, member_id, old_device_id, client)
             .await?;
-        let old = local_devices
-            .iter()
-            .find(|device| device.device_id == old_id && device.verified && !device.revoked)
-            .ok_or_else(|| {
-                enrollment_denied("Old device has no active local vault authorization")
-            })?;
-        let devices = client.list_devices().map_err(enrollment_network_error)?;
-        let recipients = client
-            .list_recipient_devices(binding.remote_vault_id)
-            .map_err(enrollment_network_error)?;
-        if !devices.iter().any(|device| {
-            device.device_id == old_device_id
-                && device.user_id == user
-                && device.revoked_at.is_none()
-                && device.agreement_public_key == old.agreement_public_key
-                && (old.signing_public_key.is_empty()
-                    || device.signing_public_key == old.signing_public_key)
-        }) || !recipients.devices.iter().any(|device| {
-            device.device_id == old_device_id
-                && device.user_id == user
-                && device.agreement_public_key == old.agreement_public_key
-        }) {
-            return Err(enrollment_denied(
-                "Old device has no active remote vault authorization",
-            ));
-        }
+        let old_id = old_device_id.to_string();
         let new_device = self
             .enroll_additional_device_for_member_with_binding(
                 binding,
@@ -1150,6 +1278,8 @@ impl HostStore {
             return Err(enrollment_denied("Replacement ID matches the old device"));
         }
 
+        self.verify_device_revocation(binding, member_id, old_device_id, client)
+            .await?;
         client.revoke_device(old_device_id).map_err(|_| {
             tracing::warn!(old_device_id = %old_device_id, replacement_id = %new_device.device_id,
                 "Replacement is authorized but remote revocation needs reconciliation");
@@ -1163,54 +1293,84 @@ impl HostStore {
         Ok(new_device)
     }
 
-    /// Revokes a specific enrolled device on the server and locally, updating member status if no
-    /// active verified devices remain.
+    async fn verify_device_revocation<T: HttpTransport>(
+        &self,
+        binding: &VerifiedRemoteVaultBinding,
+        member_id: &str,
+        old_device_id: Uuid,
+        client: &ShellumiServerClient<T>,
+    ) -> Result<TeamMember, StorageError> {
+        let user = binding.authenticate(self, client)?;
+        binding.verify_membership(client, user, None)?;
+        let user_id = user.to_string();
+        let old_id = old_device_id.to_string();
+        let member = self
+            .get_team_member(member_id)
+            .await?
+            .filter(|member| {
+                member.vault_id == binding.local_vault_id
+                    && member.user_id == user_id
+                    && !member.revoked
+            })
+            .ok_or_else(|| enrollment_denied("Device owner is not an active local member"))?;
+        let local_devices = self
+            .list_enrolled_devices_for_user(&binding.local_vault_id, &member.user_id)
+            .await?;
+        let old = local_devices
+            .iter()
+            .find(|device| device.device_id == old_id && device.verified && !device.revoked)
+            .ok_or_else(|| {
+                enrollment_denied("Old device has no active local vault authorization")
+            })?;
+        let devices = client.list_devices().map_err(enrollment_network_error)?;
+        let recipients = client
+            .list_recipient_devices(binding.remote_vault_id)
+            .map_err(enrollment_network_error)?;
+        let mut registered = devices
+            .iter()
+            .filter(|device| device.device_id == old_device_id);
+        let mut authorized = recipients
+            .devices
+            .iter()
+            .filter(|device| device.device_id == old_device_id);
+        if old_device_id.is_nil()
+            || recipients.vault_id != binding.remote_vault_id
+            || !registered.next().is_some_and(|device| {
+                device.user_id == user
+                    && device.revoked_at.is_none()
+                    && device.agreement_public_key == old.agreement_public_key
+                    && !old.signing_public_key.is_empty()
+                    && device.signing_public_key == old.signing_public_key
+            })
+            || registered.next().is_some()
+            || !authorized.next().is_some_and(|device| {
+                device.user_id == user && device.agreement_public_key == old.agreement_public_key
+            })
+            || authorized.next().is_some()
+        {
+            return Err(enrollment_denied(
+                "Old device has no unambiguous active remote vault authorization",
+            ));
+        }
+        Ok(member)
+    }
+
+    /// Revokes the authenticated user's device globally, after verifying its vault authorization.
     pub async fn revoke_device_with_server<T: HttpTransport>(
         &mut self,
-        local_vault_id: &str,
+        binding: &VerifiedRemoteVaultBinding,
         member_id: &str,
         device_id: Uuid,
         client: &ShellumiServerClient<T>,
     ) -> Result<(), StorageError> {
-        let member = self.get_team_member(member_id).await?.ok_or_else(|| {
-            StorageError::ItemNotFound(format!("Team member '{member_id}' not found"))
-        })?;
-        if member.vault_id != local_vault_id {
-            return Err(StorageError::InvalidCollaboration(
-                shellumi_core::CollaborationError::Unauthorized(format!(
-                    "Team member '{member_id}' belongs to vault '{}', not '{local_vault_id}'",
-                    member.vault_id
-                )),
-            ));
-        }
-        let me = client.me().map_err(|e| {
-            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
-        })?;
-        if member.user_id != me.user_id.to_string() {
-            return Err(StorageError::InvalidCollaboration(
-                shellumi_core::CollaborationError::Unauthorized(format!(
-                    "Authenticated user '{}' is not authorized to revoke member '{}' device",
-                    me.user_id, member.user_id
-                )),
-            ));
-        }
-        let local_devs = self
-            .list_enrolled_devices_for_user(local_vault_id, &member.user_id)
+        let _change = DeviceChangeGuard::acquire(binding, device_id)?;
+        let member = self
+            .verify_device_revocation(binding, member_id, device_id, client)
             .await?;
-        if !local_devs
-            .iter()
-            .any(|d| d.device_id == device_id.to_string())
-        {
-            return Err(StorageError::InvalidCollaboration(
-                shellumi_core::CollaborationError::Unauthorized(format!(
-                    "Device '{device_id}' is not authorized for member '{member_id}' in vault '{local_vault_id}'"
-                )),
-            ));
-        }
-
-        client.revoke_device(device_id).map_err(|e| {
-            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
-        })?;
+        let local_vault_id = &binding.local_vault_id;
+        client
+            .revoke_device(device_id)
+            .map_err(enrollment_network_error)?;
         let now_str = current_timestamp().to_string();
         let _ = self
             .revoke_enrolled_device(&device_id.to_string(), &now_str)
@@ -1386,62 +1546,88 @@ impl HostStore {
             .list_incomplete_enrollment_operations(&binding.local_vault_id)
             .await?;
         let mut recovered = 0;
+        let mut first_error = None;
         for op in ops {
             if op.user_id != user.to_string() {
                 continue;
             }
-            if op.stage == "InvitationAcceptedBound" {
-                let checkpoint = op
-                    .registration_intent
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<InvitationCheckpoint>(raw).ok())
-                    .filter(|checkpoint| binding.matches_scope(&checkpoint.scope))
-                    .ok_or_else(|| {
-                        enrollment_denied(
-                            "Manual intervention required: invalid invitation checkpoint",
-                        )
-                    })?;
-                let role = checkpoint.role.ok_or_else(|| {
-                    enrollment_denied("Manual intervention required: invitation role is missing")
-                })?;
-                binding.verify_membership(client, user, Some(role))?;
-                self.ensure_invited_member(binding, &op.member_id, user, role, &checkpoint)
-                    .await?;
-                self.enroll_device_for_authenticated_user(
-                    binding,
-                    &op.member_id,
-                    user,
-                    role,
-                    Some(&op.operation_id),
-                    &checkpoint.device_label,
-                    client,
-                    credentials,
-                )
-                .await?;
-                recovered += 1;
-                continue;
+            match self
+                .recover_enrollment_operation(binding, &op, user, client, credentials)
+                .await
+            {
+                Ok(()) => recovered += 1,
+                Err(error) => {
+                    tracing::warn!(operation_id = %op.operation_id, "Enrollment operation retained for reconciliation");
+                    first_error.get_or_insert(error);
+                }
             }
-            let intent = op
+        }
+        first_error.map_or(Ok(recovered), Err)
+    }
+
+    async fn recover_enrollment_operation<T: HttpTransport>(
+        &mut self,
+        binding: &VerifiedRemoteVaultBinding,
+        op: &crate::EnrollmentOperationRecord,
+        user: Uuid,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(), StorageError> {
+        if op.stage == "InvitationAcceptedBound" {
+            let checkpoint = op
                 .registration_intent
                 .as_deref()
-                .and_then(|raw| serde_json::from_str::<RegistrationIntent>(raw).ok())
-                .filter(|intent| binding.matches_scope(&intent.scope))
+                .and_then(|raw| serde_json::from_str::<InvitationCheckpoint>(raw).ok())
+                .filter(|checkpoint| binding.matches_scope(&checkpoint.scope))
                 .ok_or_else(|| {
-                    enrollment_denied(
-                        "Manual intervention required: missing or invalid registration intent",
-                    )
+                    enrollment_denied("Manual intervention required: invalid invitation checkpoint")
                 })?;
-            if op.stage != "RegistrationIntent" {
-                return Err(enrollment_denied(
-                    "Manual intervention required: invalid registration stage",
-                ));
-            }
-            binding.verify_membership(client, user, Some(intent.role))?;
-            self.finish_device_registration(binding, &op, &intent, client, credentials)
+            let role = checkpoint.role.ok_or_else(|| {
+                enrollment_denied("Manual intervention required: invitation role is missing")
+            })?;
+            binding.verify_membership(client, user, Some(role))?;
+            self.ensure_invited_member(binding, &op.member_id, user, role, &checkpoint)
                 .await?;
-            recovered += 1;
+            self.enroll_device_for_authenticated_user(
+                binding,
+                &op.member_id,
+                user,
+                role,
+                Some(&op.operation_id),
+                &checkpoint.device_label,
+                false,
+                client,
+                credentials,
+            )
+            .await?;
+            return Ok(());
         }
-        Ok(recovered)
+        let intent = op
+            .registration_intent
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<RegistrationIntent>(raw).ok())
+            .filter(|intent| intent.matches(binding, user))
+            .ok_or_else(|| {
+                enrollment_denied(
+                    "Manual intervention required: missing or invalid registration intent",
+                )
+            })?;
+        if !matches!(
+            op.stage.as_str(),
+            "RegistrationPrepared" | "RegistrationIntent"
+        ) {
+            return Err(enrollment_denied(
+                "Manual intervention required: invalid registration stage",
+            ));
+        }
+        binding.verify_membership(client, user, Some(intent.role))?;
+        if op.stage == "RegistrationPrepared" {
+            self.dispatch_device_registration(binding, op, &intent, client, credentials)
+                .await?;
+        }
+        self.finish_device_registration(binding, op, &intent, client, credentials)
+            .await?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1453,6 +1639,7 @@ impl HostStore {
         role: TeamRole,
         invitation_operation: Option<&str>,
         device_label: &str,
+        initialize_connection: bool,
         client: &mut ShellumiServerClient<T>,
         credentials: &dyn shellumi_core::CredentialStore,
     ) -> Result<EnrolledDevice, StorageError> {
@@ -1469,26 +1656,20 @@ impl HostStore {
                     && !member.revoked
             })
             .ok_or_else(|| enrollment_denied("No active local member for registration"))?;
-        let challenge = client
-            .device_challenge(&DeviceChallengeRequest::default())
-            .map_err(enrollment_network_error)?
-            .challenge;
-        let signing_pair = keypair_from_pkcs8(&signing)
-            .map_err(|_| enrollment_denied("Unable to open generated Ed25519 identity"))?;
         let operation_id = invitation_operation
             .map(str::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         // Unique key accounts prevent a concurrent caller from replacing the winning intent's keys.
         let key_id = Uuid::new_v4();
         let service = VaultServerConnectionRecord::CREDENTIAL_SERVICE;
-        let signing_ref = shellumi_core::store_secret_to_ref(
+        shellumi_core::store_secret_to_ref(
             credentials,
             service,
             &format!("{key_id}-signing"),
             &BASE64_STANDARD.encode(&signing),
         )
         .map_err(StorageError::InvalidCredential)?;
-        let agreement_ref = shellumi_core::store_secret_to_ref(
+        shellumi_core::store_secret_to_ref(
             credentials,
             service,
             &format!("{key_id}-agreement"),
@@ -1498,7 +1679,11 @@ impl HostStore {
         let intent = RegistrationIntent {
             scope: binding.enrollment_scope()?,
             role,
+            local_vault_id: Some(binding.local_vault_id.clone()),
+            account_id: Some(user),
             key_id,
+            device_label: device_label.into(),
+            initialize_connection,
             signing_public_key,
             agreement_public_key,
         };
@@ -1508,8 +1693,8 @@ impl HostStore {
         let user_id = user.to_string();
         let written = if invitation_operation.is_some() {
             self.connection.execute(
-                "UPDATE enrollment_operations SET stage = 'RegistrationIntent', registration_intent = ?1,
-                 updated_at = ?2, error_message = 'Registration outcome pending'
+                "UPDATE enrollment_operations SET stage = 'RegistrationPrepared', registration_intent = ?1,
+                 updated_at = ?2, error_message = 'Device credentials or dispatch pending'
                  WHERE operation_id = ?3 AND vault_id = ?4 AND user_id = ?5 AND member_id = ?6
                    AND stage = 'InvitationAcceptedBound'",
                 (encoded_intent.as_str(), now.as_str(), operation_id.as_str(), binding.local_vault_id.as_str(), user_id.as_str(), member.id.as_str()),
@@ -1518,59 +1703,14 @@ impl HostStore {
             self.connection.execute(
                 "INSERT INTO enrollment_operations
                   (operation_id, vault_id, user_id, member_id, stage, registration_intent, error_message, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'RegistrationIntent', ?5, 'Registration outcome pending', ?6)
+                 VALUES (?1, ?2, ?3, ?4, 'RegistrationPrepared', ?5, 'Device credentials or dispatch pending', ?6)
                  ON CONFLICT DO NOTHING",
                 (operation_id.as_str(), binding.local_vault_id.as_str(), user_id.as_str(), member.id.as_str(), encoded_intent.as_str(), now.as_str()),
             ).await?
         };
         if written != 1 {
-            for reference in [&signing_ref, &agreement_ref] {
-                if shellumi_core::delete_secret_by_ref(credentials, reference).is_err() {
-                    tracing::warn!("Unable to discard unused protected device credential");
-                }
-            }
             return Err(enrollment_denied(
                 "An enrollment operation already exists. Resume Enrollment before retrying.",
-            ));
-        }
-        let registration = client
-            .register_device(&RegisterDeviceRequest {
-                device_name: device_label.into(),
-                signing_public_key: intent.signing_public_key.clone(),
-                agreement_public_key: intent.agreement_public_key.clone(),
-                challenge_signature: Some(sign_device_challenge(&signing_pair, &challenge)),
-                challenge: Some(challenge),
-            })
-            .map_err(enrollment_network_error)?;
-        if registration.user_id != user
-            || registration.revoked_at.is_some()
-            || registration.signing_public_key != intent.signing_public_key
-            || registration.agreement_public_key != intent.agreement_public_key
-        {
-            return Err(enrollment_denied(
-                "Registration returned a different identity or a revoked device",
-            ));
-        }
-        let device_id = registration.device_id.to_string();
-        let updated = self
-            .connection
-            .execute(
-                "UPDATE enrollment_operations SET device_id = ?1 WHERE operation_id = ?2
-             AND vault_id = ?3 AND user_id = ?4 AND member_id = ?5
-             AND stage = 'RegistrationIntent' AND registration_intent = ?6 AND device_id IS NULL",
-                (
-                    device_id.as_str(),
-                    operation_id.as_str(),
-                    binding.local_vault_id.as_str(),
-                    user_id.as_str(),
-                    member.id.as_str(),
-                    encoded_intent.as_str(),
-                ),
-            )
-            .await?;
-        if updated != 1 {
-            return Err(enrollment_denied(
-                "Registration identity checkpoint changed concurrently",
             ));
         }
         let op = self
@@ -1581,72 +1721,92 @@ impl HostStore {
             .ok_or_else(|| enrollment_denied("Registration intent is no longer pending"))?;
         if op.registration_intent.as_deref() != Some(encoded_intent.as_str()) {
             return Err(enrollment_denied(
-                "Registration intent changed during enrollment",
+                "Registration intent changed before dispatch",
             ));
         }
+        self.dispatch_device_registration(binding, &op, &intent, client, credentials)
+            .await?;
         self.finish_device_registration(binding, &op, &intent, client, credentials)
             .await
     }
 
-    async fn finish_device_registration<T: HttpTransport>(
-        &mut self,
+    async fn dispatch_device_registration<T: HttpTransport>(
+        &self,
         binding: &VerifiedRemoteVaultBinding,
         op: &crate::EnrollmentOperationRecord,
         intent: &RegistrationIntent,
         client: &ShellumiServerClient<T>,
         credentials: &dyn shellumi_core::CredentialStore,
-    ) -> Result<EnrolledDevice, StorageError> {
+    ) -> Result<(), StorageError> {
         let user = binding.authenticate(self, client)?;
-        if op.user_id != user.to_string()
-            || op.vault_id != binding.local_vault_id
-            || !binding.matches_scope(&intent.scope)
-        {
-            return Err(enrollment_denied(
-                "Registration journal scope does not match the authenticated vault",
-            ));
+        binding.verify_membership(client, user, Some(intent.role))?;
+        if op.user_id != user.to_string() || !intent.matches(binding, user) {
+            return Err(enrollment_denied("Registration dispatch scope changed"));
         }
-        let member = self
-            .get_team_member(&op.member_id)
-            .await?
-            .filter(|member| {
-                member.user_id == op.user_id
-                    && member.vault_id == binding.local_vault_id
-                    && !member.revoked
+        if intent.initialize_connection {
+            self.verify_connection_initialization(binding, client, credentials)
+                .await?;
+        }
+        let (_, _, signing_pair) = Self::registration_credentials(intent, credentials)?;
+        let challenge = client
+            .device_challenge(&DeviceChallengeRequest {
+                account_id: Some(user),
             })
-            .ok_or_else(|| {
-                enrollment_denied("Enrollment member no longer has local authorization")
-            })?;
-        let devices = client.list_devices().map_err(enrollment_network_error)?;
-        let mut matches = devices.into_iter().filter(|device| {
-            device.user_id == user
-                && device.revoked_at.is_none()
-                && device.signing_public_key == intent.signing_public_key
-                && device.agreement_public_key == intent.agreement_public_key
-        });
-        let registered = matches.next().filter(|_| matches.next().is_none())
-            .ok_or_else(|| enrollment_denied("Manual intervention required: device registration outcome cannot be established"))?;
-        if registered.device_id.is_nil()
-            || op
-                .device_id
-                .as_deref()
-                .is_some_and(|id| Uuid::parse_str(id).ok() != Some(registered.device_id))
+            .map_err(enrollment_network_error)?
+            .challenge;
+        let changed = self.connection.execute(
+            "UPDATE enrollment_operations SET stage = 'RegistrationIntent',
+             error_message = 'Registration outcome pending', updated_at = ?1
+             WHERE operation_id = ?2 AND stage = 'RegistrationPrepared' AND registration_intent = ?3",
+            (current_timestamp().to_string(), op.operation_id.as_str(), op.registration_intent.as_deref()),
+        ).await?;
+        if changed != 1 {
+            return Err(enrollment_denied("Registration dispatch already claimed"));
+        }
+        let registration = client
+            .submit_device_registration(&RegisterDeviceRequest {
+                device_name: intent.device_label.clone(),
+                signing_public_key: intent.signing_public_key.clone(),
+                agreement_public_key: intent.agreement_public_key.clone(),
+                challenge_signature: Some(sign_device_challenge(&signing_pair, &challenge)),
+                challenge: Some(challenge),
+            })
+            .map_err(enrollment_network_error)?;
+        if registration.device_id.is_nil()
+            || registration.user_id != user
+            || registration.revoked_at.is_some()
+            || registration.signing_public_key != intent.signing_public_key
+            || registration.agreement_public_key != intent.agreement_public_key
         {
             return Err(enrollment_denied(
-                "Server returned inconsistent registration device IDs",
+                "Registration returned an inconsistent device identity",
             ));
         }
-        let recipients = client
-            .list_recipient_devices(binding.remote_vault_id)
-            .map_err(enrollment_network_error)?;
-        if !recipients.devices.iter().any(|device| {
-            device.device_id == registered.device_id
-                && device.user_id == user
-                && device.agreement_public_key == intent.agreement_public_key
-        }) {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE enrollment_operations SET device_id = ?1 WHERE operation_id = ?2
+             AND stage = 'RegistrationIntent' AND registration_intent = ?3 AND device_id IS NULL",
+                (
+                    registration.device_id.to_string(),
+                    op.operation_id.as_str(),
+                    op.registration_intent.as_deref(),
+                ),
+            )
+            .await?;
+        if changed != 1 {
             return Err(enrollment_denied(
-                "Manual intervention required: registered device has no remote vault authorization",
+                "Registration identity checkpoint changed concurrently",
             ));
         }
+        tracing::debug!(operation_id = %op.operation_id, "Recorded remote registration identity");
+        Ok(())
+    }
+
+    fn registration_credentials(
+        intent: &RegistrationIntent,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(String, String, ring::signature::Ed25519KeyPair), StorageError> {
         let service = VaultServerConnectionRecord::CREDENTIAL_SERVICE;
         let signing_ref = format!("keychain://{service}/{}-signing", intent.key_id);
         let agreement_ref = format!("keychain://{service}/{}-agreement", intent.key_id);
@@ -1672,6 +1832,84 @@ impl HostStore {
                 "Protected private keys do not match the registration intent",
             ));
         }
+        Ok((signing_ref, agreement_ref, signing_pair))
+    }
+
+    async fn finish_device_registration<T: HttpTransport>(
+        &mut self,
+        binding: &VerifiedRemoteVaultBinding,
+        op: &crate::EnrollmentOperationRecord,
+        intent: &RegistrationIntent,
+        client: &ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<EnrolledDevice, StorageError> {
+        let user = binding.authenticate(self, client)?;
+        if op.user_id != user.to_string()
+            || op.vault_id != binding.local_vault_id
+            || !intent.matches(binding, user)
+        {
+            return Err(enrollment_denied(
+                "Registration journal scope does not match the authenticated vault",
+            ));
+        }
+        let member = self
+            .get_team_member(&op.member_id)
+            .await?
+            .filter(|member| {
+                member.user_id == op.user_id
+                    && member.vault_id == binding.local_vault_id
+                    && !member.revoked
+            })
+            .ok_or_else(|| {
+                enrollment_denied("Enrollment member no longer has local authorization")
+            })?;
+        let devices = client.list_devices().map_err(enrollment_network_error)?;
+        let mut matches = devices.into_iter().filter(|device| {
+            device.user_id == user
+                && device.revoked_at.is_none()
+                && device.signing_public_key == intent.signing_public_key
+                && device.agreement_public_key == intent.agreement_public_key
+        });
+        let registered = matches.next().filter(|_| matches.next().is_none())
+            .ok_or_else(|| enrollment_denied("Manual intervention required: device registration outcome cannot be established"))?;
+        let mut checkpoint = self
+            .connection
+            .query(
+                "SELECT device_id FROM enrollment_operations WHERE operation_id = ?1
+             AND stage = 'RegistrationIntent' AND registration_intent = ?2",
+                (op.operation_id.as_str(), op.registration_intent.as_deref()),
+            )
+            .await?;
+        let checkpoint_id = checkpoint
+            .next()
+            .await?
+            .ok_or_else(|| enrollment_denied("Registration journal is no longer pending"))?
+            .get::<Option<String>>(0)?;
+        drop(checkpoint);
+        if registered.device_id.is_nil()
+            || checkpoint_id
+                .as_deref()
+                .is_some_and(|id| Uuid::parse_str(id).ok() != Some(registered.device_id))
+        {
+            return Err(enrollment_denied(
+                "Server returned inconsistent registration device IDs",
+            ));
+        }
+        let recipients = client
+            .list_recipient_devices(binding.remote_vault_id)
+            .map_err(enrollment_network_error)?;
+        if recipients.vault_id != binding.remote_vault_id
+            || !recipients.devices.iter().any(|device| {
+                device.device_id == registered.device_id
+                    && device.user_id == user
+                    && device.agreement_public_key == intent.agreement_public_key
+            })
+        {
+            return Err(enrollment_denied(
+                "Manual intervention required: registered device has no remote vault authorization",
+            ));
+        }
+        let (signing_ref, agreement_ref, _) = Self::registration_credentials(intent, credentials)?;
         let device = EnrolledDevice {
             device_id: registered.device_id.to_string(),
             vault_id: binding.local_vault_id.clone(),
@@ -1686,11 +1924,20 @@ impl HostStore {
             revoked_at: None,
             verified: true,
         };
+        let initial_auth_reference = if intent.initialize_connection {
+            Some(
+                self.verify_connection_initialization(binding, client, credentials)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let tx = self.connection.transaction().await?;
         let completed = tx.execute(
             "UPDATE enrollment_operations SET stage = 'Completed', device_id = ?1, error_message = NULL, updated_at = ?2
              WHERE operation_id = ?3 AND stage = 'RegistrationIntent' AND registration_intent = ?4
-               AND vault_id = ?5 AND member_id = ?6 AND user_id = ?7",
+               AND vault_id = ?5 AND member_id = ?6 AND user_id = ?7
+               AND (device_id IS NULL OR device_id = ?1)",
             (device.device_id.as_str(), current_timestamp().to_string(), op.operation_id.as_str(),
              op.registration_intent.as_deref(), op.vault_id.as_str(), op.member_id.as_str(), op.user_id.as_str()),
         ).await?;
@@ -1710,6 +1957,24 @@ impl HostStore {
                 "Enrollment member changed during finalization",
             ));
         }
+        let mut existing_credentials = tx
+            .query(
+                "SELECT 1 FROM enrolled_devices WHERE device_id = ?1 AND
+             ((signing_key_ref IS NOT NULL AND signing_key_ref != ?2)
+              OR (agreement_key_ref IS NOT NULL AND agreement_key_ref != ?3))",
+                (
+                    device.device_id.as_str(),
+                    device.signing_key_ref.as_deref(),
+                    device.agreement_key_ref.as_deref(),
+                ),
+            )
+            .await?;
+        if existing_credentials.next().await?.is_some() {
+            return Err(enrollment_denied(
+                "Enrollment would replace existing device credentials",
+            ));
+        }
+        drop(existing_credentials);
         let mut existing_authorization = tx
             .query(
                 "SELECT 1 FROM vault_device_authorizations
@@ -1728,6 +1993,23 @@ impl HostStore {
         }
         drop(existing_authorization);
         Self::persist_enrolled_device(&tx, &device).await?;
+        if let Some(auth_reference) = initial_auth_reference {
+            let attached = tx.execute(
+                "UPDATE vault_server_connections
+                 SET device_id = ?1, device_signing_key = ?2, device_agreement_key = ?3, updated_at = ?4
+                 WHERE id = ?5 AND server_instance_id = ?6 AND base_url = ?7
+                 AND auth_token = ?10 AND device_id IS NULL AND device_signing_key IS NULL AND device_agreement_key IS NULL
+                 AND EXISTS (SELECT 1 FROM vault_contexts WHERE id = ?8 AND server_connection_id = ?5 AND server_vault_id = ?9)",
+                (device.device_id.as_str(), device.signing_key_ref.as_deref(), device.agreement_key_ref.as_deref(),
+                 current_timestamp(), binding.server_connection_id.as_str(), intent.scope.server_instance_id.as_str(),
+                 binding.base_url.as_str(), binding.local_vault_id.as_str(), binding.remote_vault_id.to_string(), auth_reference.as_str()),
+            ).await?;
+            if attached != 1 {
+                return Err(enrollment_denied(
+                    "Connection changed before device credentials were committed",
+                ));
+            }
+        }
         tx.commit().await?;
         tracing::info!(operation_id = %op.operation_id, device_id = %device.device_id, "Completed verified device enrollment");
         Ok(device)
@@ -3103,6 +3385,9 @@ mod tests {
             omit_from_list: Mutex<bool>,
             member_response: Mutex<Option<Vec<VaultMemberResponse>>>,
             omit_recipient_label: Mutex<Option<String>>,
+            fail_challenge: std::sync::atomic::AtomicBool,
+            fail_device_listing: std::sync::atomic::AtomicBool,
+            revocation_requests: std::sync::atomic::AtomicUsize,
             lose_registration_response: std::sync::atomic::AtomicBool,
             reject_registration: std::sync::atomic::AtomicBool,
             registration_requests: std::sync::atomic::AtomicUsize,
@@ -3151,6 +3436,13 @@ mod tests {
                 }
 
                 if method == "POST" && url.ends_with("/api/v1/devices/challenge") {
+                    if self
+                        .0
+                        .fail_challenge
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return Ok(HttpResponse::new(503, b"{}".to_vec()));
+                    }
                     let resp = DeviceChallengeResponse {
                         challenge: "nonce-test-challenge-001".to_string(),
                         expires_at: 9_999_999_999,
@@ -3217,6 +3509,13 @@ mod tests {
                 }
 
                 if method == "GET" && url.ends_with("/api/v1/devices") {
+                    if self
+                        .0
+                        .fail_device_listing
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return Ok(HttpResponse::new(503, b"{}".to_vec()));
+                    }
                     let list = if *self.0.omit_from_list.lock().unwrap() {
                         Vec::new()
                     } else {
@@ -3226,6 +3525,9 @@ mod tests {
                 }
 
                 if method == "DELETE" && url.contains("/api/v1/devices/") {
+                    self.0
+                        .revocation_requests
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let id_str = url.rsplit('/').next().unwrap_or("");
                     let target_id = Uuid::parse_str(id_str).unwrap();
                     let mut devs = self.0.devices.lock().unwrap();
@@ -3362,6 +3664,9 @@ mod tests {
             omit_from_list: Mutex::new(false),
             member_response: Mutex::new(None),
             omit_recipient_label: Mutex::new(None),
+            fail_challenge: Default::default(),
+            fail_device_listing: Default::default(),
+            revocation_requests: Default::default(),
             lose_registration_response: Default::default(),
             reject_registration: Default::default(),
             registration_requests: Default::default(),
@@ -3603,7 +3908,7 @@ mod tests {
             .unwrap();
         store
             .revoke_device_with_server(
-                local_vault_id,
+                &binding,
                 "mem-keychain-failure",
                 Uuid::parse_str(&after_keychain_recovery.device_id).unwrap(),
                 &auth_client,
@@ -3823,7 +4128,7 @@ mod tests {
             .unwrap();
         store
             .revoke_device_with_server(
-                local_vault_id,
+                &binding,
                 "mem-alice",
                 Uuid::parse_str(&recovered.device_id).unwrap(),
                 &auth_client,
@@ -3872,7 +4177,7 @@ mod tests {
             .unwrap();
         store
             .revoke_device_with_server(
-                local_vault_id,
+                &binding,
                 "mem-alice",
                 Uuid::parse_str(&verified_later.device_id).unwrap(),
                 &auth_client,
@@ -3939,7 +4244,7 @@ mod tests {
         // 10. Revoke device 1 -> device 2 remains active and member stays enrolled
         reopened
             .revoke_device_with_server(
-                local_vault_id,
+                &binding,
                 "mem-alice",
                 Uuid::parse_str(&dev1.device_id).unwrap(),
                 &auth_client,
@@ -3964,7 +4269,7 @@ mod tests {
         // 11. Revoke device 2 -> member transitions to DeviceRevoked & 0 authorized devices
         reopened
             .revoke_device_with_server(
-                local_vault_id,
+                &binding,
                 "mem-alice",
                 Uuid::parse_str(&dev2.device_id).unwrap(),
                 &auth_client,
@@ -4033,6 +4338,116 @@ mod tests {
         );
 
         let migrated_id = Uuid::parse_str(&migrated_dev.device_id).unwrap();
+        {
+            let _in_flight = DeviceChangeGuard::acquire(&binding, migrated_id).unwrap();
+            let before = request_count();
+            assert!(reopened
+                .replace_device_keys_for_member(
+                    &binding,
+                    "mem-legacy",
+                    migrated_id,
+                    "Concurrent replacement",
+                    &mut auth_client,
+                    &cred_store,
+                )
+                .await
+                .is_err());
+            assert!(reopened
+                .revoke_device_with_server(&binding, "mem-legacy", migrated_id, &auth_client)
+                .await
+                .is_err());
+            assert_eq!(request_count(), before);
+        }
+        let revocations = transport.revocation_requests.load(SeqCst);
+        transport.fail_device_listing.store(true, SeqCst);
+        assert!(reopened
+            .revoke_device_with_server(&binding, "mem-legacy", migrated_id, &auth_client)
+            .await
+            .is_err());
+        transport.fail_device_listing.store(false, SeqCst);
+        assert!(reopened
+            .revoke_device_with_server(&binding, "mem-legacy", Uuid::new_v4(), &auth_client)
+            .await
+            .is_err());
+        {
+            let mut devices = transport.devices.lock().unwrap();
+            let old = devices
+                .iter_mut()
+                .find(|device| device.device_id == migrated_id)
+                .unwrap();
+            old.user_id = Uuid::new_v4();
+        }
+        assert!(reopened
+            .revoke_device_with_server(&binding, "mem-legacy", migrated_id, &auth_client)
+            .await
+            .is_err());
+        {
+            let mut devices = transport.devices.lock().unwrap();
+            let old = devices
+                .iter_mut()
+                .find(|device| device.device_id == migrated_id)
+                .unwrap();
+            old.user_id = user_id;
+            old.signing_public_key = "stale-signing-key".into();
+        }
+        assert!(reopened
+            .revoke_device_with_server(&binding, "mem-legacy", migrated_id, &auth_client)
+            .await
+            .is_err());
+        {
+            let mut devices = transport.devices.lock().unwrap();
+            let old = devices
+                .iter_mut()
+                .find(|device| device.device_id == migrated_id)
+                .unwrap();
+            old.signing_public_key = migrated_dev.signing_public_key.clone();
+        }
+        assert_eq!(transport.revocation_requests.load(SeqCst), revocations);
+        assert!(resolve_secret_from_ref(
+            &cred_store,
+            migrated_dev.signing_key_ref.as_deref().unwrap()
+        )
+        .unwrap()
+        .is_some());
+
+        let before = request_count();
+        transport.fail_challenge.store(true, SeqCst);
+        assert!(reopened
+            .enroll_additional_device_for_member_with_binding(
+                &binding,
+                "mem-legacy",
+                "Prepared before restart",
+                &mut auth_client,
+                &cred_store,
+            )
+            .await
+            .is_err());
+        assert_eq!(request_count(), before);
+        let prepared = reopened
+            .list_incomplete_enrollment_operations(local_vault_id)
+            .await
+            .unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].stage, "RegistrationPrepared");
+        drop(reopened);
+        let mut reopened = HostStore::open(db_file.to_str().unwrap()).await.unwrap();
+        reopened.set_vault_id(VaultId::new(local_vault_id).unwrap());
+        transport.fail_challenge.store(false, SeqCst);
+        assert_eq!(
+            reopened
+                .recover_incomplete_enrollments(&binding, &mut auth_client, &cred_store)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .recover_incomplete_enrollments(&binding, &mut auth_client, &cred_store)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(request_count(), before + 1);
         transport.reject_registration.store(true, SeqCst);
         assert!(reopened
             .replace_device_keys_for_member(
@@ -4060,6 +4475,97 @@ mod tests {
         assert_eq!(request_count(), before);
 
         let _ = std::fs::remove_file(&db_file);
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("registry.db");
+            let path = path.to_str().unwrap();
+            let mut registry = HostStore::open(path).await.unwrap();
+            let local_id = VaultId::new("bootstrap-vault").unwrap();
+            registry
+                .save_vault_server_connection_secured(
+                    &VaultServerConnectionRecord {
+                        id: binding.server_connection_id.clone(),
+                        server_instance_id: binding.server_instance_id.clone(),
+                        base_url: binding.base_url.clone(),
+                        auth_token: Some("jwt-alice".into()),
+                        ..Default::default()
+                    },
+                    &cred_store,
+                )
+                .await
+                .unwrap();
+            registry
+                .register_vault_context(
+                    "Bootstrap vault",
+                    &shellumi_core::VaultContext::new(
+                        local_id.clone(),
+                        shellumi_core::VaultLocation::Remote {
+                            server: shellumi_core::ServerConnectionId::new(
+                                &binding.server_connection_id,
+                            )
+                            .unwrap(),
+                            server_vault_id: VaultId::new(remote_vault_id.to_string()).unwrap(),
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+            let initial_binding = registry
+                .resolve_verified_remote_vault_binding(local_id.as_str(), None)
+                .await
+                .unwrap();
+            registry.set_vault_id(local_id.clone());
+            let before = request_count();
+            transport.lose_registration_response.store(true, SeqCst);
+            assert!(registry
+                .enroll_initial_connection_device(
+                    &initial_binding,
+                    &mut auth_client,
+                    "Bootstrap vault",
+                    "Bootstrap device",
+                    &cred_store,
+                )
+                .await
+                .is_err());
+            assert_eq!(request_count(), before + 1);
+            assert!(registry
+                .get_vault_server_connection(initial_binding.server_connection_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .device_id
+                .is_none());
+            drop(registry);
+
+            transport.lose_registration_response.store(false, SeqCst);
+            let mut registry = HostStore::open(path).await.unwrap();
+            registry.set_vault_id(local_id);
+            assert_eq!(
+                registry
+                    .recover_incomplete_enrollments(&initial_binding, &mut auth_client, &cred_store)
+                    .await
+                    .unwrap(),
+                1
+            );
+            let active_connection = registry
+                .get_vault_server_connection(initial_binding.server_connection_id())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(active_connection.device_id.is_some());
+            assert!(active_connection.resolve_signing_key(&cred_store).is_some());
+            assert!(active_connection
+                .resolve_agreement_key(&cred_store)
+                .is_some());
+            assert_eq!(
+                registry
+                    .recover_incomplete_enrollments(&initial_binding, &mut auth_client, &cred_store)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(request_count(), before + 1);
+        }
         // --- Additional Issue 2 Security Checks (Invitation Binding & Per-Vault Authorization) ---
         {
             let db_file = std::env::temp_dir()

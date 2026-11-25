@@ -1,12 +1,6 @@
 //! Vault creation and remote server enrollment actions.
 use super::*;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
-use shellumi_core::server::{
-    generate_device_ed25519_keypair_pkcs8, generate_device_x25519_keypair, keypair_from_pkcs8,
-    sign_device_challenge, CreateVaultRequest, DeviceChallengeRequest, LoginRequest,
-    RegisterDeviceRequest, ShellumiServerClient,
-};
+use shellumi_core::server::{CreateVaultRequest, LoginRequest, ShellumiServerClient};
 use shellumi_core::{ServerConnectionId, VaultContext, VaultId, VaultLocation};
 use shellumi_storage::{VaultServerConnectionRecord, VaultSyncStateRecord};
 use uuid::Uuid;
@@ -365,6 +359,7 @@ impl Shellumi {
                                 is_locked: false,
                             });
                             app.active_vault = created_name;
+                            app.invalidate_invitation_scope();
                             app.active_vault_id = vault_id.clone();
                             app.active_vault_keys.insert(vault_id, key);
                             if let Some(modal) = &mut app.create_vault_modal {
@@ -458,38 +453,10 @@ impl Shellumi {
 
                     client.set_token(login_resp.access_token.clone());
 
-                    // 2. Generate local device signing keypair (Ed25519) & agreement keypair (X25519)
-                    let (signing_pkcs8, signing_pub_b64) =
-                        generate_device_ed25519_keypair_pkcs8().map_err(|e| e.to_string())?;
-                    let (agreement_secret, agreement_pub_b64) =
-                        generate_device_x25519_keypair().map_err(|e| e.to_string())?;
-                    let signing_keypair =
-                        keypair_from_pkcs8(&signing_pkcs8).map_err(|e| e.to_string())?;
-
-                    // Challenge and sign
-                    let challenge_resp = client
-                        .device_challenge(&DeviceChallengeRequest::default())
-                        .map_err(|e| format!("Device challenge failed: {e}"))?;
-                    let challenge_sig =
-                        sign_device_challenge(&signing_keypair, &challenge_resp.challenge);
-
-                    // 3. Register device with server
-                    let dev_reg = RegisterDeviceRequest {
-                        device_name: device_name.clone(),
-                        signing_public_key: signing_pub_b64,
-                        agreement_public_key: agreement_pub_b64,
-                        challenge: Some(challenge_resp.challenge),
-                        challenge_signature: Some(challenge_sig),
-                    };
-                    let device_resp = client
-                        .register_device(&dev_reg)
-                        .map_err(|e| format!("Device enrollment failed: {e}"))?;
-
-                    client.set_device_id(device_resp.device_id);
-
-                    // 4. Find or create vault on server
-                    let existing_vaults =
-                        client.list_vaults().map(|r| r.vaults).unwrap_or_default();
+                    let existing_vaults = client
+                        .list_vaults()
+                        .map_err(|_| "Unable to verify server vaults".to_string())?
+                        .vaults;
                     let remote_vault_id = if let Some(v) = existing_vaults
                         .iter()
                         .find(|v| v.encrypted_name.as_deref() == Some(&vault_name))
@@ -527,20 +494,18 @@ impl Shellumi {
 
                     let server_inst = client
                         .capabilities()
-                        .ok()
-                        .map(|c| c.server_instance_id.to_string());
+                        .map_err(|_| "Unable to verify server instance".to_string())?
+                        .server_instance_id;
                     let conn_id = format!("srv-{}", Uuid::new_v4());
                     let conn_record = VaultServerConnectionRecord {
                         id: conn_id.clone(),
                         base_url: server_url,
                         auth_token: Some(login_resp.access_token),
                         refresh_token: Some(login_resp.refresh_token),
-                        device_id: Some(device_resp.device_id.to_string()),
-                        device_signing_key: Some(BASE64_STANDARD.encode(&signing_pkcs8)),
-                        server_instance_id: server_inst,
-                        device_agreement_key: Some(
-                            BASE64_STANDARD.encode(agreement_secret.as_ref()),
-                        ),
+                        device_id: None,
+                        device_signing_key: None,
+                        server_instance_id: Some(server_inst.to_string()),
+                        device_agreement_key: None,
                         created_at: now,
                         updated_at: now,
                     };
@@ -645,6 +610,25 @@ impl Shellumi {
                         return Err(e.to_string());
                     }
 
+                    let binding = reg_store
+                        .resolve_verified_remote_vault_binding(
+                            local_vault_id.as_str(),
+                            Some(&conn_id),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    reg_store.set_vault_id(local_vault_id.clone());
+                    reg_store
+                        .enroll_initial_connection_device(
+                            &binding,
+                            &mut client,
+                            &vault_name,
+                            &device_name,
+                            cred_store.as_ref(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+
                     Ok::<_, String>((vault_name, local_vault_id.as_str().to_string(), key))
                 });
 
@@ -661,6 +645,7 @@ impl Shellumi {
                                 is_locked: false,
                             });
                             app.active_vault = created_name;
+                            app.invalidate_invitation_scope();
                             app.active_vault_id = vault_id.clone();
                             app.active_vault_keys.insert(vault_id, key);
                             app.create_vault_modal = None;

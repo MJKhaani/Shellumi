@@ -22,7 +22,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 28;
+const SCHEMA_VERSION: i64 = 29;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -47,6 +47,17 @@ pub struct EnrollmentOperationRecord {
     pub error_message: Option<String>,
     pub updated_at: String,
     pub(crate) registration_intent: Option<String>,
+}
+
+impl EnrollmentOperationRecord {
+    /// Returns whether the journal has a checkpoint usable for restart reconciliation.
+    pub fn can_attempt_reconciliation(&self) -> bool {
+        self.registration_intent.is_some()
+            && matches!(
+                self.stage.as_str(),
+                "InvitationAcceptedBound" | "RegistrationPrepared" | "RegistrationIntent"
+            )
+    }
 }
 
 #[derive(Debug)]
@@ -2597,6 +2608,19 @@ impl HostStore {
                 (),
             ).await?;
             tx.execute("PRAGMA user_version = 28", ()).await?;
+        }
+        if version < 29 {
+            tx.execute("DROP INDEX IF EXISTS enrollment_active_member", ())
+                .await?;
+            tx.execute(
+                "CREATE UNIQUE INDEX enrollment_active_member
+                 ON enrollment_operations (vault_id, member_id)
+                 WHERE stage IN ('InvitationAccepting', 'InvitationAcceptedBound',
+                                 'RegistrationPrepared', 'RegistrationIntent')",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 29", ()).await?;
         }
         tx.commit().await?;
         tracing::debug!(

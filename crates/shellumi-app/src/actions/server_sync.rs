@@ -15,6 +15,39 @@ pub(crate) struct VaultContextSummary {
     pub is_locked: bool,
 }
 
+async fn recover_initial_server_device(
+    store: &mut HostStore,
+    vault_id: &shellumi_core::VaultId,
+    connection: &shellumi_storage::VaultServerConnectionRecord,
+) -> Result<(), shellumi_storage::StorageError> {
+    if !store
+        .list_incomplete_enrollment_operations(vault_id.as_str())
+        .await?
+        .iter()
+        .any(shellumi_storage::EnrollmentOperationRecord::can_attempt_reconciliation)
+    {
+        return Ok(());
+    }
+    let binding = store
+        .resolve_verified_remote_vault_binding(vault_id.as_str(), Some(&connection.id))
+        .await?;
+    let credentials = shellumi_core::default_credential_store();
+    let Some(token) = connection.resolve_auth_token(&*credentials) else {
+        tracing::warn!(
+            vault_id = vault_id.as_str(),
+            "Initial connection session is unavailable"
+        );
+        return Ok(());
+    };
+    let mut client = ShellumiServerClient::new(&connection.base_url);
+    client.set_token(token.expose_secret().to_string());
+    store.set_vault_id(vault_id.clone());
+    store
+        .recover_incomplete_enrollments(&binding, &mut client, &*credentials)
+        .await?;
+    Ok(())
+}
+
 impl Shellumi {
     /// Returns true if the active vault is bound to a remote Shellumi Server.
     pub(crate) fn is_active_vault_remote(&self) -> bool {
@@ -36,7 +69,7 @@ impl Shellumi {
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let store = match HostStore::open_with_key(&reg_path, default_key.as_ref()).await {
+                let mut store = match HostStore::open_with_key(&reg_path, default_key.as_ref()).await {
                     Ok(s) => s,
                     Err(_) => {
                         return Ok(vec![VaultContextSummary {
@@ -95,10 +128,13 @@ impl Shellumi {
                             server_vault_id,
                         } => {
                             let srv_id = server.as_str();
-                            let srv_url = conns
-                                .iter()
-                                .find(|c| c.id == srv_id)
-                                .map(|c| c.base_url.clone());
+                            let conn = conns.iter().find(|conn| conn.id == srv_id);
+                            if let Some(conn) = conn.filter(|conn| !is_locked && conn.device_id.is_none()) {
+                                if let Err(error) = recover_initial_server_device(&mut store, ctx.id(), conn).await {
+                                    tracing::warn!(vault_id = %id, %error, "Initial connection enrollment remains pending");
+                                }
+                            }
+                            let srv_url = conn.map(|conn| conn.base_url.clone());
                             summaries.push(VaultContextSummary {
                                 id,
                                 name,
@@ -169,8 +205,7 @@ impl Shellumi {
         self.team_form = None;
         self.selected_host_id = None;
 
-        self.last_created_invite = None;
-        self.team_invite_token_input = None;
+        self.invalidate_invitation_scope();
         self.active_vault_id = vault_id;
         self.active_vault = vault_name;
         self.vault_dropdown_open = false;
@@ -889,8 +924,11 @@ impl Shellumi {
                 let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                vault_store.set_vault_id(
+                    shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
+                );
                 vault_store
-                    .revoke_device_with_server(&active_vault_id, &member_id, device_uuid, &client)
+                    .revoke_device_with_server(&binding, &member_id, device_uuid, &client)
                     .await
                     .map_err(|e| e.to_string())?;
                 let members = vault_store

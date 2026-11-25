@@ -355,7 +355,7 @@ pub struct CreateInviteRequest {
 }
 
 /// Representation of an invitation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteResponse {
     pub invite_id: Uuid,
     pub vault_id: Uuid,
@@ -368,6 +368,17 @@ pub struct InviteResponse {
     pub created_at: i64,
 }
 
+impl std::fmt::Debug for InviteResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InviteResponse")
+            .field("invite_id", &self.invite_id)
+            .field("vault_id", &self.vault_id)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// List of invitations (`GET /api/v1/vaults/{id}/invites`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteListResponse {
@@ -375,9 +386,17 @@ pub struct InviteListResponse {
 }
 
 /// Request to accept an invitation (`POST /api/v1/invites/accept`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptInviteRequest {
     pub invite_token: String,
+}
+
+impl std::fmt::Debug for AcceptInviteRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AcceptInviteRequest")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Response payload for accepted invitation.
@@ -681,4 +700,34 @@ pub enum WsServerMessage {
     },
     #[serde(rename = "pong")]
     Pong,
+}
+
+#[cfg(test)]
+mod invite_tests {
+    use super::*;
+
+    #[test]
+    fn invitation_diagnostics_omit_token() {
+        let response = InviteResponse {
+            invite_id: Uuid::new_v4(),
+            vault_id: Uuid::new_v4(),
+            role: "editor".into(),
+            invite_token: Some("test-invitation-secret".into()),
+            recipient_email: None,
+            expires_at: 200,
+            created_at: 100,
+        };
+        let request = AcceptInviteRequest {
+            invite_token: "test-invitation-secret".into(),
+        };
+        assert!(!format!("{request:?}").contains("test-invitation-secret"));
+        assert!(!format!("{response:?}").contains("test-invitation-secret"));
+        assert!(!format!(
+            "{:?}",
+            InviteListResponse {
+                invites: vec![response]
+            }
+        )
+        .contains("test-invitation-secret"));
+    }
 }

@@ -1,12 +1,18 @@
 mod actions;
 
 pub(crate) struct CreatedInvite {
-    pub(crate) vault_id: String,
+    pub(crate) scope: InviteScope,
     pub(crate) member_id: String,
     pub(crate) invitation_id: String,
     pub(crate) token: Option<shellumi_core::SecretString>,
     pub(crate) expires_at: i64,
     pub(crate) inspector_generation: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct InviteScope {
+    binding: shellumi_storage::server_sync::VerifiedRemoteVaultBinding,
+    account: uuid::Uuid,
 }
 
 mod app_render;
@@ -785,6 +791,8 @@ struct Shellumi {
     pub(crate) team_enrollment_error: Option<String>,
     pub(crate) pending_device_revoke: Option<(String, String, String)>,
     pub(crate) pending_device_replace: Option<(String, String, String)>,
+    pub(crate) invite_scope: Option<InviteScope>,
+    pub(crate) invitation_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) last_created_invite: Option<CreatedInvite>,
     broadcast_manager: BroadcastManager,
     broadcast_warning: Option<String>,
@@ -1202,8 +1210,7 @@ impl Shellumi {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_app_quit(|app, _| {
-            app.last_created_invite = None;
-            app.team_invite_token_input = None;
+            app.invalidate_invitation_scope();
             app.inspector_coordinator.invalidate_scope();
             std::future::ready(())
         })
@@ -1250,6 +1257,8 @@ impl Shellumi {
             team_enrollment_error: None,
             pending_device_revoke: None,
             pending_device_replace: None,
+            invite_scope: None,
+            invitation_generation: Default::default(),
             last_created_invite: None,
             broadcast_manager: BroadcastManager::new(0),
             broadcast_warning: None,

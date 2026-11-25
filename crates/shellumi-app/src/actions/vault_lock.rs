@@ -217,8 +217,7 @@ impl Shellumi {
                         app.active_vault_keys
                             .insert(vault_id_str.clone(), recovered_key);
                         app.unlock_vault_modal = None;
-                        app.last_created_invite = None;
-                        app.team_invite_token_input = None;
+                        app.invalidate_invitation_scope();
                         app.inspector_coordinator.invalidate_scope();
                         app.active_vault_id = vault_id_str;
                         app.active_vault = vault_name;
@@ -265,8 +264,7 @@ impl Shellumi {
 
         // 3. If active, revoke access: clear in-memory sensitive data immediately
         if is_active {
-            self.last_created_invite = None;
-            self.team_invite_token_input = None;
+            self.invalidate_invitation_scope();
             self.incomplete_enrollments.clear();
             self.team_members.clear();
             self.enrolled_devices.clear();

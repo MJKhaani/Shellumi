@@ -794,3 +794,70 @@ async fn rollback_preserves_records_written_to_a_partial_activation() {
         .any(|host| host.id == 9999));
     fixture.originals_intact();
 }
+
+#[tokio::test]
+async fn enrollment_journal_upgrade_preserves_legacy_rows_and_scoped_intents() {
+    for old_schema in [27, 28] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.db");
+        let path = path.to_str().unwrap();
+        let mut store = crate::HostStore::open(path).await.unwrap();
+        store
+            .save_enrollment_operation_progress(
+                "legacy-operation",
+                "vault-a",
+                "account-a",
+                "member-a",
+                "InvitationAccepted",
+                Some("device-a"),
+                Some("pending"),
+                "1000",
+            )
+            .await
+            .unwrap();
+        if old_schema == 28 {
+            store.connection.execute(
+                "UPDATE enrollment_operations SET registration_intent = ?1 WHERE operation_id = 'legacy-operation'",
+                (r#"{"device":"old"}"#,)
+            ).await.unwrap();
+        } else {
+            store
+                .connection
+                .execute(
+                    "ALTER TABLE enrollment_operations DROP COLUMN registration_intent",
+                    (),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .connection
+            .execute(format!("PRAGMA user_version = {old_schema}"), ())
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = crate::HostStore::open(path).await.unwrap();
+        let records = reopened
+            .list_incomplete_enrollment_operations("vault-a")
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].operation_id, "legacy-operation");
+        assert_eq!(records[0].device_id.as_deref(), Some("device-a"));
+        assert_eq!(records[0].error_message.as_deref(), Some("pending"));
+        assert_eq!(
+            records[0].registration_intent.as_deref(),
+            (old_schema == 28).then_some(r#"{"device":"old"}"#)
+        );
+        for operation_id in ["prepared-one", "prepared-two"] {
+            let count = reopened.connection.execute(
+                "INSERT INTO enrollment_operations (operation_id, vault_id, user_id, member_id, stage, updated_at)
+                 VALUES (?1, 'vault-a', 'account-a', 'member-a', 'RegistrationPrepared', '1001')
+                 ON CONFLICT DO NOTHING",
+                (operation_id,),
+            ).await.unwrap();
+            assert_eq!(count, u64::from(operation_id == "prepared-one"));
+        }
+    }
+}

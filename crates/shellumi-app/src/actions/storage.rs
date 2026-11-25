@@ -174,6 +174,7 @@ impl Shellumi {
                         app.team_members = team_members;
                         app.desktop_command(shellumi_storage::desktop::Command::Refresh, cx);
                         app.load_vault_list(cx);
+                        app.load_team_members(cx);
                     }
                     Err(error) => {
                         if error.starts_with("MigrationRequired:") {
@@ -354,7 +355,13 @@ impl Shellumi {
                     if let Ok((members, devices, incomplete)) = res {
                         app.team_members = members;
                         app.enrolled_devices = devices;
+                        let has_recoverable_enrollment = incomplete.iter().any(
+                            shellumi_storage::EnrollmentOperationRecord::can_attempt_reconciliation,
+                        );
                         app.incomplete_enrollments = incomplete;
+                        if has_recoverable_enrollment {
+                            app.resume_incomplete_enrollments(cx);
+                        }
                         cx.notify();
                     }
                 }
