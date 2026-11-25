@@ -506,47 +506,61 @@ impl Shellumi {
                         .map_err(|e| e.to_string())?;
                     Ok::<(String, bool), String>((mid.clone(), false))
                 } else {
-                    // For remote vaults, create an authoritative server invitation before persisting local state
+                    // For remote vaults, require verified binding and server invitation creation;
+                    // never silently fall back to a local-only record when a remote vault fails.
                     let mut created_on_server = false;
                     if let Some(ref rp) = reg_path {
                         let reg_store = HostStore::open_with_key(rp, default_key.as_ref())
                             .await
                             .map_err(|e| e.to_string())?;
-                        if let Ok(binding) = reg_store
-                            .resolve_verified_remote_vault_binding(&active_vault_id_task, None)
+                        let ctx = reg_store
+                            .get_vault_context(&active_vault_id_task)
                             .await
-                        {
-                            let conn = reg_store
-                                .get_vault_server_connection(&binding.server_connection_id)
-                                .await
-                                .map_err(|e| e.to_string())?
-                                .ok_or_else(|| {
-                                    format!(
-                                        "Server connection '{}' not found",
-                                        binding.server_connection_id
+                            .map_err(|e| e.to_string())?;
+                        if let Some(ref c) = ctx {
+                            if matches!(c.location(), shellumi_core::VaultLocation::Remote { .. }) {
+                                let binding = reg_store
+                                    .resolve_verified_remote_vault_binding(
+                                        &active_vault_id_task,
+                                        None,
                                     )
-                                })?;
-                            let cred_store = shellumi_core::default_credential_store();
-                            let token_sec =
-                                conn.resolve_auth_token(&*cred_store).ok_or_else(|| {
-                                    "Server connection missing auth token; cannot create server invitation".to_string()
-                                })?;
-                            let mut client =
-                                shellumi_core::server::ShellumiServerClient::new(&conn.base_url);
-                            client.set_token(token_sec.expose_secret().to_string());
-                            let _invite_resp = client
-                                .create_invite(
-                                    binding.remote_vault_id,
-                                    &shellumi_core::server::types::CreateInviteRequest {
-                                        role: role.as_str().to_string(),
-                                        recipient_email: Some(email.clone()),
-                                        ttl_secs: Some(7 * 24 * 3600),
-                                    },
-                                )
-                                .map_err(|e| {
-                                    format!("Server invitation creation failed: {e}")
-                                })?;
-                            created_on_server = true;
+                                    .await
+                                    .map_err(|e| {
+                                        format!("Remote vault binding verification failed: {e}")
+                                    })?;
+                                let conn = reg_store
+                                    .get_vault_server_connection(&binding.server_connection_id)
+                                    .await
+                                    .map_err(|e| e.to_string())?
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "Server connection '{}' not found",
+                                            binding.server_connection_id
+                                        )
+                                    })?;
+                                let cred_store = shellumi_core::default_credential_store();
+                                let token_sec =
+                                    conn.resolve_auth_token(&*cred_store).ok_or_else(|| {
+                                        "Server connection missing auth token; cannot create server invitation".to_string()
+                                    })?;
+                                let mut client = shellumi_core::server::ShellumiServerClient::new(
+                                    &conn.base_url,
+                                );
+                                client.set_token(token_sec.expose_secret().to_string());
+                                let _invite_resp = client
+                                    .create_invite(
+                                        binding.remote_vault_id,
+                                        &shellumi_core::server::types::CreateInviteRequest {
+                                            role: role.as_str().to_string(),
+                                            recipient_email: Some(email.clone()),
+                                            ttl_secs: Some(7 * 24 * 3600),
+                                        },
+                                    )
+                                    .map_err(|e| {
+                                        format!("Server invitation creation failed: {e}")
+                                    })?;
+                                created_on_server = true;
+                            }
                         }
                     }
 

@@ -453,28 +453,20 @@ impl Shellumi {
                 let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                let ctx = reg_store
-                    .get_vault_context(&active_vault_id)
+                let binding = reg_store
+                    .resolve_verified_remote_vault_binding(&active_vault_id, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let conn = reg_store
+                    .get_vault_server_connection(&binding.server_connection_id)
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| {
-                        format!("Vault context '{active_vault_id}' not found in registry")
+                        format!(
+                            "Server connection '{}' not found",
+                            binding.server_connection_id
+                        )
                     })?;
-                let server_conn_id = match ctx.location() {
-                    shellumi_core::VaultLocation::Remote { server, .. } => {
-                        server.as_str().to_string()
-                    }
-                    shellumi_core::VaultLocation::Local => {
-                        return Err(format!(
-                            "Vault '{active_vault_id}' is local-only and has no Shellumi Server binding."
-                        ));
-                    }
-                };
-                let conn = reg_store
-                    .get_vault_server_connection(&server_conn_id)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Server connection '{server_conn_id}' not found"))?;
 
                 let cred_store = shellumi_core::default_credential_store();
                 let token_sec = conn
@@ -487,9 +479,8 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let _device = vault_store
-                    .enroll_additional_device_for_member(
-                        &server_conn_id,
-                        &active_vault_id,
+                    .enroll_additional_device_for_member_with_binding(
+                        &binding,
                         &member_id,
                         &device_label,
                         &mut client,

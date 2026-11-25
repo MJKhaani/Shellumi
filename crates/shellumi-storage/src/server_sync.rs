@@ -26,6 +26,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Authoritative server-to-vault binding resolved from the registry `VaultContext`.
+/// Construction is sealed to `HostStore::resolve_verified_remote_vault_binding`.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedRemoteVaultBinding {
     pub local_vault_id: String,
@@ -1007,6 +1009,72 @@ impl HostStore {
         Ok((member, device))
     }
 
+    /// Enrolls an additional authenticated device for an existing member using a registry-verified binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enroll_additional_device_for_member_with_binding<T: HttpTransport>(
+        &mut self,
+        binding: &VerifiedRemoteVaultBinding,
+        member_id: &str,
+        device_label: &str,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<EnrolledDevice, StorageError> {
+        self.enroll_additional_device_for_member(
+            &binding.server_connection_id,
+            &binding.local_vault_id,
+            member_id,
+            device_label,
+            client,
+            credentials,
+        )
+        .await
+    }
+
+    /// Accepts an invitation and enrolls the current device using a registry-verified binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_invitation_and_enroll_device_with_binding<T: HttpTransport>(
+        &mut self,
+        binding: &VerifiedRemoteVaultBinding,
+        member_id: &str,
+        display_name: &str,
+        ssh_public_key: &str,
+        invite_token: &str,
+        device_label: &str,
+        client: &mut ShellumiServerClient<T>,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(TeamMember, EnrolledDevice), StorageError> {
+        let (member, device) = self
+            .accept_invitation_and_enroll_device(
+                &binding.server_connection_id,
+                &binding.local_vault_id,
+                member_id,
+                display_name,
+                ssh_public_key,
+                invite_token,
+                device_label,
+                client,
+                credentials,
+            )
+            .await?;
+        let members = client.list_members(binding.remote_vault_id).map_err(|e| {
+            StorageError::InvalidSync(shellumi_core::SyncError::Network(e.to_string()))
+        })?;
+        if !members.members.is_empty()
+            && !members
+                .members
+                .iter()
+                .any(|m| m.user_id.to_string() == member.user_id)
+        {
+            return Err(StorageError::InvalidCollaboration(
+                shellumi_core::CollaborationError::Unauthorized(format!(
+                    "User '{}' not found in authoritative server membership for remote vault '{}'",
+                    member.user_id, binding.remote_vault_id
+                )),
+            ));
+        }
+        Ok((member, device))
+    }
+
     /// Enrolls an additional authenticated device for an existing user/member.
     #[allow(clippy::too_many_arguments)]
     pub async fn enroll_additional_device_for_member<T: HttpTransport>(
@@ -1375,14 +1443,35 @@ impl HostStore {
                         shellumi_core::CollaborationError::Unauthorized(msg),
                     ));
                 };
-                if credentials
+                let Some(secret_str) = credentials
                     .get_secret("org.shellumi.device.x25519", key_ref)
                     .ok()
                     .flatten()
-                    .is_none()
-                {
+                else {
                     let msg = format!(
                         "Manual intervention required: protected X25519 private key missing in credential store for device '{dev_id}'"
+                    );
+                    self.save_enrollment_operation_progress(
+                        &op.operation_id,
+                        local_vault_id,
+                        &op.user_id,
+                        &op.member_id,
+                        &op.stage,
+                        Some(dev_id),
+                        Some(&msg),
+                        &now_str,
+                    )
+                    .await?;
+                    return Err(StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(msg),
+                    ));
+                };
+                if let Err(e) = shellumi_core::server::crypto::verify_x25519_keypair_correspondence(
+                    secret_str.expose_secret(),
+                    &rd.agreement_public_key,
+                ) {
+                    let msg = format!(
+                        "Manual intervention required: stored X25519 private key mismatch for device '{dev_id}': {e}"
                     );
                     self.save_enrollment_operation_progress(
                         &op.operation_id,

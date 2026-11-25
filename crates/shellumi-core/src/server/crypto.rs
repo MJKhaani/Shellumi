@@ -346,6 +346,30 @@ pub fn validate_x25519_agreement_public_key(key_b64: &str) -> Result<[u8; 32], C
     Ok(arr)
 }
 
+/// Verifies that a base64-encoded 32-byte X25519 secret key derives `expected_public_b64`.
+pub fn verify_x25519_keypair_correspondence(
+    secret_b64: &str,
+    expected_public_b64: &str,
+) -> Result<(), CryptoError> {
+    let secret_bytes = BASE64_STANDARD
+        .decode(secret_b64.trim())
+        .map_err(|e| CryptoError::InvalidBase64(e.to_string()))?;
+    if secret_bytes.len() != 32 {
+        return Err(CryptoError::InvalidPublicKeyLength(secret_bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&secret_bytes);
+    let secret = X25519StaticSecret::from(arr);
+    let derived_pub = X25519PublicKey::from(&secret);
+    let expected_arr = validate_x25519_agreement_public_key(expected_public_b64)?;
+    if derived_pub.as_bytes() != &expected_arr {
+        return Err(CryptoError::KeyGen(
+            "Stored X25519 private key does not correspond to registered public key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Derives an AES-256-GCM wrapping key using HKDF-SHA256 from an X25519 shared secret.
 fn derive_wrap_key(
     shared_secret: &[u8; 32],
