@@ -223,31 +223,41 @@ pub(crate) struct VaultQuarantineRecord {
     pub reason: String,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PasswordRotationStage {
-    Initiated,
+    #[serde(alias = "Initiated")]
+    Prepared,
     ManifestSaved,
     TargetDbUpdated,
     RegistryUpdated,
     CredentialStoreUpdated,
     Verified,
+    RollingBack,
     Completed,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PasswordRotationJournal {
     pub journal_version: u32,
     pub vault_id: String,
     pub stage: PasswordRotationStage,
     pub original_manifest_backup: Option<String>,
+    #[serde(default)]
+    pub staged_manifest_json: Option<String>,
+    #[serde(default)]
+    pub new_primary_envelope_json: Option<String>,
     pub original_registry_envelope: Option<String>,
     pub original_target_db_envelope: Option<String>,
     #[serde(default)]
     pub target_db_path: Option<String>,
     #[serde(default)]
     pub registry_db_path: Option<String>,
+    #[serde(default)]
+    pub manifest_path: Option<String>,
+    #[serde(default)]
+    pub had_keychain_secret: bool,
+    #[serde(default)]
+    pub remember_in_keychain: bool,
     pub updated_at: u64,
 }
 
@@ -332,6 +342,7 @@ pub(crate) fn write_rotation_journal(
 
 /// Version-one journals cannot prove which credential-store writes committed.
 /// Preserve every store until authenticated reconciliation is available.
+#[allow(dead_code)]
 pub(crate) fn check_pending_password_rotation(base_path: &Path) -> Result<(), String> {
     for dir in [
         resolve_manifest_dir(base_path),

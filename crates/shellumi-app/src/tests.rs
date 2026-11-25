@@ -3453,12 +3453,17 @@ fn test_vault_password_rotation_durable_journal_and_restart_recovery() {
     let journal = PasswordRotationJournal {
         journal_version: 1,
         vault_id: vault_id.to_string(),
-        stage: PasswordRotationStage::Initiated,
+        stage: PasswordRotationStage::Prepared,
         original_manifest_backup: Some(original_bytes.clone()),
+        staged_manifest_json: None,
+        new_primary_envelope_json: None,
         original_registry_envelope: None,
         original_target_db_envelope: None,
         target_db_path: None,
         registry_db_path: None,
+        manifest_path: None,
+        had_keychain_secret: false,
+        remember_in_keychain: false,
         updated_at: 1000,
     };
     write_rotation_journal(&rotation_journal_path, &journal).unwrap();

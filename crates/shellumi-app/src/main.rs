@@ -13,6 +13,7 @@ mod sftp_ui;
 mod text_input;
 mod theme;
 mod ui;
+mod vault_rotation;
 
 pub use theme::{caption, card, glyph_badge, heading, item, pill, subheader, MacTheme};
 
@@ -697,7 +698,9 @@ pub(crate) struct VaultFormState {
     pub(crate) name: Entity<TextInput>,
     pub(crate) is_remote: bool,
     pub(crate) server_url: Entity<TextInput>,
+    pub(crate) current_passphrase: Entity<TextInput>,
     pub(crate) passphrase: Entity<TextInput>,
+    pub(crate) confirm_passphrase: Entity<TextInput>,
     pub(crate) generated_recovery_code: Option<String>,
     pub(crate) recovery_code_confirmed: bool,
     pub(crate) error: Option<String>,
@@ -826,6 +829,7 @@ struct Shellumi {
     pub(crate) team_form: Option<TeamFormState>,
     pub(crate) pending_window_action: Option<PendingWindowAction>,
     pub(crate) rd_canvas_bounds: std::collections::HashMap<usize, gpui::Bounds<gpui::Pixels>>,
+    pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -1287,6 +1291,7 @@ impl Shellumi {
             team_form: None,
             pending_window_action: None,
             rd_canvas_bounds: std::collections::HashMap::new(),
+            pending_rotation_recoveries: Vec::new(),
             rd_display_menu_open: false,
             rd_keyboard_menu_open: false,
             rd_more_menu_open: false,
@@ -3178,15 +3183,40 @@ fn main() {
         }
     };
 
-    if let Some(path) = &database {
-        if let Err(error) = data_path::check_pending_password_rotation(std::path::Path::new(path))
-            .and_then(|()| {
-                data_path::detect_and_recover_interrupted_quarantine(std::path::Path::new(path))
-                    .map(|_| ())
-            })
-        {
-            startup_error = Some(error);
-            database = None;
+    let mut pending_rotation_recoveries = Vec::new();
+    if let Some(path) = database.clone() {
+        let cred_store = shellumi_core::default_credential_store();
+        let rotation_res = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|rt| {
+                rt.block_on(vault_rotation::reconcile_pending_rotations_at_startup(
+                    std::path::Path::new(&path),
+                    cred_store.as_ref(),
+                ))
+            });
+        match rotation_res {
+            Ok(recoveries) => {
+                if let Some(default_rec) = recoveries.iter().find(|r| {
+                    r.vault_id == shellumi_storage::LEGACY_LOCAL_VAULT_ID && r.is_corrupted
+                }) {
+                    startup_error = Some(default_rec.reason.clone());
+                    database = None;
+                }
+                pending_rotation_recoveries = recoveries;
+            }
+            Err(error) => {
+                startup_error = Some(error);
+                database = None;
+            }
+        }
+        if database.is_some() {
+            if let Err(error) =
+                data_path::detect_and_recover_interrupted_quarantine(std::path::Path::new(&path))
+            {
+                startup_error = Some(error);
+                database = None;
+            }
         }
     }
     let should_run_wizard = force_wizard || {
@@ -3397,6 +3427,7 @@ fn main() {
                 |window, cx| {
                     let view = cx.new(|cx| Shellumi::new(database, window, cx));
                     view.update(cx, |app, cx| {
+                        app.pending_rotation_recoveries = pending_rotation_recoveries.clone();
                         if let Some(error) = startup_error {
                             app.hosts = HostState::Error(error);
                             cx.notify();

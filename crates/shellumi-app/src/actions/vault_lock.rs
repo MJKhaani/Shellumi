@@ -67,6 +67,27 @@ impl Shellumi {
 
         let vault_id_task = vault_id_str.clone();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let pending_recovery = self
+            .pending_rotation_recoveries
+            .iter()
+            .find(|r| r.vault_id == vault_id_str)
+            .cloned();
+        if let Some(rec) = &pending_recovery {
+            if rec.is_corrupted {
+                if let Some(m) = &mut self.unlock_vault_modal {
+                    m.error = Some(format!(
+                        "Recovery required: {}. Preserve the rotation journal at {}.",
+                        rec.reason,
+                        rec.journal_path.display()
+                    ));
+                    m.is_submitting = false;
+                }
+                cx.notify();
+                return;
+            }
+        }
+        let has_pending_recovery = pending_recovery.is_some();
+
         let task = cx.background_executor().spawn(async move {
             let vid =
                 VaultId::new(&vault_id_task).map_err(|_| "Invalid vault identifier".to_string())?;
@@ -74,7 +95,21 @@ impl Shellumi {
             let manifest_path =
                 VaultManifest::manifest_path_for_vault(std::path::Path::new(&path), &vid);
 
-            let recovered_key = if manifest_path.exists() {
+            let recovered_key = if has_pending_recovery {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let cred_store = default_credential_store();
+                let outcome =
+                    runtime.block_on(crate::vault_rotation::reconcile_rotation_with_password(
+                        std::path::Path::new(&path),
+                        &vault_id_task,
+                        &passphrase,
+                        default_key.as_ref(),
+                        cred_store.as_ref(),
+                    ))?;
+                outcome.key
+            } else if manifest_path.exists() {
                 let mut manifest = VaultManifest::load_from_path(&manifest_path)
                     .map_err(|e| format!("Failed to read vault manifest: {e}"))?;
                 let key = manifest.unlock(&passphrase).map_err(|_| {
@@ -177,6 +212,8 @@ impl Shellumi {
             let _ = app.update(cx, |app, cx| {
                 match result {
                     Ok(recovered_key) => {
+                        app.pending_rotation_recoveries
+                            .retain(|r| r.vault_id != vault_id_str);
                         app.active_vault_keys
                             .insert(vault_id_str.clone(), recovered_key);
                         app.unlock_vault_modal = None;

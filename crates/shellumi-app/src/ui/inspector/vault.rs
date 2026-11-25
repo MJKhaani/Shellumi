@@ -331,6 +331,20 @@ impl Shellumi {
         }
 
         // Passphrase
+        if !is_create {
+            let current_pass_input = form.current_passphrase.clone();
+            body = body.child(simple_field(
+                "Current Passphrase (required to change password)",
+                div()
+                    .border_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .rounded_md()
+                    .bg(surface())
+                    .p_2()
+                    .child(current_pass_input),
+            ));
+        }
+
         let pass_input = form.passphrase.clone();
         let pass_label = if is_create {
             "Passphrase *"
@@ -347,6 +361,20 @@ impl Shellumi {
                 .p_2()
                 .child(pass_input),
         ));
+
+        if !is_create {
+            let confirm_pass_input = form.confirm_passphrase.clone();
+            body = body.child(simple_field(
+                "Confirm New Passphrase",
+                div()
+                    .border_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .rounded_md()
+                    .bg(surface())
+                    .p_2()
+                    .child(confirm_pass_input),
+            ));
+        }
 
         // Emergency Recovery Code presentation for new vaults
         if is_create {
@@ -511,22 +539,36 @@ impl Shellumi {
 
                 let name = cx.new(|cx| TextInput::new(cx, name_val, "Vault name"));
                 let server_url = cx.new(|cx| TextInput::new(cx, url_val, "https://example.com"));
+                let current_passphrase =
+                    cx.new(|cx| TextInput::new(cx, "", "Current passphrase").masked());
                 let passphrase =
                     cx.new(|cx| TextInput::new(cx, "", "Encryption passphrase").masked());
+                let confirm_passphrase =
+                    cx.new(|cx| TextInput::new(cx, "", "Confirm new passphrase").masked());
 
                 cx.observe(&name, |app, _, cx| app.inspector_mark_dirty(cx))
                     .detach();
                 cx.observe(&server_url, |app, _, cx| app.inspector_mark_dirty(cx))
                     .detach();
+                cx.observe(&current_passphrase, |app, _, cx| {
+                    app.inspector_mark_dirty(cx)
+                })
+                .detach();
                 cx.observe(&passphrase, |app, _, cx| app.inspector_mark_dirty(cx))
                     .detach();
+                cx.observe(&confirm_passphrase, |app, _, cx| {
+                    app.inspector_mark_dirty(cx)
+                })
+                .detach();
 
                 self.vault_form = Some(VaultFormState {
                     vault_id,
                     name,
                     is_remote: is_rem,
                     server_url,
+                    current_passphrase,
                     passphrase,
+                    confirm_passphrase,
                     generated_recovery_code: None,
                     recovery_code_confirmed: false,
                     error: None,
@@ -541,15 +583,30 @@ impl Shellumi {
 
     /// Save vault form.
     pub(crate) fn save_vault_inspector(&mut self, cx: &mut Context<Self>) {
-        let (name, is_remote, server_url, passphrase, existing_vault_id, gen_rec, rec_confirmed) = {
+        let (
+            name,
+            is_remote,
+            server_url,
+            current_passphrase,
+            passphrase,
+            confirm_passphrase,
+            existing_vault_id,
+            gen_rec,
+            rec_confirmed,
+        ) = {
             let Some(form) = &self.vault_form else {
                 return;
             };
+            if form.saving {
+                return;
+            }
             (
                 form.name.read(cx).value().trim().to_string(),
                 form.is_remote,
                 form.server_url.read(cx).value().trim().to_string(),
+                form.current_passphrase.read(cx).value().trim().to_string(),
                 form.passphrase.read(cx).value().trim().to_string(),
+                form.confirm_passphrase.read(cx).value().trim().to_string(),
                 form.vault_id.clone(),
                 form.generated_recovery_code.clone(),
                 form.recovery_code_confirmed,
@@ -621,18 +678,34 @@ impl Shellumi {
             }
         }
 
-        // For existing vault edits: validate new passphrase if entered
-        if existing_vault_id.is_some() && !passphrase.is_empty() {
-            if let Err(err) = shellumi_core::validate_vault_password(&passphrase) {
-                let msg = format!("New password does not meet security requirements: {err}");
-                if let Some(f) = &mut self.vault_form {
-                    f.error = Some(msg);
+        // For existing vault edits: validate current passphrase, new passphrase, and confirmation if entered
+        let existing_in_memory_key = if let Some(ref target_id) = existing_vault_id {
+            if !passphrase.is_empty() {
+                if current_passphrase.is_empty() {
+                    if let Some(f) = &mut self.vault_form {
+                        f.error = Some(
+                            "Current passphrase is required to change the vault password.".into(),
+                        );
+                    }
+                    cx.notify();
+                    return;
                 }
-                cx.notify();
-                return;
-            }
-            if let Some(ref target_id) = existing_vault_id {
-                if self.vault_key_for(target_id).is_none() {
+                if passphrase != confirm_passphrase {
+                    if let Some(f) = &mut self.vault_form {
+                        f.error = Some("New passphrase and confirmation do not match.".into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                if let Err(err) = shellumi_core::validate_vault_password(&passphrase) {
+                    let msg = format!("New password does not meet security requirements: {err}");
+                    if let Some(f) = &mut self.vault_form {
+                        f.error = Some(msg);
+                    }
+                    cx.notify();
+                    return;
+                }
+                let Some(key) = self.vault_key_for(target_id) else {
                     if let Some(f) = &mut self.vault_form {
                         f.error = Some(
                             "Cannot rotate password: vault key is locked or not loaded in memory."
@@ -641,9 +714,14 @@ impl Shellumi {
                     }
                     cx.notify();
                     return;
-                }
+                };
+                Some(key)
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         let Some(gen) = self.inspector_coordinator.start_save() else {
             return;
@@ -671,10 +749,25 @@ impl Shellumi {
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
                 if let Some(target_id) = existing_vault_id {
-                    if !passphrase.is_empty() {
-                        tracing::warn!("Blocked password change before modifying vault credentials");
-                        return Err("Password changes are unavailable until recovery can verify all credential stores.".into());
-                    }
+                    let rotated_key = if !passphrase.is_empty() {
+                        let cred_store = shellumi_core::default_credential_store();
+                        let outcome = crate::vault_rotation::rotate_vault_password(
+                            crate::vault_rotation::PasswordRotationRequest {
+                                base_path: std::path::Path::new(&db_path),
+                                vault_id: &target_id,
+                                old_password: &current_passphrase,
+                                new_password: &passphrase,
+                                expected_in_memory_key: existing_in_memory_key.as_ref(),
+                                default_vault_key: default_key.as_ref(),
+                                cred_store: cred_store.as_ref(),
+                                fault_hook: None,
+                            },
+                        )
+                        .await?;
+                        Some(outcome.key)
+                    } else {
+                        None
+                    };
                     let vid = VaultId::new(&target_id).map_err(|e| e.to_string())?;
                     let location = if is_remote {
                         let conn_id = shellumi_core::ServerConnectionId::new(&server_url)
@@ -705,7 +798,10 @@ impl Shellumi {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                    Ok::<(String, Option<shellumi_core::VaultKey>), String>((target_id, None))
+                    Ok::<(String, Option<shellumi_core::VaultKey>), String>((
+                        target_id,
+                        rotated_key,
+                    ))
                 } else {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
