@@ -19,6 +19,24 @@ use shellumi_storage::HostStore;
 
 impl Shellumi {
     /// Render the unified Team Member Inspector for viewing or inviting collaborators.
+    fn invite_is_in_scope(&self, invite: &crate::CreatedInvite) -> bool {
+        invite.is_visible(
+            &self.active_vault_id,
+            self.inspector_coordinator.active(),
+            invite_timestamp(),
+        )
+    }
+
+    pub(crate) fn clear_out_of_scope_invite(&mut self) {
+        if self
+            .last_created_invite
+            .as_ref()
+            .is_some_and(|invite| !self.invite_is_in_scope(invite))
+        {
+            self.last_created_invite = None;
+        }
+    }
+
     pub(crate) fn render_team_inspector(
         &mut self,
         member_id: Option<String>,
@@ -70,7 +88,9 @@ impl Shellumi {
                 div()
                     .p_4()
                     .text_color(text_secondary())
-                    .child("No team collaborator selected or enrolled yet."),
+                    .child("No team collaborator selected or enrolled yet.")
+                    .children(self.team_enrollment_error.clone().map(error_notice))
+                    .children(self.render_enrollment_recovery(cx)),
                 None::<Div>,
                 self.active_inspector_width(),
             );
@@ -152,34 +172,7 @@ impl Shellumi {
             body = body.child(error_notice(err_msg.clone()));
         }
 
-        if !self.incomplete_enrollments.is_empty() {
-            let count = self.incomplete_enrollments.len();
-            let busy = self.team_enrollment_busy;
-            body = body.child(simple_section(
-                "Interrupted Enrollment Recovery",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().text_xs().text_color(text_secondary()).child(format!(
-                        "{count} incomplete enrollment operation(s) detected for this vault."
-                    )))
-                    .child(
-                        AppButton::new(
-                            "team-resume-enrollment-btn",
-                            if busy {
-                                "Resuming..."
-                            } else {
-                                "Resume Enrollment"
-                            },
-                            ButtonVariant::Primary,
-                        )
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.resume_incomplete_enrollments(cx);
-                        })),
-                    ),
-            ));
-        }
+        body = body.children(self.render_enrollment_recovery(cx));
 
         // Action buttons
         let edit_id_action = mem_id.clone();
@@ -512,7 +505,13 @@ impl Shellumi {
             ));
         }
 
-        if let Some((invite_id, invite_token, expires_at)) = self.last_created_invite.clone() {
+        if let Some(invite) = self
+            .last_created_invite
+            .as_ref()
+            .filter(|invite| invite.member_id == member.id && self.invite_is_in_scope(invite))
+        {
+            let invite_id = &invite.invitation_id;
+            let expires_at = invite.expires_at;
             let mut inv_box = div().flex().flex_col().gap_2().child(
                 div()
                     .text_xs()
@@ -520,7 +519,8 @@ impl Shellumi {
                     .child(format!("Invite ID: {invite_id} (expires at {expires_at})")),
             );
             let mut btn_row = div().flex().gap_2();
-            if let Some(tok) = invite_token {
+            if invite.token.is_some() {
+                let invitation_id = invite.invitation_id.clone();
                 btn_row = btn_row.child(
                     AppButton::new(
                         "copy-invite-token-btn",
@@ -528,9 +528,21 @@ impl Shellumi {
                         ButtonVariant::Primary,
                     )
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(tok.clone()));
-                        app.desktop.message =
-                            Some("Server invitation token copied to clipboard.".into());
+                        app.clear_out_of_scope_invite();
+                        if let Some(token) = app.last_created_invite.as_ref().and_then(|invite| {
+                            invite.copy_token(
+                                &invitation_id,
+                                &app.active_vault_id,
+                                app.inspector_coordinator.active(),
+                                invite_timestamp(),
+                            )
+                        }) {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                token.to_owned(),
+                            ));
+                            app.desktop.message =
+                                Some("Server invitation token copied to clipboard.".into());
+                        }
                         cx.notify();
                     })),
                 );
@@ -551,6 +563,38 @@ impl Shellumi {
         }
 
         InspectorShell::new(header, body, None::<Div>, self.active_inspector_width())
+    }
+
+    fn render_enrollment_recovery(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.incomplete_enrollments.is_empty() {
+            return None;
+        }
+        let count = self.incomplete_enrollments.len();
+        let busy = self.team_enrollment_busy;
+        Some(simple_section(
+            "Interrupted Enrollment Recovery",
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().text_xs().text_color(text_secondary()).child(format!(
+                    "{count} incomplete enrollment operation(s) detected for this vault."
+                )))
+                .child(
+                    AppButton::new(
+                        "team-resume-enrollment-btn",
+                        if busy {
+                            "Resuming..."
+                        } else {
+                            "Resume Enrollment"
+                        },
+                        ButtonVariant::Primary,
+                    )
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.resume_incomplete_enrollments(cx);
+                    })),
+                ),
+        ))
     }
 
     /// Render team member inspector in Edit or Create mode.
@@ -834,7 +878,7 @@ impl Shellumi {
                         .update_team_member_role(mid, role)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<(String, bool, Option<(String, Option<String>, i64)>), String>((
+                    Ok::<(String, bool, Option<crate::CreatedInvite>), String>((
                         mid.clone(),
                         false,
                         None,
@@ -843,7 +887,8 @@ impl Shellumi {
                     // For remote vaults, require verified binding and server invitation creation;
                     // never silently fall back to a local-only record when a remote vault fails.
                     let mut created_on_server = false;
-                    let mut invite_meta: Option<(String, Option<String>, i64)> = None;
+                    let target_id = format!("tm-{}", uuid::Uuid::new_v4().as_simple());
+                    let mut invite_meta: Option<crate::CreatedInvite> = None;
                     if let Some(ref rp) = reg_path {
                         let reg_store = HostStore::open_with_key(rp, default_key.as_ref())
                             .await
@@ -864,13 +909,13 @@ impl Shellumi {
                                         format!("Remote vault binding verification failed: {e}")
                                     })?;
                                 let conn = reg_store
-                                    .get_vault_server_connection(&binding.server_connection_id)
+                                    .get_vault_server_connection(binding.server_connection_id())
                                     .await
                                     .map_err(|e| e.to_string())?
                                     .ok_or_else(|| {
                                         format!(
                                             "Server connection '{}' not found",
-                                            binding.server_connection_id
+                                            binding.server_connection_id()
                                         )
                                     })?;
                                 let cred_store = shellumi_core::default_credential_store();
@@ -884,27 +929,27 @@ impl Shellumi {
                                 client.set_token(token_sec.expose_secret().to_string());
                                 let invite_resp = client
                                     .create_invite(
-                                        binding.remote_vault_id,
+                                        binding.remote_vault_id(),
                                         &shellumi_core::server::types::CreateInviteRequest {
                                             role: role.as_str().to_string(),
                                             recipient_email: Some(email.clone()),
                                             ttl_secs: Some(7 * 24 * 3600),
                                         },
                                     )
-                                    .map_err(|e| {
-                                        format!("Server invitation creation failed: {e}")
-                                    })?;
+                                    .map_err(|_| "Server invitation creation failed".to_string())?;
                                 created_on_server = true;
-                                invite_meta = Some((
-                                    invite_resp.invite_id.to_string(),
-                                    invite_resp.invite_token,
-                                    invite_resp.expires_at,
-                                ));
+                                invite_meta = Some(crate::CreatedInvite {
+                                    vault_id: active_vault_id_task.clone(),
+                                    member_id: target_id.clone(),
+                                    invitation_id: invite_resp.invite_id.to_string(),
+                                    token: invite_resp.invite_token.map(shellumi_core::SecretString::new),
+                                    expires_at: invite_resp.expires_at,
+                                    inspector_generation: gen,
+                                });
                             }
                         }
                     }
 
-                    let target_id = format!("tm-{}", uuid::Uuid::new_v4().as_simple());
                     let member = TeamMember {
                         id: target_id.clone(),
                         vault_id: active_vault_id_task,
@@ -927,7 +972,7 @@ impl Shellumi {
                         .add_team_member(&member)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<(String, bool, Option<(String, Option<String>, i64)>), String>((
+                    Ok::<(String, bool, Option<crate::CreatedInvite>), String>((
                         target_id,
                         created_on_server,
                         invite_meta,
@@ -939,12 +984,19 @@ impl Shellumi {
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
+                if app.active_vault_id != active_vault_id
+                    || !app.inspector_coordinator.active().is_some_and(|state| {
+                        state.vault_id == active_vault_id && state.generation == gen
+                    })
+                {
+                    tracing::debug!("Discarded stale invitation completion");
+                    return;
+                }
                 if let Some(ref mut f) = app.team_form {
                     f.sending = false;
                 }
                 match res {
                     Ok((target_id, created_on_server, invite_meta)) => {
-                        app.last_created_invite = invite_meta;
                         let target = InspectorTarget::TeamMember(Some(target_id.clone()));
                         let ok =
                             app.inspector_coordinator
@@ -974,10 +1026,27 @@ impl Shellumi {
                             app.apply_navigation_request(req, None, cx);
                         } else {
                             app.open_team_inspector_mode(
-                                Some(target_id),
+                                Some(target_id.clone()),
                                 crate::ui::inspector::InspectorMode::View,
                                 cx,
                             );
+                            if let Some(mut invite) = invite_meta {
+                                let expires_at = invite.expires_at;
+                                invite.inspector_generation = app.inspector_coordinator.active()
+                                    .map_or(gen, |state| state.generation);
+                                if app.invite_is_in_scope(&invite) {
+                                    app.last_created_invite = Some(invite);
+                                    let lifetime = expires_at.saturating_sub(invite_timestamp()).max(0) as u64;
+                                    let timer = cx.background_executor().timer(std::time::Duration::from_secs(lifetime));
+                                    cx.spawn(async move |app, cx| {
+                                        timer.await;
+                                        let _ = app.update(cx, |app, cx| {
+                                            app.clear_out_of_scope_invite();
+                                            cx.notify();
+                                        });
+                                    }).detach();
+                                }
+                            }
                         }
                     }
                     Err(err) => {
@@ -996,5 +1065,94 @@ impl Shellumi {
 
     pub(crate) fn delete_team_member_inspector(&mut self, _id: &str, cx: &mut Context<Self>) {
         self.report_team_rotation_unavailable(cx);
+    }
+}
+
+fn invite_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+impl crate::CreatedInvite {
+    fn copy_token(
+        &self,
+        invitation_id: &str,
+        active_vault: &str,
+        inspector: Option<&super::coordinator::InspectorState>,
+        now: i64,
+    ) -> Option<&str> {
+        if self.invitation_id != invitation_id || !self.is_visible(active_vault, inspector, now) {
+            return None;
+        }
+        self.token
+            .as_ref()
+            .map(shellumi_core::SecretString::expose_secret)
+    }
+
+    fn is_visible(
+        &self,
+        active_vault: &str,
+        inspector: Option<&super::coordinator::InspectorState>,
+        now: i64,
+    ) -> bool {
+        self.vault_id == active_vault
+            && self.expires_at > now
+            && inspector.is_some_and(|state| {
+                state.vault_id == self.vault_id
+                    && state.generation == self.inspector_generation
+                    && state.mode == InspectorMode::View
+                    && matches!(&state.target, InspectorTarget::TeamMember(Some(id)) if id == &self.member_id)
+            })
+    }
+}
+
+#[cfg(test)]
+mod invite_state_tests {
+    use super::super::coordinator::InspectorCoordinator;
+    use super::*;
+
+    #[test]
+    fn invite_visibility_follows_vault_target_generation_and_expiration() {
+        let mut inspector = InspectorCoordinator::new();
+        let target = InspectorTarget::TeamMember(Some("alice".into()));
+        assert!(inspector.open("vault-a", target.clone(), InspectorMode::View, None));
+        let invite = crate::CreatedInvite {
+            vault_id: "vault-a".into(),
+            member_id: "alice".into(),
+            invitation_id: "invite-a".into(),
+            token: Some(shellumi_core::SecretString::new("test-token".into())),
+            expires_at: 200,
+            inspector_generation: inspector.active().unwrap().generation,
+        };
+        assert_eq!(
+            invite.copy_token("invite-a", "vault-a", inspector.active(), 199),
+            Some("test-token")
+        );
+        assert_eq!(
+            invite.copy_token("stale-invite", "vault-a", inspector.active(), 199),
+            None
+        );
+        assert_eq!(
+            invite.copy_token("invite-a", "vault-b", inspector.active(), 199),
+            None
+        );
+        assert!(invite.is_visible("vault-a", inspector.active(), 199));
+        assert!(!invite.is_visible("vault-b", inspector.active(), 199));
+        assert!(!invite.is_visible("vault-a", inspector.active(), 200));
+        assert!(inspector.open(
+            "vault-a",
+            InspectorTarget::TeamMember(Some("bob".into())),
+            InspectorMode::View,
+            None
+        ));
+        assert!(!invite.is_visible("vault-a", inspector.active(), 199));
+        let pending = inspector.start_save().unwrap();
+        inspector.invalidate_scope();
+        assert!(!inspector.complete_save("vault-a", pending, target.clone()));
+        assert!(!invite.is_visible("vault-a", inspector.active(), 199));
+        assert!(inspector.open("vault-a", target, InspectorMode::View, None));
+        assert!(!invite.is_visible("vault-a", inspector.active(), 199));
     }
 }

@@ -22,7 +22,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -46,6 +46,7 @@ pub struct EnrollmentOperationRecord {
     pub device_id: Option<String>,
     pub error_message: Option<String>,
     pub updated_at: String,
+    pub(crate) registration_intent: Option<String>,
 }
 
 #[derive(Debug)]
@@ -2572,6 +2573,20 @@ impl HostStore {
             )
             .await?;
             tx.execute("PRAGMA user_version = 27", ()).await?;
+        }
+        if version < 28 {
+            tx.execute(
+                "ALTER TABLE enrollment_operations ADD COLUMN registration_intent TEXT",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS enrollment_active_member
+                 ON enrollment_operations (vault_id, member_id)
+                 WHERE stage IN ('InvitationAccepting', 'InvitationAcceptedBound', 'RegistrationIntent')",
+                (),
+            ).await?;
+            tx.execute("PRAGMA user_version = 28", ()).await?;
         }
         tx.commit().await?;
         tracing::debug!(
@@ -5379,7 +5394,8 @@ impl HostStore {
         Ok(rows > 0)
     }
 
-    /// Records non-secret enrollment operation progress for retry-safe recovery.
+    /// Inserts a schema 27 journal record for legacy recovery tests.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn save_enrollment_operation_progress(
         &mut self,
@@ -5424,7 +5440,7 @@ impl HostStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT operation_id, vault_id, user_id, member_id, stage, device_id, error_message, updated_at
+                "SELECT operation_id, vault_id, user_id, member_id, stage, device_id, error_message, updated_at, registration_intent
                  FROM enrollment_operations WHERE vault_id = ?1 AND stage != 'Completed' ORDER BY updated_at ASC",
                 (vault_id,),
             )
@@ -5440,6 +5456,7 @@ impl HostStore {
                 device_id: row.get(5)?,
                 error_message: row.get(6)?,
                 updated_at: row.get(7)?,
+                registration_intent: row.get(8)?,
             });
         }
         Ok(ops)
@@ -5450,6 +5467,16 @@ impl HostStore {
         &mut self,
         device: &EnrolledDevice,
     ) -> Result<(), StorageError> {
+        let tx = self.connection.transaction().await?;
+        Self::persist_enrolled_device(&tx, device).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn persist_enrolled_device(
+        tx: &turso::transaction::Transaction<'_>,
+        device: &EnrolledDevice,
+    ) -> Result<(), StorageError> {
         shellumi_core::server::crypto::validate_x25519_agreement_public_key(
             &device.agreement_public_key,
         )
@@ -5458,7 +5485,6 @@ impl HostStore {
                 "Cannot save device with invalid X25519 key: {e}"
             )))
         })?;
-        let tx = self.connection.transaction().await?;
         let mut existing_rows = tx
             .query(
                 "SELECT user_id, signing_public_key, agreement_public_key, revoked FROM enrolled_devices WHERE device_id = ?1",
@@ -5553,7 +5579,6 @@ impl HostStore {
             ),
         )
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -5726,7 +5751,7 @@ impl HostStore {
                         d.verified
                  FROM enrolled_devices d
                  INNER JOIN vault_device_authorizations a ON a.device_id = d.device_id
-                 WHERE a.vault_id = ?1 AND d.user_id = ?2
+                 WHERE a.vault_id = ?1 AND d.user_id = ?2 AND a.user_id = d.user_id
                  ORDER BY d.enrolled_at ASC",
                 (vault_id, user_id),
             )
@@ -7618,6 +7643,64 @@ pub struct SessionRecordingRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn schema_28_preserves_pending_schema_27_enrollment_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enrollments.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        store
+            .connection
+            .execute("DROP INDEX enrollment_active_member", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "ALTER TABLE enrollment_operations DROP COLUMN registration_intent",
+                (),
+            )
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("PRAGMA user_version = 27", ())
+            .await
+            .unwrap();
+        store
+            .save_enrollment_operation_progress(
+                "old-operation",
+                "vault-a",
+                "user-a",
+                "member-a",
+                "DeviceRegistered",
+                Some("old-device"),
+                Some("interrupted"),
+                "100",
+            )
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = HostStore::open(path).await.unwrap();
+        let records = store
+            .list_incomplete_enrollment_operations("vault-a")
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.operation_id, "old-operation");
+        assert_eq!(record.stage, "DeviceRegistered");
+        assert_eq!(record.device_id.as_deref(), Some("old-device"));
+        assert_eq!(record.error_message.as_deref(), Some("interrupted"));
+        assert!(record.registration_intent.is_none());
+        assert!(store
+            .list_incomplete_enrollment_operations("vault-b")
+            .await
+            .unwrap()
+            .is_empty());
+    }
 
     #[tokio::test]
     async fn vault_identity_access_rejects_other_vaults_and_unscoped_secrets() {

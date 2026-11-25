@@ -23,3 +23,15 @@ The restart regression retains a truncated journal and checks that both the orig
 The server sync containment test checks the last HTTP request, the retained mutation, and the unchanged sync cursor using a controlled transport. The existing desktop test named `real_server_verification` uses `SimulatedServerState`. Neither test establishes deployed server authorization.
 
 In Shellumi Server revision `600cb93`, the rotation service calls `save_envelopes` and `update_vault_key_epoch` separately. Release verification requires a transaction that checks the expected epoch and recipient membership while committing both changes, followed by tests against persistent server storage.
+
+## Issue 2 client follow-up
+
+The client changes build on audited revision `9b620e7110c05e558b9c280dd15865e95380df1e`.
+
+- Invitation acceptance, device enrollment, and key replacement require a registry binding. Before accepting an invitation, the client checks the selected vault, connection endpoint, server-instance UUID, authenticated user, and any existing member record. Registration requires membership in the expected remote vault and a role that matches the invitation response.
+- Key replacement checks local vault authorization, active account registration, and the vault recipient list for the old device. The client checks the replacement's Ed25519 and X25519 keys against the account and recipient listings before local authorization and global revocation. An uncertain revocation returns both device identities for reconciliation.
+- Schema 28 preserves schema 27 enrollment rows. New rows bind each operation to the local vault, remote UUID, server connection and instance, member, and authenticated user. The client records the intended public keys and a credential-store identifier before registration. Recovery matches those keys against both server listings and proves possession of both protected private keys. A single transaction commits the device, vault authorization, member, and completed journal stage.
+- A verified invitation can resume before registration. After a registration request may have been sent, recovery requires one matching active registration. Missing, conflicting, or legacy evidence calls for manual intervention. Recovery of a replacement authorizes the new device and leaves global revocation of the old device to a separate confirmed action.
+- The Team Inspector holds invitation tokens in zeroizing memory and displays them only for the originating vault, member, and generation. Copy rechecks the current scope and expiration. Navigation, dismissal, lock, and quit clear the invitation state. The client currently has no Shellumi Server sign-out action.
+
+The client regression uses local databases and simulated HTTP responses. Deployed server behavior is outside this verification scope.

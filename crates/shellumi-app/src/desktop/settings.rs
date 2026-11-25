@@ -223,7 +223,7 @@ impl Shellumi {
                         server_url_display.to_string(),
                         button("enroll-device-btn", "Enroll Device")
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.enroll_current_device("corp-server".into(), "Desktop Client".into(), cx);
+                                app.enroll_current_device("Desktop Client".into(), cx);
                             }))
                             .into_any_element(),
                     ))

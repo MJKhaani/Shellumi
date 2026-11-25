@@ -169,6 +169,8 @@ impl Shellumi {
         self.team_form = None;
         self.selected_host_id = None;
 
+        self.last_created_invite = None;
+        self.team_invite_token_input = None;
         self.active_vault_id = vault_id;
         self.active_vault = vault_name;
         self.vault_dropdown_open = false;
@@ -184,8 +186,11 @@ impl Shellumi {
         self.tunnels.clear();
         self.cloud_providers.clear();
         self.team_members.clear();
+        self.enrolled_devices.clear();
+        self.incomplete_enrollments.clear();
 
         self.start_storage(false, cx);
+        self.load_team_members(cx);
         self.desktop_command(Command::Refresh, cx);
 
         if self.is_active_vault_remote() {
@@ -361,15 +366,17 @@ impl Shellumi {
     }
 
     /// Enrolls the current desktop device with a remote Shellumi Server using protocol v1 challenge-response.
-    pub(crate) fn enroll_current_device(
-        &mut self,
-        server_conn_id: String,
-        device_label: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn enroll_current_device(&mut self, device_label: String, cx: &mut Context<Self>) {
         let Some(reg_path) = self.registry_db_path() else {
             return;
         };
+        let Some(vault_db_path) = self.active_vault_db_path() else {
+            return;
+        };
+        let vault_id = self.active_vault_id.clone();
+        let vault_id_guard = vault_id.clone();
+        let generation = self.vault_load_generation;
+        let active_key = self.active_vault_key();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -379,11 +386,15 @@ impl Shellumi {
                 let mut reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                let conn = reg_store
-                    .get_vault_server_connection(&server_conn_id)
+                let binding = reg_store
+                    .resolve_verified_remote_vault_binding(&vault_id, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut conn = reg_store
+                    .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Server connection '{server_conn_id}' not found"))?;
+                    .ok_or_else(|| "Server connection not found".to_string())?;
 
                 let cred_store = shellumi_core::default_credential_store();
                 let token_sec = conn
@@ -392,18 +403,35 @@ impl Shellumi {
                 let mut client = ShellumiServerClient::new(&conn.base_url);
                 client.set_token(token_sec.expose_secret().to_string());
 
-                let resp = reg_store
-                    .enroll_device_with_server(&server_conn_id, &mut client, &device_label)
+                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-
-                Ok::<_, String>(resp)
+                vault_store.set_vault_id(
+                    shellumi_core::VaultId::new(&vault_id).map_err(|e| e.to_string())?,
+                );
+                let device = vault_store
+                    .enroll_device_with_server(&binding, &mut client, &device_label, &*cred_store)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                conn.device_id = Some(device.device_id);
+                conn.device_signing_key = device.signing_key_ref;
+                conn.device_agreement_key = device.agreement_key_ref;
+                reg_store
+                    .save_vault_server_connection_secured(&conn, &*cred_store)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(())
             })
         });
 
         cx.spawn(async move |app, cx| {
             let result = task.await;
             let _ = app.update(cx, |app, cx| {
+                if app.active_vault_id != vault_id_guard || app.vault_load_generation != generation
+                {
+                    return;
+                }
+                app.load_team_members(cx);
                 match result {
                     Ok(_resp) => {
                         let now = std::time::SystemTime::now()
@@ -466,13 +494,13 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let conn = reg_store
-                    .get_vault_server_connection(&binding.server_connection_id)
+                    .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| {
                         format!(
                             "Server connection '{}' not found",
-                            binding.server_connection_id
+                            binding.server_connection_id()
                         )
                     })?;
 
@@ -486,6 +514,9 @@ impl Shellumi {
                 let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                vault_store.set_vault_id(
+                    shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
+                );
                 let _device = vault_store
                     .enroll_additional_device_for_member_with_binding(
                         &binding,
@@ -539,6 +570,7 @@ impl Shellumi {
                         let msg = format!("Member device enrollment failed: {e}");
                         app.team_enrollment_error = Some(msg.clone());
                         app.sync_status = AppSyncStatus::Error(msg);
+                        app.load_team_members(cx);
                     }
                 }
                 cx.notify();
@@ -593,13 +625,13 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let conn = reg_store
-                    .get_vault_server_connection(&binding.server_connection_id)
+                    .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| {
                         format!(
                             "Server connection '{}' not found",
-                            binding.server_connection_id
+                            binding.server_connection_id()
                         )
                     })?;
 
@@ -613,6 +645,9 @@ impl Shellumi {
                 let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                vault_store.set_vault_id(
+                    shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
+                );
                 let _ = vault_store
                     .accept_invitation_and_enroll_device_with_binding(
                         &binding,
@@ -664,6 +699,7 @@ impl Shellumi {
                     Err(e) => {
                         app.team_enrollment_error =
                             Some(format!("Invitation acceptance failed: {e}"));
+                        app.load_team_members(cx);
                     }
                 }
                 cx.notify();
@@ -711,13 +747,13 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let conn = reg_store
-                    .get_vault_server_connection(&binding.server_connection_id)
+                    .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| {
                         format!(
                             "Server connection '{}' not found",
-                            binding.server_connection_id
+                            binding.server_connection_id()
                         )
                     })?;
                 let cred_store = shellumi_core::default_credential_store();
@@ -730,12 +766,14 @@ impl Shellumi {
                 let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                vault_store.set_vault_id(
+                    shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
+                );
                 let device_uuid = uuid::Uuid::parse_str(&device_id)
                     .map_err(|e| format!("Invalid device UUID '{device_id}': {e}"))?;
                 let _ = vault_store
                     .replace_device_keys_for_member(
-                        &binding.server_connection_id,
-                        &active_vault_id,
+                        &binding,
                         &member_id,
                         device_uuid,
                         &device_label,
@@ -776,6 +814,7 @@ impl Shellumi {
                     Err(e) => {
                         app.team_enrollment_error =
                             Some(format!("Device key replacement failed: {e}"));
+                        app.load_team_members(cx);
                     }
                 }
                 cx.notify();
@@ -831,13 +870,13 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let conn = reg_store
-                    .get_vault_server_connection(&binding.server_connection_id)
+                    .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| {
                         format!(
                             "Server connection '{}' not found",
-                            binding.server_connection_id
+                            binding.server_connection_id()
                         )
                     })?;
                 let cred_store = shellumi_core::default_credential_store();
@@ -926,13 +965,13 @@ impl Shellumi {
                     .await
                     .map_err(|e| e.to_string())?;
                 let conn = reg_store
-                    .get_vault_server_connection(&binding.server_connection_id)
+                    .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| {
                         format!(
                             "Server connection '{}' not found",
-                            binding.server_connection_id
+                            binding.server_connection_id()
                         )
                     })?;
                 let cred_store = shellumi_core::default_credential_store();
@@ -945,14 +984,11 @@ impl Shellumi {
                 let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                vault_store.set_vault_id(
+                    shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
+                );
                 let count = vault_store
-                    .recover_incomplete_enrollments(
-                        &binding.server_connection_id,
-                        &active_vault_id,
-                        binding.remote_vault_id,
-                        &mut client,
-                        &*cred_store,
-                    )
+                    .recover_incomplete_enrollments(&binding, &mut client, &*cred_store)
                     .await
                     .map_err(|e| e.to_string())?;
                 let members = vault_store

@@ -86,6 +86,11 @@ impl InspectorCoordinator {
         }
     }
 
+    pub(crate) fn invalidate_scope(&mut self) {
+        self.active = None;
+        self.pending_guard = None;
+    }
+
     /// Check whether an inspector is currently open.
     pub fn is_open(&self) -> bool {
         self.active.is_some()

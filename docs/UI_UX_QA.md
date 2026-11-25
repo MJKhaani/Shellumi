@@ -108,3 +108,11 @@ All 9 execution phases (Phases 0 through 8) of the Shellumi Unified Inspector re
 - **UI-09 / LAY-018 / DATA-010 (4 Surface Taxonomy):** Validated across `safety_alert.rs`, `setup_wizard_modal.rs`, and `conflict_modal.rs`.
 - **INS-008 / INS-010 (Guarded Navigation & Vault Isolation):** Validated in `test_ins_008_dirty_edit_triggers_guard_on_navigation` and `test_ins_010_switch_vault_preserves_isolation`.
 
+
+## Issue 2 client enrollment and invitation checks
+
+Use a local vault database and a controlled HTTP transport for enrollment QA.
+
+- Send an invitation and confirm the Team Inspector shows its metadata and enables Copy Invite Token only for the originating vault and member. Switch members or vaults, dismiss or lock the Inspector, or wait for expiry. Confirm both the metadata and copy action disappear. Delay the invitation response until after navigation and confirm the new Inspector stays unchanged.
+- Simulate a lost registration response after the remote device exists. Reopen and unlock the vault, then use Resume Enrollment in the Team Inspector. Check that it recovers the same device and that repeated recovery issues no registration request.
+- Simulate an unverifiable registration or a revoked old device. Confirm Replace Keys leaves the old device unchanged. For a successful replacement, confirm the existing global-revocation warning is shown and the client authorizes the replacement before sending revocation.

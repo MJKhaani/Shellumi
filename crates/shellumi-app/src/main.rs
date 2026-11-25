@@ -1,4 +1,14 @@
 mod actions;
+
+pub(crate) struct CreatedInvite {
+    pub(crate) vault_id: String,
+    pub(crate) member_id: String,
+    pub(crate) invitation_id: String,
+    pub(crate) token: Option<shellumi_core::SecretString>,
+    pub(crate) expires_at: i64,
+    pub(crate) inspector_generation: u64,
+}
+
 mod app_render;
 mod askpass;
 
@@ -775,7 +785,7 @@ struct Shellumi {
     pub(crate) team_enrollment_error: Option<String>,
     pub(crate) pending_device_revoke: Option<(String, String, String)>,
     pub(crate) pending_device_replace: Option<(String, String, String)>,
-    pub(crate) last_created_invite: Option<(String, Option<String>, i64)>,
+    pub(crate) last_created_invite: Option<CreatedInvite>,
     broadcast_manager: BroadcastManager,
     broadcast_warning: Option<String>,
     sync_status: AppSyncStatus,
@@ -1191,6 +1201,13 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.on_app_quit(|app, _| {
+            app.last_created_invite = None;
+            app.team_invite_token_input = None;
+            app.inspector_coordinator.invalidate_scope();
+            std::future::ready(())
+        })
+        .detach();
         let focus = cx.focus_handle();
         window.focus(&focus);
         let search_input =

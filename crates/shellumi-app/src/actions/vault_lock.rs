@@ -217,10 +217,14 @@ impl Shellumi {
                         app.active_vault_keys
                             .insert(vault_id_str.clone(), recovered_key);
                         app.unlock_vault_modal = None;
+                        app.last_created_invite = None;
+                        app.team_invite_token_input = None;
+                        app.inspector_coordinator.invalidate_scope();
                         app.active_vault_id = vault_id_str;
                         app.active_vault = vault_name;
                         app.load_vault_list(cx);
                         app.start_storage(false, cx);
+                        app.load_team_members(cx);
                     }
                     Err(err) => {
                         if let Some(m) = &mut app.unlock_vault_modal {
@@ -261,6 +265,13 @@ impl Shellumi {
 
         // 3. If active, revoke access: clear in-memory sensitive data immediately
         if is_active {
+            self.last_created_invite = None;
+            self.team_invite_token_input = None;
+            self.incomplete_enrollments.clear();
+            self.team_members.clear();
+            self.enrolled_devices.clear();
+            self.vault_load_generation = self.vault_load_generation.wrapping_add(1);
+            self.inspector_coordinator.invalidate_scope();
             self.hosts = HostState::Loaded(Vec::new());
             self.snippets.clear();
             self.workspaces.clear();

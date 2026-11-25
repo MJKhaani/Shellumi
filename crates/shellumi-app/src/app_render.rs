@@ -3,6 +3,7 @@ use super::*;
 
 impl Render for Shellumi {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.clear_out_of_scope_invite();
         if let Some(action) = self.pending_window_action.take() {
             match action {
                 PendingWindowAction::CloseTab(tab_id) => {

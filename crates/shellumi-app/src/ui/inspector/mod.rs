@@ -126,6 +126,8 @@ impl Shellumi {
     /// Close inspector (guarded if dirty).
     pub(crate) fn inspector_close(&mut self, cx: &mut Context<Self>) {
         if self.inspector_coordinator.request_close() {
+            self.last_created_invite = None;
+            self.team_invite_token_input = None;
             self.selected_host_id = None;
             self.form = None;
             self.group_inspector = None;
