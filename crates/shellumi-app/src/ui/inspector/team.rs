@@ -472,6 +472,8 @@ impl Shellumi {
         let active_vault_id = self.active_vault_id.clone();
         let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
+        let reg_path = self.registry_db_path();
+        let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let email_for_msg = email.clone();
         cx.notify();
 
@@ -502,8 +504,52 @@ impl Shellumi {
                         .update_team_member_role(mid, role)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<String, String>(mid.clone())
+                    Ok::<(String, bool), String>((mid.clone(), false))
                 } else {
+                    // For remote vaults, create an authoritative server invitation before persisting local state
+                    let mut created_on_server = false;
+                    if let Some(ref rp) = reg_path {
+                        let reg_store = HostStore::open_with_key(rp, default_key.as_ref())
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        if let Ok(binding) = reg_store
+                            .resolve_verified_remote_vault_binding(&active_vault_id_task, None)
+                            .await
+                        {
+                            let conn = reg_store
+                                .get_vault_server_connection(&binding.server_connection_id)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Server connection '{}' not found",
+                                        binding.server_connection_id
+                                    )
+                                })?;
+                            let cred_store = shellumi_core::default_credential_store();
+                            let token_sec =
+                                conn.resolve_auth_token(&*cred_store).ok_or_else(|| {
+                                    "Server connection missing auth token; cannot create server invitation".to_string()
+                                })?;
+                            let mut client =
+                                shellumi_core::server::ShellumiServerClient::new(&conn.base_url);
+                            client.set_token(token_sec.expose_secret().to_string());
+                            let _invite_resp = client
+                                .create_invite(
+                                    binding.remote_vault_id,
+                                    &shellumi_core::server::types::CreateInviteRequest {
+                                        role: role.as_str().to_string(),
+                                        recipient_email: Some(email.clone()),
+                                        ttl_secs: Some(7 * 24 * 3600),
+                                    },
+                                )
+                                .map_err(|e| {
+                                    format!("Server invitation creation failed: {e}")
+                                })?;
+                            created_on_server = true;
+                        }
+                    }
+
                     let target_id = format!("tm-{}", uuid::Uuid::new_v4().as_simple());
                     let member = TeamMember {
                         id: target_id.clone(),
@@ -512,7 +558,11 @@ impl Shellumi {
                         display_name: email,
                         public_key: pubkey,
                         agreement_public_key: None,
-                        enrollment_status: shellumi_core::EnrollmentStatus::InvitationPending,
+                        enrollment_status: if created_on_server {
+                            shellumi_core::EnrollmentStatus::InvitationPending
+                        } else {
+                            shellumi_core::EnrollmentStatus::LegacyRequiresMigration
+                        },
                         role,
                         enrolled_at: now,
                         invited_by: "current_user".into(),
@@ -523,7 +573,7 @@ impl Shellumi {
                         .add_team_member(&member)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok::<String, String>(target_id)
+                    Ok::<(String, bool), String>((target_id, created_on_server))
                 }
             })
         });
@@ -535,7 +585,7 @@ impl Shellumi {
                     f.sending = false;
                 }
                 match res {
-                    Ok(target_id) => {
+                    Ok((target_id, created_on_server)) => {
                         let target = InspectorTarget::TeamMember(Some(target_id.clone()));
                         let ok =
                             app.inspector_coordinator
@@ -552,8 +602,14 @@ impl Shellumi {
 
                         app.team_form = None;
                         app.load_team_members(cx);
-                        app.desktop.message =
-                            Some(format!("Team permissions updated for '{}'", email_for_msg));
+                        app.desktop.message = Some(if created_on_server {
+                            format!("Server invitation created for '{}'", email_for_msg)
+                        } else {
+                            format!(
+                                "Local collaborator record saved for '{}' (not bound to a remote server)",
+                                email_for_msg
+                            )
+                        });
 
                         if let Some(req) = app.inspector_coordinator.take_pending_guard() {
                             app.apply_navigation_request(req, None, cx);

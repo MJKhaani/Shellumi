@@ -25,6 +25,15 @@ use shellumi_core::{EnrolledDevice, EnrollmentStatus, TeamMember, TeamRole, Vaul
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+/// Authoritative server-to-vault binding resolved from the registry `VaultContext`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedRemoteVaultBinding {
+    pub local_vault_id: String,
+    pub server_connection_id: String,
+    pub remote_vault_id: Uuid,
+    pub server_instance_id: Option<String>,
+}
+
 /// Persistent record of a remote Shellumi Server connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultServerConnectionRecord {
@@ -222,6 +231,64 @@ fn current_timestamp() -> i64 {
 }
 
 impl HostStore {
+    /// Resolves and validates the authoritative `VaultContext` binding for a remote vault.
+    /// Rejects missing, local-only, or mismatched server connection contexts.
+    pub async fn resolve_verified_remote_vault_binding(
+        &self,
+        local_vault_id: &str,
+        expected_connection_id: Option<&str>,
+    ) -> Result<VerifiedRemoteVaultBinding, StorageError> {
+        let ctx = self
+            .get_vault_context(local_vault_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(format!(
+                        "Vault context '{local_vault_id}' not found; refusing unverified remote operation"
+                    )),
+                )
+            })?;
+        let (server_conn_id, remote_vault_id) = match ctx.location() {
+            shellumi_core::VaultLocation::Remote {
+                server,
+                server_vault_id,
+            } => {
+                if let Some(expected) = expected_connection_id {
+                    if server.as_str() != expected {
+                        return Err(StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "Vault '{local_vault_id}' is bound to connection '{}', not '{expected}'",
+                                server.as_str()
+                            )),
+                        ));
+                    }
+                }
+                let remote_uuid = Uuid::parse_str(server_vault_id.as_str()).map_err(|_| {
+                    StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(format!(
+                            "Vault '{local_vault_id}' has non-UUID remote vault ID '{}'",
+                            server_vault_id.as_str()
+                        )),
+                    )
+                })?;
+                (server.as_str().to_string(), remote_uuid)
+            }
+            shellumi_core::VaultLocation::Local => {
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(format!(
+                        "Vault '{local_vault_id}' is local-only and cannot perform remote enrollment"
+                    )),
+                ));
+            }
+        };
+        let conn = self.get_vault_server_connection(&server_conn_id).await?;
+        Ok(VerifiedRemoteVaultBinding {
+            local_vault_id: local_vault_id.to_string(),
+            server_connection_id: server_conn_id,
+            remote_vault_id,
+            server_instance_id: conn.and_then(|c| c.server_instance_id),
+        })
+    }
     /// Upserts a remote server connection record.
     pub async fn save_vault_server_connection(
         &mut self,
@@ -1267,44 +1334,112 @@ impl HostStore {
             }
 
             if let Some(ref dev_id) = op.device_id {
-                if let Some(rd) = recipient_devices
+                let rd = recipient_devices
                     .devices
                     .iter()
                     .find(|d| d.device_id.to_string() == *dev_id && d.user_id == me.user_id)
+                    .ok_or_else(|| {
+                        StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "Manual intervention required: previously registered device '{dev_id}' not found on server"
+                            )),
+                        )
+                    })?;
+                let existing_devs = self.list_enrolled_devices_for_vault(local_vault_id).await?;
+                let local_dev = existing_devs
+                    .iter()
+                    .find(|d| d.device_id == *dev_id)
+                    .ok_or_else(|| {
+                        StorageError::InvalidCollaboration(
+                            shellumi_core::CollaborationError::Unauthorized(format!(
+                                "Manual intervention required: local record for registered device '{dev_id}' missing"
+                            )),
+                        )
+                    })?;
+                let Some(ref key_ref) = local_dev.agreement_key_ref else {
+                    let msg = format!(
+                        "Manual intervention required: missing private-key reference for device '{dev_id}'"
+                    );
+                    self.save_enrollment_operation_progress(
+                        &op.operation_id,
+                        local_vault_id,
+                        &op.user_id,
+                        &op.member_id,
+                        &op.stage,
+                        Some(dev_id),
+                        Some(&msg),
+                        &now_str,
+                    )
+                    .await?;
+                    return Err(StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(msg),
+                    ));
+                };
+                if credentials
+                    .get_secret("org.shellumi.device.x25519", key_ref)
+                    .ok()
+                    .flatten()
+                    .is_none()
                 {
-                    let existing_devs =
-                        self.list_enrolled_devices_for_vault(local_vault_id).await?;
-                    if let Some(local_dev) = existing_devs.iter().find(|d| d.device_id == *dev_id) {
-                        if let Some(ref key_ref) = local_dev.agreement_key_ref {
-                            if credentials
-                                .get_secret("org.shellumi.device.x25519", key_ref)
-                                .ok()
-                                .flatten()
-                                .is_some()
-                            {
-                                self.update_team_member_enrollment(
-                                    &member.id,
-                                    EnrollmentStatus::DeviceEnrolled,
-                                    Some(&rd.agreement_public_key),
-                                )
-                                .await?;
-                                self.save_enrollment_operation_progress(
-                                    &op.operation_id,
-                                    local_vault_id,
-                                    &op.user_id,
-                                    &op.member_id,
-                                    "Completed",
-                                    Some(dev_id),
-                                    None,
-                                    &now_str,
-                                )
-                                .await?;
-                                recovered += 1;
-                                continue;
-                            }
-                        }
-                    }
+                    let msg = format!(
+                        "Manual intervention required: protected X25519 private key missing in credential store for device '{dev_id}'"
+                    );
+                    self.save_enrollment_operation_progress(
+                        &op.operation_id,
+                        local_vault_id,
+                        &op.user_id,
+                        &op.member_id,
+                        &op.stage,
+                        Some(dev_id),
+                        Some(&msg),
+                        &now_str,
+                    )
+                    .await?;
+                    return Err(StorageError::InvalidCollaboration(
+                        shellumi_core::CollaborationError::Unauthorized(msg),
+                    ));
                 }
+
+                self.update_team_member_enrollment(
+                    &member.id,
+                    EnrollmentStatus::DeviceEnrolled,
+                    Some(&rd.agreement_public_key),
+                )
+                .await?;
+                self.save_enrollment_operation_progress(
+                    &op.operation_id,
+                    local_vault_id,
+                    &op.user_id,
+                    &op.member_id,
+                    "Completed",
+                    Some(dev_id),
+                    None,
+                    &now_str,
+                )
+                .await?;
+                recovered += 1;
+                continue;
+            }
+
+            if op.stage != "InvitationAccepted" {
+                let msg = format!(
+                    "Manual intervention required: cannot safely resume stage '{}' without registered device ID",
+                    op.stage
+                );
+                self.save_enrollment_operation_progress(
+                    &op.operation_id,
+                    local_vault_id,
+                    &op.user_id,
+                    &op.member_id,
+                    &op.stage,
+                    None,
+                    Some(&msg),
+                    &now_str,
+                )
+                .await?;
+                return Err(StorageError::InvalidCollaboration(
+                    shellumi_core::CollaborationError::Unauthorized(msg),
+                ));
             }
 
             let dev = self
