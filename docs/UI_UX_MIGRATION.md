@@ -193,5 +193,11 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
   - **Mosh Askpass Error Propagation:** Extracted `build_mosh_terminal_command()` (`actions/terminal.rs`) to fail closed with an actionable error when `askpass::environment(&plan)` fails.
   - **Unified Inspector Migration Closure:** Prevented `open_identity_inspector_mode` from opening legacy `identity_modal` in `View` mode and removed the legacy `render_identity_modal` overlay from `desktop.rs`; routine Identity/Team/Provider CRUD runs exclusively through `InspectorCoordinator` while preserving Ansible import, security challenges, confirmation dialogs, and the setup wizard.
 
+### Phase 10: Cross-Device Sync & RD Resize Hardening (2026-11-27)
+- **Implemented:**
+  - **Cross-Device Identity Association (Schema 32):** Eliminated foreign numeric `identity_id` fallback in `server_sync.rs`, added immutable `sync_id` columns/indexes and persistent `auth_dependency_unresolved` state across `hosts` and `groups`, added atomic reconciliation when identities arrive or rename, and fail-closed `resolve_protocol_auth` when dependencies remain unresolved.
+  - **Portable Auth Boundary:** Added typed allowlisted `PortableProtocolSettings` and `merge_synced_protocol_config()` (`shellumi-storage`), stripped device-local key/cert paths and keychain refs from `SyncHostPayload` / `SyncIdentityPayload`, preserved receiving-device credentials across metadata updates, and invalidated incompatible local bindings on auth-mode changes.
+  - **RD Layout-Generation, Auto-Cancel & Worker Events:** Extended `invalidate_layout_state_all()` to discard obsolete queued resize requests and flag `pending_manual_recalc`, embedded `auto_cancel_generation` inside `PendingResizeRequest` so canceled auto requests never reactivate on re-enable, removed dead `reject()` stub, added `SessionEvent::{ResizeFailed, DisplayControlUnavailable}` in `shellumi-remote-desktop` / `shellumi-rdp`, and stopped treating `FrameReady` as resize confirmation.
+
 
 
