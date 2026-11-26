@@ -928,103 +928,246 @@ pub(crate) struct CanvasMeasurement {
     pub viewport: gpui::Bounds<gpui::Pixels>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResizeOrigin {
+    Automatic,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingResizeRequest {
+    pub request_id: u64,
+    pub connection_generation: u64,
+    pub layout_generation: u64,
+    pub dimensions: (u32, u32),
+    pub origin: ResizeOrigin,
+    pub retry_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResizeRequestOutcome {
+    Skipped,
+    Debounced {
+        debounce_gen: u64,
+        auto_cancel_gen: u64,
+    },
+    DispatchNow,
+    QueuedBehindInFlight,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RdAutoResizeState {
     pub layout_generation: u64,
     pub connection_generation: u64,
-    pub desired: Option<(u32, u32)>,
-    pub in_flight: Option<(u32, u32)>,
-    pub in_flight_request_id: Option<u64>,
-    pub next_request_id: u64,
-    pub last_acknowledged: Option<(u32, u32)>,
-    pub last_rejected: Option<(u32, u32)>,
+    pub auto_cancel_generation: u64,
     pub debounce_generation: u64,
-    pub retry_count: u8,
+    pub desired: Option<PendingResizeRequest>,
+    pub in_flight: Option<PendingResizeRequest>,
+    pub next_request_id: u64,
+    pub last_confirmed: Option<(u32, u32)>,
+    pub last_rejected: Option<(u32, u32)>,
     pub last_error: Option<String>,
 }
 
 impl RdAutoResizeState {
     pub fn reset_for_connection(&mut self, connection_generation: u64) {
         self.connection_generation = connection_generation;
+        self.desired = None;
         self.in_flight = None;
-        self.in_flight_request_id = None;
-        self.last_acknowledged = None;
+        self.last_confirmed = None;
         self.last_rejected = None;
         self.debounce_generation = self.debounce_generation.wrapping_add(1);
-        self.retry_count = 0;
+        self.auto_cancel_generation = self.auto_cancel_generation.wrapping_add(1);
         self.last_error = None;
     }
 
-    pub fn record_desired(&mut self, target: (u32, u32), layout_generation: u64) -> bool {
-        if self.desired == Some(target)
-            && (self.in_flight == Some(target) || self.last_acknowledged == Some(target))
-        {
-            return false;
-        }
-        self.layout_generation = layout_generation;
-        self.desired = Some(target);
+    /// Cancel all pending/debounced automatic resize work without disturbing
+    /// an explicit manual request or the last confirmed resolution.
+    pub fn cancel_automatic(&mut self) {
+        self.auto_cancel_generation = self.auto_cancel_generation.wrapping_add(1);
         self.debounce_generation = self.debounce_generation.wrapping_add(1);
-        true
+        if matches!(
+            self.desired,
+            Some(PendingResizeRequest {
+                origin: ResizeOrigin::Automatic,
+                ..
+            })
+        ) {
+            self.desired = None;
+        }
     }
 
-    pub fn begin_dispatch(&mut self, target: (u32, u32)) -> u64 {
+    pub fn request_resize(
+        &mut self,
+        dimensions: (u32, u32),
+        layout_generation: u64,
+        origin: ResizeOrigin,
+    ) -> ResizeRequestOutcome {
+        if origin == ResizeOrigin::Automatic {
+            // Explicit manual requests take precedence over automatic resizes.
+            if matches!(
+                self.desired,
+                Some(PendingResizeRequest {
+                    origin: ResizeOrigin::Manual,
+                    ..
+                })
+            ) {
+                return ResizeRequestOutcome::Skipped;
+            }
+            let same_desired = self.desired.map(|d| d.dimensions) == Some(dimensions);
+            let same_in_flight = self.in_flight.map(|f| f.dimensions) == Some(dimensions);
+            let already_confirmed =
+                self.in_flight.is_none() && self.last_confirmed == Some(dimensions);
+            if (same_desired && (same_in_flight || already_confirmed))
+                || (self.desired.is_none() && (same_in_flight || already_confirmed))
+            {
+                return ResizeRequestOutcome::Skipped;
+            }
+            self.layout_generation = layout_generation;
+            self.desired = Some(PendingResizeRequest {
+                request_id: 0,
+                connection_generation: self.connection_generation,
+                layout_generation,
+                dimensions,
+                origin,
+                retry_count: 0,
+            });
+            self.debounce_generation = self.debounce_generation.wrapping_add(1);
+            ResizeRequestOutcome::Debounced {
+                debounce_gen: self.debounce_generation,
+                auto_cancel_gen: self.auto_cancel_generation,
+            }
+        } else {
+            self.layout_generation = layout_generation;
+            self.desired = Some(PendingResizeRequest {
+                request_id: 0,
+                connection_generation: self.connection_generation,
+                layout_generation,
+                dimensions,
+                origin,
+                retry_count: 0,
+            });
+            self.debounce_generation = self.debounce_generation.wrapping_add(1);
+            if self.in_flight.is_some() {
+                ResizeRequestOutcome::QueuedBehindInFlight
+            } else {
+                ResizeRequestOutcome::DispatchNow
+            }
+        }
+    }
+
+    /// Promote the next eligible `desired` request into `in_flight`, enforcing
+    /// at most one outstanding resize negotiation at a time.
+    pub fn take_ready_to_dispatch(
+        &mut self,
+        dynamic_resize_enabled: bool,
+    ) -> Option<PendingResizeRequest> {
+        if self.in_flight.is_some() {
+            return None;
+        }
+        let mut req = self.desired.take()?;
+        if req.origin == ResizeOrigin::Automatic && !dynamic_resize_enabled {
+            return None;
+        }
+        if req.origin == ResizeOrigin::Automatic && self.last_confirmed == Some(req.dimensions) {
+            return None;
+        }
         self.next_request_id = self.next_request_id.wrapping_add(1);
-        let req_id = self.next_request_id;
-        self.in_flight = Some(target);
-        self.in_flight_request_id = Some(req_id);
-        req_id
+        req.request_id = self.next_request_id;
+        req.connection_generation = self.connection_generation;
+        self.in_flight = Some(req);
+        Some(req)
     }
 
     pub fn fail_dispatch(&mut self, request_id: u64, err: String) {
-        if self.in_flight_request_id == Some(request_id) {
+        if self.in_flight.map(|r| r.request_id) == Some(request_id) {
             self.in_flight = None;
-            self.in_flight_request_id = None;
             self.last_error = Some(err);
         }
     }
 
-    pub fn timeout_request(&mut self, request_id: u64, target: (u32, u32)) -> Option<(u32, u32)> {
-        if self.in_flight_request_id != Some(request_id) {
+    pub fn timeout_request(
+        &mut self,
+        request_id: u64,
+        dynamic_resize_enabled: bool,
+    ) -> Option<PendingResizeRequest> {
+        let in_flight = self.in_flight?;
+        if in_flight.request_id != request_id {
             return None;
         }
         self.in_flight = None;
-        self.in_flight_request_id = None;
-        if let Some(latest) = self.desired {
-            if latest != target {
-                self.retry_count = 0;
-                return Some(latest);
+        if let Some(next) = self.desired {
+            if next.origin == ResizeOrigin::Automatic && !dynamic_resize_enabled {
+                self.desired = None;
+                return None;
             }
-            if self.retry_count < 2 {
-                self.retry_count += 1;
-                return Some(target);
+            return self.take_ready_to_dispatch(dynamic_resize_enabled);
+        }
+        if in_flight.origin == ResizeOrigin::Automatic && !dynamic_resize_enabled {
+            return None;
+        }
+        if in_flight.retry_count < 2 {
+            self.next_request_id = self.next_request_id.wrapping_add(1);
+            let retried = PendingResizeRequest {
+                request_id: self.next_request_id,
+                retry_count: in_flight.retry_count + 1,
+                ..in_flight
+            };
+            self.in_flight = Some(retried);
+            return Some(retried);
+        }
+        self.last_error = Some("Display resize acknowledgement timed out".into());
+        None
+    }
+
+    pub fn acknowledge(
+        &mut self,
+        size: (u32, u32),
+        dynamic_resize_enabled: bool,
+    ) -> Option<PendingResizeRequest> {
+        self.last_confirmed = Some(size);
+        if self.in_flight.map(|r| r.dimensions) == Some(size) {
+            self.in_flight = None;
+            self.last_error = None;
+        }
+        if self.in_flight.is_none() {
+            if let Some(next) = self.desired {
+                if next.origin == ResizeOrigin::Automatic
+                    && (!dynamic_resize_enabled || next.dimensions == size)
+                {
+                    self.desired = None;
+                    return None;
+                }
+                return self.take_ready_to_dispatch(dynamic_resize_enabled);
             }
-            self.last_error = Some("Display resize acknowledgement timed out".into());
         }
         None
     }
 
-    pub fn acknowledge(&mut self, size: (u32, u32)) -> Option<(u32, u32)> {
-        self.last_acknowledged = Some(size);
-        if self.in_flight == Some(size) {
-            self.in_flight = None;
-            self.in_flight_request_id = None;
-            self.retry_count = 0;
-            self.last_error = None;
-        }
-        match self.desired {
-            Some(next) if next != size && self.in_flight.is_none() => Some(next),
-            _ => None,
-        }
-    }
-
     #[allow(dead_code)]
-    pub fn reject(&mut self, size: (u32, u32), reason: String) {
+    pub fn reject(
+        &mut self,
+        size: (u32, u32),
+        reason: String,
+        dynamic_resize_enabled: bool,
+    ) -> Option<PendingResizeRequest> {
         self.last_rejected = Some(size);
-        if self.in_flight == Some(size) {
-            self.in_flight = None;
-            self.in_flight_request_id = None;
-        }
         self.last_error = Some(reason);
+        if self.in_flight.map(|r| r.dimensions) == Some(size) {
+            self.in_flight = None;
+        }
+        if self.in_flight.is_none() {
+            if let Some(next) = self.desired {
+                if next.origin == ResizeOrigin::Automatic
+                    && (!dynamic_resize_enabled || next.dimensions == size)
+                {
+                    self.desired = None;
+                    return None;
+                }
+                return self.take_ready_to_dispatch(dynamic_resize_enabled);
+            }
+        }
+        None
     }
 }
 

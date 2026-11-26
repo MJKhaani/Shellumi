@@ -1183,15 +1183,56 @@ impl Shellumi {
         height: u32,
         cx: &mut Context<Self>,
     ) {
-        if let Err(err) = self.try_send_remote_resize(tab_idx, width, height, cx) {
-            if let Some(rd) = self
-                .tabs
-                .get_mut(tab_idx)
-                .and_then(|t| t.remote_desktop_state.as_mut())
-            {
-                rd.last_action_note = Some(format!("Resize request failed: {err}"));
-                cx.notify();
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let Some(rd) = tab.remote_desktop_state.as_ref() else {
+            return;
+        };
+        let tab_id = tab.id;
+        let conn_gen = rd.connection_generation;
+        let dynamic_enabled = rd.dynamic_resize_enabled;
+        let layout_gen = self.layout_epoch;
+
+        // If the session is not yet connected/has no ui_handle, fall back to direct send.
+        if rd.ui_handle.is_none() || rd.status != RemoteDesktopStatus::Connected {
+            if let Err(err) = self.try_send_remote_resize(tab_idx, width, height, cx) {
+                if let Some(rd) = self
+                    .tabs
+                    .get_mut(tab_idx)
+                    .and_then(|t| t.remote_desktop_state.as_mut())
+                {
+                    rd.last_action_note = Some(format!("Resize request failed: {err}"));
+                    cx.notify();
+                }
             }
+            return;
+        }
+
+        let Some(target) =
+            Self::compute_legal_rdp_resize(width as f32, height as f32, rd.max_monitor_area)
+        else {
+            return;
+        };
+
+        let next_req = {
+            let entry = self.rd_resize_state.entry(tab_id).or_default();
+            if entry.connection_generation != conn_gen {
+                entry.reset_for_connection(conn_gen);
+            }
+            match entry.request_resize(target, layout_gen, crate::ResizeOrigin::Manual) {
+                crate::ResizeRequestOutcome::DispatchNow => {
+                    entry.take_ready_to_dispatch(dynamic_enabled)
+                }
+                _ => None,
+            }
+        };
+        if let Some(req) = next_req {
+            let session_key = crate::RemoteSessionKey {
+                tab_id,
+                connection_generation: conn_gen,
+            };
+            self.dispatch_rd_resize(session_key, req, cx);
         }
     }
 
@@ -1328,10 +1369,13 @@ impl Shellumi {
         if entry.connection_generation != conn_gen {
             entry.reset_for_connection(conn_gen);
         }
-        if !entry.record_desired(target, layout_gen) {
+        let crate::ResizeRequestOutcome::Debounced {
+            debounce_gen,
+            auto_cancel_gen,
+        } = entry.request_resize(target, layout_gen, crate::ResizeOrigin::Automatic)
+        else {
             return;
-        }
-        let debounce_gen = entry.debounce_generation;
+        };
         let session_key = crate::RemoteSessionKey {
             tab_id,
             connection_generation: conn_gen,
@@ -1356,63 +1400,86 @@ impl Shellumi {
                 {
                     return;
                 }
-                let Some(state) = app.rd_resize_state.get(&session_key.tab_id) else {
-                    return;
-                };
-                if state.debounce_generation != debounce_gen
-                    || state.layout_generation != layout_gen
-                    || state.in_flight.is_some()
-                {
-                    return;
-                }
-                if let Some(target_size) = state.desired {
-                    if state.last_acknowledged == Some(target_size) {
+                let dynamic_enabled = rd.dynamic_resize_enabled;
+                let next_req = {
+                    let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) else {
+                        return;
+                    };
+                    if state.connection_generation != session_key.connection_generation
+                        || state.auto_cancel_generation != auto_cancel_gen
+                        || state.debounce_generation != debounce_gen
+                        || state.layout_generation != layout_gen
+                        || state.in_flight.is_some()
+                    {
                         return;
                     }
-                    app.dispatch_rd_auto_resize(session_key, target_size, cx);
+                    state.take_ready_to_dispatch(dynamic_enabled)
+                };
+                if let Some(req) = next_req {
+                    app.dispatch_rd_resize(session_key, req, cx);
                 }
             });
         })
         .detach();
     }
 
-    fn dispatch_rd_auto_resize(
+    fn dispatch_rd_resize(
         &mut self,
         session_key: crate::RemoteSessionKey,
-        target: (u32, u32),
+        req: crate::PendingResizeRequest,
         cx: &mut Context<Self>,
     ) {
         let Some(tab_idx) = self.tabs.iter().position(|t| t.id == session_key.tab_id) else {
+            if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
+                state.fail_dispatch(req.request_id, "Remote desktop tab closed".into());
+            }
             return;
         };
         let Some(rd) = self.tabs[tab_idx].remote_desktop_state.as_ref() else {
+            if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
+                state.fail_dispatch(req.request_id, "Remote desktop state missing".into());
+            }
             return;
         };
         if rd.connection_generation != session_key.connection_generation
             || rd.status != RemoteDesktopStatus::Connected
             || !rd.display_control_ready
             || rd.view_only
+            || (req.origin == crate::ResizeOrigin::Automatic && !rd.dynamic_resize_enabled)
         {
+            if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
+                state.fail_dispatch(req.request_id, "Session not eligible for resize".into());
+            }
             return;
         }
-        let (req_id, backoff_ms) = {
-            let entry = self.rd_resize_state.entry(session_key.tab_id).or_default();
-            let req_id = entry.begin_dispatch(target);
-            let backoff_ms = 2000u64.saturating_mul(u64::from(entry.retry_count) + 1);
-            (req_id, backoff_ms)
-        };
+        let target = req.dimensions;
+        let req_id = req.request_id;
+        let backoff_ms = 2000u64.saturating_mul(u64::from(req.retry_count) + 1);
         tracing::debug!(
             tab_id = session_key.tab_id,
             connection_generation = session_key.connection_generation,
             request_id = req_id,
+            origin = ?req.origin,
             width = target.0,
             height = target.1,
             "Dispatching RDP display resize"
         );
         if let Err(err) = self.try_send_remote_resize(tab_idx, target.0, target.1, cx) {
-            if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
-                state.fail_dispatch(req_id, err.clone());
-            }
+            let next_req = {
+                let dynamic_enabled = self
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|t| t.remote_desktop_state.as_ref())
+                    .map(|r| r.dynamic_resize_enabled)
+                    .unwrap_or(false);
+                if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
+                    state.fail_dispatch(req_id, err.clone());
+                    // Do not immediately spin on channel failure; leave desired for next trigger.
+                    let _ = dynamic_enabled;
+                }
+                None::<crate::PendingResizeRequest>
+            };
+            let _ = next_req;
             tracing::warn!(
                 tab_id = session_key.tab_id,
                 request_id = req_id,
@@ -1440,6 +1507,7 @@ impl Shellumi {
                 {
                     return;
                 }
+                let dynamic_enabled = rd.dynamic_resize_enabled;
                 let next_dispatch = {
                     let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) else {
                         return;
@@ -1447,7 +1515,7 @@ impl Shellumi {
                     if state.connection_generation != session_key.connection_generation {
                         return;
                     }
-                    let next = state.timeout_request(req_id, target);
+                    let next = state.timeout_request(req_id, dynamic_enabled);
                     if next.is_none() && state.last_error.is_some() {
                         tracing::warn!(
                             tab_id = session_key.tab_id,
@@ -1459,8 +1527,8 @@ impl Shellumi {
                     }
                     next
                 };
-                if let Some(next_target) = next_dispatch {
-                    app.dispatch_rd_auto_resize(session_key, next_target, cx);
+                if let Some(next_req) = next_dispatch {
+                    app.dispatch_rd_resize(session_key, next_req, cx);
                 }
             });
         })
@@ -1473,6 +1541,13 @@ impl Shellumi {
         size: (u32, u32),
         cx: &mut Context<Self>,
     ) {
+        let dynamic_enabled = self
+            .tabs
+            .iter()
+            .find(|t| t.id == session_key.tab_id)
+            .and_then(|t| t.remote_desktop_state.as_ref())
+            .map(|rd| rd.dynamic_resize_enabled)
+            .unwrap_or(false);
         let next = {
             let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) else {
                 return;
@@ -1480,10 +1555,10 @@ impl Shellumi {
             if state.connection_generation != session_key.connection_generation {
                 return;
             }
-            state.acknowledge(size)
+            state.acknowledge(size, dynamic_enabled)
         };
-        if let Some(next_target) = next {
-            self.dispatch_rd_auto_resize(session_key, next_target, cx);
+        if let Some(next_req) = next {
+            self.dispatch_rd_resize(session_key, next_req, cx);
         }
     }
 
@@ -1508,6 +1583,11 @@ impl Shellumi {
         } else {
             "Automatic viewport resizing disabled (manual Match Viewport still available)".into()
         });
+        if !enabled {
+            if let Some(state) = self.rd_resize_state.get_mut(&tab_id) {
+                state.cancel_automatic();
+            }
+        }
         cx.notify();
         if enabled {
             self.schedule_rd_auto_resize(tab_id, cx);
@@ -1545,19 +1625,27 @@ impl Shellumi {
             return;
         };
         let conn_gen = rd.connection_generation;
+        let dynamic_enabled = rd.dynamic_resize_enabled;
         let layout_gen = measurement.layout_epoch;
-        let entry = self.rd_resize_state.entry(tab_id).or_default();
-        if entry.connection_generation != conn_gen {
-            entry.reset_for_connection(conn_gen);
-        }
-        entry.layout_generation = layout_gen;
-        entry.desired = Some(target);
-        entry.debounce_generation = entry.debounce_generation.wrapping_add(1);
-        let session_key = crate::RemoteSessionKey {
-            tab_id,
-            connection_generation: conn_gen,
+        let next_req = {
+            let entry = self.rd_resize_state.entry(tab_id).or_default();
+            if entry.connection_generation != conn_gen {
+                entry.reset_for_connection(conn_gen);
+            }
+            match entry.request_resize(target, layout_gen, crate::ResizeOrigin::Manual) {
+                crate::ResizeRequestOutcome::DispatchNow => {
+                    entry.take_ready_to_dispatch(dynamic_enabled)
+                }
+                _ => None,
+            }
         };
-        self.dispatch_rd_auto_resize(session_key, target, cx);
+        if let Some(req) = next_req {
+            let session_key = crate::RemoteSessionKey {
+                tab_id,
+                connection_generation: conn_gen,
+            };
+            self.dispatch_rd_resize(session_key, req, cx);
+        }
     }
 
     /// Request a remote desktop resize using *only* the validated GPUI `CanvasMeasurement`.
@@ -1591,61 +1679,115 @@ mod tests {
     }
 
     #[test]
-    fn test_rd_auto_resize_state_coalesces_and_isolates_generations() {
+    fn test_rd_resize_coordinator_enforces_single_inflight_coalesces_and_resets() {
         let mut state = crate::RdAutoResizeState::default();
-        assert!(state.record_desired((1280, 720), 1));
+        assert!(matches!(
+            state.request_resize((1280, 720), 1, crate::ResizeOrigin::Automatic),
+            crate::ResizeRequestOutcome::Debounced { .. }
+        ));
         let gen1 = state.debounce_generation;
-        assert!(state.record_desired((1440, 900), 1));
+        assert!(matches!(
+            state.request_resize((1440, 900), 1, crate::ResizeOrigin::Automatic),
+            crate::ResizeRequestOutcome::Debounced { .. }
+        ));
         assert_ne!(state.debounce_generation, gen1);
 
-        // Simulate in-flight (1440, 900) and a newer desired (1600, 1000) arriving mid-flight.
-        let req1 = state.begin_dispatch((1440, 900));
-        assert_eq!(state.in_flight_request_id, Some(req1));
-        assert!(state.record_desired((1600, 1000), 2));
-        // Acknowledging (1440, 900) must immediately return the coalesced (1600, 1000).
-        assert_eq!(state.acknowledge((1440, 900)), Some((1600, 1000)));
-        assert_eq!(state.in_flight, None);
-        assert_eq!(state.in_flight_request_id, None);
+        // Dispatch (1440, 900) as the single in-flight negotiation.
+        let req1 = state
+            .take_ready_to_dispatch(true)
+            .expect("should dispatch 1440x900");
+        assert_eq!(req1.dimensions, (1440, 900));
+        assert!(state.take_ready_to_dispatch(true).is_none());
 
-        // Reconnect resets in-flight/acknowledged/retries cleanly.
-        let _req2 = state.begin_dispatch((1600, 1000));
-        state.retry_count = 2;
+        // A manual request arriving mid-flight must queue behind in_flight, never dispatch concurrently.
+        assert_eq!(
+            state.request_resize((1920, 1080), 2, crate::ResizeOrigin::Manual),
+            crate::ResizeRequestOutcome::QueuedBehindInFlight
+        );
+        // An automatic resize must NOT overwrite a queued manual request.
+        assert_eq!(
+            state.request_resize((1600, 1000), 2, crate::ResizeOrigin::Automatic),
+            crate::ResizeRequestOutcome::Skipped
+        );
+
+        // Acknowledging (1440, 900) immediately promotes the queued manual (1920, 1080).
+        let req2 = state
+            .acknowledge((1440, 900), true)
+            .expect("should promote queued manual resize");
+        assert_eq!(req2.dimensions, (1920, 1080));
+        assert_eq!(req2.origin, crate::ResizeOrigin::Manual);
+        assert_ne!(req2.request_id, req1.request_id);
+
+        // Reconnect resets in-flight, desired, confirmed, and bumps generations cleanly.
         state.reset_for_connection(2);
         assert_eq!(state.connection_generation, 2);
         assert_eq!(state.in_flight, None);
-        assert_eq!(state.in_flight_request_id, None);
-        assert_eq!(state.last_acknowledged, None);
-        assert_eq!(state.retry_count, 0);
+        assert_eq!(state.desired, None);
+        assert_eq!(state.last_confirmed, None);
     }
 
     #[test]
     fn test_rd_resize_request_id_prevents_stale_timeouts_and_handles_queue_failure_and_rejection() {
         let mut state = crate::RdAutoResizeState::default();
-        state.record_desired((1280, 720), 1);
-        let req1 = state.begin_dispatch((1280, 720));
+        state.request_resize((1280, 720), 1, crate::ResizeOrigin::Automatic);
+        let req1 = state.take_ready_to_dispatch(true).unwrap();
+
         // Queue failure clears in_flight immediately without leaving request stuck.
-        state.fail_dispatch(req1, "channel full".into());
+        state.fail_dispatch(req1.request_id, "channel full".into());
         assert_eq!(state.in_flight, None);
-        assert_eq!(state.in_flight_request_id, None);
         assert_eq!(state.last_error.as_deref(), Some("channel full"));
 
         // Stale timeout for req1 must NOT cancel req2 even with identical dimensions.
-        let req2 = state.begin_dispatch((1280, 720));
-        assert_ne!(req1, req2);
-        assert_eq!(state.timeout_request(req1, (1280, 720)), None);
-        assert_eq!(state.in_flight_request_id, Some(req2));
+        state.request_resize((1280, 720), 1, crate::ResizeOrigin::Manual);
+        let req2 = state.take_ready_to_dispatch(true).unwrap();
+        assert_ne!(req1.request_id, req2.request_id);
+        assert_eq!(state.timeout_request(req1.request_id, true), None);
+        assert_eq!(state.in_flight, Some(req2));
 
         // Rejection clears matching in-flight and records last_rejected.
-        state.reject((1280, 720), "server rejected".into());
+        assert_eq!(
+            state.reject((1280, 720), "server rejected".into(), true),
+            None
+        );
         assert_eq!(state.in_flight, None);
         assert_eq!(state.last_rejected, Some((1280, 720)));
         assert_eq!(state.last_error.as_deref(), Some("server rejected"));
 
         // Delayed ack for an older size cannot complete a newer in-flight size.
-        state.record_desired((1920, 1080), 2);
-        let req3 = state.begin_dispatch((1920, 1080));
-        let _ = state.acknowledge((1280, 720));
-        assert_eq!(state.in_flight, Some((1920, 1080)));
-        assert_eq!(state.in_flight_request_id, Some(req3));
+        state.request_resize((1920, 1080), 2, crate::ResizeOrigin::Manual);
+        let req3 = state.take_ready_to_dispatch(true).unwrap();
+        let _ = state.acknowledge((1280, 720), true);
+        assert_eq!(state.in_flight, Some(req3));
+    }
+
+    #[test]
+    fn test_disabling_dynamic_resize_cancels_auto_work_but_preserves_manual_and_confirmed() {
+        let mut state = crate::RdAutoResizeState::default();
+        assert_eq!(state.acknowledge((1280, 720), true), None);
+        assert_eq!(state.last_confirmed, Some((1280, 720)));
+
+        // Queued automatic request is dropped and auto_cancel_generation increments when disabled.
+        let cancel_before = state.auto_cancel_generation;
+        state.request_resize((1440, 900), 2, crate::ResizeOrigin::Automatic);
+        state.cancel_automatic();
+        assert_ne!(state.auto_cancel_generation, cancel_before);
+        assert_eq!(state.desired, None);
+        assert_eq!(state.last_confirmed, Some((1280, 720)));
+
+        // An in-flight automatic request must NOT retry or schedule further auto requests once disabled.
+        state.request_resize((1600, 1000), 3, crate::ResizeOrigin::Automatic);
+        let auto_req = state.take_ready_to_dispatch(true).unwrap();
+        state.cancel_automatic();
+        assert_eq!(state.timeout_request(auto_req.request_id, false), None);
+
+        // Pending manual requests are preserved when automatic resizing is canceled.
+        state.request_resize((1920, 1080), 4, crate::ResizeOrigin::Manual);
+        state.cancel_automatic();
+        let manual_req = state
+            .take_ready_to_dispatch(false)
+            .expect("manual request should survive cancel_automatic");
+        assert_eq!(manual_req.origin, crate::ResizeOrigin::Manual);
+        assert_eq!(manual_req.dimensions, (1920, 1080));
+        assert_eq!(state.last_confirmed, Some((1280, 720)));
     }
 }
