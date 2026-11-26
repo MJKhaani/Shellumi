@@ -764,8 +764,7 @@ pub(crate) enum DeleteTarget {
 
 struct Shellumi {
     sftp_jobs: std::collections::HashMap<(u64, u64), sftp_transfer::TransferJob>,
-    pending_connections: std::collections::HashMap<i64, u64>,
-    next_connection_op_id: u64,
+    connection_ops: ConnectionOpRegistry,
     rd_credential_edit_gen: std::collections::HashMap<u64, u64>,
     desktop: desktop::DesktopUi,
     database: Option<String>,
@@ -873,16 +872,47 @@ struct Shellumi {
     pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionOperationState {
+    Pending,
+    Consumed,
+    Canceled,
+    Superseded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectionOperationError(pub &'static str);
+
+impl std::fmt::Display for ConnectionOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectionOperationContext {
     pub window_id: gpui::WindowId,
     pub vault_id: String,
     pub vault_load_generation: u64,
     pub host_id: i64,
+    pub host_revision: u64,
     pub operation_id: u64,
     pub tab_id: Option<u64>,
     pub connection_generation: Option<u64>,
     pub credential_edit_generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConnectionOperationRecord {
+    pub ctx: ConnectionOperationContext,
+    pub state: ConnectionOperationState,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ConnectionOpRegistry {
+    pub ops: std::collections::HashMap<u64, ConnectionOperationRecord>,
+    pub next_op_id: u64,
+    pub host_revisions: std::collections::HashMap<i64, u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1528,8 +1558,11 @@ impl Shellumi {
             .detach();
         Self {
             sftp_jobs: std::collections::HashMap::new(),
-            pending_connections: std::collections::HashMap::new(),
-            next_connection_op_id: 1,
+            connection_ops: ConnectionOpRegistry {
+                ops: std::collections::HashMap::new(),
+                next_op_id: 1,
+                host_revisions: std::collections::HashMap::new(),
+            },
             rd_credential_edit_gen: std::collections::HashMap::new(),
             desktop: desktop::DesktopUi::new(cx),
             database,

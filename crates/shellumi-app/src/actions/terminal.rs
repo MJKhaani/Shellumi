@@ -369,6 +369,7 @@ impl Shellumi {
             self.rd_pan_state.remove(&id);
             self.rd_resize_state.remove(&id);
             self.rd_credential_edit_gen.remove(&id);
+            self.connection_ops.cancel_for_tab(id);
             if let Some(rd) = &mut self.tabs[pos].remote_desktop_state {
                 if let Some(pwd) = rd.password.as_mut() {
                     use zeroize::Zeroize;
@@ -426,9 +427,7 @@ impl Shellumi {
                 let Some(path) = self.active_vault_db_path() else {
                     return;
                 };
-                let Some(op_ctx) = self.begin_connection_op(host.id, window, None, None, 0) else {
-                    return;
-                };
+                let op_ctx = self.register_connection_op(host.id, window, None, None, 0);
                 let host = host.clone();
                 let host_id = host.id;
                 let active_vault_id_task = op_ctx.vault_id.clone();
@@ -453,15 +452,14 @@ impl Shellumi {
                     let result = task.await;
                     let _ = handle.update(cx, |_, window, cx| {
                         let _ = app.update(cx, |app, cx| {
-                            app.finish_connection_op(op_ctx.host_id, op_ctx.operation_id);
-                            if let Err(reason) = app.validate_connection_op(
+                            if let Err(reason) = app.authorize_and_consume_connection_op(
                                 &op_ctx,
                                 Some(window.window_handle().window_id()),
                             ) {
                                 tracing::warn!(
                                     host_id = op_ctx.host_id,
                                     operation_id = op_ctx.operation_id,
-                                    reason = reason,
+                                    reason = %reason,
                                     "Discarded stale Mosh credential resolution"
                                 );
                                 return;

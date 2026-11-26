@@ -214,22 +214,13 @@ impl Shellumi {
 
         // Asynchronously resolve saved, host-scoped, or inherited group credentials via the unified resolver
         if let Some(db_path) = self.active_vault_db_path() {
-            let op_id = self.next_connection_op_id;
-            self.next_connection_op_id = self.next_connection_op_id.wrapping_add(1);
-            let op_ctx = crate::ConnectionOperationContext {
-                window_id: window.window_handle().window_id(),
-                vault_id: self.active_vault_id.clone(),
-                vault_load_generation: self.vault_load_generation,
-                host_id: host.id,
-                operation_id: op_id,
-                tab_id: Some(tab_id),
-                connection_generation: Some(0),
-                credential_edit_generation: self
-                    .rd_credential_edit_gen
-                    .get(&tab_id)
-                    .copied()
-                    .unwrap_or(0),
-            };
+            let edit_gen = self
+                .rd_credential_edit_gen
+                .get(&tab_id)
+                .copied()
+                .unwrap_or(0);
+            let op_ctx =
+                self.register_connection_op(host.id, window, Some(tab_id), Some(0), edit_gen);
             let vault_id = op_ctx.vault_id.clone();
             let vault_key = self.active_vault_key();
             let task = cx.background_executor().spawn(async move {
@@ -249,12 +240,12 @@ impl Shellumi {
             cx.spawn(async move |app, cx| {
                 let mut res = task.await;
                 let _ = app.update(cx, |app, cx| {
-                    if let Err(reason) = app.validate_connection_op(&op_ctx, None) {
+                    if let Err(reason) = app.authorize_and_consume_connection_op(&op_ctx, None) {
                         tracing::warn!(
                             tab_id = tab_id,
                             host_id = op_ctx.host_id,
                             operation_id = op_ctx.operation_id,
-                            reason = reason,
+                            reason = %reason,
                             "Discarded stale remote desktop credential resolution"
                         );
                         if let Ok((_, Some(ref mut pwd), _)) = res {
@@ -616,6 +607,7 @@ impl Shellumi {
                 rd.status_message = Some("Session disconnected by user.".into());
                 rd.last_action_note = Some("Disconnected".into());
                 self.rd_resize_state.remove(&tab_id);
+                self.connection_ops.cancel_for_tab(tab_id);
                 cx.notify();
             }
         }
@@ -655,6 +647,7 @@ impl Shellumi {
                     tab_id,
                     connection_generation: rd.connection_generation,
                 };
+                self.connection_ops.cancel_for_tab(tab_id);
                 self.rd_resize_state
                     .entry(tab_id)
                     .or_default()

@@ -4904,12 +4904,14 @@ impl HostStore {
         }
     }
 
-    /// Atomically create or update an identity and transition `credential_operations` to `Committed`.
+    /// Atomically create or update an identity, record an optional sync mutation, and transition
+    /// `credential_operations` to `Committed`.
     pub async fn save_identity_with_journal_tx(
         &mut self,
         editing_id: Option<i64>,
         identity: &shellumi_core::NewIdentity,
         journal_op_id: Option<&str>,
+        record_sync_mutation: bool,
     ) -> Result<i64, StorageError> {
         let name = validated_name(&identity.name)?;
         let username = identity.username.trim();
@@ -4976,6 +4978,37 @@ impl HostStore {
                 self.connection.last_insert_rowid()
             };
 
+            if record_sync_mutation {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let ident_payload = SyncIdentityPayload {
+                    name: name.to_string(),
+                    username: stored_user.to_string(),
+                    auth_method: identity.auth_method.clone(),
+                    password_secret_ref: None,
+                    key_path: identity.key_path.clone(),
+                    passphrase_secret_ref: None,
+                    certificate_path: identity.certificate_path.clone(),
+                    tags: identity.tags.clone(),
+                    comment: identity.comment.clone(),
+                };
+                let ident_json = serde_json::to_string(&ident_payload)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                self.connection
+                    .execute(
+                        "INSERT INTO vault_mutations (vault_id, object_id, entity_type, expected_revision, deleted, payload_json, created_at, idempotency_key, key_epoch, device_counter)
+                         VALUES (?1, ?2, 'identity', 0, 0, ?3, ?4, NULL, 0, 0)",
+                        (
+                            self.host_vault_id.as_str(),
+                            name,
+                            ident_json.as_str(),
+                            now,
+                        ),
+                    )
+                    .await?;
+            }
             if let Some(op_id) = journal_op_id {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -5084,15 +5117,32 @@ impl HostStore {
         }
     }
 
-    /// Atomically delete an identity (clearing host references) and mark `credential_operations`
-    /// as `Committed` inside a single SQLite transaction.
+    /// Atomically delete an identity (clearing host references), record an optional sync deletion
+    /// mutation, and mark `credential_operations` as `Committed` inside a single SQLite transaction.
     pub async fn delete_identity_with_journal_tx(
         &mut self,
         identity_id: i64,
         journal_op_id: Option<&str>,
+        record_sync_mutation: bool,
     ) -> Result<bool, StorageError> {
         self.connection.execute("BEGIN IMMEDIATE", ()).await?;
         let result: Result<bool, StorageError> = async {
+            let ident_name: Option<String> = if record_sync_mutation {
+                let mut rows = self
+                    .connection
+                    .query(
+                        "SELECT name FROM identities WHERE id = ?1 AND vault_id = ?2",
+                        (identity_id, self.host_vault_id.as_str()),
+                    )
+                    .await?;
+                if let Some(row) = rows.next().await? {
+                    Some(row.get(0)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             self.connection
                 .execute(
                     "UPDATE hosts SET identity_id = NULL WHERE identity_id = ?1 AND vault_id = ?2",
@@ -5108,6 +5158,19 @@ impl HostStore {
                 .await?
                 > 0;
             if deleted {
+                if let Some(ref name) = ident_name {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    self.connection
+                        .execute(
+                            "INSERT INTO vault_mutations (vault_id, object_id, entity_type, expected_revision, deleted, payload_json, created_at, idempotency_key, key_epoch, device_counter)
+                             VALUES (?1, ?2, 'identity', 0, 1, '{}', ?3, NULL, 0, 0)",
+                            (self.host_vault_id.as_str(), name.as_str(), now),
+                        )
+                        .await?;
+                }
                 if let Some(op_id) = journal_op_id {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

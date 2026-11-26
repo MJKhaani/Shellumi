@@ -12,6 +12,7 @@ impl Shellumi {
     ) {
         let input =
             cx.new(|cx| TextInput::new(cx, "", "Enter vault password or recovery code…").masked());
+        self.connection_ops.cancel_for_vault();
         self.unlock_vault_modal = Some(UnlockVaultModalState {
             vault_id,
             vault_name,

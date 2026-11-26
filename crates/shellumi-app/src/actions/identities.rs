@@ -126,6 +126,7 @@ impl Shellumi {
         let active_vault_id = self.active_vault_id.clone();
         let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
+        let is_remote = self.is_active_vault_remote();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -250,6 +251,7 @@ impl Shellumi {
                         } else {
                             None
                         },
+                        is_remote,
                     )
                     .await
                     .map(|_| ())
@@ -344,6 +346,14 @@ impl Shellumi {
                     app.identity_modal = None;
                     app.load_identities(cx);
                     app.desktop.message = Some(format!("Identity '{}' saved successfully", name));
+                    if app.is_active_vault_remote() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        app.sync_scheduler.notify_local_mutation(now);
+                        app.sync_active_vault(cx);
+                    }
 
                     if let Some(req) = app.inspector_coordinator.take_pending_guard() {
                         app.apply_navigation_request(req, None, cx);
@@ -368,6 +378,7 @@ impl Shellumi {
         let active_vault_id = self.active_vault_id.clone();
         let active_vault_id_task = active_vault_id.clone();
         let vault_key = self.active_vault_key();
+        let is_remote = self.is_active_vault_remote();
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -423,6 +434,7 @@ impl Shellumi {
                         } else {
                             None
                         },
+                        is_remote,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -474,6 +486,14 @@ impl Shellumi {
                         if app.active_vault_id == active_vault_id {
                             app.load_identities(cx);
                             app.desktop.message = Some("Identity deleted successfully".into());
+                            if app.is_active_vault_remote() {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                app.sync_scheduler.notify_local_mutation(now);
+                                app.sync_active_vault(cx);
+                            }
                         }
                     }
                     Err(err) => {

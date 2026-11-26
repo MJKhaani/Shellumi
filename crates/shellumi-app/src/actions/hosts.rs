@@ -1230,6 +1230,7 @@ impl Shellumi {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
+                        app.connection_ops.bump_host_revision(saved_host_id);
                         app.sync_scheduler.notify_local_mutation(now);
                         app.form = None;
                         app.selected_host_id = final_host_id;
@@ -1384,6 +1385,8 @@ impl Shellumi {
             let result = task.await;
             let _ = app.update(cx, |app, cx| match result {
                 Ok(true) => {
+                    app.connection_ops.cancel_for_host(id);
+                    app.connection_ops.bump_host_revision(id);
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1407,6 +1410,7 @@ impl Shellumi {
 
     pub(crate) fn load_hosts(&mut self, cx: &mut Context<Self>) {
         self.vault_load_generation += 1;
+        self.connection_ops.cancel_for_vault();
         let gen = self.vault_load_generation;
         let Some(path) = self.active_vault_db_path() else {
             return;
