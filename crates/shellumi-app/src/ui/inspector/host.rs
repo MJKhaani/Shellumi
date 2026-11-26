@@ -238,11 +238,20 @@ impl Shellumi {
                 .map(|i| format!("{} ({})", i.name, i.auth_method))
                 .unwrap_or_else(|| format!("Identity #{}", identity_id));
             ("Saved Identity", id_summary)
-        } else if auth_meta.host_secret_ref.is_some() {
+        } else if auth_meta.host_secret_ref.is_some()
+            || auth_meta.host_key_path.is_some()
+            || auth_meta.host_passphrase_ref.is_some()
+        {
             (
                 "Credential",
-                "Host-private credential configured".to_string(),
+                if let Some(kp) = &auth_meta.host_key_path {
+                    format!("Host-private SSH key ({kp})")
+                } else {
+                    "Host-private credential configured".to_string()
+                },
             )
+        } else if auth_meta.auth_mode.as_deref() == Some("inherit_group") {
+            ("Authentication", "Inherit from host group".to_string())
         } else if auth_meta.auth_mode.as_deref() == Some("no_auth") && caps.allows_no_auth {
             ("Authentication", "No authentication".to_string())
         } else {
@@ -827,7 +836,9 @@ impl Shellumi {
                     );
                 }
 
-                if form.has_host_secret {
+                if form.host_secret_ref.is_some()
+                    && form.credential_kind != shellumi_core::CredentialKind::SshKey
+                {
                     let mut action_row = div().flex().gap_1p5();
                     for (idx, (act, label)) in [
                         (shellumi_core::SecretUpdateAction::Keep, "Keep Saved"),
@@ -875,9 +886,65 @@ impl Shellumi {
                                 div()
                                     .text_xs()
                                     .text_color(text_secondary())
-                                    .child("Saved Host Credential"),
+                                    .child("Saved Host Password"),
                             )
                             .child(action_row),
+                    );
+                }
+
+                if form.has_host_passphrase
+                    && form.credential_kind == shellumi_core::CredentialKind::SshKey
+                {
+                    let mut pass_action_row = div().flex().gap_1p5();
+                    for (idx, (act, label)) in [
+                        (shellumi_core::SecretUpdateAction::Keep, "Keep Saved"),
+                        (shellumi_core::SecretUpdateAction::Replace, "Replace"),
+                        (shellumi_core::SecretUpdateAction::Remove, "Remove"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let is_sel = form.passphrase_update_action == act;
+                        pass_action_row = pass_action_row.child(
+                            div()
+                                .id(("host-passphrase-act", idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .bg(if is_sel {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::INPUT_BG)
+                                })
+                                .text_color(if is_sel {
+                                    accent_blue()
+                                } else {
+                                    text_secondary()
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.apply_host_edit(
+                                        draft_gen,
+                                        crate::HostEditEvent::SetPassphraseUpdateAction(act),
+                                        cx,
+                                    );
+                                }))
+                                .child(label),
+                        );
+                    }
+                    section = section.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_secondary())
+                                    .child("Saved Key Passphrase"),
+                            )
+                            .child(pass_action_row),
                     );
                 }
 

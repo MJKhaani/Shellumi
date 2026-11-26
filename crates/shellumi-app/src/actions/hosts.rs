@@ -101,40 +101,20 @@ impl Shellumi {
             .as_deref()
             .and_then(|c| serde_json::from_str::<shellumi_core::SerialConfig>(c).ok())
             .unwrap_or_default();
-        let auth_meta = protocol_config
-            .as_deref()
-            .and_then(|c| serde_json::from_str::<HostAuthMetadata>(c).ok())
-            .unwrap_or_default();
-        let host_secret_ref = auth_meta.host_secret_ref;
-        let has_host_secret = host_secret_ref.is_some();
-
+        let persisted = crate::PersistedHostAuth::from_host(
+            protocol,
+            host.and_then(|h| h.identity_id),
+            protocol_config.as_deref(),
+        );
         let caps = shellumi_core::ProtocolCapabilities::for_protocol(protocol);
         let identity_id = host.and_then(|host| host.identity_id);
-        let auth_source_kind = if !caps.allows_saved_identity && !caps.allows_ask_on_connect {
-            if caps.allows_no_auth {
-                HostAuthSourceKind::NoAuthentication
-            } else {
-                HostAuthSourceKind::AskOnConnect
-            }
-        } else if identity_id.is_some() {
-            HostAuthSourceKind::ExistingIdentity
-        } else if has_host_secret {
-            HostAuthSourceKind::EnterCredentials
-        } else if auth_meta.auth_mode.as_deref() == Some("no_auth") && caps.allows_no_auth {
-            HostAuthSourceKind::NoAuthentication
-        } else {
-            HostAuthSourceKind::AskOnConnect
-        };
-        let credential_kind = caps
-            .supported_credentials
-            .first()
-            .copied()
-            .unwrap_or(shellumi_core::CredentialKind::None);
-        let persistence_choice = if has_host_secret {
-            HostPersistenceChoice::SaveForThisHost
-        } else {
-            HostPersistenceChoice::SessionOnly
-        };
+        let auth_source_kind = persisted.auth_source_kind;
+        let credential_kind = persisted.credential_kind;
+        let persistence_choice = persisted.persistence_choice;
+        let host_secret_ref = persisted.host_secret_ref;
+        let host_passphrase_ref = persisted.host_passphrase_ref;
+        let has_host_passphrase = persisted.has_host_passphrase;
+        let initial_key_path = persisted.host_key_path.unwrap_or_default();
 
         let draft_generation = self
             .form
@@ -172,7 +152,7 @@ impl Shellumi {
                 TextInput::new(
                     cx,
                     "",
-                    if has_host_secret {
+                    if host_secret_ref.is_some() {
                         "Credential configured (enter to replace)"
                     } else {
                         "Password…"
@@ -180,14 +160,28 @@ impl Shellumi {
                 )
                 .masked()
             }),
-            auth_key_path: cx.new(|cx| TextInput::new(cx, "", "Key path (e.g. ~/.ssh/id_ed25519)")),
-            auth_passphrase: cx
-                .new(|cx| TextInput::new(cx, "", "Key passphrase (optional)").masked()),
+            auth_key_path: cx.new(|cx| {
+                TextInput::new(cx, &initial_key_path, "Key path (e.g. ~/.ssh/id_ed25519)")
+            }),
+            auth_passphrase: cx.new(|cx| {
+                TextInput::new(
+                    cx,
+                    "",
+                    if has_host_passphrase {
+                        "Passphrase configured (enter to replace)"
+                    } else {
+                        "Key passphrase (optional)"
+                    },
+                )
+                .masked()
+            }),
             new_identity_name: cx.new(|cx| TextInput::new(cx, "", "New identity name")),
             new_identity_tags: cx.new(|cx| TextInput::new(cx, "", "Tags (comma-separated)")),
             secret_update_action: shellumi_core::SecretUpdateAction::Keep,
+            passphrase_update_action: shellumi_core::SecretUpdateAction::Keep,
             host_secret_ref,
-            has_host_secret,
+            host_passphrase_ref,
+            has_host_passphrase,
             rd_domain: cx.new(|cx| TextInput::new(cx, &rd_domain, "Domain (optional)")),
             rd_width: cx.new(|cx| TextInput::new(cx, &rd_width, "1920")),
             rd_height: cx.new(|cx| TextInput::new(cx, &rd_height, "1080")),
@@ -323,6 +317,9 @@ impl Shellumi {
             }
             HostEditEvent::SetSecretUpdateAction(action) => {
                 form.secret_update_action = action;
+            }
+            HostEditEvent::SetPassphraseUpdateAction(action) => {
+                form.passphrase_update_action = action;
             }
             HostEditEvent::SetRdColorDepth(depth) => {
                 form.rd_color_depth = depth;
@@ -700,7 +697,9 @@ impl Shellumi {
         let credential_kind = form.credential_kind;
         let persistence_choice = form.persistence_choice;
         let secret_update_action = form.secret_update_action;
+        let passphrase_update_action = form.passphrase_update_action;
         let existing_host_secret_ref = form.host_secret_ref.clone();
+        let existing_host_passphrase_ref = form.host_passphrase_ref.clone();
         // Preserve exact password/passphrase whitespace!
         let raw_password = form.auth_password.read(cx).value().to_string();
         let raw_passphrase = form.auth_passphrase.read(cx).value().to_string();
@@ -968,52 +967,48 @@ impl Shellumi {
 
                 // Handle host-scoped secret (SaveForThisHost) via non-secret ref in protocol_config
                 let mut host_secret_ref_to_save = existing_host_secret_ref.clone();
-                let mut host_passphrase_ref_to_save: Option<String> = None;
+                let mut host_passphrase_ref_to_save = existing_host_passphrase_ref.clone();
                 if wants_host_secret {
                     if credential_kind == shellumi_core::CredentialKind::SshKey {
                         if let Some(prev) = existing_host_secret_ref.clone() {
                             old_refs.push(prev);
                         }
                         host_secret_ref_to_save = None;
-                        if !raw_passphrase.is_empty() {
-                            let r = vault_store
-                                .plan_unique_ref("host-passphrase")
-                                .map_err(|e| e.to_string())?;
-                            planned_new_refs.push(r.clone());
-                            staged_secrets.push((r.clone(), raw_passphrase.clone()));
-                            host_passphrase_ref_to_save = Some(r);
-                        }
+                        plan_host_secret_update(
+                            &vault_store,
+                            "host-passphrase",
+                            passphrase_update_action,
+                            &raw_passphrase,
+                            &mut host_passphrase_ref_to_save,
+                            &mut old_refs,
+                            &mut planned_new_refs,
+                            &mut staged_secrets,
+                        )?;
                     } else {
-                        match secret_update_action {
-                            shellumi_core::SecretUpdateAction::Remove => {
-                                if let Some(prev) = existing_host_secret_ref.clone() {
-                                    old_refs.push(prev);
-                                }
-                                host_secret_ref_to_save = None;
-                            }
-                            shellumi_core::SecretUpdateAction::Keep
-                                if existing_host_secret_ref.is_some()
-                                    && raw_password.is_empty() => {}
-                            _ => {
-                                if !raw_password.is_empty() {
-                                    if let Some(prev) = existing_host_secret_ref.clone() {
-                                        old_refs.push(prev);
-                                    }
-                                    let r = vault_store
-                                        .plan_unique_ref("host-password")
-                                        .map_err(|e| e.to_string())?;
-                                    planned_new_refs.push(r.clone());
-                                    staged_secrets.push((r.clone(), raw_password.clone()));
-                                    host_secret_ref_to_save = Some(r);
-                                }
-                            }
+                        if let Some(prev_pass) = existing_host_passphrase_ref.clone() {
+                            old_refs.push(prev_pass);
                         }
+                        host_passphrase_ref_to_save = None;
+                        plan_host_secret_update(
+                            &vault_store,
+                            "host-password",
+                            secret_update_action,
+                            &raw_password,
+                            &mut host_secret_ref_to_save,
+                            &mut old_refs,
+                            &mut planned_new_refs,
+                            &mut staged_secrets,
+                        )?;
                     }
                 } else {
                     if let Some(prev) = existing_host_secret_ref.clone() {
                         old_refs.push(prev);
                     }
+                    if let Some(prev_pass) = existing_host_passphrase_ref.clone() {
+                        old_refs.push(prev_pass);
+                    }
                     host_secret_ref_to_save = None;
+                    host_passphrase_ref_to_save = None;
                 }
 
                 // Unconditionally normalize non-secret auth metadata in protocol_config JSON
@@ -1403,5 +1398,154 @@ impl Shellumi {
             });
         })
         .detach();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_host_secret_update(
+    vault_store: &shellumi_core::VaultCredentialStore<'_>,
+    purpose: &str,
+    action: shellumi_core::SecretUpdateAction,
+    raw_secret: &str,
+    target_ref: &mut Option<String>,
+    old_refs: &mut Vec<String>,
+    planned_new_refs: &mut Vec<String>,
+    staged_secrets: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    match action {
+        shellumi_core::SecretUpdateAction::Remove => {
+            if let Some(prev) = target_ref.take() {
+                old_refs.push(prev);
+            }
+        }
+        shellumi_core::SecretUpdateAction::Keep
+            if target_ref.is_some() && raw_secret.is_empty() => {}
+        _ => {
+            if !raw_secret.is_empty() {
+                if let Some(prev) = target_ref.take() {
+                    old_refs.push(prev);
+                }
+                let new_ref = vault_store
+                    .plan_unique_ref(purpose)
+                    .map_err(|e| e.to_string())?;
+                planned_new_refs.push(new_ref.clone());
+                staged_secrets.push((new_ref.clone(), raw_secret.to_string()));
+                *target_ref = Some(new_ref);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{HostAuthMetadata, HostAuthSourceKind, HostPersistenceChoice, PersistedHostAuth};
+    use shellumi_core::{
+        ConnectionProtocol, CredentialKind, EphemeralCredentialStore, SecretUpdateAction,
+        VaultCredentialStore, VaultId,
+    };
+
+    #[test]
+    fn test_persisted_host_auth_restores_ssh_key_passphrase_and_inherit_group() {
+        let key_meta = serde_json::to_string(&HostAuthMetadata {
+            host_secret_ref: None,
+            host_key_path: Some("~/.ssh/id_ed25519".to_string()),
+            host_passphrase_ref: Some("keychain:shellumi:vault-v1-abc".to_string()),
+            auth_mode: None,
+        })
+        .unwrap();
+        let restored = PersistedHostAuth::from_host(ConnectionProtocol::Ssh, None, Some(&key_meta));
+        assert_eq!(
+            restored.auth_source_kind,
+            HostAuthSourceKind::EnterCredentials
+        );
+        assert_eq!(restored.credential_kind, CredentialKind::SshKey);
+        assert_eq!(
+            restored.persistence_choice,
+            HostPersistenceChoice::SaveForThisHost
+        );
+        assert_eq!(restored.host_key_path.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert_eq!(
+            restored.host_passphrase_ref.as_deref(),
+            Some("keychain:shellumi:vault-v1-abc")
+        );
+        assert!(restored.has_host_secret);
+        assert!(restored.has_host_passphrase);
+
+        let inherit_meta = serde_json::to_string(&HostAuthMetadata {
+            auth_mode: Some("inherit_group".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let inherited =
+            PersistedHostAuth::from_host(ConnectionProtocol::Rdp, None, Some(&inherit_meta));
+        assert_eq!(inherited.auth_source_kind, HostAuthSourceKind::InheritGroup);
+    }
+
+    #[test]
+    fn test_plan_host_secret_update_keep_replace_remove_semantics() {
+        let store = EphemeralCredentialStore::new();
+        let vid = VaultId::new("vault-host-edit").unwrap();
+        let vault_store = VaultCredentialStore::new(&store, &vid);
+        let initial_ref = vault_store
+            .store_unique("host-passphrase", "initial-pass")
+            .unwrap();
+
+        // Keep with empty input preserves existing ref without staging or deleting.
+        let mut target = Some(initial_ref.clone());
+        let mut old_refs = Vec::new();
+        let mut planned = Vec::new();
+        let mut staged = Vec::new();
+        plan_host_secret_update(
+            &vault_store,
+            "host-passphrase",
+            SecretUpdateAction::Keep,
+            "",
+            &mut target,
+            &mut old_refs,
+            &mut planned,
+            &mut staged,
+        )
+        .unwrap();
+        assert_eq!(target.as_deref(), Some(initial_ref.as_str()));
+        assert!(old_refs.is_empty());
+        assert!(planned.is_empty());
+
+        // Replace stages a new ref and schedules old ref for post-commit cleanup.
+        plan_host_secret_update(
+            &vault_store,
+            "host-passphrase",
+            SecretUpdateAction::Replace,
+            "rotated-pass",
+            &mut target,
+            &mut old_refs,
+            &mut planned,
+            &mut staged,
+        )
+        .unwrap();
+        assert_ne!(target.as_deref(), Some(initial_ref.as_str()));
+        assert_eq!(old_refs, vec![initial_ref.clone()]);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(staged.len(), 1);
+
+        // Remove clears the ref and schedules it for cleanup.
+        let replaced_ref = target.clone().unwrap();
+        old_refs.clear();
+        planned.clear();
+        staged.clear();
+        plan_host_secret_update(
+            &vault_store,
+            "host-passphrase",
+            SecretUpdateAction::Remove,
+            "",
+            &mut target,
+            &mut old_refs,
+            &mut planned,
+            &mut staged,
+        )
+        .unwrap();
+        assert_eq!(target, None);
+        assert_eq!(old_refs, vec![replaced_ref]);
     }
 }

@@ -1188,6 +1188,86 @@ pub(crate) struct HostAuthMetadata {
     pub auth_mode: Option<String>,
 }
 
+/// Typed persisted authentication state restored when opening an existing host in the editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistedHostAuth {
+    pub auth_source_kind: HostAuthSourceKind,
+    pub credential_kind: shellumi_core::CredentialKind,
+    pub persistence_choice: HostPersistenceChoice,
+    pub host_secret_ref: Option<String>,
+    pub host_key_path: Option<String>,
+    pub host_passphrase_ref: Option<String>,
+    pub has_host_secret: bool,
+    pub has_host_passphrase: bool,
+}
+
+impl PersistedHostAuth {
+    pub fn from_host(
+        protocol: ConnectionProtocol,
+        identity_id: Option<i64>,
+        protocol_config: Option<&str>,
+    ) -> Self {
+        let caps = shellumi_core::ProtocolCapabilities::for_protocol(protocol);
+        let auth_meta = protocol_config
+            .and_then(|c| serde_json::from_str::<HostAuthMetadata>(c).ok())
+            .unwrap_or_default();
+        let host_secret_ref = auth_meta.host_secret_ref;
+        let host_key_path = auth_meta.host_key_path;
+        let host_passphrase_ref = auth_meta.host_passphrase_ref;
+        let has_host_passphrase = host_passphrase_ref.is_some();
+        let has_host_credentials =
+            host_secret_ref.is_some() || host_key_path.is_some() || has_host_passphrase;
+
+        let auth_source_kind = if !caps.allows_saved_identity && !caps.allows_ask_on_connect {
+            if caps.allows_no_auth {
+                HostAuthSourceKind::NoAuthentication
+            } else {
+                HostAuthSourceKind::AskOnConnect
+            }
+        } else if identity_id.is_some() {
+            HostAuthSourceKind::ExistingIdentity
+        } else if has_host_credentials {
+            HostAuthSourceKind::EnterCredentials
+        } else if auth_meta.auth_mode.as_deref() == Some("inherit_group") {
+            HostAuthSourceKind::InheritGroup
+        } else if auth_meta.auth_mode.as_deref() == Some("no_auth") && caps.allows_no_auth {
+            HostAuthSourceKind::NoAuthentication
+        } else {
+            HostAuthSourceKind::AskOnConnect
+        };
+
+        let credential_kind = if (host_key_path.is_some() || has_host_passphrase)
+            && caps
+                .supported_credentials
+                .contains(&shellumi_core::CredentialKind::SshKey)
+        {
+            shellumi_core::CredentialKind::SshKey
+        } else {
+            caps.supported_credentials
+                .first()
+                .copied()
+                .unwrap_or(shellumi_core::CredentialKind::None)
+        };
+
+        let persistence_choice = if has_host_credentials {
+            HostPersistenceChoice::SaveForThisHost
+        } else {
+            HostPersistenceChoice::SessionOnly
+        };
+
+        Self {
+            auth_source_kind,
+            credential_kind,
+            persistence_choice,
+            host_secret_ref,
+            host_key_path,
+            host_passphrase_ref,
+            has_host_secret: has_host_credentials,
+            has_host_passphrase,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum HostEditEvent {
     SetProtocol(ConnectionProtocol),
@@ -1196,6 +1276,7 @@ pub(crate) enum HostEditEvent {
     SetCredentialKind(shellumi_core::CredentialKind),
     SetPersistence(HostPersistenceChoice),
     SetSecretUpdateAction(shellumi_core::SecretUpdateAction),
+    SetPassphraseUpdateAction(shellumi_core::SecretUpdateAction),
     SetRdColorDepth(u8),
     ToggleRdViewOnly,
     ToggleRdTlsStrict,
@@ -1232,8 +1313,10 @@ struct HostForm {
     new_identity_name: Entity<TextInput>,
     new_identity_tags: Entity<TextInput>,
     secret_update_action: shellumi_core::SecretUpdateAction,
+    passphrase_update_action: shellumi_core::SecretUpdateAction,
     host_secret_ref: Option<String>,
-    has_host_secret: bool,
+    host_passphrase_ref: Option<String>,
+    has_host_passphrase: bool,
     rd_domain: Entity<TextInput>,
     rd_width: Entity<TextInput>,
     rd_height: Entity<TextInput>,
