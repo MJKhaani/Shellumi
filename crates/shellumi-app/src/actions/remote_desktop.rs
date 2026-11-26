@@ -1190,22 +1190,46 @@ impl Shellumi {
         height: u32,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            if let Some(rd) = &mut tab.remote_desktop_state {
-                if let Some(ui_handle) = &rd.ui_handle {
-                    let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::RequestResize { width, height },
-                    );
-                    rd.last_action_note =
-                        Some(format!("Requested resolution resize to {width}×{height}"));
-                } else {
-                    rd.width = width;
-                    rd.height = height;
-                    rd.last_action_note = Some(format!("Local resolution set to {width}×{height}"));
-                }
+        if let Err(err) = self.try_send_remote_resize(tab_idx, width, height, cx) {
+            if let Some(rd) = self
+                .tabs
+                .get_mut(tab_idx)
+                .and_then(|t| t.remote_desktop_state.as_mut())
+            {
+                rd.last_action_note = Some(format!("Resize request failed: {err}"));
                 cx.notify();
             }
         }
+    }
+
+    fn try_send_remote_resize(
+        &mut self,
+        tab_idx: usize,
+        width: u32,
+        height: u32,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return Err("Remote desktop tab no longer exists".into());
+        };
+        let Some(rd) = &mut tab.remote_desktop_state else {
+            return Err("Remote desktop state missing".into());
+        };
+        if let Some(ui_handle) = &rd.ui_handle {
+            ui_handle
+                .try_send_command(shellumi_remote_desktop::SessionCommand::RequestResize {
+                    width,
+                    height,
+                })
+                .map_err(|e| e.to_string())?;
+            rd.last_action_note = Some(format!("Requested resolution resize to {width}×{height}"));
+        } else {
+            rd.width = width;
+            rd.height = height;
+            rd.last_action_note = Some(format!("Local resolution set to {width}×{height}"));
+        }
+        cx.notify();
+        Ok(())
     }
 
     pub(crate) fn remote_desktop_choose_shared_folder(
@@ -1378,20 +1402,36 @@ impl Shellumi {
         {
             return;
         }
-        let entry = self.rd_resize_state.entry(session_key.tab_id).or_default();
-        entry.in_flight = Some(target);
+        let (req_id, backoff_ms) = {
+            let entry = self.rd_resize_state.entry(session_key.tab_id).or_default();
+            let req_id = entry.begin_dispatch(target);
+            let backoff_ms = 2000u64.saturating_mul(u64::from(entry.retry_count) + 1);
+            (req_id, backoff_ms)
+        };
         tracing::debug!(
             tab_id = session_key.tab_id,
             connection_generation = session_key.connection_generation,
+            request_id = req_id,
             width = target.0,
             height = target.1,
-            "Dispatching debounced RDP display resize"
+            "Dispatching RDP display resize"
         );
-        self.remote_desktop_request_resize(tab_idx, target.0, target.1, cx);
+        if let Err(err) = self.try_send_remote_resize(tab_idx, target.0, target.1, cx) {
+            if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
+                state.fail_dispatch(req_id, err.clone());
+            }
+            tracing::warn!(
+                tab_id = session_key.tab_id,
+                request_id = req_id,
+                error = %err,
+                "Failed to enqueue RDP display resize"
+            );
+            return;
+        }
 
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(2000))
+                .timer(std::time::Duration::from_millis(backoff_ms))
                 .await;
             let _ = this.update(cx, |app, cx| {
                 let Some(rd) = app
@@ -1411,33 +1451,20 @@ impl Shellumi {
                     let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) else {
                         return;
                     };
-                    if state.connection_generation != session_key.connection_generation
-                        || state.in_flight != Some(target)
-                    {
+                    if state.connection_generation != session_key.connection_generation {
                         return;
                     }
-                    state.in_flight = None;
-                    if let Some(latest) = state.desired {
-                        if latest != target {
-                            state.retry_count = 0;
-                            Some(latest)
-                        } else if state.retry_count < 2 {
-                            state.retry_count += 1;
-                            Some(target)
-                        } else {
-                            state.last_error =
-                                Some("Display resize acknowledgement timed out".into());
-                            tracing::warn!(
-                                tab_id = session_key.tab_id,
-                                width = target.0,
-                                height = target.1,
-                                "RDP display resize acknowledgement timed out after retries"
-                            );
-                            None
-                        }
-                    } else {
-                        None
+                    let next = state.timeout_request(req_id, target);
+                    if next.is_none() && state.last_error.is_some() {
+                        tracing::warn!(
+                            tab_id = session_key.tab_id,
+                            request_id = req_id,
+                            width = target.0,
+                            height = target.1,
+                            "RDP display resize acknowledgement timed out after retries"
+                        );
                     }
+                    next
                 };
                 if let Some(next_target) = next_dispatch {
                     app.dispatch_rd_auto_resize(session_key, next_target, cx);
@@ -1467,10 +1494,83 @@ impl Shellumi {
         }
     }
 
+    /// Toggle automatic dynamic display resizing for an RDP session.
+    pub(crate) fn remote_desktop_toggle_dynamic_resize(
+        &mut self,
+        tab_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rd) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.remote_desktop_state.as_mut())
+        else {
+            return;
+        };
+        rd.dynamic_resize_enabled = !rd.dynamic_resize_enabled;
+        let enabled = rd.dynamic_resize_enabled;
+        rd.last_action_note = Some(if enabled {
+            "Automatic viewport resizing enabled".into()
+        } else {
+            "Automatic viewport resizing disabled (manual Match Viewport still available)".into()
+        });
+        cx.notify();
+        if enabled {
+            self.schedule_rd_auto_resize(tab_id, cx);
+        }
+    }
+
+    /// Manually resize the remote desktop to match the measured GPUI viewport,
+    /// even when automatic dynamic resizing is disabled.
+    pub(crate) fn remote_desktop_match_viewport(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(rd) = tab.remote_desktop_state.as_ref() else {
+            return;
+        };
+        if rd.protocol != RemoteDesktopProtocol::Rdp
+            || rd.view_only
+            || !rd.display_control_ready
+            || rd.status != RemoteDesktopStatus::Connected
+        {
+            return;
+        }
+        let Some(measurement) = self
+            .rd_canvas_measurements
+            .get(&tab_id)
+            .filter(|m| m.tab_id == tab_id && m.layout_epoch == self.layout_epoch)
+        else {
+            return;
+        };
+        let Some(target) = Self::compute_legal_rdp_resize(
+            f32::from(measurement.viewport.size.width),
+            f32::from(measurement.viewport.size.height),
+            rd.max_monitor_area,
+        ) else {
+            return;
+        };
+        let conn_gen = rd.connection_generation;
+        let layout_gen = measurement.layout_epoch;
+        let entry = self.rd_resize_state.entry(tab_id).or_default();
+        if entry.connection_generation != conn_gen {
+            entry.reset_for_connection(conn_gen);
+        }
+        entry.layout_generation = layout_gen;
+        entry.desired = Some(target);
+        entry.debounce_generation = entry.debounce_generation.wrapping_add(1);
+        let session_key = crate::RemoteSessionKey {
+            tab_id,
+            connection_generation: conn_gen,
+        };
+        self.dispatch_rd_auto_resize(session_key, target, cx);
+    }
+
     /// Request a remote desktop resize using *only* the validated GPUI `CanvasMeasurement`.
     #[allow(dead_code)]
     pub(crate) fn request_measured_remote_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        self.schedule_rd_auto_resize(tab_id, cx);
+        self.remote_desktop_match_viewport(tab_id, cx);
     }
 }
 
@@ -1506,19 +1606,53 @@ mod tests {
         assert_ne!(state.debounce_generation, gen1);
 
         // Simulate in-flight (1440, 900) and a newer desired (1600, 1000) arriving mid-flight.
-        state.in_flight = Some((1440, 900));
+        let req1 = state.begin_dispatch((1440, 900));
+        assert_eq!(state.in_flight_request_id, Some(req1));
         assert!(state.record_desired((1600, 1000), 2));
         // Acknowledging (1440, 900) must immediately return the coalesced (1600, 1000).
         assert_eq!(state.acknowledge((1440, 900)), Some((1600, 1000)));
         assert_eq!(state.in_flight, None);
+        assert_eq!(state.in_flight_request_id, None);
 
         // Reconnect resets in-flight/acknowledged/retries cleanly.
-        state.in_flight = Some((1600, 1000));
+        let _req2 = state.begin_dispatch((1600, 1000));
         state.retry_count = 2;
         state.reset_for_connection(2);
         assert_eq!(state.connection_generation, 2);
         assert_eq!(state.in_flight, None);
+        assert_eq!(state.in_flight_request_id, None);
         assert_eq!(state.last_acknowledged, None);
         assert_eq!(state.retry_count, 0);
+    }
+
+    #[test]
+    fn test_rd_resize_request_id_prevents_stale_timeouts_and_handles_queue_failure_and_rejection() {
+        let mut state = crate::RdAutoResizeState::default();
+        state.record_desired((1280, 720), 1);
+        let req1 = state.begin_dispatch((1280, 720));
+        // Queue failure clears in_flight immediately without leaving request stuck.
+        state.fail_dispatch(req1, "channel full".into());
+        assert_eq!(state.in_flight, None);
+        assert_eq!(state.in_flight_request_id, None);
+        assert_eq!(state.last_error.as_deref(), Some("channel full"));
+
+        // Stale timeout for req1 must NOT cancel req2 even with identical dimensions.
+        let req2 = state.begin_dispatch((1280, 720));
+        assert_ne!(req1, req2);
+        assert_eq!(state.timeout_request(req1, (1280, 720)), None);
+        assert_eq!(state.in_flight_request_id, Some(req2));
+
+        // Rejection clears matching in-flight and records last_rejected.
+        state.reject((1280, 720), "server rejected".into());
+        assert_eq!(state.in_flight, None);
+        assert_eq!(state.last_rejected, Some((1280, 720)));
+        assert_eq!(state.last_error.as_deref(), Some("server rejected"));
+
+        // Delayed ack for an older size cannot complete a newer in-flight size.
+        state.record_desired((1920, 1080), 2);
+        let req3 = state.begin_dispatch((1920, 1080));
+        let _ = state.acknowledge((1280, 720));
+        assert_eq!(state.in_flight, Some((1920, 1080)));
+        assert_eq!(state.in_flight_request_id, Some(req3));
     }
 }

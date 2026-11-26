@@ -904,7 +904,10 @@ pub(crate) struct RdAutoResizeState {
     pub connection_generation: u64,
     pub desired: Option<(u32, u32)>,
     pub in_flight: Option<(u32, u32)>,
+    pub in_flight_request_id: Option<u64>,
+    pub next_request_id: u64,
     pub last_acknowledged: Option<(u32, u32)>,
+    pub last_rejected: Option<(u32, u32)>,
     pub debounce_generation: u64,
     pub retry_count: u8,
     pub last_error: Option<String>,
@@ -914,7 +917,9 @@ impl RdAutoResizeState {
     pub fn reset_for_connection(&mut self, connection_generation: u64) {
         self.connection_generation = connection_generation;
         self.in_flight = None;
+        self.in_flight_request_id = None;
         self.last_acknowledged = None;
+        self.last_rejected = None;
         self.debounce_generation = self.debounce_generation.wrapping_add(1);
         self.retry_count = 0;
         self.last_error = None;
@@ -932,10 +937,47 @@ impl RdAutoResizeState {
         true
     }
 
+    pub fn begin_dispatch(&mut self, target: (u32, u32)) -> u64 {
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let req_id = self.next_request_id;
+        self.in_flight = Some(target);
+        self.in_flight_request_id = Some(req_id);
+        req_id
+    }
+
+    pub fn fail_dispatch(&mut self, request_id: u64, err: String) {
+        if self.in_flight_request_id == Some(request_id) {
+            self.in_flight = None;
+            self.in_flight_request_id = None;
+            self.last_error = Some(err);
+        }
+    }
+
+    pub fn timeout_request(&mut self, request_id: u64, target: (u32, u32)) -> Option<(u32, u32)> {
+        if self.in_flight_request_id != Some(request_id) {
+            return None;
+        }
+        self.in_flight = None;
+        self.in_flight_request_id = None;
+        if let Some(latest) = self.desired {
+            if latest != target {
+                self.retry_count = 0;
+                return Some(latest);
+            }
+            if self.retry_count < 2 {
+                self.retry_count += 1;
+                return Some(target);
+            }
+            self.last_error = Some("Display resize acknowledgement timed out".into());
+        }
+        None
+    }
+
     pub fn acknowledge(&mut self, size: (u32, u32)) -> Option<(u32, u32)> {
         self.last_acknowledged = Some(size);
         if self.in_flight == Some(size) {
             self.in_flight = None;
+            self.in_flight_request_id = None;
             self.retry_count = 0;
             self.last_error = None;
         }
@@ -943,6 +985,16 @@ impl RdAutoResizeState {
             Some(next) if next != size && self.in_flight.is_none() => Some(next),
             _ => None,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn reject(&mut self, size: (u32, u32), reason: String) {
+        self.last_rejected = Some(size);
+        if self.in_flight == Some(size) {
+            self.in_flight = None;
+            self.in_flight_request_id = None;
+        }
+        self.last_error = Some(reason);
     }
 }
 

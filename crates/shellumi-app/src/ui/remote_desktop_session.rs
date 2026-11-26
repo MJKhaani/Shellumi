@@ -506,6 +506,17 @@ impl Shellumi {
             .get(&tab_id)
             .is_some_and(|m| m.tab_id == tab_id && m.layout_epoch == self.layout_epoch);
 
+        let dynamic_resize_enabled = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|t| t.remote_desktop_state.as_ref())
+            .is_some_and(|rd| rd.dynamic_resize_enabled);
+        let display_control_ready = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|t| t.remote_desktop_state.as_ref())
+            .is_some_and(|rd| rd.display_control_ready);
+
         let res_match_viewport = div()
             .id(("rd-res-viewport", tab_id))
             .px_2()
@@ -531,13 +542,46 @@ impl Shellumi {
                 }
             })
             .on_click(cx.listener(move |app, _, _window, cx| {
-                app.request_measured_remote_resize(tab_id, cx);
+                app.remote_desktop_match_viewport(tab_id, cx);
             }))
             .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::DynamicResize).size(14.0))
             .child(if has_measured_viewport {
                 "Match Viewport"
             } else {
                 "Waiting for layout…"
+            });
+
+        let res_auto_toggle = div()
+            .id(("rd-auto-resize-toggle", tab_id))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_xs()
+            .bg(if dynamic_resize_enabled {
+                rgb(MacTheme::ACCENT_BLUE)
+            } else {
+                rgb(MacTheme::SURFACE_ACTIVE)
+            })
+            .text_color(if dynamic_resize_enabled {
+                rgb(0xffffff)
+            } else {
+                rgb(MacTheme::TEXT_SECONDARY)
+            })
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.9))
+            .on_click(cx.listener(move |app, _, _window, cx| {
+                app.remote_desktop_toggle_dynamic_resize(tab_id, cx);
+            }))
+            .child(if !display_control_ready {
+                if dynamic_resize_enabled {
+                    "Auto-Resize: On (waiting caps)"
+                } else {
+                    "Auto-Resize: Off"
+                }
+            } else if dynamic_resize_enabled {
+                "Auto-Resize: On"
+            } else {
+                "Auto-Resize: Off"
             });
 
         let res_indicator = if state.display_control_ready {
@@ -913,7 +957,8 @@ impl Shellumi {
                                                 .child(res_1440p)
                                                 .child(res_4k),
                                         )
-                                        .child(res_match_viewport),
+                                        .child(res_match_viewport)
+                                        .child(res_auto_toggle),
                                 )
                             } else {
                                 None
