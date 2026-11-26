@@ -109,10 +109,23 @@ fn lists_local_temporary_directory() {
 
 mod codec;
 
+fn loopback_tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    let timeout = Some(std::time::Duration::from_secs(5));
+    client.set_read_timeout(timeout).unwrap();
+    client.set_write_timeout(timeout).unwrap();
+    server.set_read_timeout(timeout).unwrap();
+    server.set_write_timeout(timeout).unwrap();
+    (client, server)
+}
+
 #[test]
 fn verifies_sftp_client_handshake_and_directory_listing() {
     use std::io::{Read as _, Write as _};
-    let (client_side, mut server_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (client_side, mut server_side) = loopback_tcp_pair();
 
     let server_thread = std::thread::spawn(move || {
         // 1. Read Init { version: 3 }
@@ -253,7 +266,7 @@ fn verifies_sftp_client_handshake_and_directory_listing() {
 #[test]
 fn verifies_remote_editor_workspace_dirty_tracking_and_save() {
     use std::io::{Read as _, Write as _};
-    let (client_side, mut server_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (client_side, mut server_side) = loopback_tcp_pair();
 
     let server_thread = std::thread::spawn(move || {
         let mut len_buf = [0u8; 4];

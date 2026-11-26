@@ -38,9 +38,10 @@ pub use theme::{caption, card, glyph_badge, heading, item, pill, subheader, MacT
 
 use gpui::{
     actions, div, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context, Entity,
-    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Menu, MenuItem, OsAction,
-    SystemMenuType, Window,
+    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Window,
 };
+#[cfg(target_os = "macos")]
+use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 use session::{Session, SessionEvent};
 #[cfg(test)]
 use shellumi_core::ActiveTunnelStatus;

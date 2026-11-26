@@ -8361,6 +8361,11 @@ mod tests {
         let mut store = HostStore::open(path).await.unwrap();
         store
             .connection
+            .execute("DROP TABLE IF EXISTS credential_operations", ())
+            .await
+            .unwrap();
+        store
+            .connection
             .execute("DROP TABLE device_replacements", ())
             .await
             .unwrap();
@@ -8458,8 +8463,117 @@ mod tests {
                     .unwrap()
                     .get::<i64>(0)
                     .unwrap(),
+                SCHEMA_VERSION
+            );
+            let mut tables = store
+                .connection
+                .query(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('device_replacements', 'credential_operations') ORDER BY name",
+                    (),
+                )
+                .await
+                .unwrap();
+            let mut found = Vec::new();
+            while let Some(row) = tables.next().await.unwrap() {
+                found.push(row.get::<String>(0).unwrap());
+            }
+            assert_eq!(found, vec!["credential_operations", "device_replacements"]);
+            let mut idx = store
+                .connection
+                .query(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_credential_ops_vault_phase'",
+                    (),
+                )
+                .await
+                .unwrap();
+            assert!(idx.next().await.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_30_to_31_migrates_credential_operations_and_rolls_back_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("schema-30-to-31.db");
+        let path_str = path.to_str().unwrap();
+
+        // Start from a valid v31 DB, seed an enrollment record, then downgrade to v30 without credential_operations.
+        let mut store = HostStore::open(path_str).await.unwrap();
+        store
+            .save_enrollment_operation_progress(
+                "op-v30",
+                "vault-a",
+                "acct-a",
+                "member-a",
+                "CredentialsCreating",
+                None,
+                None,
+                "1",
+            )
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("DROP TABLE credential_operations", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("PRAGMA user_version = 30", ())
+            .await
+            .unwrap();
+        drop(store);
+
+        // Inject a conflicting view named credential_operations to force v30->31 failure and verify rollback to 30.
+        {
+            let db = turso::Builder::new_local(path_str).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute("CREATE VIEW credential_operations AS SELECT 1 AS id", ())
+                .await
+                .unwrap();
+        }
+        assert!(HostStore::open(path_str).await.is_err());
+        {
+            let db = turso::Builder::new_local(path_str).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            let mut ver = conn.query("PRAGMA user_version", ()).await.unwrap();
+            assert_eq!(
+                ver.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
                 30
             );
+            drop(ver);
+            conn.execute("DROP VIEW credential_operations", ())
+                .await
+                .unwrap();
+        }
+
+        // Reopen twice: upgrades 30 -> 31, preserves enrollment row, and creates table + index idempotently.
+        for _ in 0..2 {
+            let store = HostStore::open(path_str).await.unwrap();
+            let mut ver = store
+                .connection
+                .query("PRAGMA user_version", ())
+                .await
+                .unwrap();
+            assert_eq!(
+                ver.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                SCHEMA_VERSION
+            );
+            let recs = store
+                .list_incomplete_enrollment_operations("vault-a")
+                .await
+                .unwrap();
+            assert_eq!(recs.len(), 1);
+            assert_eq!(recs[0].operation_id, "op-v30");
+
+            let mut idx = store
+                .connection
+                .query(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_credential_ops_vault_phase'",
+                    (),
+                )
+                .await
+                .unwrap();
+            assert!(idx.next().await.unwrap().is_some());
         }
     }
 
