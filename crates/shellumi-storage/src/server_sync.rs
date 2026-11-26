@@ -1896,7 +1896,11 @@ impl HostStore {
                 };
                 if !connections.iter().any(|record| {
                     record.id == server.as_str()
-                        && record.server_instance_id == binding.server_instance_id
+                        && record
+                            .server_instance_id
+                            .as_deref()
+                            .and_then(|id| Uuid::parse_str(id).ok())
+                            == Some(instance)
                 }) {
                     continue;
                 }
