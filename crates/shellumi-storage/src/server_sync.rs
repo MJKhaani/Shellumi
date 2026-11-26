@@ -4278,10 +4278,14 @@ mod tests {
         };
 
         let guard = store.lock_device_journal(".device-change.lock").unwrap();
+        // Turso owns a separate exclusive database file lock. Release it so the
+        // child reaches the operation lock under test.
+        drop(store);
         run_worker(true);
         drop(guard);
         run_worker(false);
-        assert!(store.lock_device_journal(".device-change.lock").is_ok());
+        let reopened = HostStore::open(path.to_str().unwrap()).await.unwrap();
+        assert!(reopened.lock_device_journal(".device-change.lock").is_ok());
     }
 
     #[tokio::test]
