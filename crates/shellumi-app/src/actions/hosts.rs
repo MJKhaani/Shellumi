@@ -876,7 +876,16 @@ impl Shellumi {
         let auth_mode_str = match auth_source_kind {
             HostAuthSourceKind::NoAuthentication => Some("no_auth".to_string()),
             HostAuthSourceKind::AskOnConnect => Some("ask".to_string()),
+            HostAuthSourceKind::InheritGroup => Some("inherit_group".to_string()),
             _ => None,
+        };
+        let host_key_path_to_save = if wants_host_secret
+            && credential_kind == shellumi_core::CredentialKind::SshKey
+            && !key_path.is_empty()
+        {
+            Some(key_path.clone())
+        } else {
+            None
         };
         cx.notify();
         let task = cx.background_executor().spawn(async move {
@@ -887,63 +896,43 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
-                    store.set_vault_id(vid);
-                }
+                let vid = shellumi_core::VaultId::new(&active_vault_id_task)
+                    .map_err(|e| e.to_string())?;
+                store.set_vault_id(vid.clone());
 
                 let credential_store = shellumi_core::default_credential_store();
-                let nonce = std::time::SystemTime::now()
+                let vault_store =
+                    shellumi_core::VaultCredentialStore::new(credential_store.as_ref(), &vid);
+                let op_id = shellumi_core::VaultCredentialStore::generate_credential_id()
+                    .map_err(|e| e.to_string())?;
+                let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_nanos();
-                let mut staged_refs: Vec<String> = Vec::new();
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                let mut planned_new_refs: Vec<String> = Vec::new();
+                let mut old_refs: Vec<String> = Vec::new();
+                let mut staged_secrets: Vec<(String, String)> = Vec::new();
 
                 let mut new_identity: Option<shellumi_core::NewIdentity> = None;
                 if wants_new_identity {
-                    let ident_account = format!(
-                        "desktop-identity-{}-{}-{nonce}",
-                        active_vault_id_task,
-                        std::process::id()
-                    );
                     let password_ref = if !raw_password.is_empty() {
-                        match shellumi_core::store_secret_to_ref(
-                            credential_store.as_ref(),
-                            shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
-                            &format!("{ident_account}:password"),
-                            &raw_password,
-                        ) {
-                            Ok(r) => {
-                                staged_refs.push(r.clone());
-                                Some(r)
-                            }
-                            Err(e) => {
-                                return Err(format!("Failed to store credential: {e}"));
-                            }
-                        }
+                        let r = vault_store
+                            .plan_unique_ref("identity-password")
+                            .map_err(|e| e.to_string())?;
+                        planned_new_refs.push(r.clone());
+                        staged_secrets.push((r.clone(), raw_password.clone()));
+                        Some(r)
                     } else {
                         None
                     };
                     let passphrase_ref = if !raw_passphrase.is_empty() {
-                        match shellumi_core::store_secret_to_ref(
-                            credential_store.as_ref(),
-                            shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
-                            &format!("{ident_account}:passphrase"),
-                            &raw_passphrase,
-                        ) {
-                            Ok(r) => {
-                                staged_refs.push(r.clone());
-                                Some(r)
-                            }
-                            Err(e) => {
-                                for r in &staged_refs {
-                                    let _ = shellumi_core::delete_secret_by_ref(
-                                        credential_store.as_ref(),
-                                        r,
-                                    );
-                                }
-                                return Err(format!("Failed to store key passphrase: {e}"));
-                            }
-                        }
+                        let r = vault_store
+                            .plan_unique_ref("identity-passphrase")
+                            .map_err(|e| e.to_string())?;
+                        planned_new_refs.push(r.clone());
+                        staged_secrets.push((r.clone(), raw_passphrase.clone()));
+                        Some(r)
                     } else {
                         None
                     };
@@ -979,51 +968,56 @@ impl Shellumi {
 
                 // Handle host-scoped secret (SaveForThisHost) via non-secret ref in protocol_config
                 let mut host_secret_ref_to_save = existing_host_secret_ref.clone();
+                let mut host_passphrase_ref_to_save: Option<String> = None;
                 if wants_host_secret {
-                    match secret_update_action {
-                        shellumi_core::SecretUpdateAction::Remove => {
-                            host_secret_ref_to_save = None;
+                    if credential_kind == shellumi_core::CredentialKind::SshKey {
+                        if let Some(prev) = existing_host_secret_ref.clone() {
+                            old_refs.push(prev);
                         }
-                        shellumi_core::SecretUpdateAction::Keep
-                            if existing_host_secret_ref.is_some() && raw_password.is_empty() => {}
-                        _ => {
-                            if !raw_password.is_empty() {
-                                let host_account = format!(
-                                    "desktop-host-{}-{}-{nonce}",
-                                    active_vault_id_task,
-                                    std::process::id()
-                                );
-                                match shellumi_core::store_secret_to_ref(
-                                    credential_store.as_ref(),
-                                    shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
-                                    &host_account,
-                                    &raw_password,
-                                ) {
-                                    Ok(r) => {
-                                        staged_refs.push(r.clone());
-                                        host_secret_ref_to_save = Some(r);
+                        host_secret_ref_to_save = None;
+                        if !raw_passphrase.is_empty() {
+                            let r = vault_store
+                                .plan_unique_ref("host-passphrase")
+                                .map_err(|e| e.to_string())?;
+                            planned_new_refs.push(r.clone());
+                            staged_secrets.push((r.clone(), raw_passphrase.clone()));
+                            host_passphrase_ref_to_save = Some(r);
+                        }
+                    } else {
+                        match secret_update_action {
+                            shellumi_core::SecretUpdateAction::Remove => {
+                                if let Some(prev) = existing_host_secret_ref.clone() {
+                                    old_refs.push(prev);
+                                }
+                                host_secret_ref_to_save = None;
+                            }
+                            shellumi_core::SecretUpdateAction::Keep
+                                if existing_host_secret_ref.is_some()
+                                    && raw_password.is_empty() => {}
+                            _ => {
+                                if !raw_password.is_empty() {
+                                    if let Some(prev) = existing_host_secret_ref.clone() {
+                                        old_refs.push(prev);
                                     }
-                                    Err(e) => {
-                                        for r in &staged_refs {
-                                            let _ = shellumi_core::delete_secret_by_ref(
-                                                credential_store.as_ref(),
-                                                r,
-                                            );
-                                        }
-                                        return Err(format!(
-                                            "Failed to store host credential: {e}"
-                                        ));
-                                    }
+                                    let r = vault_store
+                                        .plan_unique_ref("host-password")
+                                        .map_err(|e| e.to_string())?;
+                                    planned_new_refs.push(r.clone());
+                                    staged_secrets.push((r.clone(), raw_password.clone()));
+                                    host_secret_ref_to_save = Some(r);
                                 }
                             }
                         }
                     }
-                } else if auth_source_kind != HostAuthSourceKind::EnterCredentials {
+                } else {
+                    if let Some(prev) = existing_host_secret_ref.clone() {
+                        old_refs.push(prev);
+                    }
                     host_secret_ref_to_save = None;
                 }
 
-                // Merge non-secret auth metadata into protocol_config JSON
-                if host_secret_ref_to_save.is_some() || auth_mode_str.is_some() {
+                // Unconditionally normalize non-secret auth metadata in protocol_config JSON
+                {
                     let mut map = proto_config
                         .as_deref()
                         .and_then(|s| {
@@ -1031,23 +1025,102 @@ impl Shellumi {
                                 .ok()
                         })
                         .unwrap_or_default();
+                    for stale_key in [
+                        "host_secret_ref",
+                        "host_key_path",
+                        "host_passphrase_ref",
+                        "auth_mode",
+                    ] {
+                        map.remove(stale_key);
+                    }
                     if let Some(ref r) = host_secret_ref_to_save {
                         map.insert(
                             "host_secret_ref".to_string(),
                             serde_json::Value::String(r.clone()),
                         );
-                    } else {
-                        map.remove("host_secret_ref");
+                    }
+                    if let Some(ref kp) = host_key_path_to_save {
+                        map.insert(
+                            "host_key_path".to_string(),
+                            serde_json::Value::String(kp.clone()),
+                        );
+                    }
+                    if let Some(ref pr) = host_passphrase_ref_to_save {
+                        map.insert(
+                            "host_passphrase_ref".to_string(),
+                            serde_json::Value::String(pr.clone()),
+                        );
                     }
                     if let Some(ref m) = auth_mode_str {
                         map.insert(
                             "auth_mode".to_string(),
                             serde_json::Value::String(m.clone()),
                         );
-                    } else {
-                        map.remove("auth_mode");
                     }
-                    proto_config = serde_json::to_string(&map).ok();
+                    proto_config = if map.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&map).ok()
+                    };
+                }
+
+                // Step 2: Persist durable credential operation journal (Planned)
+                let has_journal = !planned_new_refs.is_empty() || !old_refs.is_empty();
+                if has_journal {
+                    let op_record = shellumi_storage::CredentialOperationRecord {
+                        operation_id: op_id.clone(),
+                        vault_id: active_vault_id_task.clone(),
+                        target_host_id: id,
+                        target_identity_id: identity_id,
+                        operation_type: if wants_new_identity {
+                            "save_host_with_new_identity".to_string()
+                        } else {
+                            "save_host_credentials".to_string()
+                        },
+                        old_refs: old_refs.clone(),
+                        planned_new_refs: planned_new_refs.clone(),
+                        phase: shellumi_storage::CredentialOpPhase::Planned,
+                        cleanup_status: shellumi_storage::CredentialCleanupStatus::Pending,
+                        last_error: None,
+                        updated_at: now_ts,
+                    };
+                    store
+                        .record_credential_operation(&op_record)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Step 3: Stage new credentials in the vault-scoped secure store
+                let mut staged_refs: Vec<String> = Vec::new();
+                for (planned_ref, secret) in &staged_secrets {
+                    if let Err(e) = vault_store.store_planned(planned_ref, secret) {
+                        for r in &staged_refs {
+                            let _ = vault_store.delete(r);
+                        }
+                        if has_journal {
+                            let _ = store
+                                .update_credential_operation_phase(
+                                    &op_id,
+                                    shellumi_storage::CredentialOpPhase::RolledBack,
+                                    shellumi_storage::CredentialCleanupStatus::Completed,
+                                    Some(&e.to_string()),
+                                )
+                                .await;
+                        }
+                        return Err(format!("Failed to store credential: {e}"));
+                    }
+                    staged_refs.push(planned_ref.clone());
+                }
+                if has_journal && !staged_refs.is_empty() {
+                    store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            shellumi_storage::CredentialOpPhase::Staged,
+                            shellumi_storage::CredentialCleanupStatus::Pending,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
 
                 let tx_res = store
@@ -1070,12 +1143,60 @@ impl Shellumi {
                     Ok(pair) => pair,
                     Err(error) => {
                         for r in &staged_refs {
-                            let _ =
-                                shellumi_core::delete_secret_by_ref(credential_store.as_ref(), r);
+                            let _ = vault_store.delete(r);
+                        }
+                        if has_journal {
+                            let _ = store
+                                .update_credential_operation_phase(
+                                    &op_id,
+                                    shellumi_storage::CredentialOpPhase::RolledBack,
+                                    shellumi_storage::CredentialCleanupStatus::Completed,
+                                    Some(&error.to_string()),
+                                )
+                                .await;
                         }
                         return Err(error.to_string());
                     }
                 };
+
+                if has_journal {
+                    let _ = store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            shellumi_storage::CredentialOpPhase::Committed,
+                            shellumi_storage::CredentialCleanupStatus::Pending,
+                            None,
+                        )
+                        .await;
+                    let mut cleanup_ok = true;
+                    let mut cleanup_err = None;
+                    for old_r in &old_refs {
+                        if !store.is_credential_ref_in_use(old_r).await.unwrap_or(true)
+                            && vault_store.validate_reference(old_r).is_ok()
+                        {
+                            if let Err(e) = vault_store.delete(old_r) {
+                                cleanup_ok = false;
+                                cleanup_err = Some(e.to_string());
+                            }
+                        }
+                    }
+                    let _ = store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            if cleanup_ok {
+                                shellumi_storage::CredentialOpPhase::Completed
+                            } else {
+                                shellumi_storage::CredentialOpPhase::Committed
+                            },
+                            if cleanup_ok {
+                                shellumi_storage::CredentialCleanupStatus::Completed
+                            } else {
+                                shellumi_storage::CredentialCleanupStatus::RetryPending
+                            },
+                            cleanup_err.as_deref(),
+                        )
+                        .await;
+                }
 
                 if is_remote {
                     let payload = shellumi_storage::SyncHostPayload {
@@ -1246,6 +1367,17 @@ impl Shellumi {
                     .map_err(|e| e.to_string())?;
                 if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
                     store.set_vault_id(vid);
+                }
+                let cred_store = shellumi_core::default_credential_store();
+                if let Err(err) = store
+                    .reconcile_credential_operations(cred_store.as_ref())
+                    .await
+                {
+                    tracing::warn!(
+                        vault_id = %active_vault_id_task,
+                        error = %err,
+                        "Credential operation reconciliation encountered an error"
+                    );
                 }
                 store.list().await.map_err(|e| e.to_string())
             })

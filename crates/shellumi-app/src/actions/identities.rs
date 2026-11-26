@@ -134,44 +134,29 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
-                    store.set_vault_id(vid);
-                }
+                let vid = shellumi_core::VaultId::new(&active_vault_id_task)
+                    .map_err(|e| e.to_string())?;
+                store.set_vault_id(vid.clone());
                 let credential_store = shellumi_core::default_credential_store();
-                let nonce = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_nanos();
-                let account = format!("desktop-identity-{}-{nonce}", std::process::id());
+                let vault_store =
+                    shellumi_core::VaultCredentialStore::new(credential_store.as_ref(), &vid);
                 let mut created_refs = Vec::new();
                 if !password.is_empty() {
-                    let reference = shellumi_core::store_secret_to_ref(
-                        credential_store.as_ref(),
-                        shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
-                        &format!("{account}-password"),
-                        &password,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    let reference = vault_store
+                        .store_unique("identity-password", &password)
+                        .map_err(|e| e.to_string())?;
                     created_refs.push(reference.clone());
                     new_id.password_secret_ref = Some(reference);
                 }
                 if !passphrase.is_empty() {
-                    match shellumi_core::store_secret_to_ref(
-                        credential_store.as_ref(),
-                        shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
-                        &format!("{account}-passphrase"),
-                        &passphrase,
-                    ) {
+                    match vault_store.store_unique("identity-passphrase", &passphrase) {
                         Ok(reference) => {
                             created_refs.push(reference.clone());
                             new_id.passphrase_secret_ref = Some(reference);
                         }
                         Err(error) => {
                             for reference in &created_refs {
-                                let _ = shellumi_core::delete_secret_by_ref(
-                                    credential_store.as_ref(),
-                                    reference,
-                                );
+                                let _ = vault_store.delete(reference);
                             }
                             return Err(error.to_string());
                         }

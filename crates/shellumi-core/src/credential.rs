@@ -490,8 +490,9 @@ impl<'a> VaultCredentialStore<'a> {
         use std::fmt::Write;
         let rng = SystemRandom::new();
         let mut bytes = [0u8; 32];
-        rng.fill(&mut bytes)
-            .map_err(|_| CredentialError::Storage("CSPRNG failure generating credential ID".into()))?;
+        rng.fill(&mut bytes).map_err(|_| {
+            CredentialError::Storage("CSPRNG failure generating credential ID".into())
+        })?;
         let mut hex = String::with_capacity(64);
         for b in bytes {
             let _ = write!(&mut hex, "{b:02x}");
@@ -503,14 +504,19 @@ impl<'a> VaultCredentialStore<'a> {
     pub fn plan_unique_ref(&self, kind: &str) -> Result<String, CredentialError> {
         let kind = validate_identifier(kind, "credential kind")?;
         let id = Self::generate_credential_id()?;
-        let account = format!("{}{}", self.account_prefix, sha256_hex(&format!("{kind}:{id}")));
+        let account = format!(
+            "{}{}",
+            self.account_prefix,
+            sha256_hex(&format!("{kind}:{id}"))
+        );
         Ok(format_keychain_ref(DEFAULT_KEYCHAIN_SERVICE, &account))
     }
 
     /// Stage a secret at a previously planned canonical reference after verifying vault ownership.
     pub fn store_planned(&self, planned_ref: &str, secret: &str) -> Result<(), CredentialError> {
         let account = self.account_for_ref(planned_ref)?;
-        self.store.set_secret(DEFAULT_KEYCHAIN_SERVICE, &account, secret)
+        self.store
+            .set_secret(DEFAULT_KEYCHAIN_SERVICE, &account, secret)
     }
 
     /// Store a secret under a fresh CSPRNG-backed vault-specific account and return its canonical reference.

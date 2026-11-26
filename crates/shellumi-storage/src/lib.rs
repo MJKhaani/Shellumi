@@ -565,9 +565,9 @@ impl VaultHostStore {
     pub async fn delete(&mut self, id: i64) -> Result<bool, StorageError> {
         self.0.delete(id).await
     }
+}
 
-    /// Only vault-scoped keychain references are accepted for new identities.
-    /// Transaction phase for durable credential operations.
+/// Transaction phase for durable credential operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialOpPhase {
     Planned,
@@ -768,7 +768,8 @@ impl HostStore {
             .await?;
         while let Some(row) = host_rows.next().await? {
             let cfg: String = row.get(0)?;
-            if let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cfg)
+            if let Ok(map) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cfg)
             {
                 if map
                     .get("host_secret_ref")
@@ -905,7 +906,8 @@ impl HostStore {
     }
 }
 
-/// Atomically create an optional reusable identity and create/update a host in a single
+impl VaultHostStore {
+    /// Atomically create an optional reusable identity and create/update a host in a single
     /// SQLite transaction scoped to `self.0.host_vault_id`.
     #[allow(clippy::too_many_arguments)]
     pub async fn save_host_with_identity_tx(
@@ -4519,345 +4521,7 @@ impl HostStore {
         Ok(rows != 0)
     }
 
-    /// Transaction phase for durable credential operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialOpPhase {
-    Planned,
-    Staged,
-    Committed,
-    Completed,
-    RolledBack,
-}
-
-impl CredentialOpPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Planned => "Planned",
-            Self::Staged => "Staged",
-            Self::Committed => "Committed",
-            Self::Completed => "Completed",
-            Self::RolledBack => "RolledBack",
-        }
-    }
-
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "Staged" => Self::Staged,
-            "Committed" => Self::Committed,
-            "Completed" => Self::Completed,
-            "RolledBack" => Self::RolledBack,
-            _ => Self::Planned,
-        }
-    }
-}
-
-/// Cleanup/reconciliation status for durable credential operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialCleanupStatus {
-    Pending,
-    Completed,
-    RetryPending,
-}
-
-impl CredentialCleanupStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::Completed => "Completed",
-            Self::RetryPending => "RetryPending",
-        }
-    }
-
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "Completed" => Self::Completed,
-            "RetryPending" => Self::RetryPending,
-            _ => Self::Pending,
-        }
-    }
-}
-
-/// Non-secret durable journal record for crash-safe credential mutations.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CredentialOperationRecord {
-    pub operation_id: String,
-    pub vault_id: String,
-    pub target_host_id: Option<i64>,
-    pub target_identity_id: Option<i64>,
-    pub operation_type: String,
-    pub old_refs: Vec<String>,
-    pub planned_new_refs: Vec<String>,
-    pub phase: CredentialOpPhase,
-    pub cleanup_status: CredentialCleanupStatus,
-    pub last_error: Option<String>,
-    pub updated_at: i64,
-}
-
-impl HostStore {
-    pub async fn record_credential_operation(
-        &self,
-        op: &CredentialOperationRecord,
-    ) -> Result<(), StorageError> {
-        let old_json = serde_json::to_string(&op.old_refs)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        let new_json = serde_json::to_string(&op.planned_new_refs)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO credential_operations
-                 (operation_id, vault_id, target_host_id, target_identity_id, operation_type,
-                  old_refs_json, planned_new_refs_json, phase, cleanup_status, last_error, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                (
-                    op.operation_id.as_str(),
-                    op.vault_id.as_str(),
-                    op.target_host_id,
-                    op.target_identity_id,
-                    op.operation_type.as_str(),
-                    old_json,
-                    new_json,
-                    op.phase.as_str(),
-                    op.cleanup_status.as_str(),
-                    op.last_error.as_deref(),
-                    op.updated_at,
-                ),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn update_credential_operation_phase(
-        &self,
-        operation_id: &str,
-        phase: CredentialOpPhase,
-        cleanup_status: CredentialCleanupStatus,
-        last_error: Option<&str>,
-    ) -> Result<(), StorageError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        self.connection
-            .execute(
-                "UPDATE credential_operations
-                 SET phase = ?1, cleanup_status = ?2, last_error = ?3, updated_at = ?4
-                 WHERE operation_id = ?5 AND vault_id = ?6",
-                (
-                    phase.as_str(),
-                    cleanup_status.as_str(),
-                    last_error,
-                    now,
-                    operation_id,
-                    self.host_vault_id.as_str(),
-                ),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn list_pending_credential_operations(
-        &self,
-    ) -> Result<Vec<CredentialOperationRecord>, StorageError> {
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT operation_id, vault_id, target_host_id, target_identity_id, operation_type,
-                        old_refs_json, planned_new_refs_json, phase, cleanup_status, last_error, updated_at
-                 FROM credential_operations
-                 WHERE vault_id = ?1
-                   AND (phase NOT IN ('Completed', 'RolledBack') OR cleanup_status != 'Completed')
-                 ORDER BY updated_at ASC",
-                [self.host_vault_id.as_str()],
-            )
-            .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let old_json: String = row.get(5)?;
-            let new_json: String = row.get(6)?;
-            let old_refs: Vec<String> = serde_json::from_str(&old_json).unwrap_or_default();
-            let planned_new_refs: Vec<String> = serde_json::from_str(&new_json).unwrap_or_default();
-            let phase_str: String = row.get(7)?;
-            let cleanup_str: String = row.get(8)?;
-            out.push(CredentialOperationRecord {
-                operation_id: row.get(0)?,
-                vault_id: row.get(1)?,
-                target_host_id: row.get(2)?,
-                target_identity_id: row.get(3)?,
-                operation_type: row.get(4)?,
-                old_refs,
-                planned_new_refs,
-                phase: CredentialOpPhase::parse(&phase_str),
-                cleanup_status: CredentialCleanupStatus::parse(&cleanup_str),
-                last_error: row.get(9)?,
-                updated_at: row.get(10)?,
-            });
-        }
-        Ok(out)
-    }
-
-    /// Check whether a credential reference is still referenced by any host or identity
-    /// in the current vault (`self.host_vault_id`).
-    pub async fn is_credential_ref_in_use(&self, reference: &str) -> Result<bool, StorageError> {
-        let mut id_rows = self
-            .connection
-            .query(
-                "SELECT 1 FROM identities
-                 WHERE vault_id = ?1 AND (password_secret_ref = ?2 OR passphrase_secret_ref = ?2)
-                 LIMIT 1",
-                (self.host_vault_id.as_str(), reference),
-            )
-            .await?;
-        if id_rows.next().await?.is_some() {
-            return Ok(true);
-        }
-
-        let mut host_rows = self
-            .connection
-            .query(
-                "SELECT protocol_config FROM hosts WHERE vault_id = ?1 AND protocol_config IS NOT NULL",
-                [self.host_vault_id.as_str()],
-            )
-            .await?;
-        while let Some(row) = host_rows.next().await? {
-            let cfg: String = row.get(0)?;
-            if let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cfg)
-            {
-                if map
-                    .get("host_secret_ref")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|r| r == reference)
-                    || map
-                        .get("host_passphrase_ref")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|r| r == reference)
-                {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Reconcile any unfinished or retry-pending credential operations for the current vault.
-    pub async fn reconcile_credential_operations(
-        &self,
-        backend: &dyn shellumi_core::CredentialStore,
-    ) -> Result<usize, StorageError> {
-        let pending = self.list_pending_credential_operations().await?;
-        let vault_store = shellumi_core::VaultCredentialStore::new(backend, &self.host_vault_id);
-        let mut reconciled = 0usize;
-
-        for op in pending {
-            match op.phase {
-                CredentialOpPhase::Planned | CredentialOpPhase::Staged => {
-                    // Crashed before DB commit: clean up any unreferenced planned_new_refs.
-                    let mut all_ok = true;
-                    let mut last_err = None;
-                    for r in &op.planned_new_refs {
-                        if self.is_credential_ref_in_use(r).await? {
-                            continue;
-                        }
-                        if vault_store.validate_reference(r).is_ok() {
-                            if let Err(e) = vault_store.delete(r) {
-                                all_ok = false;
-                                last_err = Some(e.to_string());
-                            }
-                        }
-                    }
-                    if all_ok {
-                        self.update_credential_operation_phase(
-                            &op.operation_id,
-                            CredentialOpPhase::RolledBack,
-                            CredentialCleanupStatus::Completed,
-                            None,
-                        )
-                        .await?;
-                        reconciled += 1;
-                    } else {
-                        self.update_credential_operation_phase(
-                            &op.operation_id,
-                            op.phase,
-                            CredentialCleanupStatus::RetryPending,
-                            last_err.as_deref(),
-                        )
-                        .await?;
-                    }
-                }
-                CredentialOpPhase::Committed | CredentialOpPhase::Completed => {
-                    // Crashed after DB commit (or previous cleanup failed): clean up unreferenced old_refs.
-                    let mut all_ok = true;
-                    let mut last_err = None;
-                    for r in &op.old_refs {
-                        if self.is_credential_ref_in_use(r).await? {
-                            continue;
-                        }
-                        if vault_store.validate_reference(r).is_ok() {
-                            if let Err(e) = vault_store.delete(r) {
-                                all_ok = false;
-                                last_err = Some(e.to_string());
-                            }
-                        }
-                    }
-                    if all_ok {
-                        self.update_credential_operation_phase(
-                            &op.operation_id,
-                            CredentialOpPhase::Completed,
-                            CredentialCleanupStatus::Completed,
-                            None,
-                        )
-                        .await?;
-                        reconciled += 1;
-                    } else {
-                        self.update_credential_operation_phase(
-                            &op.operation_id,
-                            CredentialOpPhase::Committed,
-                            CredentialCleanupStatus::RetryPending,
-                            last_err.as_deref(),
-                        )
-                        .await?;
-                    }
-                }
-                CredentialOpPhase::RolledBack => {
-                    if op.cleanup_status != CredentialCleanupStatus::Completed {
-                        let mut all_ok = true;
-                        let mut last_err = None;
-                        for r in &op.planned_new_refs {
-                            if !self.is_credential_ref_in_use(r).await?
-                                && vault_store.validate_reference(r).is_ok()
-                            {
-                                if let Err(e) = vault_store.delete(r) {
-                                    all_ok = false;
-                                    last_err = Some(e.to_string());
-                                }
-                            }
-                        }
-                        if all_ok {
-                            self.update_credential_operation_phase(
-                                &op.operation_id,
-                                CredentialOpPhase::RolledBack,
-                                CredentialCleanupStatus::Completed,
-                                None,
-                            )
-                            .await?;
-                            reconciled += 1;
-                        } else {
-                            self.update_credential_operation_phase(
-                                &op.operation_id,
-                                CredentialOpPhase::RolledBack,
-                                CredentialCleanupStatus::RetryPending,
-                                last_err.as_deref(),
-                            )
-                            .await?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(reconciled)
-    }
-}
-
-/// Atomically create an optional reusable identity and create/update a host in a single
+    /// Atomically create an optional reusable identity and create/update a host in a single
     /// SQLite transaction scoped to `self.host_vault_id`.
     #[allow(clippy::too_many_arguments)]
     pub async fn save_host_with_identity_tx(
@@ -13433,5 +13097,120 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resolved_pw.expose_secret(), " s3cr3t with spaces ");
+    }
+
+    #[tokio::test]
+    async fn test_credential_journal_crash_recovery_and_in_use_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("journal_vault.db");
+        let vid_a = shellumi_core::VaultId::new("vault-a").unwrap();
+        let vid_b = shellumi_core::VaultId::new("vault-b").unwrap();
+
+        let mut store = HostStore::open(db_path.to_str().unwrap()).await.unwrap();
+        store.set_vault_id(vid_a.clone());
+
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let vault_a_creds = shellumi_core::VaultCredentialStore::new(&cred_store, &vid_a);
+        let vault_b_creds = shellumi_core::VaultCredentialStore::new(&cred_store, &vid_b);
+
+        // 1. Staged crash (before DB commit): planned_new_ref must be cleaned up and marked RolledBack
+        let staged_ref = vault_a_creds
+            .store_unique("host-password", "crash-before-commit")
+            .unwrap();
+        store
+            .record_credential_operation(&CredentialOperationRecord {
+                operation_id: "op-staged-crash".into(),
+                vault_id: vid_a.as_str().to_string(),
+                target_host_id: None,
+                target_identity_id: None,
+                operation_type: "save_host_credentials".into(),
+                old_refs: vec![],
+                planned_new_refs: vec![staged_ref.clone()],
+                phase: CredentialOpPhase::Staged,
+                cleanup_status: CredentialCleanupStatus::Pending,
+                last_error: None,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+
+        // 2. Committed crash (after DB commit): unreferenced old_ref must be cleaned up,
+        //    but an old_ref still referenced by an identity in Vault A must NOT be deleted!
+        let orphan_old_ref = vault_a_creds
+            .store_unique("host-password", "orphan-old")
+            .unwrap();
+        let shared_ref = vault_a_creds
+            .store_unique("identity-password", "shared-secret")
+            .unwrap();
+        let shared_ident = shellumi_core::NewIdentity {
+            name: "Shared Ident".into(),
+            username: "ops".into(),
+            auth_method: shellumi_core::AuthMethod::Password,
+            password_secret_ref: Some(shared_ref.clone()),
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+        };
+        store.create_identity(&shared_ident).await.unwrap();
+
+        store
+            .record_credential_operation(&CredentialOperationRecord {
+                operation_id: "op-committed-crash".into(),
+                vault_id: vid_a.as_str().to_string(),
+                target_host_id: Some(1),
+                target_identity_id: None,
+                operation_type: "save_host_credentials".into(),
+                old_refs: vec![orphan_old_ref.clone(), shared_ref.clone()],
+                planned_new_refs: vec![],
+                phase: CredentialOpPhase::Committed,
+                cleanup_status: CredentialCleanupStatus::Pending,
+                last_error: None,
+                updated_at: 101,
+            })
+            .await
+            .unwrap();
+
+        // 3. Cross-vault isolation: Vault B ref cannot be resolved or deleted by Vault A
+        let vault_b_ref = vault_b_creds
+            .store_unique("host-password", "vault-b-secret")
+            .unwrap();
+        assert!(vault_a_creds.validate_reference(&vault_b_ref).is_err());
+        assert!(vault_a_creds.resolve(&vault_b_ref).is_err());
+
+        // Reconcile on reopen/unlock
+        let reconciled = store
+            .reconcile_credential_operations(&cred_store)
+            .await
+            .unwrap();
+        assert_eq!(reconciled, 2);
+
+        // Staged ref & orphan old ref were deleted; shared ref & Vault B ref remain intact
+        assert!(vault_a_creds.resolve(&staged_ref).unwrap().is_none());
+        assert!(vault_a_creds.resolve(&orphan_old_ref).unwrap().is_none());
+        assert_eq!(
+            vault_a_creds
+                .resolve(&shared_ref)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "shared-secret"
+        );
+        assert_eq!(
+            vault_b_creds
+                .resolve(&vault_b_ref)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "vault-b-secret"
+        );
+
+        // Repeated reconciliation is a no-op
+        let second_pass = store
+            .reconcile_credential_operations(&cred_store)
+            .await
+            .unwrap();
+        assert_eq!(second_pass, 0);
     }
 }
