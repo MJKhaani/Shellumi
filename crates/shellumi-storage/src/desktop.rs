@@ -868,6 +868,249 @@ pub async fn resolve_connection(
     resolve_connection_with_key(database, host_id, None, None).await
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedAuthSource {
+    SavedIdentity(i64),
+    HostSpecific,
+    InheritedGroup(i64),
+    AskOnConnect,
+    NoAuthentication,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedProtocolAuth {
+    pub source: ResolvedAuthSource,
+    pub protocol: shellumi_core::ConnectionProtocol,
+    pub identity: Option<shellumi_core::Identity>,
+    pub group: Option<shellumi_core::HostGroup>,
+}
+
+/// Shared typed authentication resolver used across SSH, SFTP, Mosh, RDP, VNC, Telnet, Serial, and Local.
+pub async fn resolve_protocol_auth(
+    store: &HostStore,
+    host: &crate::SavedHost,
+    cred_store: &dyn shellumi_core::CredentialStore,
+) -> Result<ResolvedProtocolAuth, String> {
+    let proto = host.protocol();
+    let caps = shellumi_core::ProtocolCapabilities::for_protocol(proto);
+    let group = if let Some(name) = &host.group_name {
+        store.get_group(name).await.map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+
+    let cfg_map = host
+        .protocol_config
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok())
+        .unwrap_or_default();
+    let cfg_str = |k: &str| {
+        cfg_map
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    };
+    let auth_mode = cfg_str("auth_mode");
+    let host_secret_ref = cfg_str("host_secret_ref");
+    let host_key_path = cfg_str("host_key_path");
+    let host_passphrase_ref = cfg_str("host_passphrase_ref");
+    let vault_store = shellumi_core::VaultCredentialStore::new(cred_store, &store.host_vault_id);
+
+    let validate_identity = |ident: &shellumi_core::Identity| -> Result<(), String> {
+        if !caps.is_auth_method_compatible(&ident.auth_method) {
+            return Err(format!(
+                "Identity '{}' ({}) is not compatible with {}.",
+                ident.name, ident.auth_method, proto
+            ));
+        }
+        for r in [&ident.password_secret_ref, &ident.passphrase_secret_ref]
+            .into_iter()
+            .flatten()
+        {
+            if r.starts_with("keychain://") {
+                vault_store
+                    .validate_reference(r)
+                    .map_err(|e| format!("Invalid identity credential reference: {e}"))?;
+            }
+        }
+        Ok(())
+    };
+
+    if let Some(id) = host.identity_id {
+        let ident = store
+            .get_identity(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("Selected identity no longer exists.")?
+            .to_identity();
+        validate_identity(&ident)?;
+        return Ok(ResolvedProtocolAuth {
+            source: ResolvedAuthSource::SavedIdentity(id),
+            protocol: proto,
+            identity: Some(ident),
+            group,
+        });
+    }
+
+    if host_secret_ref.is_some() || host_key_path.is_some() || host_passphrase_ref.is_some() {
+        for r in [&host_secret_ref, &host_passphrase_ref]
+            .into_iter()
+            .flatten()
+        {
+            vault_store
+                .validate_reference(r)
+                .map_err(|e| format!("Invalid host credential reference: {e}"))?;
+        }
+        let auth_method = if host_key_path.is_some() {
+            shellumi_core::AuthMethod::PublicKey {
+                key_name: host.name.clone(),
+            }
+        } else {
+            shellumi_core::AuthMethod::Password
+        };
+        if !caps.is_auth_method_compatible(&auth_method) {
+            return Err(format!(
+                "Host-specific {} credential is not compatible with {}.",
+                auth_method, proto
+            ));
+        }
+        return Ok(ResolvedProtocolAuth {
+            source: ResolvedAuthSource::HostSpecific,
+            protocol: proto,
+            identity: Some(shellumi_core::Identity {
+                id: 0,
+                name: format!("{} (host-specific)", host.name),
+                username: host.destination.username().to_string(),
+                auth_method,
+                password_secret_ref: host_secret_ref,
+                key_path: host_key_path,
+                passphrase_secret_ref: host_passphrase_ref,
+                certificate_path: None,
+                tags: Vec::new(),
+                comment: None,
+                created_at: None,
+                updated_at: None,
+            }),
+            group,
+        });
+    }
+
+    if auth_mode.as_deref() == Some("ask") {
+        // Explicit Ask on Connect must never silently fall back to group inheritance.
+        return Ok(ResolvedProtocolAuth {
+            source: ResolvedAuthSource::AskOnConnect,
+            protocol: proto,
+            identity: None,
+            group,
+        });
+    }
+
+    if auth_mode.as_deref() == Some("no_auth") {
+        if !caps.allows_no_auth {
+            return Err(format!("{proto} does not allow No Authentication."));
+        }
+        return Ok(ResolvedProtocolAuth {
+            source: ResolvedAuthSource::NoAuthentication,
+            protocol: proto,
+            identity: None,
+            group,
+        });
+    }
+
+    if let Some(group_identity_id) = group.as_ref().and_then(|g| g.identity_id) {
+        if caps.allows_saved_identity {
+            let ident = store
+                .get_identity(group_identity_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Group identity no longer exists.")?
+                .to_identity();
+            validate_identity(&ident)?;
+            return Ok(ResolvedProtocolAuth {
+                source: ResolvedAuthSource::InheritedGroup(group_identity_id),
+                protocol: proto,
+                identity: Some(ident),
+                group,
+            });
+        }
+    }
+
+    Ok(ResolvedProtocolAuth {
+        source: if !caps.allows_ask_on_connect && caps.allows_no_auth {
+            ResolvedAuthSource::NoAuthentication
+        } else {
+            ResolvedAuthSource::AskOnConnect
+        },
+        protocol: proto,
+        identity: None,
+        group,
+    })
+}
+
+/// Resolve saved/inherited RDP or VNC credentials through the unified protocol auth resolver.
+pub async fn resolve_remote_desktop_auth_with_key(
+    database: &str,
+    host_id: i64,
+    active_vault_id: Option<&str>,
+    vault_key: Option<&shellumi_core::VaultKey>,
+) -> Result<(Option<String>, Option<String>, ResolvedAuthSource), String> {
+    let resolved_key = if let Some(k) = vault_key {
+        Some(k.clone())
+    } else if let Some(vid) = active_vault_id {
+        if let Ok(v) = shellumi_core::VaultId::new(vid) {
+            let cred_store = shellumi_core::default_credential_store();
+            shellumi_core::VaultKeyManager::retrieve_key(&*cred_store, &v)
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut store = HostStore::open_with_key(database, resolved_key.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(vid) = active_vault_id {
+        if let Ok(v) = shellumi_core::VaultId::new(vid) {
+            store.set_vault_id(v);
+        }
+    }
+    let host = store
+        .get_host(host_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Host no longer exists.")?;
+    let proto = host.protocol();
+    if proto != shellumi_core::ConnectionProtocol::Rdp
+        && proto != shellumi_core::ConnectionProtocol::Vnc
+    {
+        return Err("The selected host is not a remote desktop host.".into());
+    }
+    let cred_store = shellumi_core::default_credential_store();
+    let resolved = resolve_protocol_auth(&store, &host, cred_store.as_ref()).await?;
+    let vault_store = shellumi_core::VaultCredentialStore::new(&*cred_store, &store.host_vault_id);
+    if let Some(ident) = resolved.identity {
+        let uname = if ident.username.is_empty() || ident.username == "-" {
+            None
+        } else {
+            Some(ident.username.clone())
+        };
+        let pwd = match ident.password_secret_ref.as_deref() {
+            Some(r) => vault_store
+                .resolve(r)
+                .map_err(|e| e.to_string())?
+                .map(|s| s.expose_secret().to_string()),
+            None => None,
+        };
+        Ok((uname, pwd, resolved.source))
+    } else {
+        Ok((None, None, resolved.source))
+    }
+}
+
 pub async fn resolve_connection_with_key(
     database: &str,
     host_id: i64,
@@ -917,86 +1160,10 @@ pub async fn resolve_connection_with_key(
     {
         return Err("The selected host does not use SSH authentication.".into());
     }
-    let group = if let Some(name) = &host.group_name {
-        store.get_group(name).await.map_err(|e| e.to_string())?
-    } else {
-        None
-    };
-
-    let cfg_map = host
-        .protocol_config
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok())
-        .unwrap_or_default();
-    let cfg_str = |k: &str| {
-        cfg_map
-            .get(k)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-    };
-    let auth_mode = cfg_str("auth_mode");
-    let host_secret_ref = cfg_str("host_secret_ref");
-    let host_key_path = cfg_str("host_key_path");
-    let host_passphrase_ref = cfg_str("host_passphrase_ref");
-
-    let mut identity = if let Some(id) = host.identity_id {
-        Some(
-            store
-                .get_identity(id)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("Selected identity no longer exists.")?
-                .to_identity(),
-        )
-    } else if host_secret_ref.is_some() || host_key_path.is_some() {
-        let cred_store = shellumi_core::default_credential_store();
-        let vault_store =
-            shellumi_core::VaultCredentialStore::new(&*cred_store, &store.host_vault_id);
-        for r in [&host_secret_ref, &host_passphrase_ref]
-            .into_iter()
-            .flatten()
-        {
-            vault_store
-                .validate_reference(r)
-                .map_err(|e| format!("Invalid host credential reference: {e}"))?;
-        }
-        let auth_method = if host_key_path.is_some() {
-            shellumi_core::AuthMethod::PublicKey {
-                key_name: host.name.clone(),
-            }
-        } else {
-            shellumi_core::AuthMethod::Password
-        };
-        Some(shellumi_core::Identity {
-            id: 0,
-            name: format!("{} (host-specific)", host.name),
-            username: host.destination.username().to_string(),
-            auth_method,
-            password_secret_ref: host_secret_ref,
-            key_path: host_key_path,
-            passphrase_secret_ref: host_passphrase_ref,
-            certificate_path: None,
-            tags: Vec::new(),
-            comment: None,
-            created_at: None,
-            updated_at: None,
-        })
-    } else if auth_mode.as_deref() == Some("ask") {
-        // Explicit Ask on Connect must never silently fall back to group inheritance.
-        None
-    } else if let Some(group_identity_id) = group.as_ref().and_then(|g| g.identity_id) {
-        Some(
-            store
-                .get_identity(group_identity_id)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("Group identity no longer exists.")?
-                .to_identity(),
-        )
-    } else {
-        None
-    };
+    let cred_store = shellumi_core::default_credential_store();
+    let resolved = resolve_protocol_auth(&store, &host, cred_store.as_ref()).await?;
+    let group = resolved.group;
+    let mut identity = resolved.identity;
     fn absolute(path: &str) -> Result<String, String> {
         if path.trim().is_empty() || path.chars().any(char::is_control) {
             return Err("Invalid identity file path.".into());
@@ -1310,5 +1477,79 @@ mod connection_tests {
             .await
             .unwrap();
         assert!(resolve_connection(path_str, bad_host_id).await.is_err());
+
+        // 4. RDP group identity inheritance + explicit Ask/NoAuth blocking fallback
+        let rdp_group_pass_ref = vault_store
+            .store_unique("identity-password", "rdp-secret")
+            .unwrap();
+        let rdp_ident_id = store
+            .create_identity(&shellumi_core::NewIdentity {
+                name: "RDP Corp".into(),
+                username: "corpuser".into(),
+                auth_method: shellumi_core::AuthMethod::Password,
+                password_secret_ref: Some(rdp_group_pass_ref),
+                key_path: None,
+                passphrase_secret_ref: None,
+                certificate_path: None,
+                tags: Vec::new(),
+                comment: None,
+            })
+            .await
+            .unwrap();
+        store
+            .add_group(&shellumi_core::HostGroup {
+                name: "WindowsFleet".into(),
+                default_username: Some("corpuser".into()),
+                default_port: Some(std::num::NonZeroU16::new(3389).unwrap()),
+                identity_id: Some(rdp_ident_id),
+                tags: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let rdp_dest = SshDestination::new("10.0.0.88", "corpuser", 3389).unwrap();
+        let rdp_inherited_id = store
+            .add_full(
+                "RDP Inherited",
+                &rdp_dest,
+                Some("WindowsFleet"),
+                &[],
+                None,
+                None,
+                "rdp",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let (uname, pwd, src) =
+            resolve_remote_desktop_auth_with_key(path_str, rdp_inherited_id, None, None)
+                .await
+                .unwrap();
+        assert_eq!(uname.as_deref(), Some("corpuser"));
+        assert_eq!(pwd.as_deref(), Some("rdp-secret"));
+        assert_eq!(src, ResolvedAuthSource::InheritedGroup(rdp_ident_id));
+
+        // Explicit Ask on Connect blocks group fallback for RDP
+        let rdp_ask_id = store
+            .add_full(
+                "RDP Ask",
+                &rdp_dest,
+                Some("WindowsFleet"),
+                &[],
+                None,
+                None,
+                "rdp",
+                Some(r#"{"auth_mode":"ask"}"#),
+                None,
+            )
+            .await
+            .unwrap();
+        let (uname2, pwd2, src2) =
+            resolve_remote_desktop_auth_with_key(path_str, rdp_ask_id, None, None)
+                .await
+                .unwrap();
+        assert_eq!(uname2, None);
+        assert_eq!(pwd2, None);
+        assert_eq!(src2, ResolvedAuthSource::AskOnConnect);
     }
 }

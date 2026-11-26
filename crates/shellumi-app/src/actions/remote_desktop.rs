@@ -212,147 +212,97 @@ impl Shellumi {
         window.focus(&self.focus);
         cx.notify();
 
-        // Asynchronously resolve saved identity or host-scoped credential for this remote desktop tab
-        let host_identity_id = host.identity_id;
-        let host_secret_ref = host
-            .protocol_config
-            .as_deref()
-            .and_then(|c| serde_json::from_str::<crate::HostAuthMetadata>(c).ok())
-            .and_then(|m| m.host_secret_ref);
+        // Asynchronously resolve saved, host-scoped, or inherited group credentials via the unified resolver
+        if let Some(db_path) = self.active_vault_db_path() {
+            let op_id = self.next_connection_op_id;
+            self.next_connection_op_id = self.next_connection_op_id.wrapping_add(1);
+            let op_ctx = crate::ConnectionOperationContext {
+                window_id: window.window_handle().window_id(),
+                vault_id: self.active_vault_id.clone(),
+                vault_load_generation: self.vault_load_generation,
+                host_id: host.id,
+                operation_id: op_id,
+                tab_id: Some(tab_id),
+                connection_generation: Some(0),
+                credential_edit_generation: self
+                    .rd_credential_edit_gen
+                    .get(&tab_id)
+                    .copied()
+                    .unwrap_or(0),
+            };
+            let vault_id = op_ctx.vault_id.clone();
+            let vault_key = self.active_vault_key();
+            let task = cx.background_executor().spawn(async move {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                runtime.block_on(
+                    shellumi_storage::desktop::resolve_remote_desktop_auth_with_key(
+                        &db_path,
+                        op_ctx.host_id,
+                        Some(&vault_id),
+                        vault_key.as_ref(),
+                    ),
+                )
+            });
 
-        if host_identity_id.is_some() || host_secret_ref.is_some() {
-            if let Some(db_path) = self.active_vault_db_path() {
-                let op_id = self.next_connection_op_id;
-                self.next_connection_op_id = self.next_connection_op_id.wrapping_add(1);
-                let op_ctx = crate::ConnectionOperationContext {
-                    window_id: window.window_handle().window_id(),
-                    vault_id: self.active_vault_id.clone(),
-                    vault_load_generation: self.vault_load_generation,
-                    host_id: host.id,
-                    operation_id: op_id,
-                    tab_id: Some(tab_id),
-                    connection_generation: Some(0),
-                    credential_edit_generation: self
-                        .rd_credential_edit_gen
-                        .get(&tab_id)
-                        .copied()
-                        .unwrap_or(0),
-                };
-                let vault_id = op_ctx.vault_id.clone();
-                let vault_key = self.active_vault_key();
-                let task = cx.background_executor().spawn(async move {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .build()
-                        .map_err(|e| e.to_string())?;
-                    runtime.block_on(async {
-                        let cred_store = shellumi_core::default_credential_store();
-                        if let Some(ref_uri) = host_secret_ref {
-                            let vid = shellumi_core::VaultId::new(&vault_id)
-                                .map_err(|e| e.to_string())?;
-                            let vault_store =
-                                shellumi_core::VaultCredentialStore::new(cred_store.as_ref(), &vid);
-                            vault_store
-                                .validate_reference(&ref_uri)
-                                .map_err(|e| e.to_string())?;
-                            let secret = shellumi_core::resolve_secret_from_ref(
-                                cred_store.as_ref(),
-                                &ref_uri,
-                            )
-                            .map_err(|e| e.to_string())?;
-                            return Ok::<(Option<String>, Option<String>), String>((
-                                None,
-                                secret.map(|s| s.expose_secret().to_string()),
-                            ));
+            cx.spawn(async move |app, cx| {
+                let mut res = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    if let Err(reason) = app.validate_connection_op(&op_ctx, None) {
+                        tracing::warn!(
+                            tab_id = tab_id,
+                            host_id = op_ctx.host_id,
+                            operation_id = op_ctx.operation_id,
+                            reason = reason,
+                            "Discarded stale remote desktop credential resolution"
+                        );
+                        if let Ok((_, Some(ref mut pwd), _)) = res {
+                            use zeroize::Zeroize;
+                            pwd.zeroize();
                         }
-                        if let Some(id_val) = host_identity_id {
-                            let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            if let Ok(vid) = shellumi_core::VaultId::new(&vault_id) {
-                                store.set_vault_id(vid);
-                            }
-                            let ident = store
-                                .get_identity(id_val)
-                                .await
-                                .map_err(|e| e.to_string())?
-                                .ok_or_else(|| {
-                                    "Selected identity not found in vault".to_string()
-                                })?;
-                            let secret = store
-                                .resolve_identity_password(&ident, cred_store.as_ref())
-                                .map_err(|e| e.to_string())?;
-                            let uname = if ident.username.is_empty() || ident.username == "-" {
-                                None
-                            } else {
-                                Some(ident.username)
-                            };
-                            return Ok((uname, secret.map(|s| s.expose_secret().to_string())));
-                        }
-                        Ok((None, None))
-                    })
-                });
-
-                cx.spawn(async move |app, cx| {
-                    let mut res = task.await;
-                    let _ = app.update(cx, |app, cx| {
-                        if let Err(reason) = app.validate_connection_op(&op_ctx, None) {
-                            tracing::warn!(
-                                tab_id = tab_id,
-                                host_id = op_ctx.host_id,
-                                operation_id = op_ctx.operation_id,
-                                reason = reason,
-                                "Discarded stale remote desktop credential resolution"
-                            );
-                            if let Ok((_, Some(ref mut pwd))) = res {
-                                use zeroize::Zeroize;
-                                pwd.zeroize();
-                            }
-                            return;
-                        }
-                        if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
-                            if let Some(rd) = &mut tab.remote_desktop_state {
-                                match res {
-                                    Ok((uname, mut pwd)) => {
-                                        if rd.username.is_none() {
-                                            if let Some(u) = uname {
-                                                rd.username = Some(u.clone());
-                                                if let Some(input) = &rd.username_input {
-                                                    input.update(cx, |inp, cx| {
-                                                        inp.set_value(&u, cx)
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        if let Some(mut p) = pwd.take() {
-                                            if rd.password.is_none() {
-                                                rd.password = Some(p);
-                                                rd.last_action_note = Some(
-                                                    "Saved credential loaded from vault".into(),
-                                                );
-                                            } else {
-                                                use zeroize::Zeroize;
-                                                p.zeroize();
+                        return;
+                    }
+                    if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        if let Some(rd) = &mut tab.remote_desktop_state {
+                            match res {
+                                Ok((uname, mut pwd, _source)) => {
+                                    if rd.username.is_none() {
+                                        if let Some(u) = uname {
+                                            rd.username = Some(u.clone());
+                                            if let Some(input) = &rd.username_input {
+                                                input.update(cx, |inp, cx| inp.set_value(&u, cx));
                                             }
                                         }
                                     }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            tab_id = tab_id,
-                                            error = %err,
-                                            "Failed to resolve saved remote desktop credential"
-                                        );
-                                        rd.last_action_note = Some(format!(
-                                            "Saved credential unavailable ({err}); enter password"
-                                        ));
+                                    if let Some(mut p) = pwd.take() {
+                                        if rd.password.is_none() {
+                                            rd.password = Some(p);
+                                            rd.last_action_note =
+                                                Some("Saved credential loaded from vault".into());
+                                        } else {
+                                            use zeroize::Zeroize;
+                                            p.zeroize();
+                                        }
                                     }
                                 }
-                                cx.notify();
+                                Err(err) => {
+                                    tracing::warn!(
+                                        tab_id = tab_id,
+                                        error = %err,
+                                        "Failed to resolve saved remote desktop credential"
+                                    );
+                                    rd.last_action_note = Some(format!(
+                                        "Saved credential unavailable ({err}); enter password"
+                                    ));
+                                }
                             }
+                            cx.notify();
                         }
-                    });
-                })
-                .detach();
-            }
+                    }
+                });
+            })
+            .detach();
         }
     }
 
