@@ -471,44 +471,29 @@ impl Shellumi {
                                     cx.notify();
                                 }
                                 Ok(plan) => {
-                                    app.desktop.message = None;
                                     let mosh_cfg = host
                                         .protocol_config
                                         .as_deref()
                                         .and_then(|c| serde_json::from_str::<MoshConfig>(c).ok())
                                         .unwrap_or_default();
-                                    let mut mosh_args = mosh_cfg.build_arguments(
-                                        &plan.destination,
-                                        plan.jump_host.as_deref(),
-                                    );
-                                    let mut ssh_parts = vec!["ssh".to_string()];
-                                    ssh_parts.push("-p".to_string());
-                                    ssh_parts.push(plan.destination.port().get().to_string());
-                                    if let Some(ref key_path) = plan.identity_file {
-                                        ssh_parts.push("-i".to_string());
-                                        ssh_parts.push(key_path.clone());
-                                    }
-                                    if let Some(ref cert_path) = plan.certificate_file {
-                                        ssh_parts.push("-o".to_string());
-                                        ssh_parts.push(format!("CertificateFile={cert_path}"));
-                                    }
-                                    for (flag, val) in &plan.authentication_options {
-                                        ssh_parts.push(flag.clone());
-                                        ssh_parts.push(val.clone());
-                                    }
-                                    let escaped_ssh = ssh_parts
-                                        .iter()
-                                        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-                                        .collect::<Vec<_>>()
-                                        .join(" ");
-                                    mosh_args.insert(0, format!("--ssh={escaped_ssh}"));
-
-                                    let mut command = TerminalCommand::new("mosh").args(mosh_args);
-                                    if let Ok(env_vars) = crate::askpass::environment(&plan) {
-                                        for (k, v) in env_vars {
-                                            command = command.env(k, v);
-                                        }
-                                    }
+                                    let command =
+                                        match build_mosh_terminal_command(&plan, &mosh_cfg, |p| {
+                                            crate::askpass::environment(p)
+                                                .map_err(|e| e.to_string())
+                                        }) {
+                                            Ok(cmd) => cmd,
+                                            Err(err) => {
+                                                tracing::error!(
+                                                    host = %host.name,
+                                                    error = %err,
+                                                    "Mosh launch aborted: askpass setup failed"
+                                                );
+                                                app.desktop.message = Some(err);
+                                                cx.notify();
+                                                return;
+                                            }
+                                        };
+                                    app.desktop.message = None;
                                     let startup = host.startup_snippet_id.map(|id| {
                                         app.snippets
                                             .iter()
@@ -589,5 +574,110 @@ impl Shellumi {
                 self.launch_remote_desktop(host, RemoteDesktopProtocol::Rdp, window, cx);
             }
         }
+    }
+}
+
+pub(crate) fn build_mosh_terminal_command(
+    plan: &shellumi_core::connection::ConnectionPlan,
+    mosh_cfg: &MoshConfig,
+    askpass_env_fn: impl FnOnce(
+        &shellumi_core::connection::ConnectionPlan,
+    ) -> Result<Vec<(String, String)>, String>,
+) -> Result<TerminalCommand, String> {
+    let mut mosh_args = mosh_cfg.build_arguments(&plan.destination, plan.jump_host.as_deref());
+    let mut ssh_parts = vec![
+        "ssh".to_string(),
+        "-p".to_string(),
+        plan.destination.port().get().to_string(),
+    ];
+    if let Some(ref key_path) = plan.identity_file {
+        ssh_parts.push("-i".to_string());
+        ssh_parts.push(key_path.clone());
+    }
+    if let Some(ref cert_path) = plan.certificate_file {
+        ssh_parts.push("-o".to_string());
+        ssh_parts.push(format!("CertificateFile={cert_path}"));
+    }
+    for (flag, val) in &plan.authentication_options {
+        ssh_parts.push(flag.clone());
+        ssh_parts.push(val.clone());
+    }
+    let escaped_ssh = ssh_parts
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    mosh_args.insert(0, format!("--ssh={escaped_ssh}"));
+
+    let env_vars = askpass_env_fn(plan)
+        .map_err(|err| format!("Failed to configure SSH askpass for Mosh: {err}"))?;
+    let mut command = TerminalCommand::new("mosh").args(mosh_args);
+    for (k, v) in env_vars {
+        command = command.env(k, v);
+    }
+    Ok(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_mosh_plan() -> shellumi_core::connection::ConnectionPlan {
+        shellumi_core::connection::ConnectionPlan {
+            destination: shellumi_core::SshDestination::new("example.com", "alice", 2222).unwrap(),
+            ssh_arguments: Vec::new(),
+            sftp_arguments: Vec::new(),
+            jump_host: None,
+            identity_file: Some("/tmp/my 'key'/id_ed25519".to_string()),
+            certificate_file: Some("/tmp/my 'cert'/id_ed25519-cert.pub".to_string()),
+            authentication_options: vec![("-o".to_string(), "IdentitiesOnly=yes".to_string())],
+            password_ref: None,
+            passphrase_ref: None,
+        }
+    }
+
+    #[test]
+    fn test_mosh_askpass_failure_aborts_launch_with_actionable_error() {
+        let plan = sample_mosh_plan();
+        let cfg = MoshConfig::default();
+        let err = build_mosh_terminal_command(&plan, &cfg, |_| {
+            Err("askpass helper unavailable".to_string())
+        })
+        .expect_err("askpass error must abort Mosh launch");
+        assert!(err.contains("askpass"));
+        assert!(err.contains("askpass helper unavailable"));
+    }
+
+    #[test]
+    fn test_mosh_askpass_success_attaches_env_and_escapes_ssh_bootstrap() {
+        let plan = sample_mosh_plan();
+        let cfg = MoshConfig::default();
+        let cmd = build_mosh_terminal_command(&plan, &cfg, |_| {
+            Ok(vec![
+                (
+                    "SSH_ASKPASS".to_string(),
+                    "/tmp/shellumi-askpass".to_string(),
+                ),
+                ("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string()),
+            ])
+        })
+        .expect("askpass success should build Mosh command");
+
+        assert_eq!(cmd.program, "mosh");
+        assert_eq!(
+            cmd.env.get("SSH_ASKPASS").map(String::as_str),
+            Some("/tmp/shellumi-askpass")
+        );
+        assert_eq!(
+            cmd.env.get("SSH_ASKPASS_REQUIRE").map(String::as_str),
+            Some("force")
+        );
+        let ssh_flag = cmd
+            .args
+            .iter()
+            .find(|a| a.starts_with("--ssh="))
+            .expect("should include --ssh bootstrap flag");
+        assert!(ssh_flag.contains("'/tmp/my '\\''key'\\''/id_ed25519'"));
+        assert!(ssh_flag.contains("'CertificateFile=/tmp/my '\\''cert'\\''/id_ed25519-cert.pub'"));
     }
 }
