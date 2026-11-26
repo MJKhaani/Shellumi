@@ -11,15 +11,15 @@ Shellumi is a free, open-source (MIT), local-first desktop SSH client and remote
 ### Workspace Structure
 
 ```text
-crates/shellumi-core/            UI-independent domain models and destination validation
+crates/shellumi-core/            UI-independent domain models, crypto, sync, and destination validation
 crates/shellumi-terminal/        VT/ANSI terminal emulator engine & cross-platform PTY manager
-crates/shellumi-storage/         Local async Turso database operations and migrations
-crates/shellumi-cli/             CLI host management and connection dispatching
+crates/shellumi-storage/         Local async encrypted Turso database operations and migrations
+crates/shellumi-cli/             CLI host management, diagnostics, and connection dispatching
 crates/shellumi-app/             GPUI 0.2.2 desktop user interface
-crates/shellumi-remote-desktop/  (In progress) Shared session abstractions, framebuffer & events
-crates/shellumi-vnc/             (In progress) Native RFB transport & client decoders
-crates/shellumi-rdp/             (In progress) Embedded IronRDP client integration
-docs/                            Architecture, roadmap, threat model, feature matrix
+crates/shellumi-remote-desktop/  Shared remote desktop session abstractions, framebuffer & events
+crates/shellumi-vnc/             Native RFB transport & VNC client decoders
+crates/shellumi-rdp/             Embedded IronRDP client integration
+docs/                            Structured documentation (user guide, architecture, security, QA, roadmap)
 ```
 
 ---
@@ -39,7 +39,7 @@ docs/                            Architecture, roadmap, threat model, feature ma
 5. **No Telemetry or Mandatory Accounts:** The application must remain fully functional offline and locally without an account.
 6. **Verify Before Reporting:** Never claim a test passed or a feature works without compiling and running the test suite.
 7. **Authentic Remote Desktop & Protocol State:** Remote Desktop (RDP and VNC) must use native Rust protocol engines with real network I/O, authentication, and live framebuffer rendering. Never fabricate metrics (e.g. hardcoded 60 FPS or 14 ms latency), fake `Connected` states, simulated desktop canvases, or synthetic input/clipboard events. All UI telemetry must derive from live, measured protocol events.
-8. **Mandatory Logging Compliance (`docs/LOGGING.md`):** All newly written or modified code must strictly follow [`docs/LOGGING.md`](docs/LOGGING.md). Structured logging via `tracing` (`error!`, `warn!`, `info!`, `debug!`, `trace!`) must be integrated across all operations and error paths, including initialization, UI, networking, authentication, synchronization, database operations, background tasks, and error handling. Never silently swallow errors. Never log passwords, tokens, private keys, passphrase credentials, or decryption keys in plaintext; sanitize and redact sensitive fields using `shellumi_core::logging::redact_sensitive` or `Redacted<T>`.
+8. **Mandatory Logging Compliance ([`docs/development/logging.md`](docs/development/logging.md)):** All newly written or modified code must strictly follow [`docs/development/logging.md`](docs/development/logging.md). Structured logging via `tracing` (`error!`, `warn!`, `info!`, `debug!`, `trace!`) must be integrated across all operations and error paths, including initialization, UI, networking, authentication, synchronization, database operations, background tasks, and error handling. Never silently swallow errors. Never log passwords, tokens, private keys, passphrase credentials, or decryption keys in plaintext; sanitize and redact sensitive fields using `shellumi_core::logging::redact_sensitive` or `Redacted<T>`.
 
 ---
 
@@ -47,7 +47,7 @@ docs/                            Architecture, roadmap, threat model, feature ma
 
 - **Rust Edition:** Rust 2021 edition.
 - **Code Formatting:** Strictly adhere to `cargo fmt --all`.
-- **Linting:** Must pass `cargo clippy --workspace --all-targets -- -D warnings` with zero warnings.
+- **Linting:** Must pass `cargo clippy --locked --workspace --all-targets -- -D warnings` with zero warnings.
 - **Imports:** Keep imports clean and organized; avoid wildcard re-exports unless standard for GPUI traits (`gpui::prelude::*`).
 - **Dependencies:**
   - Before adding dependencies, verify their maintenance status, license compatibility (MIT/Apache-2.0 preferred), security history, and whether they compile offline.
@@ -63,15 +63,35 @@ Every increment must have automated test coverage:
 3. **CLI:** Process execution, argument parsing, error reporting.
 4. **UI Components:** Data conversions and unit-testable helpers.
 
-Run the smallest test group covering each changed section locally, including relevant cross-crate integration tests. Use `cargo test --offline -p <crate> <test-name-or-module>`; expand the scope when changes cross module boundaries. GitHub Actions runs the full workspace suite.
+Run the smallest test group covering each changed section locally, including relevant cross-crate integration tests. Use `cargo test --locked --offline -p <crate> <test-name-or-module>`; expand the scope when changes cross module boundaries. GitHub Actions runs the full workspace suite.
 
 ---
 
-## 5. Reporting Task Completion
+## 5. Mandatory Documentation Maintenance Requirements
+
+For every implementation change, contributors and agents must:
+
+1. Identify all affected authoritative documents under [`docs/`](docs/README.md).
+2. Update documentation in the same change set as the implementation.
+3. Update user instructions in [`docs/user-guide/`](docs/user-guide/README.md) when workflows change.
+4. Update architecture documentation in [`docs/architecture/`](docs/architecture/README.md) when technical behavior changes.
+5. Update security documentation in [`docs/security/`](docs/security/README.md) when trust boundaries, cryptography, or credential handling change.
+6. Update reference documentation in [`docs/reference/`](docs/reference/README.md) when configuration, environment variables, shortcuts, schemas, or CLI commands change.
+7. Update the canonical [`docs/reference/feature-matrix.md`](docs/reference/feature-matrix.md).
+8. Update [`CHANGELOG.md`](CHANGELOG.md) where appropriate.
+9. Record actual verification results and distinguish unit/integration/CI checks from native runtime acceptance in [`docs/qa/`](docs/qa/README.md).
+10. Update [`docs/project/known-issues.md`](docs/project/known-issues.md) when new limitations are discovered or existing defects are resolved.
+11. Avoid creating redundant progress-report documents; track routine progress through Git history, [`CHANGELOG.md`](CHANGELOG.md), [`docs/project/roadmap.md`](docs/project/roadmap.md), and existing authoritative documentation.
+
+Historical implementation reports belong in [`docs/archive/`](docs/archive/README.md) only when they provide significant engineering value.
+
+---
+
+## 6. Reporting Task Completion
 
 When finishing any task or increment, always report:
 1. **What was implemented:** Detailed summary of new capabilities or fixes.
 2. **Files changed:** List of modified, created, or deleted files.
 3. **Tests executed:** Commands run and test pass/fail results.
 4. **Remaining limitations:** Transparent disclosure of what is still pending.
-5. **Next concrete engineering step:** The next logical increment from `docs/ROADMAP.md`.
+5. **Next concrete engineering step:** The next logical increment from [`docs/project/roadmap.md`](docs/project/roadmap.md).

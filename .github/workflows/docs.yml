@@ -1,0 +1,27 @@
+name: Verify Documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'resources/**'
+      - 'scripts/verify-docs.sh'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'resources/**'
+      - 'scripts/verify-docs.sh'
+      - '.github/workflows/docs.yml'
+
+jobs:
+  verify-docs:
+    name: Verify Documentation Links & Structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run documentation verification script
+        run: ./scripts/verify-docs.sh
