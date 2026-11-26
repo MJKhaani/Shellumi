@@ -43,7 +43,7 @@ async fn recover_initial_server_device(
     client.set_token(token.expose_secret().to_string());
     store.set_vault_id(vault_id.clone());
     let recovered = store
-        .recover_incomplete_enrollments(&binding, &mut client, &*credentials)
+        .recover_connection_enrollments(&binding, &mut client, &*credentials)
         .await?;
     Ok(recovered > 0)
 }
@@ -769,15 +769,17 @@ impl Shellumi {
         let gen = self.vault_load_generation;
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let active_key = self.active_vault_key();
+        let recovery_keys = self.active_vault_keys.clone();
 
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                let mut reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                reg_store.set_device_recovery_vault_keys(recovery_keys);
                 let binding = reg_store
                     .resolve_verified_remote_vault_binding(&active_vault_id, None)
                     .await
@@ -997,15 +999,17 @@ impl Shellumi {
         let gen = self.vault_load_generation;
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let active_key = self.active_vault_key();
+        let recovery_keys = self.active_vault_keys.clone();
 
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())?;
             runtime.block_on(async {
-                let reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
+                let mut reg_store = HostStore::open_with_key(&reg_path, default_key.as_ref())
                     .await
                     .map_err(|e| e.to_string())?;
+                reg_store.set_device_recovery_vault_keys(recovery_keys);
                 let binding = reg_store
                     .resolve_verified_remote_vault_binding(&active_vault_id, None)
                     .await

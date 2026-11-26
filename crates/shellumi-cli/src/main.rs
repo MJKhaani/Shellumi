@@ -227,6 +227,18 @@ fn handle_keychain_command(args: &[String]) -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
+            let is_server_credential = if args[1].starts_with("keychain://") {
+                shellumi_core::credential::parse_keychain_ref(&args[1])?.0
+                    == shellumi_storage::VaultServerConnectionRecord::CREDENTIAL_SERVICE
+            } else {
+                args[1].trim() == shellumi_storage::VaultServerConnectionRecord::CREDENTIAL_SERVICE
+            };
+            if is_server_credential {
+                return Err(invalid(
+                    "Use Shellumi device recovery to retire protected server credentials",
+                )
+                .into());
+            }
             let store = default_credential_store();
             let deleted = if args[1].starts_with("keychain://") {
                 delete_secret_by_ref(&*store, &args[1])?

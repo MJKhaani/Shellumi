@@ -510,6 +510,7 @@ pub struct HostStore {
     connection: Connection,
     host_vault_id: shellumi_core::VaultId,
     db_path: Option<String>,
+    device_recovery_vault_keys: std::collections::HashMap<String, shellumi_core::VaultKey>,
 }
 
 /// Restricted host-only access; this does not isolate identities, groups, or secrets.
@@ -2679,6 +2680,7 @@ impl HostStore {
             host_vault_id: shellumi_core::VaultId::new(LEGACY_LOCAL_VAULT_ID)
                 .map_err(StorageError::InvalidVaultIdentity)?,
             db_path: Some(path.to_string()),
+            device_recovery_vault_keys: std::collections::HashMap::new(),
         })
     }
 
@@ -2717,6 +2719,7 @@ impl HostStore {
         name: &str,
         context: &shellumi_core::VaultContext,
     ) -> Result<(), StorageError> {
+        let _device_changes = self.lock_device_journal(".device-change.lock")?;
         let name = validated_name(name)?;
         let (server, remote) = match context.location() {
             shellumi_core::VaultLocation::Local => (None, None),
@@ -2801,6 +2804,7 @@ impl HostStore {
 
     /// Unregisters and deletes a vault context entry.
     pub async fn unregister_vault_context(&mut self, id: &str) -> Result<bool, StorageError> {
+        let _device_changes = self.lock_device_journal(".device-change.lock")?;
         let rows = self
             .connection
             .execute("DELETE FROM vault_contexts WHERE id = ?1", (id,))
@@ -4324,11 +4328,26 @@ impl HostStore {
         store: &dyn shellumi_core::CredentialStore,
     ) -> Result<bool, StorageError> {
         if let Some(identity) = self.get_identity(id).await? {
-            if let Some(ref_uri) = &identity.password_secret_ref {
-                let _ = shellumi_core::delete_secret_by_ref(store, ref_uri);
-            }
-            if let Some(ref_uri) = &identity.passphrase_secret_ref {
-                let _ = shellumi_core::delete_secret_by_ref(store, ref_uri);
+            for reference in [identity.password_secret_ref, identity.passphrase_secret_ref]
+                .into_iter()
+                .flatten()
+            {
+                if reference.starts_with("keychain://")
+                    && shellumi_core::credential::parse_keychain_ref(&reference).is_ok_and(
+                        |(service, _)| {
+                            service == server_sync::VaultServerConnectionRecord::CREDENTIAL_SERVICE
+                        },
+                    )
+                {
+                    tracing::warn!(
+                        identity_id = id,
+                        "Retained a server credential referenced by an SSH identity"
+                    );
+                    continue;
+                }
+                if let Err(error) = shellumi_core::delete_secret_by_ref(store, &reference) {
+                    tracing::warn!(identity_id = id, %error, "Unable to delete a protected identity credential");
+                }
             }
         }
         self.delete_identity(id).await
