@@ -608,6 +608,7 @@ impl Shellumi {
                 rd.last_action_note = Some("Disconnected".into());
                 self.rd_resize_state.remove(&tab_id);
                 self.connection_ops.cancel_for_tab(tab_id);
+                self.invalidate_layout();
                 cx.notify();
             }
         }
@@ -652,6 +653,8 @@ impl Shellumi {
                     .entry(tab_id)
                     .or_default()
                     .reset_for_connection(session_key.connection_generation);
+                self.layout_epoch = self.layout_epoch.wrapping_add(1);
+                self.rd_canvas_measurements.clear();
                 let default_port = match rd.protocol {
                     RemoteDesktopProtocol::Vnc => 5900,
                     RemoteDesktopProtocol::Rdp => 3389,
@@ -1331,6 +1334,20 @@ impl Shellumi {
         Some((w, h))
     }
 
+    /// Advance `layout_epoch` and clear stale remote-desktop canvas measurements
+    /// whenever container geometry or workspace visibility changes.
+    pub(crate) fn invalidate_layout(&mut self) {
+        Self::invalidate_layout_state(&mut self.layout_epoch, &mut self.rd_canvas_measurements);
+    }
+
+    pub(crate) fn invalidate_layout_state(
+        layout_epoch: &mut u64,
+        measurements: &mut std::collections::HashMap<u64, crate::CanvasMeasurement>,
+    ) {
+        *layout_epoch = layout_epoch.wrapping_add(1);
+        measurements.clear();
+    }
+
     /// Schedule a debounced automatic resize for an active RDP session when its
     /// measured canvas viewport changes.
     pub(crate) fn schedule_rd_auto_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
@@ -1789,5 +1806,23 @@ mod tests {
         assert_eq!(manual_req.origin, crate::ResizeOrigin::Manual);
         assert_eq!(manual_req.dimensions, (1920, 1080));
         assert_eq!(state.last_confirmed, Some((1280, 720)));
+    }
+
+    #[test]
+    fn test_invalidate_layout_advances_epoch_and_clears_stale_measurements() {
+        let mut layout_epoch = 0u64;
+        let mut measurements = std::collections::HashMap::new();
+        measurements.insert(
+            42,
+            crate::CanvasMeasurement {
+                tab_id: 42,
+                layout_epoch,
+                viewport: gpui::Bounds::default(),
+            },
+        );
+        assert_eq!(measurements.len(), 1);
+        Shellumi::invalidate_layout_state(&mut layout_epoch, &mut measurements);
+        assert_eq!(layout_epoch, 1);
+        assert!(measurements.is_empty());
     }
 }

@@ -379,7 +379,7 @@ impl Shellumi {
                 rd.ui_handle = None;
             }
             self.tabs.remove(pos);
-            self.layout_epoch = self.layout_epoch.wrapping_add(1);
+            self.invalidate_layout();
             if self.tabs.is_empty() {
                 self.active_tab_idx = None;
             } else if let Some(active) = self.active_tab_idx {
@@ -409,7 +409,7 @@ impl Shellumi {
         }
         self.page = None;
         self.active_tab_idx = idx;
-        self.layout_epoch = self.layout_epoch.wrapping_add(1);
+        self.invalidate_layout();
         window.focus(&self.focus);
         cx.notify();
     }

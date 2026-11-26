@@ -3,6 +3,13 @@ use super::*;
 
 impl Render for Shellumi {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        let scale = window.scale_factor();
+        let window_geom = (f32::from(viewport.width), f32::from(viewport.height), scale);
+        if self.last_window_geometry != Some(window_geom) {
+            self.last_window_geometry = Some(window_geom);
+            self.invalidate_layout();
+        }
         self.clear_out_of_scope_invite();
         if let Some(action) = self.pending_window_action.take() {
             match action {
@@ -1486,6 +1493,17 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let is_open = self.inspector_coordinator.is_open();
+        let geom = self.active_workspace_layout();
+        let inspector_sig = (
+            is_open,
+            geom.presentation,
+            geom.inspector_width.round() as u32,
+        );
+        if self.last_inspector_layout_sig != Some(inspector_sig) {
+            self.last_inspector_layout_sig = Some(inspector_sig);
+            self.invalidate_layout();
+        }
         let layout_epoch = self.layout_epoch;
         let view = cx.entity().downgrade();
         let workspace_sensor = gpui::canvas(
@@ -1513,9 +1531,6 @@ impl Shellumi {
         )
         .absolute()
         .inset_0();
-
-        let is_open = self.inspector_coordinator.is_open();
-        let geom = self.active_workspace_layout();
 
         let mut container = div()
             .relative()

@@ -850,6 +850,9 @@ struct Shellumi {
     pub(crate) current_inspector_width: Option<f32>,
     pub(crate) measured_workspace_width: Option<f32>,
     pub(crate) layout_epoch: u64,
+    pub(crate) last_window_geometry: Option<(f32, f32, f32)>,
+    pub(crate) last_inspector_layout_sig:
+        Option<(bool, crate::ui::layout::InspectorPresentation, u32)>,
     pub(crate) vault_load_generation: u64,
     pub(crate) tab_overflow_menu_open: bool,
     pub(crate) tab_overflow_x: f32,
@@ -1806,6 +1809,8 @@ impl Shellumi {
             current_inspector_width: Some(crate::ui::layout::INSPECTOR_PREFERRED_WIDTH),
             measured_workspace_width: None,
             layout_epoch: 0,
+            last_window_geometry: None,
+            last_inspector_layout_sig: None,
             vault_load_generation: 0,
             tab_overflow_menu_open: false,
             tab_overflow_x: 220.0,

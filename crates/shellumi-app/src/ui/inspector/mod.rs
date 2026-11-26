@@ -68,6 +68,7 @@ impl Shellumi {
                 self.inspector_coordinator.close();
                 self.selected_host_id = None;
             }
+            self.invalidate_layout();
         } else {
             let vault_id = self.active_vault_id.clone();
             if self
@@ -76,6 +77,7 @@ impl Shellumi {
             {
                 self.selected_host_id = Some(host_id);
                 self.group_inspector = None;
+                self.invalidate_layout();
             }
         }
         cx.notify();
@@ -434,6 +436,7 @@ impl Shellumi {
                         self.selected_host_id = None;
                     }
                 }
+                self.invalidate_layout();
             }
             crate::ui::inspector::NavigationRequest::CloseInspector => {
                 self.selected_host_id = None;
@@ -445,6 +448,7 @@ impl Shellumi {
                 self.vault_form = None;
                 self.provider_form = None;
                 self.team_form = None;
+                self.invalidate_layout();
             }
             crate::ui::inspector::NavigationRequest::SwitchVault(new_vault_id) => {
                 let vname = self

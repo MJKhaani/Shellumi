@@ -270,6 +270,7 @@ impl Shellumi {
 
     pub(crate) fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.invalidate_layout();
         cx.notify();
     }
 

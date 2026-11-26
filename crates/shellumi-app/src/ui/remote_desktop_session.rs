@@ -697,8 +697,9 @@ impl Shellumi {
             })
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-            .on_click(cx.listener(move |_app, _, window, cx| {
+            .on_click(cx.listener(move |app, _, window, cx| {
                 window.toggle_fullscreen();
+                app.invalidate_layout();
                 cx.notify();
             }))
             .child(if is_fs {
