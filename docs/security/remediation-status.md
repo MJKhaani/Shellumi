@@ -44,3 +44,38 @@ The client regression uses local databases and simulated HTTP responses. Deploye
 - Initial connections journal enrollment in the encrypted registry and attach the protected device references in the same transaction as enrollment completion. The desktop attempts recovery for unlocked vaults on load. Invitation tokens stay in memory and are bound to the verified server, account, vault, Inspector target, request generation, and expiry. A stale response is discarded, and the request and response DTOs omit tokens from debug output.
 - Direct global revocation and key replacement both verify the authenticated account, server instance, local authorization, live vault membership, and matching device identity in both server listings. Replacement checks ownership again before deletion. A per-process guard serializes operations on the same server device across windows. Vault-local removal continues to affect only local vault authorization. The server must enforce authorization on the global deletion request itself.
 - The current client protocol exposes creation, listing, and acceptance of invitations. It has no invitation-specific revocation endpoint or Shellumi Server sign-out action.
+
+## Schema 30 client recovery
+
+### Enrollment and protected credentials
+
+| Durable checkpoint | Restart behavior |
+| --- | --- |
+| `InvitationAccepting` | Preserve the invitation acceptance checkpoint. Consult the vault administrator when the outcome is unknown. A definitive rejection cancels the attempt. |
+| `InvitationAcceptedBound` | Recheck live membership and role before preparing device keys. |
+| `CredentialsCreating` | The journal reserves both keychain accounts and records both public keys before either private key is written. Two matching keys permit promotion to `RegistrationPrepared`. A missing key moves the operation to `CredentialCleanup`. A credential-store error retains the checkpoint. |
+| `CredentialCleanup` | Check that neither key reference was published to a device or connection. Delete the operation's reserved entries independently. Restart tolerates an already absent entry and preserves the checkpoint after a failed deletion. An interrupted key write restores any verified invitation checkpoint. Other abandoned operations finish as `Canceled`. |
+| `RegistrationPrepared` | Verify both private keys and obtain a fresh challenge. The client commits `RegistrationIntent` before it issues the POST. |
+| `RegistrationIntent` | The request may have reached the server. Use the account listing, exact signing and agreement keys, any recorded device UUID, and the vault recipient listing to establish the device. A definitive rejection or a unique, matching revoked device record allows cleanup. A missing or ambiguous account result moves the operation to `RegistrationReconciliation`. |
+| `RegistrationReconciliation` | Resume Enrollment rechecks the original operation and retains its keys. No registration POST is repeated. |
+| `Completed` | The device, vault authorization, member, and journal are committed together. Settings and initial connection enrollment attach credentials in that same registry transaction. When Settings replaces the active connection identity without revoking it, finalization compares the previously active device before it attaches the new one. |
+
+The operating system releases the enrollment guard on process exit. The lock is keyed by the canonical local database path and covers keychain writes and recovery. A partial unique index also protects the active member checkpoint. Journal updates compare the expected stage and payload. Schema 30 leaves schemas 27–29 records intact and updates indexes and tables in a transaction. Unbound legacy rows stay visible for inspection. A pre-schema-30 keychain entry that was never journaled cannot be safely attributed to an operation, so the client retains it.
+
+When Resume Enrollment reports an unknown outcome, check the original account on the original server. An exact active device with the original keys and vault authorization allows recovery. A missing entry provides no proof that a delayed request cannot still commit. Protocol v1 has no registration idempotency key or queryable request outcome. In that case keep the operation and credentials, and consult the server operator before attempting another enrollment.
+
+### Device replacement
+
+The encrypted connection registry reserves the old device across vaults, windows, and independent processes using that registry. The row binds the server instance, URL, connection, authenticated account, local and remote vault IDs, member, old device, and enrollment operation. The replacement UUID is taken from that operation. The same registry lock serializes a replacement with direct global revocation. A client using a single database stores both journals there.
+
+1. `OwnershipVerified` records the replacement intent and the initial ownership check before a registration can start. Recovery uses the same enrollment operation ID. That enrollment's completed checkpoint establishes the replacement device.
+2. `ReplacementVerified` requires the local vault authorization, both protected keys, and the account and vault recipient listings. Before revoking, the client rechecks both devices and accesses the vault using the replacement identity. For a vault requiring an epoch key, the replacement must decrypt its own current key envelope. If that envelope is missing, an authorized operator must make it available before Resume Enrollment can retire the old device. If the old device is the connection's active identity, the registry promotes the verified replacement using a conditional update.
+3. `RevocationDispatched` is durable before DELETE. A successful response or a unique revoked account record matching the old device and both public keys permits `RevocationConfirmed`. If evidence remains uncertain, Resume Enrollment only checks status. Replace Keys for the same old device can retry DELETE after revalidating both devices.
+4. `RevocationRejected` preserves the replacement and the old device. Resolve the server's rejection before using Replace Keys for that same device.
+5. `RevocationConfirmed` permits idempotent local retirement. The registry records `Completed` after the vault update succeeds. A crash between those writes repeats local retirement. Old keys are retained because another vault or connection can still reference them.
+
+A server that omits a revoked device from its account listing supplies no positive revocation evidence after a lost response. If ownership cannot be revalidated, leave the journal in reconciliation and consult the server operator. These client safeguards rely on the server enforcing ownership on the DELETE itself.
+
+### Invitation tokens
+
+The Team Inspector retains the issuing session and invitation token in zeroizing memory. Vault changes, locking, Inspector dismissal or generation changes, and window release invalidate pending work. Copying resolves the active binding and credential again, checks the live account and vault membership, and rechecks the generation, target, and expiration before releasing the token to the clipboard. Server-side invitation revocation and server sign-out are unavailable through the current client protocol. A request that already reached the server may still create an invitation while the local response is discarded. The server controls its lifetime, and the user controls any copy already placed on the system clipboard.

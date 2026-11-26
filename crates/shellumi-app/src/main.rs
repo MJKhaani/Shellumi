@@ -5,6 +5,7 @@ pub(crate) struct CreatedInvite {
     pub(crate) member_id: String,
     pub(crate) invitation_id: String,
     pub(crate) token: Option<shellumi_core::SecretString>,
+    pub(crate) issuing_session: shellumi_core::SecretString,
     pub(crate) expires_at: i64,
     pub(crate) inspector_generation: u64,
 }
@@ -785,6 +786,7 @@ struct Shellumi {
     pub(crate) cloud_providers: Vec<shellumi_storage::CloudProviderRecord>,
     pub(crate) team_members: Vec<shellumi_core::TeamMember>,
     pub(crate) enrolled_devices: Vec<shellumi_core::EnrolledDevice>,
+    pub(crate) has_pending_device_replacements: bool,
     pub(crate) incomplete_enrollments: Vec<shellumi_storage::EnrollmentOperationRecord>,
     pub(crate) team_invite_token_input: Option<Entity<TextInput>>,
     pub(crate) team_enrollment_busy: bool,
@@ -792,6 +794,7 @@ struct Shellumi {
     pub(crate) pending_device_revoke: Option<(String, String, String)>,
     pub(crate) pending_device_replace: Option<(String, String, String)>,
     pub(crate) invite_scope: Option<InviteScope>,
+    pub(crate) pending_invitation_inspector: Option<u64>,
     pub(crate) invitation_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) last_created_invite: Option<CreatedInvite>,
     broadcast_manager: BroadcastManager,
@@ -1209,6 +1212,8 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.on_release(|app, _| app.invalidate_invitation_scope())
+            .detach();
         cx.on_app_quit(|app, _| {
             app.invalidate_invitation_scope();
             app.inspector_coordinator.invalidate_scope();
@@ -1252,12 +1257,14 @@ impl Shellumi {
             team_members: Vec::new(),
             enrolled_devices: Vec::new(),
             incomplete_enrollments: Vec::new(),
+            has_pending_device_replacements: false,
             team_invite_token_input: None,
             team_enrollment_busy: false,
             team_enrollment_error: None,
             pending_device_revoke: None,
             pending_device_replace: None,
             invite_scope: None,
+            pending_invitation_inspector: None,
             invitation_generation: Default::default(),
             last_created_invite: None,
             broadcast_manager: BroadcastManager::new(0),

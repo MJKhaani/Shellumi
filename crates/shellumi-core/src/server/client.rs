@@ -55,6 +55,11 @@ impl<T: HttpTransport> ShellumiServerClient<T> {
         self.device_id = Some(device_id);
     }
 
+    /// Clears the local device identity without clearing the authenticated session.
+    pub fn clear_device_id(&mut self) {
+        self.device_id = None;
+    }
+
     /// Returns the configured local device UUID.
     pub fn device_id(&self) -> Option<Uuid> {
         self.device_id

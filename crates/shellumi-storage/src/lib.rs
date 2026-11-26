@@ -22,7 +22,7 @@ use std::fmt;
 use std::str::FromStr;
 use turso::{transaction::TransactionBehavior, Builder, Connection, Database};
 
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 
 /// Registry identity reserved for the existing, unscoped local data.
 pub const LEGACY_LOCAL_VAULT_ID: &str = "legacy-local";
@@ -55,7 +55,12 @@ impl EnrollmentOperationRecord {
         self.registration_intent.is_some()
             && matches!(
                 self.stage.as_str(),
-                "InvitationAcceptedBound" | "RegistrationPrepared" | "RegistrationIntent"
+                "InvitationAcceptedBound"
+                    | "CredentialsCreating"
+                    | "RegistrationPrepared"
+                    | "RegistrationIntent"
+                    | "RegistrationReconciliation"
+                    | "CredentialCleanup"
             )
     }
 }
@@ -2621,6 +2626,46 @@ impl HostStore {
             )
             .await?;
             tx.execute("PRAGMA user_version = 29", ()).await?;
+        }
+        if version < 30 {
+            tx.execute("DROP INDEX IF EXISTS enrollment_active_member", ())
+                .await?;
+            tx.execute(
+                "CREATE UNIQUE INDEX enrollment_active_member
+                 ON enrollment_operations (vault_id, member_id)
+                 WHERE stage IN ('InvitationAccepting', 'InvitationAcceptedBound',
+                                 'CredentialsCreating', 'RegistrationPrepared',
+                                 'RegistrationIntent', 'RegistrationReconciliation',
+                                 'CredentialCleanup')",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS device_replacements (
+                    operation_id TEXT PRIMARY KEY,
+                    server_instance_id TEXT NOT NULL,
+                    old_device_id TEXT NOT NULL,
+                    local_vault_id TEXT NOT NULL,
+                    remote_vault_id TEXT NOT NULL,
+                    connection_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    device_label TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    replacement_device_id TEXT
+                )",
+                (),
+            )
+            .await?;
+            tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS device_replacement_active_old_device
+                 ON device_replacements(server_instance_id, old_device_id)
+                 WHERE stage NOT IN ('Completed', 'Canceled')",
+                (),
+            )
+            .await?;
+            tx.execute("PRAGMA user_version = 30", ()).await?;
         }
         tx.commit().await?;
         tracing::debug!(
@@ -5466,7 +5511,7 @@ impl HostStore {
         Ok(())
     }
 
-    /// Lists all incomplete enrollment operations (`stage != 'Completed'`) for a vault.
+    /// Lists all incomplete enrollment operations for a vault.
     pub async fn list_incomplete_enrollment_operations(
         &self,
         vault_id: &str,
@@ -5475,7 +5520,7 @@ impl HostStore {
             .connection
             .query(
                 "SELECT operation_id, vault_id, user_id, member_id, stage, device_id, error_message, updated_at, registration_intent
-                 FROM enrollment_operations WHERE vault_id = ?1 AND stage != 'Completed' ORDER BY updated_at ASC",
+                 FROM enrollment_operations WHERE vault_id = ?1 AND stage NOT IN ('Completed', 'Canceled') ORDER BY updated_at ASC",
                 (vault_id,),
             )
             .await?;
@@ -7734,6 +7779,116 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn schema_30_rolls_back_and_replays_enrollment_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("schema-30.db");
+        let path = path.to_str().unwrap();
+        let mut store = HostStore::open(path).await.unwrap();
+        store
+            .connection
+            .execute("DROP TABLE device_replacements", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("DROP INDEX enrollment_active_member", ())
+            .await
+            .unwrap();
+        store.connection.execute(
+            "CREATE UNIQUE INDEX enrollment_active_member ON enrollment_operations (vault_id, member_id)
+             WHERE stage IN ('InvitationAccepting', 'InvitationAcceptedBound', 'RegistrationPrepared', 'RegistrationIntent')",
+            (),
+        ).await.unwrap();
+        for operation in ["keep", "conflict"] {
+            store
+                .save_enrollment_operation_progress(
+                    operation,
+                    "vault",
+                    "account",
+                    "member",
+                    "CredentialsCreating",
+                    None,
+                    None,
+                    "1",
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .connection
+            .execute("PRAGMA user_version = 29", ())
+            .await
+            .unwrap();
+        drop(store);
+
+        assert!(HostStore::open(path).await.is_err());
+        let database = turso::Builder::new_local(path).build().await.unwrap();
+        let connection = database.connect().unwrap();
+        let mut version = connection.query("PRAGMA user_version", ()).await.unwrap();
+        assert_eq!(
+            version
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            29
+        );
+        drop(version);
+        let mut index = connection
+            .query(
+                "SELECT sql FROM sqlite_schema WHERE name = 'enrollment_active_member'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(!index
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+            .contains("CredentialCleanup"));
+        drop(index);
+        connection
+            .execute(
+                "DELETE FROM enrollment_operations WHERE operation_id = 'conflict'",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+        for _ in 0..2 {
+            let store = HostStore::open(path).await.unwrap();
+            let records = store
+                .list_incomplete_enrollment_operations("vault")
+                .await
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].operation_id, "keep");
+            assert_eq!(records[0].stage, "CredentialsCreating");
+            let mut version = store
+                .connection
+                .query("PRAGMA user_version", ())
+                .await
+                .unwrap();
+            assert_eq!(
+                version
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get::<i64>(0)
+                    .unwrap(),
+                30
+            );
+        }
     }
 
     #[tokio::test]

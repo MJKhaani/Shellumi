@@ -325,6 +325,8 @@ impl Shellumi {
         let active_vault_id_task = active_vault_id.clone();
         let gen = self.vault_load_generation;
         let in_memory_key = self.active_vault_key();
+        let registry_path = self.registry_db_path();
+        let registry_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -345,21 +347,34 @@ impl Shellumi {
                     .list_incomplete_enrollment_operations(&active_vault_id_task)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<_, String>((members, devices, incomplete))
+                let mut replacement_pending = false;
+                if let Some(registry_path) = registry_path {
+                    match HostStore::open_with_key(&registry_path, registry_key.as_ref()).await {
+                        Ok(registry) => {
+                            match registry.has_pending_device_replacements(&active_vault_id_task).await {
+                                Ok(pending) => replacement_pending = pending,
+                                Err(error) => tracing::warn!(%error, "Unable to read device replacement journal"),
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "Unable to open device replacement journal"),
+                    }
+                }
+                Ok::<_, String>((members, devices, incomplete, replacement_pending))
             })
         });
         cx.spawn(async move |app, cx| {
             let res = task.await;
             let _ = app.update(cx, |app, cx| {
                 if app.active_vault_id == active_vault_id && app.vault_load_generation == gen {
-                    if let Ok((members, devices, incomplete)) = res {
+                    if let Ok((members, devices, incomplete, replacement_pending)) = res {
                         app.team_members = members;
                         app.enrolled_devices = devices;
                         let has_recoverable_enrollment = incomplete.iter().any(
                             shellumi_storage::EnrollmentOperationRecord::can_attempt_reconciliation,
                         );
                         app.incomplete_enrollments = incomplete;
-                        if has_recoverable_enrollment {
+                        app.has_pending_device_replacements = replacement_pending;
+                        if has_recoverable_enrollment || replacement_pending {
                             app.resume_incomplete_enrollments(cx);
                         }
                         cx.notify();

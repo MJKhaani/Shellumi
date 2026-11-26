@@ -19,14 +19,14 @@ async fn recover_initial_server_device(
     store: &mut HostStore,
     vault_id: &shellumi_core::VaultId,
     connection: &shellumi_storage::VaultServerConnectionRecord,
-) -> Result<(), shellumi_storage::StorageError> {
+) -> Result<bool, shellumi_storage::StorageError> {
     if !store
         .list_incomplete_enrollment_operations(vault_id.as_str())
         .await?
         .iter()
         .any(shellumi_storage::EnrollmentOperationRecord::can_attempt_reconciliation)
     {
-        return Ok(());
+        return Ok(false);
     }
     let binding = store
         .resolve_verified_remote_vault_binding(vault_id.as_str(), Some(&connection.id))
@@ -37,15 +37,15 @@ async fn recover_initial_server_device(
             vault_id = vault_id.as_str(),
             "Initial connection session is unavailable"
         );
-        return Ok(());
+        return Ok(false);
     };
     let mut client = ShellumiServerClient::new(&connection.base_url);
     client.set_token(token.expose_secret().to_string());
     store.set_vault_id(vault_id.clone());
-    store
+    let recovered = store
         .recover_incomplete_enrollments(&binding, &mut client, &*credentials)
         .await?;
-    Ok(())
+    Ok(recovered > 0)
 }
 
 impl Shellumi {
@@ -129,7 +129,7 @@ impl Shellumi {
                         } => {
                             let srv_id = server.as_str();
                             let conn = conns.iter().find(|conn| conn.id == srv_id);
-                            if let Some(conn) = conn.filter(|conn| !is_locked && conn.device_id.is_none()) {
+                            if let Some(conn) = conn.filter(|_| !is_locked) {
                                 if let Err(error) = recover_initial_server_device(&mut store, ctx.id(), conn).await {
                                     tracing::warn!(vault_id = %id, %error, "Initial connection enrollment remains pending");
                                 }
@@ -223,6 +223,7 @@ impl Shellumi {
         self.team_members.clear();
         self.enrolled_devices.clear();
         self.incomplete_enrollments.clear();
+        self.has_pending_device_replacements = false;
 
         self.start_storage(false, cx);
         self.load_team_members(cx);
@@ -405,13 +406,10 @@ impl Shellumi {
         let Some(reg_path) = self.registry_db_path() else {
             return;
         };
-        let Some(vault_db_path) = self.active_vault_db_path() else {
-            return;
-        };
         let vault_id = self.active_vault_id.clone();
         let vault_id_guard = vault_id.clone();
+        let vault_name = self.active_vault.clone();
         let generation = self.vault_load_generation;
-        let active_key = self.active_vault_key();
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let task = cx.background_executor().spawn(async move {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -425,7 +423,7 @@ impl Shellumi {
                     .resolve_verified_remote_vault_binding(&vault_id, None)
                     .await
                     .map_err(|e| e.to_string())?;
-                let mut conn = reg_store
+                let conn = reg_store
                     .get_vault_server_connection(binding.server_connection_id())
                     .await
                     .map_err(|e| e.to_string())?
@@ -438,23 +436,26 @@ impl Shellumi {
                 let mut client = ShellumiServerClient::new(&conn.base_url);
                 client.set_token(token_sec.expose_secret().to_string());
 
-                let mut vault_store = HostStore::open_with_key(&vault_db_path, active_key.as_ref())
+                let id =
+                    shellumi_core::VaultId::new(&vault_id).map_err(|error| error.to_string())?;
+                reg_store.set_vault_id(id.clone());
+                if recover_initial_server_device(&mut reg_store, &id, &conn)
                     .await
-                    .map_err(|e| e.to_string())?;
-                vault_store.set_vault_id(
-                    shellumi_core::VaultId::new(&vault_id).map_err(|e| e.to_string())?,
-                );
-                let device = vault_store
-                    .enroll_device_with_server(&binding, &mut client, &device_label, &*cred_store)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                conn.device_id = Some(device.device_id);
-                conn.device_signing_key = device.signing_key_ref;
-                conn.device_agreement_key = device.agreement_key_ref;
+                    .map_err(|error| error.to_string())?
+                {
+                    return Ok(());
+                }
                 reg_store
-                    .save_vault_server_connection_secured(&conn, &*cred_store)
+                    .enroll_connection_device(
+                        &binding,
+                        &mut client,
+                        &vault_name,
+                        &device_label,
+                        &*cred_store,
+                        conn.device_id.as_deref(),
+                    )
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|error| error.to_string())?;
                 Ok::<_, String>(())
             })
         });
@@ -814,6 +815,7 @@ impl Shellumi {
                         &device_label,
                         &mut client,
                         &*cred_store,
+                        Some(&reg_store),
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -928,7 +930,13 @@ impl Shellumi {
                     shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
                 );
                 vault_store
-                    .revoke_device_with_server(&binding, &member_id, device_uuid, &client)
+                    .revoke_device_with_server_and_registry(
+                        &binding,
+                        &member_id,
+                        device_uuid,
+                        &client,
+                        Some(&reg_store),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 let members = vault_store
@@ -1025,10 +1033,14 @@ impl Shellumi {
                 vault_store.set_vault_id(
                     shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?,
                 );
-                let count = vault_store
-                    .recover_incomplete_enrollments(&binding, &mut client, &*cred_store)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let recovery = vault_store
+                    .recover_incomplete_enrollments_with_registry(
+                        &binding,
+                        &mut client,
+                        &*cred_store,
+                        Some(&reg_store),
+                    )
+                    .await;
                 let members = vault_store
                     .list_team_members(&active_vault_id)
                     .await
@@ -1041,7 +1053,11 @@ impl Shellumi {
                     .list_incomplete_enrollment_operations(&active_vault_id)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<_, String>((count, members, devices, incomplete))
+                let replacement_pending = reg_store
+                    .has_pending_device_replacements(&active_vault_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((recovery, members, devices, incomplete, replacement_pending))
             })
         });
 
@@ -1055,13 +1071,23 @@ impl Shellumi {
                     return;
                 }
                 match result {
-                    Ok((count, members, devices, incomplete)) => {
+                    Ok((recovery, members, devices, incomplete, replacement_pending)) => {
                         app.team_members = members;
                         app.enrolled_devices = devices;
                         app.incomplete_enrollments = incomplete;
-                        app.team_enrollment_error = None;
-                        app.desktop.message =
-                            Some(format!("Recovered {count} interrupted enrollment(s)."));
+                        app.has_pending_device_replacements = replacement_pending;
+                        match recovery {
+                            Ok(count) => {
+                                app.team_enrollment_error = None;
+                                app.desktop.message = Some(format!(
+                                    "Reconciled {count} interrupted device operation(s)."
+                                ));
+                            }
+                            Err(error) => {
+                                app.team_enrollment_error =
+                                    Some(format!("Device recovery needs attention: {error}"));
+                            }
+                        }
                     }
                     Err(e) => {
                         app.team_enrollment_error =

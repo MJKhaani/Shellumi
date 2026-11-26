@@ -11,7 +11,7 @@ pub enum ServerError {
     /// Server returned an HTTP error without a standard API JSON error payload.
     Http(u16, String),
     /// Server returned a structured JSON `ErrorResponse`.
-    Api(ErrorResponse),
+    Api(u16, ErrorResponse),
     /// Underlying transport or network failure.
     Network(String),
     /// JSON serialization failure on outgoing request.
@@ -34,7 +34,7 @@ impl fmt::Display for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Http(code, body) => write!(f, "HTTP error {code}: {body}"),
-            Self::Api(err) => write!(f, "API error [{}]: {}", err.error_code, err.message),
+            Self::Api(_, err) => write!(f, "API error [{}]: {}", err.error_code, err.message),
             Self::Network(msg) => write!(f, "network error: {msg}"),
             Self::Serialization(msg) => write!(f, "serialization error: {msg}"),
             Self::Deserialization(msg) => write!(f, "deserialization error: {msg}"),
@@ -78,7 +78,7 @@ impl ServerError {
                 401 => Self::Unauthorized,
                 404 => Self::NotFound(api_err.message),
                 409 => Self::Conflict(api_err.message),
-                _ => Self::Api(api_err),
+                _ => Self::Api(status, api_err),
             }
         } else {
             let body_str = String::from_utf8_lossy(body).trim().to_string();
@@ -94,7 +94,7 @@ impl ServerError {
     /// Returns the machine-readable error code if this is an API error response.
     pub fn error_code(&self) -> Option<&str> {
         match self {
-            Self::Api(err) => Some(&err.error_code),
+            Self::Api(_, err) => Some(&err.error_code),
             _ => None,
         }
     }

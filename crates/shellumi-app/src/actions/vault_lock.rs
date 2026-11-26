@@ -266,6 +266,7 @@ impl Shellumi {
         if is_active {
             self.invalidate_invitation_scope();
             self.incomplete_enrollments.clear();
+            self.has_pending_device_replacements = false;
             self.team_members.clear();
             self.enrolled_devices.clear();
             self.vault_load_generation = self.vault_load_generation.wrapping_add(1);

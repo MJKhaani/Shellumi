@@ -461,6 +461,25 @@ pub fn wrap_dek_for_recipient(
     Ok((wrapped_dek_b64, ephem_pk_b64))
 }
 
+/// Verifies that a protected base64-encoded X25519 key can open this envelope.
+pub fn verify_device_key_envelope(
+    wrapped_dek: &str,
+    ephemeral_key: &str,
+    agreement_key: &str,
+    vault_id: Uuid,
+    epoch: u32,
+) -> Result<(), CryptoError> {
+    let mut secret = Zeroizing::new([0u8; 32]);
+    if BASE64_STANDARD
+        .decode_slice(agreement_key, secret.as_mut())
+        .ok()
+        != Some(32)
+    {
+        return Err(CryptoError::InvalidPublicKeyLength(0));
+    }
+    unwrap_dek_for_device(wrapped_dek, ephemeral_key, &secret, vault_id, epoch).map(|_| ())
+}
+
 /// Unwraps a wrapped vault DEK using device static X25519 secret and ephemeral sender public key.
 pub fn unwrap_dek_for_device(
     wrapped_dek_b64: &str,

@@ -36,33 +36,171 @@ impl InvitationRequest {
     fn is_current(&self) -> bool {
         self.epoch.load(Ordering::Acquire) == self.generation
     }
+    fn can_deliver(
+        &self,
+        inspector: &super::coordinator::InspectorCoordinator,
+        vault: &str,
+        generation: u64,
+    ) -> bool {
+        self.is_current()
+            && inspector
+                .active()
+                .is_some_and(|state| state.vault_id == vault && state.generation == generation)
+    }
+
+    async fn session_is_current(
+        &self,
+        registry: &HostStore,
+        binding: &shellumi_storage::server_sync::VerifiedRemoteVaultBinding,
+        session: &shellumi_core::SecretString,
+        credentials: &dyn shellumi_core::CredentialStore,
+    ) -> Result<bool, shellumi_storage::StorageError> {
+        if !self.is_current() || registry.is_vault_locked(binding.local_vault_id()).await? {
+            return Ok(false);
+        }
+        let current = registry
+            .resolve_verified_remote_vault_binding(binding.local_vault_id(), None)
+            .await?;
+        let token = registry
+            .get_vault_server_connection(current.server_connection_id())
+            .await?
+            .and_then(|connection| connection.resolve_auth_token(credentials));
+        Ok(current == *binding && token.as_ref() == Some(session) && self.is_current())
+    }
 }
 
 impl Shellumi {
     /// Render the unified Team Member Inspector for viewing or inviting collaborators.
     fn invite_is_in_scope(&self, invite: &crate::CreatedInvite) -> bool {
-        invite.is_visible(
-            self.invite_scope.as_ref(),
-            &self.active_vault_id,
-            self.inspector_coordinator.active(),
-            invite_timestamp(),
-        )
+        !self
+            .available_vaults
+            .iter()
+            .any(|vault| vault.id == self.active_vault_id && vault.is_locked)
+            && invite.is_visible(
+                self.invite_scope.as_ref(),
+                &self.active_vault_id,
+                self.inspector_coordinator.active(),
+                invite_timestamp(),
+            )
+    }
+
+    fn copy_current_invitation(&mut self, invitation_id: &str, cx: &mut Context<Self>) {
+        self.clear_out_of_scope_invite();
+        let Some(invite) = self
+            .last_created_invite
+            .as_ref()
+            .filter(|invite| invite.invitation_id == invitation_id && invite.token.is_some())
+        else {
+            return;
+        };
+        let (Some(registry_path), Some(vault_path)) =
+            (self.registry_db_path(), self.active_vault_db_path())
+        else {
+            self.invalidate_invitation_scope();
+            cx.notify();
+            return;
+        };
+        let registry_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
+        let vault_key = self.active_vault_key();
+        let scope = invite.scope.clone();
+        let session = invite.issuing_session.clone();
+        let request = InvitationRequest::capture(&self.invitation_generation);
+        let background_request = request.clone();
+        let invitation_id = invitation_id.to_owned();
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread().build().ok()?;
+            runtime.block_on(async {
+                if !background_request.is_current() {
+                    return None;
+                }
+                let registry = HostStore::open_with_key(&registry_path, registry_key.as_ref())
+                    .await
+                    .ok()?;
+                let binding = scope.binding;
+                let credentials = shellumi_core::default_credential_store();
+                if !background_request
+                    .session_is_current(&registry, &binding, &session, &*credentials)
+                    .await
+                    .ok()?
+                {
+                    return None;
+                }
+                let connection = registry
+                    .get_vault_server_connection(binding.server_connection_id())
+                    .await
+                    .ok()??;
+                let mut store = HostStore::open_with_key(&vault_path, vault_key.as_ref())
+                    .await
+                    .ok()?;
+                store.set_vault_id(shellumi_core::VaultId::new(binding.local_vault_id()).ok()?);
+                let mut client =
+                    shellumi_core::server::ShellumiServerClient::new(&connection.base_url);
+                client.set_token(session.expose_secret().to_owned());
+                if binding.authenticate_vault_member(&store, &client).ok()? != scope.account {
+                    return None;
+                }
+                background_request
+                    .session_is_current(&registry, &binding, &session, &*credentials)
+                    .await
+                    .ok()?
+                    .then_some(())
+            })
+        });
+        cx.spawn(async move |app, cx| {
+            let verified = task.await.is_some();
+            let _ = app.update(cx, |app, cx| {
+                if !request.is_current() {
+                    return;
+                }
+                if !verified {
+                    tracing::warn!(
+                        "Discarded invitation after live authentication verification failed"
+                    );
+                    app.invalidate_invitation_scope();
+                    cx.notify();
+                    return;
+                }
+                if let Some(token) = app.last_created_invite.as_ref().and_then(|invite| {
+                    invite.copy_token(
+                        &invitation_id,
+                        app.invite_scope.as_ref(),
+                        &app.active_vault_id,
+                        app.inspector_coordinator.active(),
+                        invite_timestamp(),
+                    )
+                }) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(token.to_owned()));
+                    app.desktop.message =
+                        Some("Server invitation token copied to clipboard.".into());
+                    tracing::debug!("Copied invitation after checking the authenticated vault");
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn invalidate_invitation_scope(&mut self) {
         self.invitation_generation.fetch_add(1, Ordering::AcqRel);
         self.invite_scope = None;
+        self.pending_invitation_inspector = None;
         self.last_created_invite = None;
         self.team_invite_token_input = None;
     }
 
     pub(crate) fn clear_out_of_scope_invite(&mut self) {
-        if self
+        let inspector = self
+            .inspector_coordinator
+            .active()
+            .map(|state| state.generation);
+        let request_left_inspector = self.pending_invitation_inspector.is_some()
+            && self.pending_invitation_inspector != inspector;
+        let stored_invite_out_of_scope = self
             .last_created_invite
             .as_ref()
-            .is_some_and(|invite| !self.invite_is_in_scope(invite))
-        {
-            self.last_created_invite = None;
+            .is_some_and(|invite| !self.invite_is_in_scope(invite));
+        if request_left_inspector || stored_invite_out_of_scope {
+            self.invalidate_invitation_scope();
         }
     }
 
@@ -557,23 +695,7 @@ impl Shellumi {
                         ButtonVariant::Primary,
                     )
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        app.clear_out_of_scope_invite();
-                        if let Some(token) = app.last_created_invite.as_ref().and_then(|invite| {
-                            invite.copy_token(
-                                &invitation_id,
-                                app.invite_scope.as_ref(),
-                                &app.active_vault_id,
-                                app.inspector_coordinator.active(),
-                                invite_timestamp(),
-                            )
-                        }) {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                token.to_owned(),
-                            ));
-                            app.desktop.message =
-                                Some("Server invitation token copied to clipboard.".into());
-                        }
-                        cx.notify();
+                        app.copy_current_invitation(&invitation_id, cx);
                     })),
                 );
             }
@@ -596,20 +718,32 @@ impl Shellumi {
     }
 
     fn render_enrollment_recovery(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.incomplete_enrollments.is_empty() {
+        if self.incomplete_enrollments.is_empty() && !self.has_pending_device_replacements {
             return None;
         }
-        let count = self.incomplete_enrollments.len();
         let busy = self.team_enrollment_busy;
         Some(simple_section(
-            "Interrupted Enrollment Recovery",
+            "Device Recovery",
             div()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(div().text_xs().text_color(text_secondary()).child(format!(
-                    "{count} incomplete enrollment operation(s) detected for this vault."
-                )))
+                .children(self.incomplete_enrollments.iter().filter_map(|operation| {
+                    operation.error_message.as_ref().map(|message| {
+                        div()
+                            .text_xs()
+                            .text_color(text_secondary())
+                            .child(message.clone())
+                    })
+                }))
+                .when(self.has_pending_device_replacements, |panel| {
+                    panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(text_secondary())
+                            .child("A device replacement still needs reconciliation."),
+                    )
+                })
                 .child(
                     AppButton::new(
                         "team-resume-enrollment-btn",
@@ -880,6 +1014,7 @@ impl Shellumi {
         let default_key = self.vault_key_for(shellumi_storage::LEGACY_LOCAL_VAULT_ID);
         let email_for_msg = email.clone();
         self.invalidate_invitation_scope();
+        self.pending_invitation_inspector = Some(gen);
         let request = InvitationRequest::capture(&self.invitation_generation);
         let background_request = request.clone();
         cx.notify();
@@ -962,7 +1097,9 @@ impl Shellumi {
                                 client.set_token(token_sec.expose_secret().to_string());
                                 let account = binding.authenticate_vault_member(&store, &client)
                                     .map_err(|_| "Server invitation scope could not be verified".to_string())?;
-                                if !background_request.is_current() {
+                                if !background_request.session_is_current(&reg_store, &binding, &token_sec, &*cred_store)
+                                    .await.map_err(|_| "Server invitation session could not be verified".to_string())?
+                                {
                                     tracing::debug!("Invitation request invalidated before dispatch");
                                     return Err("Invitation request was canceled".into());
                                 }
@@ -980,19 +1117,9 @@ impl Shellumi {
                                     tracing::warn!("Discarded inconsistent server invitation identity");
                                     return Err("Server returned an invitation for an unexpected vault".into());
                                 }
-                                let current_binding = reg_store
-                                    .resolve_verified_remote_vault_binding(&active_vault_id_task, None)
-                                    .await
-                                    .map_err(|_| "Server invitation scope changed".to_string())?;
-                                let current_token = reg_store
-                                    .get_vault_server_connection(current_binding.server_connection_id())
-                                    .await
-                                    .map_err(|_| "Server invitation session could not be verified".to_string())?
-                                    .and_then(|record| record.resolve_auth_token(&*cred_store));
-                                if current_binding != binding
-                                    || current_token.as_ref().map(shellumi_core::SecretString::expose_secret)
-                                        != Some(token_sec.expose_secret())
-                                    || !background_request.is_current()
+                                if binding.authenticate_vault_member(&store, &client).ok() != Some(account)
+                                    || !background_request.session_is_current(&reg_store, &binding, &token_sec, &*cred_store)
+                                        .await.map_err(|_| "Server invitation session could not be verified".to_string())?
                                 {
                                     tracing::debug!("Discarded invitation for invalidated server session");
                                     return Err("Server invitation session changed".into());
@@ -1000,6 +1127,7 @@ impl Shellumi {
                                 created_on_server = true;
                                 invite_meta = Some(crate::CreatedInvite {
                                     scope: crate::InviteScope { binding, account },
+                                    issuing_session: token_sec,
                                     member_id: target_id.clone(),
                                     invitation_id: invite_resp.invite_id.to_string(),
                                     token: invite_resp.invite_token.map(shellumi_core::SecretString::new),
@@ -1046,13 +1174,12 @@ impl Shellumi {
             let _ = app.update(cx, |app, cx| {
                 if !request.is_current()
                     || app.active_vault_id != active_vault_id
-                    || !app.inspector_coordinator.active().is_some_and(|state| {
-                        state.vault_id == active_vault_id && state.generation == gen
-                    })
+                    || !request.can_deliver(&app.inspector_coordinator, &active_vault_id, gen)
                 {
                     tracing::debug!("Discarded stale invitation completion");
                     return;
                 }
+                app.pending_invitation_inspector = None;
                 if let Some(ref mut f) = app.team_form {
                     f.sending = false;
                 }
@@ -1210,6 +1337,107 @@ mod invite_state_tests {
     }
 
     #[tokio::test]
+    async fn invitation_delivery_checks_live_registry_credentials_and_inspector_transitions() {
+        use shellumi_core::{CredentialStore, EphemeralCredentialStore, SecretString};
+        let mut registry = HostStore::open(":memory:").await.unwrap();
+        let connection_id = "invitation-test";
+        let credential_store = EphemeralCredentialStore::new();
+        let service = shellumi_storage::VaultServerConnectionRecord::CREDENTIAL_SERVICE;
+        let account = "invite-auth";
+        credential_store
+            .set_secret(service, account, "original")
+            .unwrap();
+        let mut connection = shellumi_storage::VaultServerConnectionRecord {
+            id: connection_id.into(),
+            base_url: "https://example.test".into(),
+            server_instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            auth_token: Some(format!("keychain://{service}/{account}")),
+            ..Default::default()
+        };
+        registry
+            .save_vault_server_connection(&connection)
+            .await
+            .unwrap();
+        for vault in ["one", "two"] {
+            registry
+                .register_vault_context(
+                    vault,
+                    &shellumi_core::VaultContext::new(
+                        shellumi_core::VaultId::new(vault).unwrap(),
+                        shellumi_core::VaultLocation::Remote {
+                            server: shellumi_core::ServerConnectionId::new(connection_id).unwrap(),
+                            server_vault_id: shellumi_core::VaultId::new(
+                                uuid::Uuid::new_v4().to_string(),
+                            )
+                            .unwrap(),
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let binding = registry
+            .resolve_verified_remote_vault_binding("one", None)
+            .await
+            .unwrap();
+        let token = SecretString::new("original".into());
+        let epoch = Arc::new(AtomicU64::new(0));
+        let original = InvitationRequest::capture(&epoch);
+        let mut inspector = InspectorCoordinator::new();
+        let target = InspectorTarget::TeamMember(None);
+        assert!(inspector.open("one", target.clone(), InspectorMode::Create, None));
+        let generation = inspector.active().unwrap().generation;
+        assert!(original.can_deliver(&inspector, "one", generation));
+        assert!(original
+            .session_is_current(&registry, &binding, &token, &credential_store)
+            .await
+            .unwrap());
+
+        // A concurrent request replaces the earlier request within the same Inspector.
+        epoch.fetch_add(1, Ordering::AcqRel);
+        let newer = InvitationRequest::capture(&epoch);
+        assert!(!original.can_deliver(&inspector, "one", generation));
+        assert!(newer.can_deliver(&inspector, "one", generation));
+
+        // Actual coordinator transitions invalidate results even after selecting the originating vault again.
+        inspector.invalidate_scope();
+        assert!(inspector.open("two", target.clone(), InspectorMode::Create, None));
+        assert!(!newer.can_deliver(&inspector, "one", generation));
+        inspector.invalidate_scope();
+        assert!(inspector.open("one", target, InspectorMode::Create, None));
+        assert!(!newer.can_deliver(&inspector, "one", generation));
+        let active = inspector.active().unwrap().generation;
+        assert!(inspector.request_close());
+        assert!(!newer.can_deliver(&inspector, "one", active));
+
+        credential_store
+            .set_secret(service, account, "different")
+            .unwrap();
+        assert!(!newer
+            .session_is_current(&registry, &binding, &token, &credential_store)
+            .await
+            .unwrap());
+        credential_store
+            .set_secret(service, account, "original")
+            .unwrap();
+        registry.set_vault_locked("one", true).await.unwrap();
+        assert!(!newer
+            .session_is_current(&registry, &binding, &token, &credential_store)
+            .await
+            .unwrap());
+        registry.set_vault_locked("one", false).await.unwrap();
+        connection.base_url = "https://changed.example.test".into();
+        registry
+            .save_vault_server_connection(&connection)
+            .await
+            .unwrap();
+        assert!(!newer
+            .session_is_current(&registry, &binding, &token, &credential_store)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn invite_visibility_follows_vault_target_generation_and_expiration() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = HostStore::open(directory.path().join("registry.db").to_str().unwrap())
@@ -1253,6 +1481,7 @@ mod invite_state_tests {
                 binding,
                 account: uuid::Uuid::new_v4(),
             },
+            issuing_session: shellumi_core::SecretString::new("test-session".into()),
             member_id: "alice".into(),
             invitation_id: "invite-a".into(),
             token: Some(shellumi_core::SecretString::new("test-token".into())),

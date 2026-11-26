@@ -38,3 +38,8 @@ been reviewed or approved for production. Revisit it with each design change.
 
 Do not store credentials in configuration or logs. No security guarantee is
 made for the current foundation, and cross-platform behavior remains untested.
+
+
+## Interrupted server device changes
+
+Device enrollment and replacement cross an encrypted database, the OS credential store, and the server API. Shellumi treats a request with a lost response as potentially committed. It verifies recovered devices against the original account, server instance, vault, and both public keys before authorizing them locally. Replacement keeps the old device until the new device has passed an access check and, where required, decrypted its current vault key envelope. Review [enrollment and replacement recovery](remediation-status.md#schema-30-client-recovery) for the checkpoints and protocol limits.
