@@ -77,6 +77,14 @@ pub enum SessionEvent {
     },
     /// Display control capabilities negotiated via MS-RDPEDISP extension.
     DisplayControlCaps { max_monitors: u32, max_area: u64 },
+    /// Display resize submission or negotiation failed in the protocol worker.
+    ResizeFailed {
+        width: u32,
+        height: u32,
+        reason: String,
+    },
+    /// Display control capabilities are no longer available for this session.
+    DisplayControlUnavailable { reason: String },
     /// Drive redirection status and telemetry update (RDPDR / MS-RDPEFS).
     DriveStatus {
         drive_name: String,

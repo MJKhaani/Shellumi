@@ -308,12 +308,26 @@ async fn run_rdp_session_attempt(
                                 adj_h,
                                 "Dispatching MS-RDPEDISP dynamic resize event to RDP engine"
                             );
-                            let _ = input_sender.send(RdpInputEvent::Resize {
+                            if let Err(err) = input_sender.send(RdpInputEvent::Resize {
                                 width: adj_w as u16,
                                 height: adj_h as u16,
                                 scale_factor: 100,
                                 physical_size: None,
-                            });
+                            }) {
+                                tracing::warn!(
+                                    width = adj_w,
+                                    height = adj_h,
+                                    error = %err,
+                                    "Failed to submit MS-RDPEDISP resize event to RDP worker"
+                                );
+                                let _ = worker
+                                    .send_event(SessionEvent::ResizeFailed {
+                                        width: adj_w,
+                                        height: adj_h,
+                                        reason: err.to_string(),
+                                    })
+                                    .await;
+                            }
                         }
                         SessionCommand::ConfigureDrive(opt_path) => {
                             let target_path = opt_path.unwrap_or_else(crate::drive::default_shared_folder);

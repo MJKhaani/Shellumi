@@ -942,6 +942,7 @@ pub(crate) struct PendingResizeRequest {
     pub request_id: u64,
     pub connection_generation: u64,
     pub layout_generation: u64,
+    pub auto_cancel_generation: u64,
     pub dimensions: (u32, u32),
     pub origin: ResizeOrigin,
     pub retry_count: u8,
@@ -970,6 +971,7 @@ pub(crate) struct RdAutoResizeState {
     pub last_confirmed: Option<(u32, u32)>,
     pub last_rejected: Option<(u32, u32)>,
     pub last_error: Option<String>,
+    pub pending_manual_recalc: bool,
 }
 
 impl RdAutoResizeState {
@@ -982,6 +984,24 @@ impl RdAutoResizeState {
         self.debounce_generation = self.debounce_generation.wrapping_add(1);
         self.auto_cancel_generation = self.auto_cancel_generation.wrapping_add(1);
         self.last_error = None;
+        self.pending_manual_recalc = false;
+    }
+
+    /// Invalidate geometry-dependent pending state when `layout_epoch` advances.
+    /// Already in-flight protocol negotiations settle safely, while obsolete queued
+    /// requests and debounce timers are discarded. Manual Match Viewport intent is
+    /// flagged for recalculation once fresh geometry arrives.
+    pub fn invalidate_layout(&mut self, new_layout_epoch: u64) {
+        self.layout_generation = new_layout_epoch;
+        self.debounce_generation = self.debounce_generation.wrapping_add(1);
+        if let Some(req) = self.desired {
+            if req.layout_generation != new_layout_epoch {
+                if req.origin == ResizeOrigin::Manual {
+                    self.pending_manual_recalc = true;
+                }
+                self.desired = None;
+            }
+        }
     }
 
     /// Cancel all pending/debounced automatic resize work without disturbing
@@ -1014,7 +1034,8 @@ impl RdAutoResizeState {
                     origin: ResizeOrigin::Manual,
                     ..
                 })
-            ) {
+            ) || self.pending_manual_recalc
+            {
                 return ResizeRequestOutcome::Skipped;
             }
             let same_desired = self.desired.map(|d| d.dimensions) == Some(dimensions);
@@ -1031,6 +1052,7 @@ impl RdAutoResizeState {
                 request_id: 0,
                 connection_generation: self.connection_generation,
                 layout_generation,
+                auto_cancel_generation: self.auto_cancel_generation,
                 dimensions,
                 origin,
                 retry_count: 0,
@@ -1042,10 +1064,12 @@ impl RdAutoResizeState {
             }
         } else {
             self.layout_generation = layout_generation;
+            self.pending_manual_recalc = false;
             self.desired = Some(PendingResizeRequest {
                 request_id: 0,
                 connection_generation: self.connection_generation,
                 layout_generation,
+                auto_cancel_generation: self.auto_cancel_generation,
                 dimensions,
                 origin,
                 retry_count: 0,
@@ -1060,19 +1084,28 @@ impl RdAutoResizeState {
     }
 
     /// Promote the next eligible `desired` request into `in_flight`, enforcing
-    /// at most one outstanding resize negotiation at a time.
+    /// at most one outstanding resize negotiation, current `layout_epoch`, and
+    /// matching `auto_cancel_generation`.
     pub fn take_ready_to_dispatch(
         &mut self,
+        current_layout_epoch: u64,
         dynamic_resize_enabled: bool,
     ) -> Option<PendingResizeRequest> {
         if self.in_flight.is_some() {
             return None;
         }
         let mut req = self.desired.take()?;
-        if req.origin == ResizeOrigin::Automatic && !dynamic_resize_enabled {
+        if req.layout_generation != current_layout_epoch {
+            if req.origin == ResizeOrigin::Manual {
+                self.pending_manual_recalc = true;
+            }
             return None;
         }
-        if req.origin == ResizeOrigin::Automatic && self.last_confirmed == Some(req.dimensions) {
+        if req.origin == ResizeOrigin::Automatic
+            && (!dynamic_resize_enabled
+                || req.auto_cancel_generation != self.auto_cancel_generation
+                || self.last_confirmed == Some(req.dimensions))
+        {
             return None;
         }
         self.next_request_id = self.next_request_id.wrapping_add(1);
@@ -1089,9 +1122,28 @@ impl RdAutoResizeState {
         }
     }
 
+    pub fn handle_resize_failed(
+        &mut self,
+        size: (u32, u32),
+        reason: String,
+        current_layout_epoch: u64,
+        dynamic_resize_enabled: bool,
+    ) -> Option<PendingResizeRequest> {
+        self.last_rejected = Some(size);
+        self.last_error = Some(reason);
+        if self.in_flight.map(|r| r.dimensions) == Some(size) {
+            self.in_flight = None;
+        }
+        if self.in_flight.is_none() {
+            return self.take_ready_to_dispatch(current_layout_epoch, dynamic_resize_enabled);
+        }
+        None
+    }
+
     pub fn timeout_request(
         &mut self,
         request_id: u64,
+        current_layout_epoch: u64,
         dynamic_resize_enabled: bool,
     ) -> Option<PendingResizeRequest> {
         let in_flight = self.in_flight?;
@@ -1100,13 +1152,32 @@ impl RdAutoResizeState {
         }
         self.in_flight = None;
         if let Some(next) = self.desired {
-            if next.origin == ResizeOrigin::Automatic && !dynamic_resize_enabled {
+            if next.layout_generation != current_layout_epoch {
+                if next.origin == ResizeOrigin::Manual {
+                    self.pending_manual_recalc = true;
+                }
                 self.desired = None;
                 return None;
             }
-            return self.take_ready_to_dispatch(dynamic_resize_enabled);
+            if next.origin == ResizeOrigin::Automatic
+                && (!dynamic_resize_enabled
+                    || next.auto_cancel_generation != self.auto_cancel_generation)
+            {
+                self.desired = None;
+                return None;
+            }
+            return self.take_ready_to_dispatch(current_layout_epoch, dynamic_resize_enabled);
         }
-        if in_flight.origin == ResizeOrigin::Automatic && !dynamic_resize_enabled {
+        if in_flight.layout_generation != current_layout_epoch {
+            if in_flight.origin == ResizeOrigin::Manual {
+                self.pending_manual_recalc = true;
+            }
+            return None;
+        }
+        if in_flight.origin == ResizeOrigin::Automatic
+            && (!dynamic_resize_enabled
+                || in_flight.auto_cancel_generation != self.auto_cancel_generation)
+        {
             return None;
         }
         if in_flight.retry_count < 2 {
@@ -1126,6 +1197,7 @@ impl RdAutoResizeState {
     pub fn acknowledge(
         &mut self,
         size: (u32, u32),
+        current_layout_epoch: u64,
         dynamic_resize_enabled: bool,
     ) -> Option<PendingResizeRequest> {
         self.last_confirmed = Some(size);
@@ -1134,41 +1206,7 @@ impl RdAutoResizeState {
             self.last_error = None;
         }
         if self.in_flight.is_none() {
-            if let Some(next) = self.desired {
-                if next.origin == ResizeOrigin::Automatic
-                    && (!dynamic_resize_enabled || next.dimensions == size)
-                {
-                    self.desired = None;
-                    return None;
-                }
-                return self.take_ready_to_dispatch(dynamic_resize_enabled);
-            }
-        }
-        None
-    }
-
-    #[allow(dead_code)]
-    pub fn reject(
-        &mut self,
-        size: (u32, u32),
-        reason: String,
-        dynamic_resize_enabled: bool,
-    ) -> Option<PendingResizeRequest> {
-        self.last_rejected = Some(size);
-        self.last_error = Some(reason);
-        if self.in_flight.map(|r| r.dimensions) == Some(size) {
-            self.in_flight = None;
-        }
-        if self.in_flight.is_none() {
-            if let Some(next) = self.desired {
-                if next.origin == ResizeOrigin::Automatic
-                    && (!dynamic_resize_enabled || next.dimensions == size)
-                {
-                    self.desired = None;
-                    return None;
-                }
-                return self.take_ready_to_dispatch(dynamic_resize_enabled);
-            }
+            return self.take_ready_to_dispatch(current_layout_epoch, dynamic_resize_enabled);
         }
         None
     }

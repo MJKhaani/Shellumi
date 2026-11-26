@@ -877,7 +877,6 @@ impl Shellumi {
                                     if let Some(snap) = snapshot {
                                         rd.width = snap.width;
                                         rd.height = snap.height;
-                                        ack_size = Some((snap.width, snap.height));
                                         let render_image =
                                             crate::ui::remote_desktop_canvas::create_render_image_from_snapshot(&snap);
                                         rd.render_image = render_image;
@@ -987,6 +986,45 @@ impl Shellumi {
                                     rd.status = RemoteDesktopStatus::Error;
                                     rd.error = Some(err.clone());
                                     rd.status_message = Some(format!("Error: {err}"));
+                                }
+                                shellumi_remote_desktop::SessionEvent::ResizeFailed {
+                                    width,
+                                    height,
+                                    reason,
+                                } => {
+                                    rd.last_action_note = Some(format!(
+                                        "Display resize to {width}×{height} failed: {reason}"
+                                    ));
+                                    let dyn_en = rd.dynamic_resize_enabled;
+                                    let epoch = app.layout_epoch;
+                                    if let Some(state) =
+                                        app.rd_resize_state.get_mut(&session_key.tab_id)
+                                    {
+                                        if state.connection_generation
+                                            == session_key.connection_generation
+                                        {
+                                            if let Some(next_req) = state.handle_resize_failed(
+                                                (width, height),
+                                                reason,
+                                                epoch,
+                                                dyn_en,
+                                            ) {
+                                                let _ = next_req;
+                                            }
+                                        }
+                                    }
+                                }
+                                shellumi_remote_desktop::SessionEvent::DisplayControlUnavailable {
+                                    reason,
+                                } => {
+                                    rd.display_control_ready = false;
+                                    rd.last_action_note = Some(reason);
+                                    if let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) {
+                                        if state.connection_generation == session_key.connection_generation {
+                                            state.cancel_automatic();
+                                            state.in_flight = None;
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1225,7 +1263,7 @@ impl Shellumi {
             }
             match entry.request_resize(target, layout_gen, crate::ResizeOrigin::Manual) {
                 crate::ResizeRequestOutcome::DispatchNow => {
-                    entry.take_ready_to_dispatch(dynamic_enabled)
+                    entry.take_ready_to_dispatch(layout_gen, dynamic_enabled)
                 }
                 _ => None,
             }
@@ -1334,18 +1372,27 @@ impl Shellumi {
         Some((w, h))
     }
 
-    /// Advance `layout_epoch` and clear stale remote-desktop canvas measurements
-    /// whenever container geometry or workspace visibility changes.
+    /// Advance `layout_epoch`, clear stale remote-desktop canvas measurements,
+    /// and invalidate geometry-dependent pending resize state whenever container
+    /// geometry or workspace visibility changes.
     pub(crate) fn invalidate_layout(&mut self) {
-        Self::invalidate_layout_state(&mut self.layout_epoch, &mut self.rd_canvas_measurements);
+        Self::invalidate_layout_state_all(
+            &mut self.layout_epoch,
+            &mut self.rd_canvas_measurements,
+            &mut self.rd_resize_state,
+        );
     }
 
-    pub(crate) fn invalidate_layout_state(
+    pub(crate) fn invalidate_layout_state_all(
         layout_epoch: &mut u64,
         measurements: &mut std::collections::HashMap<u64, crate::CanvasMeasurement>,
+        resize_states: &mut std::collections::HashMap<u64, crate::RdAutoResizeState>,
     ) {
         *layout_epoch = layout_epoch.wrapping_add(1);
         measurements.clear();
+        for state in resize_states.values_mut() {
+            state.invalidate_layout(*layout_epoch);
+        }
     }
 
     /// Schedule a debounced automatic resize for an active RDP session when its
@@ -1418,6 +1465,15 @@ impl Shellumi {
                     return;
                 }
                 let dynamic_enabled = rd.dynamic_resize_enabled;
+                let current_epoch = app.layout_epoch;
+                if current_epoch != layout_gen
+                    || !app
+                        .rd_canvas_measurements
+                        .get(&session_key.tab_id)
+                        .is_some_and(|m| m.layout_epoch == current_epoch)
+                {
+                    return;
+                }
                 let next_req = {
                     let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) else {
                         return;
@@ -1425,12 +1481,12 @@ impl Shellumi {
                     if state.connection_generation != session_key.connection_generation
                         || state.auto_cancel_generation != auto_cancel_gen
                         || state.debounce_generation != debounce_gen
-                        || state.layout_generation != layout_gen
+                        || state.layout_generation != current_epoch
                         || state.in_flight.is_some()
                     {
                         return;
                     }
-                    state.take_ready_to_dispatch(dynamic_enabled)
+                    state.take_ready_to_dispatch(current_epoch, dynamic_enabled)
                 };
                 if let Some(req) = next_req {
                     app.dispatch_rd_resize(session_key, req, cx);
@@ -1452,20 +1508,37 @@ impl Shellumi {
             }
             return;
         };
+        let is_visible = self.page.is_none() && self.active_tab_idx == Some(tab_idx);
+        let has_fresh_measurement = self
+            .rd_canvas_measurements
+            .get(&session_key.tab_id)
+            .is_some_and(|m| m.layout_epoch == self.layout_epoch);
         let Some(rd) = self.tabs[tab_idx].remote_desktop_state.as_ref() else {
             if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
                 state.fail_dispatch(req.request_id, "Remote desktop state missing".into());
             }
             return;
         };
+        let cancel_gen_valid = req.origin != crate::ResizeOrigin::Automatic
+            || self
+                .rd_resize_state
+                .get(&session_key.tab_id)
+                .is_some_and(|s| s.auto_cancel_generation == req.auto_cancel_generation);
         if rd.connection_generation != session_key.connection_generation
             || rd.status != RemoteDesktopStatus::Connected
             || !rd.display_control_ready
             || rd.view_only
+            || req.layout_generation != self.layout_epoch
+            || !has_fresh_measurement
+            || !is_visible
+            || !cancel_gen_valid
             || (req.origin == crate::ResizeOrigin::Automatic && !rd.dynamic_resize_enabled)
         {
             if let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) {
-                state.fail_dispatch(req.request_id, "Session not eligible for resize".into());
+                state.fail_dispatch(
+                    req.request_id,
+                    "Session or layout no longer eligible for resize".into(),
+                );
             }
             return;
         }
@@ -1525,6 +1598,7 @@ impl Shellumi {
                     return;
                 }
                 let dynamic_enabled = rd.dynamic_resize_enabled;
+                let current_epoch = app.layout_epoch;
                 let next_dispatch = {
                     let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) else {
                         return;
@@ -1532,7 +1606,7 @@ impl Shellumi {
                     if state.connection_generation != session_key.connection_generation {
                         return;
                     }
-                    let next = state.timeout_request(req_id, dynamic_enabled);
+                    let next = state.timeout_request(req_id, current_epoch, dynamic_enabled);
                     if next.is_none() && state.last_error.is_some() {
                         tracing::warn!(
                             tab_id = session_key.tab_id,
@@ -1565,6 +1639,7 @@ impl Shellumi {
             .and_then(|t| t.remote_desktop_state.as_ref())
             .map(|rd| rd.dynamic_resize_enabled)
             .unwrap_or(false);
+        let current_epoch = self.layout_epoch;
         let next = {
             let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) else {
                 return;
@@ -1572,7 +1647,7 @@ impl Shellumi {
             if state.connection_generation != session_key.connection_generation {
                 return;
             }
-            state.acknowledge(size, dynamic_enabled)
+            state.acknowledge(size, current_epoch, dynamic_enabled)
         };
         if let Some(next_req) = next {
             self.dispatch_rd_resize(session_key, next_req, cx);
@@ -1651,7 +1726,7 @@ impl Shellumi {
             }
             match entry.request_resize(target, layout_gen, crate::ResizeOrigin::Manual) {
                 crate::ResizeRequestOutcome::DispatchNow => {
-                    entry.take_ready_to_dispatch(dynamic_enabled)
+                    entry.take_ready_to_dispatch(layout_gen, dynamic_enabled)
                 }
                 _ => None,
             }
@@ -1711,10 +1786,10 @@ mod tests {
 
         // Dispatch (1440, 900) as the single in-flight negotiation.
         let req1 = state
-            .take_ready_to_dispatch(true)
+            .take_ready_to_dispatch(1, true)
             .expect("should dispatch 1440x900");
         assert_eq!(req1.dimensions, (1440, 900));
-        assert!(state.take_ready_to_dispatch(true).is_none());
+        assert!(state.take_ready_to_dispatch(1, true).is_none());
 
         // A manual request arriving mid-flight must queue behind in_flight, never dispatch concurrently.
         assert_eq!(
@@ -1727,9 +1802,9 @@ mod tests {
             crate::ResizeRequestOutcome::Skipped
         );
 
-        // Acknowledging (1440, 900) immediately promotes the queued manual (1920, 1080).
+        // Acknowledging (1440, 900) immediately promotes the queued manual (1920, 1080) at epoch 2.
         let req2 = state
-            .acknowledge((1440, 900), true)
+            .acknowledge((1440, 900), 2, true)
             .expect("should promote queued manual resize");
         assert_eq!(req2.dimensions, (1920, 1080));
         assert_eq!(req2.origin, crate::ResizeOrigin::Manual);
@@ -1744,10 +1819,11 @@ mod tests {
     }
 
     #[test]
-    fn test_rd_resize_request_id_prevents_stale_timeouts_and_handles_queue_failure_and_rejection() {
+    fn test_rd_resize_request_id_prevents_stale_timeouts_and_handles_queue_failure_and_worker_rejection(
+    ) {
         let mut state = crate::RdAutoResizeState::default();
         state.request_resize((1280, 720), 1, crate::ResizeOrigin::Automatic);
-        let req1 = state.take_ready_to_dispatch(true).unwrap();
+        let req1 = state.take_ready_to_dispatch(1, true).unwrap();
 
         // Queue failure clears in_flight immediately without leaving request stuck.
         state.fail_dispatch(req1.request_id, "channel full".into());
@@ -1756,31 +1832,31 @@ mod tests {
 
         // Stale timeout for req1 must NOT cancel req2 even with identical dimensions.
         state.request_resize((1280, 720), 1, crate::ResizeOrigin::Manual);
-        let req2 = state.take_ready_to_dispatch(true).unwrap();
+        let req2 = state.take_ready_to_dispatch(1, true).unwrap();
         assert_ne!(req1.request_id, req2.request_id);
-        assert_eq!(state.timeout_request(req1.request_id, true), None);
+        assert_eq!(state.timeout_request(req1.request_id, 1, true), None);
         assert_eq!(state.in_flight, Some(req2));
 
-        // Rejection clears matching in-flight and records last_rejected.
+        // Worker ResizeFailed clears matching in-flight and records last_rejected.
         assert_eq!(
-            state.reject((1280, 720), "server rejected".into(), true),
+            state.handle_resize_failed((1280, 720), "worker rejected".into(), 1, true),
             None
         );
         assert_eq!(state.in_flight, None);
         assert_eq!(state.last_rejected, Some((1280, 720)));
-        assert_eq!(state.last_error.as_deref(), Some("server rejected"));
+        assert_eq!(state.last_error.as_deref(), Some("worker rejected"));
 
         // Delayed ack for an older size cannot complete a newer in-flight size.
         state.request_resize((1920, 1080), 2, crate::ResizeOrigin::Manual);
-        let req3 = state.take_ready_to_dispatch(true).unwrap();
-        let _ = state.acknowledge((1280, 720), true);
+        let req3 = state.take_ready_to_dispatch(2, true).unwrap();
+        let _ = state.acknowledge((1280, 720), 2, true);
         assert_eq!(state.in_flight, Some(req3));
     }
 
     #[test]
-    fn test_disabling_dynamic_resize_cancels_auto_work_but_preserves_manual_and_confirmed() {
+    fn test_disabling_dynamic_resize_cancels_auto_work_and_prevents_reactivation_on_reenable() {
         let mut state = crate::RdAutoResizeState::default();
-        assert_eq!(state.acknowledge((1280, 720), true), None);
+        assert_eq!(state.acknowledge((1280, 720), 1, true), None);
         assert_eq!(state.last_confirmed, Some((1280, 720)));
 
         // Queued automatic request is dropped and auto_cancel_generation increments when disabled.
@@ -1791,17 +1867,20 @@ mod tests {
         assert_eq!(state.desired, None);
         assert_eq!(state.last_confirmed, Some((1280, 720)));
 
-        // An in-flight automatic request must NOT retry or schedule further auto requests once disabled.
+        // Disable then RE-ENABLE before an old in-flight automatic timeout executes:
+        // the old request's auto_cancel_generation no longer matches, so it must NEVER retry!
         state.request_resize((1600, 1000), 3, crate::ResizeOrigin::Automatic);
-        let auto_req = state.take_ready_to_dispatch(true).unwrap();
-        state.cancel_automatic();
-        assert_eq!(state.timeout_request(auto_req.request_id, false), None);
+        let auto_req = state.take_ready_to_dispatch(3, true).unwrap();
+        state.cancel_automatic(); // disabled
+                                  // Re-enabled (dynamic_resize_enabled = true again), but old auto_req has stale token:
+        assert_eq!(state.timeout_request(auto_req.request_id, 3, true), None);
+        assert_eq!(state.in_flight, None);
 
         // Pending manual requests are preserved when automatic resizing is canceled.
         state.request_resize((1920, 1080), 4, crate::ResizeOrigin::Manual);
         state.cancel_automatic();
         let manual_req = state
-            .take_ready_to_dispatch(false)
+            .take_ready_to_dispatch(4, false)
             .expect("manual request should survive cancel_automatic");
         assert_eq!(manual_req.origin, crate::ResizeOrigin::Manual);
         assert_eq!(manual_req.dimensions, (1920, 1080));
@@ -1809,9 +1888,10 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidate_layout_advances_epoch_and_clears_stale_measurements() {
-        let mut layout_epoch = 0u64;
+    fn test_invalidate_layout_discards_obsolete_geometry_and_flags_manual_recalc() {
+        let mut layout_epoch = 1u64;
         let mut measurements = std::collections::HashMap::new();
+        let mut states = std::collections::HashMap::new();
         measurements.insert(
             42,
             crate::CanvasMeasurement {
@@ -1820,9 +1900,105 @@ mod tests {
                 viewport: gpui::Bounds::default(),
             },
         );
-        assert_eq!(measurements.len(), 1);
-        Shellumi::invalidate_layout_state(&mut layout_epoch, &mut measurements);
-        assert_eq!(layout_epoch, 1);
+        let mut st = crate::RdAutoResizeState::default();
+        st.request_resize((1280, 720), layout_epoch, crate::ResizeOrigin::Automatic);
+        let debounce_before = st.debounce_generation;
+        states.insert(42, st);
+
+        // Layout invalidation (e.g. inspector open, sidebar collapse, DPI change)
+        Shellumi::invalidate_layout_state_all(&mut layout_epoch, &mut measurements, &mut states);
+        assert_eq!(layout_epoch, 2);
         assert!(measurements.is_empty());
+        let st_after = states.get(&42).unwrap();
+        assert_eq!(st_after.layout_generation, 2);
+        assert_ne!(st_after.debounce_generation, debounce_before);
+        assert_eq!(st_after.desired, None);
+
+        // Manual request invalidated before dispatch flags pending_manual_recalc instead of sending obsolete dimensions.
+        states
+            .get_mut(&42)
+            .unwrap()
+            .request_resize((1440, 900), 2, crate::ResizeOrigin::Manual);
+        Shellumi::invalidate_layout_state_all(&mut layout_epoch, &mut measurements, &mut states);
+        assert_eq!(layout_epoch, 3);
+        let st_manual = states.get_mut(&42).unwrap();
+        assert!(st_manual.pending_manual_recalc);
+        assert_eq!(st_manual.desired, None);
+
+        // In-flight request from epoch 3 must NOT retry if layout advances to epoch 4 before timeout.
+        st_manual.pending_manual_recalc = false;
+        st_manual.request_resize((1600, 900), 3, crate::ResizeOrigin::Automatic);
+        let in_flight = st_manual.take_ready_to_dispatch(3, true).unwrap();
+        Shellumi::invalidate_layout_state_all(&mut layout_epoch, &mut measurements, &mut states);
+        assert_eq!(
+            states
+                .get_mut(&42)
+                .unwrap()
+                .timeout_request(in_flight.request_id, layout_epoch, true),
+            None
+        );
+    }
+
+    #[test]
+    fn test_worker_channel_resize_submission_failure_and_confirmation_lifecycle() {
+        let (cmd_tx, cmd_rx) = async_channel::bounded(4);
+        let (evt_tx, evt_rx) = async_channel::bounded(4);
+        let mut state = crate::RdAutoResizeState::default();
+
+        // 1. Coordinator queues and submits RequestResize over SessionCommand channel.
+        state.request_resize((1600, 900), 1, crate::ResizeOrigin::Automatic);
+        let req1 = state.take_ready_to_dispatch(1, true).unwrap();
+        cmd_tx
+            .try_send(shellumi_remote_desktop::SessionCommand::RequestResize {
+                width: req1.dimensions.0,
+                height: req1.dimensions.1,
+            })
+            .unwrap();
+        match cmd_rx.try_recv().unwrap() {
+            shellumi_remote_desktop::SessionCommand::RequestResize { width, height } => {
+                assert_eq!((width, height), (1600, 900));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // 2. Worker emits ResizeFailed, while a manual request is queued behind it.
+        assert_eq!(
+            state.request_resize((1920, 1080), 1, crate::ResizeOrigin::Manual),
+            crate::ResizeRequestOutcome::QueuedBehindInFlight
+        );
+        evt_tx
+            .try_send(shellumi_remote_desktop::SessionEvent::ResizeFailed {
+                width: 1600,
+                height: 900,
+                reason: "worker input channel closed".to_string(),
+            })
+            .unwrap();
+        let next = match evt_rx.try_recv().unwrap() {
+            shellumi_remote_desktop::SessionEvent::ResizeFailed {
+                width,
+                height,
+                reason,
+            } => state.handle_resize_failed((width, height), reason, 1, true),
+            _ => panic!("expected ResizeFailed"),
+        };
+        let req2 = next.expect("queued manual request should promote after ResizeFailed");
+        assert_eq!(req2.dimensions, (1920, 1080));
+        assert_eq!(req2.origin, crate::ResizeOrigin::Manual);
+
+        // 3. Worker confirms 1920x1080 via RemoteResize.
+        evt_tx
+            .try_send(shellumi_remote_desktop::SessionEvent::RemoteResize {
+                width: 1920,
+                height: 1080,
+            })
+            .unwrap();
+        match evt_rx.try_recv().unwrap() {
+            shellumi_remote_desktop::SessionEvent::RemoteResize { width, height } => {
+                assert_eq!(state.acknowledge((width, height), 1, true), None);
+            }
+            _ => panic!("expected RemoteResize"),
+        }
+        assert_eq!(state.in_flight, None);
+        assert_eq!(state.last_confirmed, Some((1920, 1080)));
     }
 }

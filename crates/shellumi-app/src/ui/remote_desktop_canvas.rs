@@ -67,7 +67,15 @@ impl Shellumi {
                             .is_none_or(|prev| *prev != new_m);
                         if changed {
                             app.rd_canvas_measurements.insert(tab_id, new_m);
-                            app.schedule_rd_auto_resize(tab_id, cx);
+                            if app
+                                .rd_resize_state
+                                .get(&tab_id)
+                                .is_some_and(|s| s.pending_manual_recalc)
+                            {
+                                app.remote_desktop_match_viewport(tab_id, cx);
+                            } else {
+                                app.schedule_rd_auto_resize(tab_id, cx);
+                            }
                             cx.notify();
                         }
                     });
