@@ -641,6 +641,36 @@ pub struct CredentialOperationRecord {
     pub updated_at: i64,
 }
 
+static ACTIVE_CREDENTIAL_OPS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// RAII guard registering an active credential transaction so background/startup
+/// reconciliation cannot delete its staged references while in flight.
+pub struct ActiveCredentialOpGuard {
+    op_id: String,
+}
+
+impl Drop for ActiveCredentialOpGuard {
+    fn drop(&mut self) {
+        if let Some(lock) = ACTIVE_CREDENTIAL_OPS.get() {
+            if let Ok(mut set) = lock.lock() {
+                set.remove(&self.op_id);
+            }
+        }
+    }
+}
+
+/// Optional pending sync mutation to include inside an atomic host/credential SQLite transaction.
+#[derive(Clone, Copy, Debug)]
+pub struct PendingSyncMutation<'a> {
+    pub entity_id: &'a str,
+    pub entity_type: &'a str,
+    pub version: i64,
+    pub deleted: bool,
+    pub payload_json: Option<&'a str>,
+}
+
 impl HostStore {
     pub async fn record_credential_operation(
         &self,
@@ -797,6 +827,13 @@ impl HostStore {
         let mut reconciled = 0usize;
 
         for op in pending {
+            let is_active = ACTIVE_CREDENTIAL_OPS
+                .get()
+                .and_then(|m| m.lock().ok())
+                .is_some_and(|set| set.contains(&op.operation_id));
+            if is_active {
+                continue;
+            }
             match op.phase {
                 CredentialOpPhase::Planned | CredentialOpPhase::Staged => {
                     // Crashed before DB commit: clean up any unreferenced planned_new_refs.
@@ -4522,7 +4559,20 @@ impl HostStore {
     }
 
     /// Atomically create an optional reusable identity and create/update a host in a single
-    /// SQLite transaction scoped to `self.host_vault_id`.
+    pub fn acquire_credential_op_guard(op_id: &str) -> ActiveCredentialOpGuard {
+        let set = ACTIVE_CREDENTIAL_OPS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        if let Ok(mut guard) = set.lock() {
+            guard.insert(op_id.to_string());
+        }
+        ActiveCredentialOpGuard {
+            op_id: op_id.to_string(),
+        }
+    }
+
+    /// Atomically create an optional reusable identity, create or update a host,
+    /// record an optional sync mutation, and transition `credential_operations` to `Committed`
+    /// in a single SQLite transaction scoped to `self.host_vault_id`.
     #[allow(clippy::too_many_arguments)]
     pub async fn save_host_with_identity_tx(
         &mut self,
@@ -4537,6 +4587,42 @@ impl HostStore {
         protocol_config: Option<&str>,
         existing_identity_id: Option<i64>,
         new_identity: Option<&shellumi_core::NewIdentity>,
+    ) -> Result<(i64, Option<i64>), StorageError> {
+        self.save_host_with_identity_and_journal_tx(
+            host_id,
+            name,
+            destination,
+            group_name,
+            tags,
+            jump_host,
+            startup_snippet_id,
+            protocol,
+            protocol_config,
+            existing_identity_id,
+            new_identity,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Single-transaction atomic host + optional identity + optional sync mutation + journal commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_host_with_identity_and_journal_tx(
+        &mut self,
+        host_id: Option<i64>,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+        existing_identity_id: Option<i64>,
+        new_identity: Option<&shellumi_core::NewIdentity>,
+        journal_op_id: Option<&str>,
+        sync_mutation: Option<&PendingSyncMutation<'_>>,
     ) -> Result<(i64, Option<i64>), StorageError> {
         let host_name = validated_name(name)?;
         let group = validated_group(group_name)?;
@@ -4655,6 +4741,55 @@ impl HostStore {
                 self.connection.last_insert_rowid()
             };
 
+            if let Some(m) = sync_mutation {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                self.connection
+                    .execute(
+                        "INSERT INTO vault_mutations (vault_id, object_id, entity_type, expected_revision, deleted, payload_json, created_at, idempotency_key, key_epoch, device_counter)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 0, 0)",
+                        (
+                            self.host_vault_id.as_str(),
+                            m.entity_id,
+                            m.entity_type,
+                            m.version,
+                            if m.deleted { 1i64 } else { 0i64 },
+                            m.payload_json,
+                            now,
+                        ),
+                    )
+                    .await?;
+            }
+
+            if let Some(op_id) = journal_op_id {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let updated = self
+                    .connection
+                    .execute(
+                        "UPDATE credential_operations
+                         SET phase = 'Committed', cleanup_status = 'Pending', target_host_id = ?1, target_identity_id = ?2, last_error = NULL, updated_at = ?3
+                         WHERE operation_id = ?4 AND vault_id = ?5",
+                        (
+                            saved_host_id,
+                            resolved_identity_id,
+                            now,
+                            op_id,
+                            self.host_vault_id.as_str(),
+                        ),
+                    )
+                    .await?;
+                if updated == 0 {
+                    return Err(StorageError::ItemNotFound(format!(
+                        "credential operation {op_id}"
+                    )));
+                }
+            }
+
             Ok((saved_host_id, resolved_identity_id))
         }
         .await;
@@ -4663,6 +4798,242 @@ impl HostStore {
             Ok(pair) => {
                 self.connection.execute("COMMIT", ()).await?;
                 Ok(pair)
+            }
+            Err(err) => {
+                let _ = self.connection.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Atomically create or update an identity and transition `credential_operations` to `Committed`.
+    pub async fn save_identity_with_journal_tx(
+        &mut self,
+        editing_id: Option<i64>,
+        identity: &shellumi_core::NewIdentity,
+        journal_op_id: Option<&str>,
+    ) -> Result<i64, StorageError> {
+        let name = validated_name(&identity.name)?;
+        let username = identity.username.trim();
+        if username
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(StorageError::InvalidIdentity(
+                shellumi_core::IdentityError::InvalidIdentityField(
+                    "username must not contain whitespace or control characters".to_string(),
+                ),
+            ));
+        }
+        let stored_user = if username.is_empty() { "-" } else { username };
+        let auth_method_json = serde_json::to_string(&identity.auth_method)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags_json = serde_json::to_string(&identity.tags)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        self.connection.execute("BEGIN IMMEDIATE", ()).await?;
+        let result: Result<i64, StorageError> = async {
+            let saved_id = if let Some(id) = editing_id {
+                let changed = self
+                    .connection
+                    .execute(
+                        "UPDATE identities SET name = ?1, username = ?2, auth_method = ?3, password_secret_ref = ?4, key_path = ?5, passphrase_secret_ref = ?6, certificate_path = ?7, tags = ?8, comment = ?9, updated_at = CURRENT_TIMESTAMP WHERE id = ?10 AND vault_id = ?11",
+                        (
+                            name,
+                            stored_user,
+                            auth_method_json,
+                            identity.password_secret_ref.as_deref(),
+                            identity.key_path.as_deref(),
+                            identity.passphrase_secret_ref.as_deref(),
+                            identity.certificate_path.as_deref(),
+                            tags_json,
+                            identity.comment.as_deref(),
+                            id,
+                            self.host_vault_id.as_str(),
+                        ),
+                    )
+                    .await?;
+                if changed == 0 {
+                    return Err(StorageError::ItemNotFound(format!("identity {id}")));
+                }
+                id
+            } else {
+                self.connection
+                    .execute(
+                        "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        (
+                            name,
+                            stored_user,
+                            auth_method_json,
+                            identity.password_secret_ref.as_deref(),
+                            identity.key_path.as_deref(),
+                            identity.passphrase_secret_ref.as_deref(),
+                            identity.certificate_path.as_deref(),
+                            tags_json,
+                            identity.comment.as_deref(),
+                            self.host_vault_id.as_str(),
+                        ),
+                    )
+                    .await?;
+                self.connection.last_insert_rowid()
+            };
+
+            if let Some(op_id) = journal_op_id {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let updated = self
+                    .connection
+                    .execute(
+                        "UPDATE credential_operations
+                         SET phase = 'Committed', cleanup_status = 'Pending', target_identity_id = ?1, last_error = NULL, updated_at = ?2
+                         WHERE operation_id = ?3 AND vault_id = ?4",
+                        (saved_id, now, op_id, self.host_vault_id.as_str()),
+                    )
+                    .await?;
+                if updated == 0 {
+                    return Err(StorageError::ItemNotFound(format!(
+                        "credential operation {op_id}"
+                    )));
+                }
+            }
+            Ok(saved_id)
+        }
+        .await;
+
+        match result {
+            Ok(id) => {
+                self.connection.execute("COMMIT", ()).await?;
+                Ok(id)
+            }
+            Err(err) => {
+                let _ = self.connection.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Atomically delete a host, record an optional sync deletion mutation, and mark
+    /// `credential_operations` as `Committed` inside a single SQLite transaction.
+    pub async fn delete_host_with_journal_tx(
+        &mut self,
+        host_id: i64,
+        journal_op_id: Option<&str>,
+        sync_mutation: Option<&PendingSyncMutation<'_>>,
+    ) -> Result<bool, StorageError> {
+        self.connection.execute("BEGIN IMMEDIATE", ()).await?;
+        let result: Result<bool, StorageError> = async {
+            let deleted = self
+                .connection
+                .execute(
+                    "DELETE FROM hosts WHERE id = ?1 AND vault_id = ?2",
+                    (host_id, self.host_vault_id.as_str()),
+                )
+                .await?
+                > 0;
+            if deleted {
+                if let Some(m) = sync_mutation {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    self.connection
+                        .execute(
+                            "INSERT INTO vault_mutations (vault_id, object_id, entity_type, expected_revision, deleted, payload_json, created_at, idempotency_key, key_epoch, device_counter)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 0, 0)",
+                            (
+                                self.host_vault_id.as_str(),
+                                m.entity_id,
+                                m.entity_type,
+                                m.version,
+                                if m.deleted { 1i64 } else { 0i64 },
+                                m.payload_json,
+                                now,
+                            ),
+                        )
+                        .await?;
+                }
+                if let Some(op_id) = journal_op_id {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let _ = self
+                        .connection
+                        .execute(
+                            "UPDATE credential_operations
+                             SET phase = 'Committed', cleanup_status = 'Pending', target_host_id = ?1, last_error = NULL, updated_at = ?2
+                             WHERE operation_id = ?3 AND vault_id = ?4",
+                            (host_id, now, op_id, self.host_vault_id.as_str()),
+                        )
+                        .await?;
+                }
+            }
+            Ok(deleted)
+        }
+        .await;
+
+        match result {
+            Ok(deleted) => {
+                self.connection.execute("COMMIT", ()).await?;
+                Ok(deleted)
+            }
+            Err(err) => {
+                let _ = self.connection.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Atomically delete an identity (clearing host references) and mark `credential_operations`
+    /// as `Committed` inside a single SQLite transaction.
+    pub async fn delete_identity_with_journal_tx(
+        &mut self,
+        identity_id: i64,
+        journal_op_id: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        self.connection.execute("BEGIN IMMEDIATE", ()).await?;
+        let result: Result<bool, StorageError> = async {
+            self.connection
+                .execute(
+                    "UPDATE hosts SET identity_id = NULL WHERE identity_id = ?1 AND vault_id = ?2",
+                    (identity_id, self.host_vault_id.as_str()),
+                )
+                .await?;
+            let deleted = self
+                .connection
+                .execute(
+                    "DELETE FROM identities WHERE id = ?1 AND vault_id = ?2",
+                    (identity_id, self.host_vault_id.as_str()),
+                )
+                .await?
+                > 0;
+            if deleted {
+                if let Some(op_id) = journal_op_id {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let _ = self
+                        .connection
+                        .execute(
+                            "UPDATE credential_operations
+                             SET phase = 'Committed', cleanup_status = 'Pending', target_identity_id = ?1, last_error = NULL, updated_at = ?2
+                             WHERE operation_id = ?3 AND vault_id = ?4",
+                            (identity_id, now, op_id, self.host_vault_id.as_str()),
+                        )
+                        .await?;
+                }
+            }
+            Ok(deleted)
+        }
+        .await;
+
+        match result {
+            Ok(deleted) => {
+                self.connection.execute("COMMIT", ()).await?;
+                Ok(deleted)
             }
             Err(err) => {
                 let _ = self.connection.execute("ROLLBACK", ()).await;
@@ -13326,5 +13697,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second_pass, 0);
+    }
+
+    #[tokio::test]
+    async fn test_credential_journal_single_tx_atomicity_and_active_op_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("atomic-journal.db");
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let vid = shellumi_core::VaultId::new("vault-atomic").unwrap();
+        let mut store = HostStore::open(db_path.to_str().unwrap()).await.unwrap();
+        store.set_vault_id(vid.clone());
+        let vault_creds = shellumi_core::VaultCredentialStore::new(&cred_store, &vid);
+
+        // 1. Active operation guard prevents reconcile_credential_operations from deleting in-flight staged refs.
+        let staged_ref = vault_creds
+            .store_unique("host-password", "in-flight-secret")
+            .unwrap();
+        let active_op_id = "op-in-flight-1";
+        let guard = HostStore::acquire_credential_op_guard(active_op_id);
+        store
+            .record_credential_operation(&CredentialOperationRecord {
+                operation_id: active_op_id.to_string(),
+                vault_id: vid.as_str().to_string(),
+                target_host_id: None,
+                target_identity_id: None,
+                operation_type: "save_host_credentials".to_string(),
+                old_refs: vec![],
+                planned_new_refs: vec![staged_ref.clone()],
+                phase: CredentialOpPhase::Staged,
+                cleanup_status: CredentialCleanupStatus::Pending,
+                last_error: None,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+        let reconciled_while_active = store
+            .reconcile_credential_operations(&cred_store)
+            .await
+            .unwrap();
+        assert_eq!(reconciled_while_active, 0);
+        assert!(vault_creds.resolve(&staged_ref).unwrap().is_some());
+
+        // 2. Single SQLite transaction atomically saves host, identity, sync mutation, and marks journal Committed.
+        let dest = SshDestination::new("10.0.0.50", "ops", 22).unwrap();
+        let proto_cfg = format!(r#"{{"host_secret_ref":"{staged_ref}"}}"#);
+        let new_ident = shellumi_core::NewIdentity {
+            name: "ops-ident".to_string(),
+            username: "ops".to_string(),
+            auth_method: shellumi_core::AuthMethod::Password,
+            password_secret_ref: None,
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+        };
+        let sync_mut = PendingSyncMutation {
+            entity_id: "Atomic Host",
+            entity_type: "host",
+            version: 0,
+            deleted: false,
+            payload_json: Some("{}"),
+        };
+        let (saved_host_id, saved_ident_id) = store
+            .save_host_with_identity_and_journal_tx(
+                None,
+                "Atomic Host",
+                &dest,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                Some(&proto_cfg),
+                None,
+                Some(&new_ident),
+                Some(active_op_id),
+                Some(&sync_mut),
+            )
+            .await
+            .unwrap();
+        drop(guard);
+        assert!(saved_host_id > 0);
+        assert!(saved_ident_id.is_some());
+
+        // Verify journal was committed in the same transaction and pending mutation exists.
+        let pending = store.list_pending_credential_operations().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].phase, CredentialOpPhase::Committed);
+        assert_eq!(pending[0].target_host_id, Some(saved_host_id));
+        assert_eq!(pending[0].target_identity_id, saved_ident_id);
+        let mut mut_rows = store
+            .connection
+            .query(
+                "SELECT COUNT(*) FROM vault_mutations WHERE object_id = 'Atomic Host'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            mut_rows
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            1
+        );
+        drop(mut_rows);
+
+        // Reconciling Committed op completes cleanup without rolling back committed host/secret.
+        let reconciled_after_commit = store
+            .reconcile_credential_operations(&cred_store)
+            .await
+            .unwrap();
+        assert_eq!(reconciled_after_commit, 1);
+        assert!(vault_creds.resolve(&staged_ref).unwrap().is_some());
+
+        // 3. Failed transaction with invalid journal_op_id rolls back host, identity, and sync mutation atomically.
+        let bad_dest = SshDestination::new("10.0.0.51", "ops2", 22).unwrap();
+        let bad_mut = PendingSyncMutation {
+            entity_id: "RolledBack Host",
+            entity_type: "host",
+            version: 0,
+            deleted: false,
+            payload_json: Some("{}"),
+        };
+        let err = store
+            .save_host_with_identity_and_journal_tx(
+                None,
+                "RolledBack Host",
+                &bad_dest,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                None,
+                None,
+                Some("missing-op-id"),
+                Some(&bad_mut),
+            )
+            .await;
+        assert!(err.is_err());
+        let hosts = store.list().await.unwrap();
+        assert!(!hosts.iter().any(|h| h.name == "RolledBack Host"));
+        let mut mut_rows2 = store
+            .connection
+            .query(
+                "SELECT COUNT(*) FROM vault_mutations WHERE object_id = 'RolledBack Host'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            mut_rows2
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            0
+        );
     }
 }

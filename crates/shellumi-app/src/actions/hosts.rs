@@ -1060,6 +1060,7 @@ impl Shellumi {
                 }
 
                 // Step 2: Persist durable credential operation journal (Planned)
+                let _op_guard = HostStore::acquire_credential_op_guard(&op_id);
                 let has_journal = !planned_new_refs.is_empty() || !old_refs.is_empty();
                 if has_journal {
                     let op_record = shellumi_storage::CredentialOperationRecord {
@@ -1118,8 +1119,38 @@ impl Shellumi {
                         .map_err(|e| e.to_string())?;
                 }
 
+                let sync_payload_json = if is_remote {
+                    let payload = shellumi_storage::SyncHostPayload {
+                        name: name.clone(),
+                        hostname: destination.host().to_string(),
+                        username: destination.username().to_string(),
+                        port: destination.port().into(),
+                        group_name: group.clone(),
+                        tags: tags.clone(),
+                        jump_host: jump_host.clone(),
+                        startup_snippet_id,
+                        protocol: proto.to_string(),
+                        protocol_config: proto_config.clone(),
+                        identity_id,
+                    };
+                    serde_json::to_string(&payload).ok()
+                } else {
+                    None
+                };
+                let sync_mutation = if is_remote {
+                    Some(shellumi_storage::PendingSyncMutation {
+                        entity_id: &name,
+                        entity_type: "host",
+                        version: 0,
+                        deleted: false,
+                        payload_json: sync_payload_json.as_deref(),
+                    })
+                } else {
+                    None
+                };
+
                 let tx_res = store
-                    .save_host_with_identity_tx(
+                    .save_host_with_identity_and_journal_tx(
                         id,
                         &name,
                         &destination,
@@ -1131,22 +1162,38 @@ impl Shellumi {
                         proto_config.as_deref(),
                         identity_id,
                         new_identity.as_ref(),
+                        if has_journal {
+                            Some(op_id.as_str())
+                        } else {
+                            None
+                        },
+                        sync_mutation.as_ref(),
                     )
                     .await;
 
                 let (saved_host_id, saved_identity_id) = match tx_res {
                     Ok(pair) => pair,
                     Err(error) => {
+                        let mut rollback_ok = true;
+                        let mut rollback_err = error.to_string();
                         for r in &staged_refs {
-                            let _ = vault_store.delete(r);
+                            if let Err(del_err) = vault_store.delete(r) {
+                                rollback_ok = false;
+                                rollback_err =
+                                    format!("{rollback_err}; rollback delete failed: {del_err}");
+                            }
                         }
                         if has_journal {
                             let _ = store
                                 .update_credential_operation_phase(
                                     &op_id,
                                     shellumi_storage::CredentialOpPhase::RolledBack,
-                                    shellumi_storage::CredentialCleanupStatus::Completed,
-                                    Some(&error.to_string()),
+                                    if rollback_ok {
+                                        shellumi_storage::CredentialCleanupStatus::Completed
+                                    } else {
+                                        shellumi_storage::CredentialCleanupStatus::RetryPending
+                                    },
+                                    Some(&rollback_err),
                                 )
                                 .await;
                         }
@@ -1155,14 +1202,6 @@ impl Shellumi {
                 };
 
                 if has_journal {
-                    let _ = store
-                        .update_credential_operation_phase(
-                            &op_id,
-                            shellumi_storage::CredentialOpPhase::Committed,
-                            shellumi_storage::CredentialCleanupStatus::Pending,
-                            None,
-                        )
-                        .await;
                     let mut cleanup_ok = true;
                     let mut cleanup_err = None;
                     for old_r in &old_refs {
@@ -1189,33 +1228,6 @@ impl Shellumi {
                                 shellumi_storage::CredentialCleanupStatus::RetryPending
                             },
                             cleanup_err.as_deref(),
-                        )
-                        .await;
-                }
-
-                if is_remote {
-                    let payload = shellumi_storage::SyncHostPayload {
-                        name: name.clone(),
-                        hostname: destination.host().to_string(),
-                        username: destination.username().to_string(),
-                        port: destination.port().into(),
-                        group_name: group.clone(),
-                        tags: tags.clone(),
-                        jump_host: jump_host.clone(),
-                        startup_snippet_id,
-                        protocol: proto.to_string(),
-                        protocol_config: proto_config.clone(),
-                        identity_id: saved_identity_id,
-                    };
-                    let json = serde_json::to_string(&payload).ok();
-                    let _ = store
-                        .record_pending_mutation(
-                            &active_vault_id_task,
-                            &name,
-                            "host",
-                            0,
-                            false,
-                            json.as_deref(),
                         )
                         .await;
                 }
@@ -1293,24 +1305,107 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id) {
-                    store.set_vault_id(vid);
-                }
-                let host_name = store.get_host(id).await.ok().flatten().map(|h| h.name);
-                let deleted = store.delete(id).await.map_err(|error| error.to_string())?;
-                if is_remote && deleted {
-                    if let Some(hname) = host_name {
-                        let _ = store
-                            .record_pending_mutation(
-                                &active_vault_id,
-                                &hname,
-                                "host",
-                                0,
-                                true,
-                                None,
-                            )
-                            .await;
+                let vid =
+                    shellumi_core::VaultId::new(&active_vault_id).map_err(|e| e.to_string())?;
+                store.set_vault_id(vid.clone());
+                let existing_host = store.get_host(id).await.map_err(|e| e.to_string())?;
+                let host_name = existing_host.as_ref().map(|h| h.name.clone());
+                let mut old_refs = Vec::new();
+                if let Some(cfg) = existing_host
+                    .as_ref()
+                    .and_then(|h| h.protocol_config.as_deref())
+                    .and_then(|c| serde_json::from_str::<crate::HostAuthMetadata>(c).ok())
+                {
+                    if let Some(r) = cfg.host_secret_ref {
+                        old_refs.push(r);
                     }
+                    if let Some(r) = cfg.host_passphrase_ref {
+                        old_refs.push(r);
+                    }
+                }
+                let op_id = shellumi_core::VaultCredentialStore::generate_credential_id()
+                    .map_err(|e| e.to_string())?;
+                let _op_guard = HostStore::acquire_credential_op_guard(&op_id);
+                let has_journal = !old_refs.is_empty();
+                if has_journal {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    store
+                        .record_credential_operation(&shellumi_storage::CredentialOperationRecord {
+                            operation_id: op_id.clone(),
+                            vault_id: active_vault_id.clone(),
+                            target_host_id: Some(id),
+                            target_identity_id: None,
+                            operation_type: "delete_host".to_string(),
+                            old_refs: old_refs.clone(),
+                            planned_new_refs: Vec::new(),
+                            phase: shellumi_storage::CredentialOpPhase::Planned,
+                            cleanup_status: shellumi_storage::CredentialCleanupStatus::Pending,
+                            last_error: None,
+                            updated_at: now_ts,
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                let sync_mutation = if is_remote {
+                    host_name
+                        .as_deref()
+                        .map(|hname| shellumi_storage::PendingSyncMutation {
+                            entity_id: hname,
+                            entity_type: "host",
+                            version: 0,
+                            deleted: true,
+                            payload_json: None,
+                        })
+                } else {
+                    None
+                };
+                let deleted = store
+                    .delete_host_with_journal_tx(
+                        id,
+                        if has_journal {
+                            Some(op_id.as_str())
+                        } else {
+                            None
+                        },
+                        sync_mutation.as_ref(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if has_journal && deleted {
+                    let cred_store = shellumi_core::default_credential_store();
+                    let vault_store =
+                        shellumi_core::VaultCredentialStore::new(cred_store.as_ref(), &vid);
+                    let mut cleanup_ok = true;
+                    let mut cleanup_err = None;
+                    for r in &old_refs {
+                        if !store.is_credential_ref_in_use(r).await.unwrap_or(true)
+                            && vault_store.validate_reference(r).is_ok()
+                        {
+                            if let Err(e) = vault_store.delete(r) {
+                                cleanup_ok = false;
+                                cleanup_err = Some(e.to_string());
+                            }
+                        }
+                    }
+                    let _ = store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            if cleanup_ok {
+                                shellumi_storage::CredentialOpPhase::Completed
+                            } else {
+                                shellumi_storage::CredentialOpPhase::Committed
+                            },
+                            if cleanup_ok {
+                                shellumi_storage::CredentialCleanupStatus::Completed
+                            } else {
+                                shellumi_storage::CredentialCleanupStatus::RetryPending
+                            },
+                            cleanup_err.as_deref(),
+                        )
+                        .await;
                 }
                 Ok::<_, String>(deleted)
             })

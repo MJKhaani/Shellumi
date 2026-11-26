@@ -140,54 +140,174 @@ impl Shellumi {
                 let credential_store = shellumi_core::default_credential_store();
                 let vault_store =
                     shellumi_core::VaultCredentialStore::new(credential_store.as_ref(), &vid);
-                let mut created_refs = Vec::new();
+                let op_id = shellumi_core::VaultCredentialStore::generate_credential_id()
+                    .map_err(|e| e.to_string())?;
+                let _op_guard = HostStore::acquire_credential_op_guard(&op_id);
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                let mut old_refs: Vec<String> = Vec::new();
+                let mut planned_new_refs: Vec<String> = Vec::new();
+                let mut staged_secrets: Vec<(String, String)> = Vec::new();
+
                 if !password.is_empty() {
+                    if let Some(prev) = new_id.password_secret_ref.take() {
+                        old_refs.push(prev);
+                    }
                     let reference = vault_store
-                        .store_unique("identity-password", &password)
+                        .plan_unique_ref("identity-password")
                         .map_err(|e| e.to_string())?;
-                    created_refs.push(reference.clone());
+                    planned_new_refs.push(reference.clone());
+                    staged_secrets.push((reference.clone(), password.clone()));
                     new_id.password_secret_ref = Some(reference);
                 }
                 if !passphrase.is_empty() {
-                    match vault_store.store_unique("identity-passphrase", &passphrase) {
-                        Ok(reference) => {
-                            created_refs.push(reference.clone());
-                            new_id.passphrase_secret_ref = Some(reference);
-                        }
-                        Err(error) => {
-                            for reference in &created_refs {
-                                let _ = vault_store.delete(reference);
-                            }
-                            return Err(error.to_string());
-                        }
+                    if let Some(prev) = new_id.passphrase_secret_ref.take() {
+                        old_refs.push(prev);
                     }
+                    let reference = vault_store
+                        .plan_unique_ref("identity-passphrase")
+                        .map_err(|e| e.to_string())?;
+                    planned_new_refs.push(reference.clone());
+                    staged_secrets.push((reference.clone(), passphrase.clone()));
+                    new_id.passphrase_secret_ref = Some(reference);
                 }
-                let result = if let Some(id) = editing_id {
+
+                let has_journal = !planned_new_refs.is_empty() || !old_refs.is_empty();
+                if has_journal {
                     store
-                        .update_identity(id, &new_id)
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|updated| {
-                            if updated {
-                                Ok(())
+                        .record_credential_operation(&shellumi_storage::CredentialOperationRecord {
+                            operation_id: op_id.clone(),
+                            vault_id: active_vault_id_task.clone(),
+                            target_host_id: None,
+                            target_identity_id: editing_id,
+                            operation_type: if editing_id.is_some() {
+                                "edit_identity".to_string()
                             } else {
-                                Err("Identity no longer exists.".into())
-                            }
+                                "create_identity".to_string()
+                            },
+                            old_refs: old_refs.clone(),
+                            planned_new_refs: planned_new_refs.clone(),
+                            phase: shellumi_storage::CredentialOpPhase::Planned,
+                            cleanup_status: shellumi_storage::CredentialCleanupStatus::Pending,
+                            last_error: None,
+                            updated_at: now_ts,
                         })
-                } else {
-                    store
-                        .create_identity(&new_id)
                         .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                };
-                if result.is_err() {
-                    for reference in &created_refs {
-                        let _ = shellumi_core::delete_secret_by_ref(
-                            credential_store.as_ref(),
-                            reference,
-                        );
+                        .map_err(|e| e.to_string())?;
+                }
+
+                let mut staged_refs: Vec<String> = Vec::new();
+                for (planned_ref, secret) in &staged_secrets {
+                    if let Err(error) = vault_store.store_planned(planned_ref, secret) {
+                        let mut rollback_ok = true;
+                        let mut rollback_err = error.to_string();
+                        for r in &staged_refs {
+                            if let Err(del_err) = vault_store.delete(r) {
+                                rollback_ok = false;
+                                rollback_err =
+                                    format!("{rollback_err}; rollback delete failed: {del_err}");
+                            }
+                        }
+                        if has_journal {
+                            let _ = store
+                                .update_credential_operation_phase(
+                                    &op_id,
+                                    shellumi_storage::CredentialOpPhase::RolledBack,
+                                    if rollback_ok {
+                                        shellumi_storage::CredentialCleanupStatus::Completed
+                                    } else {
+                                        shellumi_storage::CredentialCleanupStatus::RetryPending
+                                    },
+                                    Some(&rollback_err),
+                                )
+                                .await;
+                        }
+                        return Err(error.to_string());
                     }
+                    staged_refs.push(planned_ref.clone());
+                }
+                if has_journal && !staged_refs.is_empty() {
+                    store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            shellumi_storage::CredentialOpPhase::Staged,
+                            shellumi_storage::CredentialCleanupStatus::Pending,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                let result = store
+                    .save_identity_with_journal_tx(
+                        editing_id,
+                        &new_id,
+                        if has_journal {
+                            Some(op_id.as_str())
+                        } else {
+                            None
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+
+                if let Err(ref err_msg) = result {
+                    let mut rollback_ok = true;
+                    let mut rollback_err = err_msg.clone();
+                    for r in &staged_refs {
+                        if let Err(del_err) = vault_store.delete(r) {
+                            rollback_ok = false;
+                            rollback_err =
+                                format!("{rollback_err}; rollback delete failed: {del_err}");
+                        }
+                    }
+                    if has_journal {
+                        let _ = store
+                            .update_credential_operation_phase(
+                                &op_id,
+                                shellumi_storage::CredentialOpPhase::RolledBack,
+                                if rollback_ok {
+                                    shellumi_storage::CredentialCleanupStatus::Completed
+                                } else {
+                                    shellumi_storage::CredentialCleanupStatus::RetryPending
+                                },
+                                Some(&rollback_err),
+                            )
+                            .await;
+                    }
+                } else if has_journal {
+                    let mut cleanup_ok = true;
+                    let mut cleanup_err = None;
+                    for old_r in &old_refs {
+                        if !store.is_credential_ref_in_use(old_r).await.unwrap_or(true)
+                            && vault_store.validate_reference(old_r).is_ok()
+                        {
+                            if let Err(e) = vault_store.delete(old_r) {
+                                cleanup_ok = false;
+                                cleanup_err = Some(e.to_string());
+                            }
+                        }
+                    }
+                    let _ = store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            if cleanup_ok {
+                                shellumi_storage::CredentialOpPhase::Completed
+                            } else {
+                                shellumi_storage::CredentialOpPhase::Committed
+                            },
+                            if cleanup_ok {
+                                shellumi_storage::CredentialCleanupStatus::Completed
+                            } else {
+                                shellumi_storage::CredentialCleanupStatus::RetryPending
+                            },
+                            cleanup_err.as_deref(),
+                        )
+                        .await;
                 }
                 result
             })
@@ -256,16 +376,91 @@ impl Shellumi {
                 let mut store = HostStore::open_with_key(&path, vault_key.as_ref())
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Ok(vid) = shellumi_core::VaultId::new(&active_vault_id_task) {
-                    store.set_vault_id(vid);
+                let vid = shellumi_core::VaultId::new(&active_vault_id_task)
+                    .map_err(|e| e.to_string())?;
+                store.set_vault_id(vid.clone());
+                let existing = store.get_identity(id).await.map_err(|e| e.to_string())?;
+                let mut old_refs = Vec::new();
+                if let Some(ident) = existing {
+                    if let Some(r) = ident.password_secret_ref {
+                        old_refs.push(r);
+                    }
+                    if let Some(r) = ident.passphrase_secret_ref {
+                        old_refs.push(r);
+                    }
                 }
-                let credential_store = shellumi_core::default_credential_store();
+                let op_id = shellumi_core::VaultCredentialStore::generate_credential_id()
+                    .map_err(|e| e.to_string())?;
+                let _op_guard = HostStore::acquire_credential_op_guard(&op_id);
+                let has_journal = !old_refs.is_empty();
+                if has_journal {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    store
+                        .record_credential_operation(&shellumi_storage::CredentialOperationRecord {
+                            operation_id: op_id.clone(),
+                            vault_id: active_vault_id_task.clone(),
+                            target_host_id: None,
+                            target_identity_id: Some(id),
+                            operation_type: "delete_identity".to_string(),
+                            old_refs: old_refs.clone(),
+                            planned_new_refs: Vec::new(),
+                            phase: shellumi_storage::CredentialOpPhase::Planned,
+                            cleanup_status: shellumi_storage::CredentialCleanupStatus::Pending,
+                            last_error: None,
+                            updated_at: now_ts,
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
                 let deleted = store
-                    .delete_identity_with_secrets(id, &*credential_store)
+                    .delete_identity_with_journal_tx(
+                        id,
+                        if has_journal {
+                            Some(op_id.as_str())
+                        } else {
+                            None
+                        },
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 if !deleted {
                     return Err(format!("Identity with ID {} not found", id));
+                }
+                if has_journal {
+                    let credential_store = shellumi_core::default_credential_store();
+                    let vault_store =
+                        shellumi_core::VaultCredentialStore::new(credential_store.as_ref(), &vid);
+                    let mut cleanup_ok = true;
+                    let mut cleanup_err = None;
+                    for r in &old_refs {
+                        if !store.is_credential_ref_in_use(r).await.unwrap_or(true)
+                            && vault_store.validate_reference(r).is_ok()
+                        {
+                            if let Err(e) = vault_store.delete(r) {
+                                cleanup_ok = false;
+                                cleanup_err = Some(e.to_string());
+                            }
+                        }
+                    }
+                    let _ = store
+                        .update_credential_operation_phase(
+                            &op_id,
+                            if cleanup_ok {
+                                shellumi_storage::CredentialOpPhase::Completed
+                            } else {
+                                shellumi_storage::CredentialOpPhase::Committed
+                            },
+                            if cleanup_ok {
+                                shellumi_storage::CredentialCleanupStatus::Completed
+                            } else {
+                                shellumi_storage::CredentialCleanupStatus::RetryPending
+                            },
+                            cleanup_err.as_deref(),
+                        )
+                        .await;
                 }
                 Ok::<(), String>(())
             })
