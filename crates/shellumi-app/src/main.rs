@@ -870,6 +870,12 @@ struct Shellumi {
     pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RemoteSessionKey {
+    pub tab_id: u64,
+    pub connection_generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CanvasMeasurement {
     pub tab_id: u64,
@@ -879,9 +885,50 @@ pub(crate) struct CanvasMeasurement {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RdAutoResizeState {
+    pub layout_generation: u64,
+    pub connection_generation: u64,
     pub desired: Option<(u32, u32)>,
-    pub last_sent: Option<(u32, u32)>,
-    pub pending_token: u64,
+    pub in_flight: Option<(u32, u32)>,
+    pub last_acknowledged: Option<(u32, u32)>,
+    pub debounce_generation: u64,
+    pub retry_count: u8,
+    pub last_error: Option<String>,
+}
+
+impl RdAutoResizeState {
+    pub fn reset_for_connection(&mut self, connection_generation: u64) {
+        self.connection_generation = connection_generation;
+        self.in_flight = None;
+        self.last_acknowledged = None;
+        self.debounce_generation = self.debounce_generation.wrapping_add(1);
+        self.retry_count = 0;
+        self.last_error = None;
+    }
+
+    pub fn record_desired(&mut self, target: (u32, u32), layout_generation: u64) -> bool {
+        if self.desired == Some(target)
+            && (self.in_flight == Some(target) || self.last_acknowledged == Some(target))
+        {
+            return false;
+        }
+        self.layout_generation = layout_generation;
+        self.desired = Some(target);
+        self.debounce_generation = self.debounce_generation.wrapping_add(1);
+        true
+    }
+
+    pub fn acknowledge(&mut self, size: (u32, u32)) -> Option<(u32, u32)> {
+        self.last_acknowledged = Some(size);
+        if self.in_flight == Some(size) {
+            self.in_flight = None;
+            self.retry_count = 0;
+            self.last_error = None;
+        }
+        match self.desired {
+            Some(next) if next != size && self.in_flight.is_none() => Some(next),
+            _ => None,
+        }
+    }
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -1001,6 +1048,8 @@ struct RemoteDesktopState {
     mic_packets_sent: u64,
     display_control_ready: bool,
     max_monitor_area: Option<u64>,
+    connection_generation: u64,
+    dynamic_resize_enabled: bool,
     shared_folder: Option<std::path::PathBuf>,
     drive_name: Option<String>,
     drive_mounted: bool,

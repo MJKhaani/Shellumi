@@ -460,6 +460,8 @@ impl Shellumi {
                     mic_packets_sent: 0,
                     display_control_ready: false,
                     max_monitor_area: None,
+                    connection_generation: 0,
+                    dynamic_resize_enabled: matches!(proto, RemoteDesktopProtocol::Rdp),
                     shared_folder: None,
                     drive_name: None,
                     drive_mounted: false,

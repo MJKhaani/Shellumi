@@ -365,6 +365,17 @@ impl Shellumi {
                     true
                 }
             });
+            self.rd_canvas_measurements.remove(&id);
+            self.rd_pan_state.remove(&id);
+            self.rd_resize_state.remove(&id);
+            if let Some(rd) = &mut self.tabs[pos].remote_desktop_state {
+                if let Some(pwd) = rd.password.as_mut() {
+                    use zeroize::Zeroize;
+                    pwd.zeroize();
+                }
+                rd.password = None;
+                rd.ui_handle = None;
+            }
             self.tabs.remove(pos);
             if self.tabs.is_empty() {
                 self.active_tab_idx = None;

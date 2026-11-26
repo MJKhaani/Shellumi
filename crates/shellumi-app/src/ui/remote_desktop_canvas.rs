@@ -67,6 +67,7 @@ impl Shellumi {
                             .is_none_or(|prev| *prev != new_m);
                         if changed {
                             app.rd_canvas_measurements.insert(tab_id, new_m);
+                            app.schedule_rd_auto_resize(tab_id, cx);
                             cx.notify();
                         }
                     });

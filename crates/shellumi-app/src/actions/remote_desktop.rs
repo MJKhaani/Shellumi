@@ -169,6 +169,8 @@ impl Shellumi {
             mic_packets_sent: 0,
             display_control_ready: false,
             max_monitor_area: None,
+            connection_generation: 0,
+            dynamic_resize_enabled: matches!(protocol, RemoteDesktopProtocol::Rdp),
             shared_folder: None,
             drive_name: None,
             drive_mounted: false,
@@ -405,6 +407,8 @@ impl Shellumi {
             mic_packets_sent: 0,
             display_control_ready: false,
             max_monitor_area: None,
+            connection_generation: 0,
+            dynamic_resize_enabled: matches!(protocol, RemoteDesktopProtocol::Rdp),
             shared_folder: None,
             drive_name: None,
             drive_mounted: false,
@@ -597,15 +601,20 @@ impl Shellumi {
 
     pub(crate) fn remote_desktop_disconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let tab_id = tab.id;
             if let Some(rd) = &mut tab.remote_desktop_state {
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle
                         .try_send_command(shellumi_remote_desktop::SessionCommand::Disconnect);
                 }
+                rd.connection_generation = rd.connection_generation.wrapping_add(1);
+                rd.ui_handle = None;
+                rd.display_control_ready = false;
                 rd.status = RemoteDesktopStatus::Disconnected;
                 rd.error = None;
                 rd.status_message = Some("Session disconnected by user.".into());
                 rd.last_action_note = Some("Disconnected".into());
+                self.rd_resize_state.remove(&tab_id);
                 cx.notify();
             }
         }
@@ -636,8 +645,19 @@ impl Shellumi {
 
     pub(crate) fn remote_desktop_reconnect(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let tab_id = tab.id;
             if let Some(rd) = &mut tab.remote_desktop_state {
                 rd.error = None;
+                rd.connection_generation = rd.connection_generation.wrapping_add(1);
+                rd.display_control_ready = false;
+                let session_key = crate::RemoteSessionKey {
+                    tab_id,
+                    connection_generation: rd.connection_generation,
+                };
+                self.rd_resize_state
+                    .entry(tab_id)
+                    .or_default()
+                    .reset_for_connection(session_key.connection_generation);
                 let default_port = match rd.protocol {
                     RemoteDesktopProtocol::Vnc => 5900,
                     RemoteDesktopProtocol::Rdp => 3389,
@@ -782,159 +802,206 @@ impl Shellumi {
 
                 cx.spawn(async move |this, cx| {
                     while let Ok(event) = ui_handle.recv_event().await {
+                        let mut keep_running = true;
+                        let mut trigger_auto_resize = false;
+                        let mut ack_size: Option<(u32, u32)> = None;
                         let res = this.update(cx, |app, cx| {
-                            if let Some(tab) = app.tabs.get_mut(tab_idx) {
-                                if let Some(rd) = &mut tab.remote_desktop_state {
-                                    match event {
-                                        shellumi_remote_desktop::SessionEvent::StateChanged(s) => match s {
-                                            shellumi_remote_desktop::SessionState::Connecting => {
-                                                rd.status = RemoteDesktopStatus::Connecting;
-                                                rd.status_message = Some(format!("Connecting to {proto_name} server…"));
-                                            }
-                                            shellumi_remote_desktop::SessionState::Connected => {
-                                                rd.status = RemoteDesktopStatus::Connected;
-                                                rd.status_message = Some(format!("Connected to {proto_name} server"));
-                                            }
-                                            shellumi_remote_desktop::SessionState::Reconnecting {
-                                                attempt,
-                                                max_attempts,
-                                                delay_ms,
-                                            } => {
-                                                rd.status = RemoteDesktopStatus::Reconnecting {
-                                                    attempt,
-                                                    max_attempts,
-                                                };
-                                                let delay_s = (delay_ms as f64) / 1000.0;
-                                                rd.status_message = Some(format!(
-                                                    "Connection interrupted. Reconnecting (attempt {attempt}/{max_attempts} in {delay_s:.1}s)…"
-                                                ));
-                                                rd.last_action_note = Some(format!("Reconnecting ({attempt}/{max_attempts})"));
-                                            }
-                                            shellumi_remote_desktop::SessionState::Disconnected => {
-                                                if rd.status != RemoteDesktopStatus::Error && rd.error.is_none() {
-                                                    rd.status = RemoteDesktopStatus::Disconnected;
-                                                    rd.status_message = Some(format!("Disconnected from {proto_name} server"));
-                                                }
-                                            }
-                                            shellumi_remote_desktop::SessionState::Error(err) => {
-                                                rd.status = RemoteDesktopStatus::Error;
-                                                rd.error = Some(err.clone());
-                                                rd.status_message = Some(format!("Error: {err}"));
-                                            }
-                                            _ => {}
-                                        },
-                                        shellumi_remote_desktop::SessionEvent::RemoteResize { width, height } => {
-                                            rd.width = width;
-                                            rd.height = height;
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::FrameReady { sequence: _, snapshot } => {
-                                            if let Some(snap) = snapshot {
-                                                rd.width = snap.width;
-                                                rd.height = snap.height;
-                                                let render_image =
-                                                    crate::ui::remote_desktop_canvas::create_render_image_from_snapshot(&snap);
-                                                rd.render_image = render_image;
-                                                rd.framebuffer = Some(snap);
-                                            }
-                                            rd.status = RemoteDesktopStatus::Connected;
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::Metrics(m) => {
-                                            rd.fps = m.fps;
-                                            rd.latency_ms = m.latency_ms;
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
-                                            rd.clipboard_text = Some(text.clone());
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                                            rd.last_action_note = Some("Remote clipboard text received and copied to local clipboard".into());
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::ServerFilesReceived { files, target_dir } => {
-                                            rd.last_action_note = Some(format!("Received {} file(s) into {}", files.len(), target_dir));
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::Bell => {
-                                            rd.last_action_note = Some("Terminal bell alert".into());
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::SecurityWarning(warning) => {
-                                            rd.status_message = Some(format!("Security: {}", warning.message()));
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::AudioStatus {
-                                            active,
-                                            muted,
-                                            volume,
-                                            format,
-                                            sample_rate,
-                                            channels,
-                                            bytes_received,
-                                        } => {
-                                            rd.audio_active = active;
-                                            rd.audio_muted = muted;
-                                            rd.audio_volume = volume;
-                                            rd.audio_format = Some(format);
-                                            rd.audio_sample_rate = sample_rate;
-                                            rd.audio_channels = channels;
-                                            rd.audio_bytes_received = bytes_received;
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::MicrophoneStatus {
-                                            active,
-                                            muted,
-                                            volume,
-                                            format,
-                                            sample_rate,
-                                            channels,
-                                            bytes_sent,
-                                            packets_sent,
-                                        } => {
-                                            rd.mic_active = active;
-                                            rd.mic_muted = muted;
-                                            rd.mic_volume = volume;
-                                            rd.mic_format = Some(format);
-                                            rd.mic_sample_rate = sample_rate;
-                                            rd.mic_channels = channels;
-                                            rd.mic_bytes_sent = bytes_sent;
-                                            rd.mic_packets_sent = packets_sent;
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::DisplayControlCaps {
-                                            max_monitors: _,
-                                            max_area,
-                                        } => {
-                                            rd.display_control_ready = true;
-                                            rd.max_monitor_area = Some(max_area);
-                                            rd.last_action_note = Some(
-                                                "Dynamic display resizing (MS-RDPEDISP) ready".into(),
-                                            );
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::DriveStatus {
-                                            drive_name,
-                                            local_path,
-                                            mounted,
-                                            bytes_read,
-                                            bytes_written,
-                                            operations_count,
-                                        } => {
-                                            rd.drive_name = Some(drive_name.clone());
-                                            rd.shared_folder = Some(std::path::PathBuf::from(local_path.clone()));
-                                            rd.drive_mounted = mounted;
-                                            rd.drive_bytes_read = bytes_read;
-                                            rd.drive_bytes_written = bytes_written;
-                                            rd.drive_operations_count = operations_count;
-                                            if mounted {
-                                                rd.last_action_note = Some(format!(
-                                                    "Shared drive \"{}\" mounted ({})",
-                                                    drive_name, local_path
-                                                ));
-                                            }
-                                        }
-                                        shellumi_remote_desktop::SessionEvent::Error(err) => {
-                                            rd.status = RemoteDesktopStatus::Error;
-                                            rd.error = Some(err.clone());
-                                            rd.status_message = Some(format!("Error: {err}"));
-                                        }
-                                        _ => {}
-                                    }
-                                    cx.notify();
-                                }
+                            let Some(tab) = app.tabs.iter_mut().find(|t| t.id == session_key.tab_id)
+                            else {
+                                keep_running = false;
+                                return;
+                            };
+                            let Some(rd) = &mut tab.remote_desktop_state else {
+                                keep_running = false;
+                                return;
+                            };
+                            if rd.connection_generation != session_key.connection_generation {
+                                keep_running = false;
+                                return;
                             }
+                            match event {
+                                shellumi_remote_desktop::SessionEvent::StateChanged(s) => match s {
+                                    shellumi_remote_desktop::SessionState::Connecting => {
+                                        rd.status = RemoteDesktopStatus::Connecting;
+                                        rd.status_message =
+                                            Some(format!("Connecting to {proto_name} server…"));
+                                    }
+                                    shellumi_remote_desktop::SessionState::Connected => {
+                                        rd.status = RemoteDesktopStatus::Connected;
+                                        rd.status_message =
+                                            Some(format!("Connected to {proto_name} server"));
+                                        trigger_auto_resize = true;
+                                    }
+                                    shellumi_remote_desktop::SessionState::Reconnecting {
+                                        attempt,
+                                        max_attempts,
+                                        delay_ms,
+                                    } => {
+                                        rd.status = RemoteDesktopStatus::Reconnecting {
+                                            attempt,
+                                            max_attempts,
+                                        };
+                                        let delay_s = (delay_ms as f64) / 1000.0;
+                                        rd.status_message = Some(format!(
+                                            "Connection interrupted. Reconnecting (attempt {attempt}/{max_attempts} in {delay_s:.1}s)…"
+                                        ));
+                                        rd.last_action_note =
+                                            Some(format!("Reconnecting ({attempt}/{max_attempts})"));
+                                    }
+                                    shellumi_remote_desktop::SessionState::Disconnected => {
+                                        if rd.status != RemoteDesktopStatus::Error
+                                            && rd.error.is_none()
+                                        {
+                                            rd.status = RemoteDesktopStatus::Disconnected;
+                                            rd.status_message = Some(format!(
+                                                "Disconnected from {proto_name} server"
+                                            ));
+                                        }
+                                    }
+                                    shellumi_remote_desktop::SessionState::Error(err) => {
+                                        rd.status = RemoteDesktopStatus::Error;
+                                        rd.error = Some(err.clone());
+                                        rd.status_message = Some(format!("Error: {err}"));
+                                    }
+                                    _ => {}
+                                },
+                                shellumi_remote_desktop::SessionEvent::RemoteResize {
+                                    width,
+                                    height,
+                                } => {
+                                    rd.width = width;
+                                    rd.height = height;
+                                    ack_size = Some((width, height));
+                                }
+                                shellumi_remote_desktop::SessionEvent::FrameReady {
+                                    sequence: _,
+                                    snapshot,
+                                } => {
+                                    if let Some(snap) = snapshot {
+                                        rd.width = snap.width;
+                                        rd.height = snap.height;
+                                        ack_size = Some((snap.width, snap.height));
+                                        let render_image =
+                                            crate::ui::remote_desktop_canvas::create_render_image_from_snapshot(&snap);
+                                        rd.render_image = render_image;
+                                        rd.framebuffer = Some(snap);
+                                    }
+                                    rd.status = RemoteDesktopStatus::Connected;
+                                }
+                                shellumi_remote_desktop::SessionEvent::Metrics(m) => {
+                                    rd.fps = m.fps;
+                                    rd.latency_ms = m.latency_ms;
+                                }
+                                shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
+                                    rd.clipboard_text = Some(text.clone());
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                    rd.last_action_note = Some(
+                                        "Remote clipboard text received and copied to local clipboard"
+                                            .into(),
+                                    );
+                                }
+                                shellumi_remote_desktop::SessionEvent::ServerFilesReceived {
+                                    files,
+                                    target_dir,
+                                } => {
+                                    rd.last_action_note = Some(format!(
+                                        "Received {} file(s) into {}",
+                                        files.len(),
+                                        target_dir
+                                    ));
+                                }
+                                shellumi_remote_desktop::SessionEvent::Bell => {
+                                    rd.last_action_note = Some("Terminal bell alert".into());
+                                }
+                                shellumi_remote_desktop::SessionEvent::SecurityWarning(warning) => {
+                                    rd.status_message =
+                                        Some(format!("Security: {}", warning.message()));
+                                }
+                                shellumi_remote_desktop::SessionEvent::AudioStatus {
+                                    active,
+                                    muted,
+                                    volume,
+                                    format,
+                                    sample_rate,
+                                    channels,
+                                    bytes_received,
+                                } => {
+                                    rd.audio_active = active;
+                                    rd.audio_muted = muted;
+                                    rd.audio_volume = volume;
+                                    rd.audio_format = Some(format);
+                                    rd.audio_sample_rate = sample_rate;
+                                    rd.audio_channels = channels;
+                                    rd.audio_bytes_received = bytes_received;
+                                }
+                                shellumi_remote_desktop::SessionEvent::MicrophoneStatus {
+                                    active,
+                                    muted,
+                                    volume,
+                                    format,
+                                    sample_rate,
+                                    channels,
+                                    bytes_sent,
+                                    packets_sent,
+                                } => {
+                                    rd.mic_active = active;
+                                    rd.mic_muted = muted;
+                                    rd.mic_volume = volume;
+                                    rd.mic_format = Some(format);
+                                    rd.mic_sample_rate = sample_rate;
+                                    rd.mic_channels = channels;
+                                    rd.mic_bytes_sent = bytes_sent;
+                                    rd.mic_packets_sent = packets_sent;
+                                }
+                                shellumi_remote_desktop::SessionEvent::DisplayControlCaps {
+                                    max_monitors: _,
+                                    max_area,
+                                } => {
+                                    rd.display_control_ready = true;
+                                    rd.max_monitor_area = Some(max_area);
+                                    rd.last_action_note = Some(
+                                        "Dynamic display resizing (MS-RDPEDISP) ready".into(),
+                                    );
+                                    trigger_auto_resize = true;
+                                }
+                                shellumi_remote_desktop::SessionEvent::DriveStatus {
+                                    drive_name,
+                                    local_path,
+                                    mounted,
+                                    bytes_read,
+                                    bytes_written,
+                                    operations_count,
+                                } => {
+                                    rd.drive_name = Some(drive_name.clone());
+                                    rd.shared_folder =
+                                        Some(std::path::PathBuf::from(local_path.clone()));
+                                    rd.drive_mounted = mounted;
+                                    rd.drive_bytes_read = bytes_read;
+                                    rd.drive_bytes_written = bytes_written;
+                                    rd.drive_operations_count = operations_count;
+                                    if mounted {
+                                        rd.last_action_note = Some(format!(
+                                            "Shared drive \"{}\" mounted ({})",
+                                            drive_name, local_path
+                                        ));
+                                    }
+                                }
+                                shellumi_remote_desktop::SessionEvent::Error(err) => {
+                                    rd.status = RemoteDesktopStatus::Error;
+                                    rd.error = Some(err.clone());
+                                    rd.status_message = Some(format!("Error: {err}"));
+                                }
+                                _ => {}
+                            }
+                            if let Some(sz) = ack_size {
+                                app.handle_rd_resize_acknowledged(session_key, sz, cx);
+                            }
+                            if trigger_auto_resize {
+                                app.schedule_rd_auto_resize(session_key.tab_id, cx);
+                            }
+                            cx.notify();
                         });
-                        if res.is_err() {
+                        if res.is_err() || !keep_running {
                             break;
                         }
                     }
@@ -1005,6 +1072,9 @@ impl Shellumi {
         tab_idx: usize,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -1016,7 +1086,9 @@ impl Shellumi {
             if let Ok(Ok(Some(paths))) = rx.await {
                 if !paths.is_empty() {
                     let _ = this.update(cx, |app, cx| {
-                        app.remote_desktop_send_files(tab_idx, paths, cx);
+                        if let Some(current_idx) = app.tabs.iter().position(|t| t.id == tab_id) {
+                            app.remote_desktop_send_files(current_idx, paths, cx);
+                        }
                     });
                 }
             }
@@ -1200,15 +1272,21 @@ impl Shellumi {
         Some((w, h))
     }
 
-    /// Request a remote desktop resize using *only* the validated GPUI `CanvasMeasurement`.
-    pub(crate) fn request_measured_remote_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+    /// Schedule a debounced automatic resize for an active RDP session when its
+    /// measured canvas viewport changes.
+    pub(crate) fn schedule_rd_auto_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
-        let Some(rd) = self.tabs[tab_idx].remote_desktop_state.as_ref() else {
+        let Some(rd) = tab.remote_desktop_state.as_ref() else {
             return;
         };
-        if rd.protocol != RemoteDesktopProtocol::Rdp || rd.view_only || !rd.display_control_ready {
+        if rd.protocol != RemoteDesktopProtocol::Rdp
+            || !rd.dynamic_resize_enabled
+            || rd.view_only
+            || !rd.display_control_ready
+            || rd.status != RemoteDesktopStatus::Connected
+        {
             return;
         }
         let Some(measurement) = self
@@ -1218,7 +1296,7 @@ impl Shellumi {
         else {
             return;
         };
-        let Some((target_w, target_h)) = Self::compute_legal_rdp_resize(
+        let Some(target) = Self::compute_legal_rdp_resize(
             f32::from(measurement.viewport.size.width),
             f32::from(measurement.viewport.size.height),
             rd.max_monitor_area,
@@ -1226,13 +1304,172 @@ impl Shellumi {
             return;
         };
 
+        let conn_gen = rd.connection_generation;
+        let layout_gen = measurement.layout_epoch;
         let entry = self.rd_resize_state.entry(tab_id).or_default();
-        if entry.last_sent == Some((target_w, target_h)) {
+        if entry.connection_generation != conn_gen {
+            entry.reset_for_connection(conn_gen);
+        }
+        if !entry.record_desired(target, layout_gen) {
             return;
         }
-        entry.desired = Some((target_w, target_h));
-        entry.last_sent = Some((target_w, target_h));
-        self.remote_desktop_request_resize(tab_idx, target_w, target_h, cx);
+        let debounce_gen = entry.debounce_generation;
+        let session_key = crate::RemoteSessionKey {
+            tab_id,
+            connection_generation: conn_gen,
+        };
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(tab) = app.tabs.iter().find(|t| t.id == session_key.tab_id) else {
+                    return;
+                };
+                let Some(rd) = tab.remote_desktop_state.as_ref() else {
+                    return;
+                };
+                if rd.connection_generation != session_key.connection_generation
+                    || rd.status != RemoteDesktopStatus::Connected
+                    || !rd.dynamic_resize_enabled
+                    || !rd.display_control_ready
+                    || rd.view_only
+                {
+                    return;
+                }
+                let Some(state) = app.rd_resize_state.get(&session_key.tab_id) else {
+                    return;
+                };
+                if state.debounce_generation != debounce_gen
+                    || state.layout_generation != layout_gen
+                    || state.in_flight.is_some()
+                {
+                    return;
+                }
+                if let Some(target_size) = state.desired {
+                    if state.last_acknowledged == Some(target_size) {
+                        return;
+                    }
+                    app.dispatch_rd_auto_resize(session_key, target_size, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn dispatch_rd_auto_resize(
+        &mut self,
+        session_key: crate::RemoteSessionKey,
+        target: (u32, u32),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_idx) = self.tabs.iter().position(|t| t.id == session_key.tab_id) else {
+            return;
+        };
+        let Some(rd) = self.tabs[tab_idx].remote_desktop_state.as_ref() else {
+            return;
+        };
+        if rd.connection_generation != session_key.connection_generation
+            || rd.status != RemoteDesktopStatus::Connected
+            || !rd.display_control_ready
+            || rd.view_only
+        {
+            return;
+        }
+        let entry = self.rd_resize_state.entry(session_key.tab_id).or_default();
+        entry.in_flight = Some(target);
+        tracing::debug!(
+            tab_id = session_key.tab_id,
+            connection_generation = session_key.connection_generation,
+            width = target.0,
+            height = target.1,
+            "Dispatching debounced RDP display resize"
+        );
+        self.remote_desktop_request_resize(tab_idx, target.0, target.1, cx);
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2000))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(rd) = app
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == session_key.tab_id)
+                    .and_then(|t| t.remote_desktop_state.as_ref())
+                else {
+                    return;
+                };
+                if rd.connection_generation != session_key.connection_generation
+                    || rd.status != RemoteDesktopStatus::Connected
+                {
+                    return;
+                }
+                let next_dispatch = {
+                    let Some(state) = app.rd_resize_state.get_mut(&session_key.tab_id) else {
+                        return;
+                    };
+                    if state.connection_generation != session_key.connection_generation
+                        || state.in_flight != Some(target)
+                    {
+                        return;
+                    }
+                    state.in_flight = None;
+                    if let Some(latest) = state.desired {
+                        if latest != target {
+                            state.retry_count = 0;
+                            Some(latest)
+                        } else if state.retry_count < 2 {
+                            state.retry_count += 1;
+                            Some(target)
+                        } else {
+                            state.last_error =
+                                Some("Display resize acknowledgement timed out".into());
+                            tracing::warn!(
+                                tab_id = session_key.tab_id,
+                                width = target.0,
+                                height = target.1,
+                                "RDP display resize acknowledgement timed out after retries"
+                            );
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(next_target) = next_dispatch {
+                    app.dispatch_rd_auto_resize(session_key, next_target, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn handle_rd_resize_acknowledged(
+        &mut self,
+        session_key: crate::RemoteSessionKey,
+        size: (u32, u32),
+        cx: &mut Context<Self>,
+    ) {
+        let next = {
+            let Some(state) = self.rd_resize_state.get_mut(&session_key.tab_id) else {
+                return;
+            };
+            if state.connection_generation != session_key.connection_generation {
+                return;
+            }
+            state.acknowledge(size)
+        };
+        if let Some(next_target) = next {
+            self.dispatch_rd_auto_resize(session_key, next_target, cx);
+        }
+    }
+
+    /// Request a remote desktop resize using *only* the validated GPUI `CanvasMeasurement`.
+    #[allow(dead_code)]
+    pub(crate) fn request_measured_remote_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        self.schedule_rd_auto_resize(tab_id, cx);
     }
 }
 
@@ -1257,5 +1494,30 @@ mod tests {
             Shellumi::compute_legal_rdp_resize(f32::NAN, 720.0, None),
             None
         );
+    }
+
+    #[test]
+    fn test_rd_auto_resize_state_coalesces_and_isolates_generations() {
+        let mut state = crate::RdAutoResizeState::default();
+        assert!(state.record_desired((1280, 720), 1));
+        let gen1 = state.debounce_generation;
+        assert!(state.record_desired((1440, 900), 1));
+        assert_ne!(state.debounce_generation, gen1);
+
+        // Simulate in-flight (1440, 900) and a newer desired (1600, 1000) arriving mid-flight.
+        state.in_flight = Some((1440, 900));
+        assert!(state.record_desired((1600, 1000), 2));
+        // Acknowledging (1440, 900) must immediately return the coalesced (1600, 1000).
+        assert_eq!(state.acknowledge((1440, 900)), Some((1600, 1000)));
+        assert_eq!(state.in_flight, None);
+
+        // Reconnect resets in-flight/acknowledged/retries cleanly.
+        state.in_flight = Some((1600, 1000));
+        state.retry_count = 2;
+        state.reset_for_connection(2);
+        assert_eq!(state.connection_generation, 2);
+        assert_eq!(state.in_flight, None);
+        assert_eq!(state.last_acknowledged, None);
+        assert_eq!(state.retry_count, 0);
     }
 }
