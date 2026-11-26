@@ -386,6 +386,9 @@ mod tests {
 
     #[test]
     fn spawns_local_pty_and_executes_echo() {
+        #[cfg(windows)]
+        let cmd = TerminalCommand::new("cmd").args(["/C", "echo", "hello from pty"]);
+        #[cfg(not(windows))]
         let cmd = TerminalCommand::new("/bin/echo").arg("hello from pty");
         let session = PtySession::spawn(&cmd, 24, 80).expect("failed to spawn echo in PTY");
         let mut reader = session.try_clone_reader().expect("failed to clone reader");
