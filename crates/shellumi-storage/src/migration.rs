@@ -1294,7 +1294,11 @@ impl MigrationEngine {
                 drop(target);
                 fault(&format!("staging_committed:{index}"))?;
                 io(
-                    File::open(&path).and_then(|f| f.sync_all()),
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .and_then(|f| f.sync_all()),
                     "Flush encrypted staged database",
                 )?;
                 sync_dir(&work)?;
