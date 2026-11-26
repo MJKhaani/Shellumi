@@ -159,6 +159,50 @@ impl Shellumi {
         self.launch_saved_tunnel(host, session_name, args, window, cx);
     }
 
+    /// Start or stop a saved port-forward tunnel from the inventory or Tunnel Inspector.
+    pub(crate) fn toggle_saved_tunnel(
+        &mut self,
+        tunnel_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tunnel) = self.tunnels.iter().find(|t| t.id == tunnel_id).cloned() else {
+            return;
+        };
+        let session_name = format!("Tunnel: {}", tunnel.name);
+        if let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.name == session_name)
+            .map(|tab| tab.id)
+        {
+            self.close_tab(tab_id, window, cx);
+            return;
+        }
+        let host = match &self.hosts {
+            HostState::Loaded(hosts) => hosts
+                .iter()
+                .find(|host| Some(host.id) == tunnel.host_id)
+                .cloned(),
+            _ => None,
+        };
+        let Some(host) = host else {
+            self.desktop.message =
+                Some("Choose a saved SSH host for this tunnel before starting.".into());
+            cx.notify();
+            return;
+        };
+        let (flag, value) = tunnel.rule.openssh_argument();
+        let args = vec![
+            "-N".to_string(),
+            "-o".into(),
+            "ExitOnForwardFailure=yes".into(),
+            flag.into(),
+            value,
+        ];
+        self.launch_saved_tunnel(host, session_name, args, window, cx);
+    }
+
     pub(crate) fn save_new_tunnel_modal(&mut self, cx: &mut Context<Self>) {
         let (name, bind_port_str, target_host_str, target_port_str, ftype, host_id, auto_start) = {
             if let Some(ref modal) = self.tunnel_modal {

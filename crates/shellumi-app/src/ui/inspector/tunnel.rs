@@ -140,22 +140,48 @@ impl Shellumi {
 
         let mut body = div().flex().flex_col().gap_4();
 
+        let is_running = self
+            .tabs
+            .iter()
+            .any(|t| t.name == format!("Tunnel: {}", t_name));
+
         // Action buttons
-        let actions_row = div().flex().gap_2().child(
-            AppButton::new(
-                "tunnel-view-delete-btn",
-                "Delete Port Forward",
-                ButtonVariant::Danger,
+        let actions_row = div()
+            .flex()
+            .gap_2()
+            .child(
+                AppButton::new(
+                    "tunnel-view-toggle-btn",
+                    if is_running {
+                        "Stop Tunnel"
+                    } else {
+                        "Start Tunnel"
+                    },
+                    if is_running {
+                        ButtonVariant::Secondary
+                    } else {
+                        ButtonVariant::Primary
+                    },
+                )
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.toggle_saved_tunnel(id_val, window, cx);
+                })),
             )
-            .on_click({
-                let name_for_del = t_name.clone();
-                cx.listener(move |app, _, _, cx| {
-                    app.delete_confirm =
-                        Some(crate::DeleteTarget::Tunnel(id_val, name_for_del.clone()));
-                    cx.notify();
-                })
-            }),
-        );
+            .child(
+                AppButton::new(
+                    "tunnel-view-delete-btn",
+                    "Delete Port Forward",
+                    ButtonVariant::Danger,
+                )
+                .on_click({
+                    let name_for_del = t_name.clone();
+                    cx.listener(move |app, _, _, cx| {
+                        app.delete_confirm =
+                            Some(crate::DeleteTarget::Tunnel(id_val, name_for_del.clone()));
+                        cx.notify();
+                    })
+                }),
+            );
         body = body.child(actions_row);
 
         // Configuration details

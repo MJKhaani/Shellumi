@@ -313,6 +313,13 @@ impl Shellumi {
             return;
         }
 
+        self.vault_dropdown_open = false;
+        self.tab_overflow_menu_open = false;
+        self.group_context_menu = None;
+        self.sftp_context_menu = None;
+        self.rd_display_menu_open = false;
+        self.rd_keyboard_menu_open = false;
+        self.rd_more_menu_open = false;
         self.form = None;
         self.group_inspector = None;
         self.snippet_form = None;
@@ -699,16 +706,206 @@ impl Shellumi {
                                 );
                             })),
                     );
-                let content_scroll = div()
-                    .id("port-forwarding-content-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_6()
-                    .child(
-                        empty("Port forwarding", "Create and manage saved SSH tunnel rules.")
-                            .child(primary("open-tunnels-page", "Manage tunnels").on_click(cx.listener(|app, _, window, cx| app.navigate_page("Port Forwarding", Some(window), cx)))),
-                    );
+                let content_scroll = if self.tunnels.is_empty() {
+                    div()
+                        .id("port-forwarding-content-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_6()
+                        .child(
+                            empty("Port forwarding", "Create and manage saved SSH tunnel rules.")
+                                .child(
+                                    primary("new-tunnel-empty-btn", "+ New Tunnel").on_click(
+                                        cx.listener(|app, _, _, cx| {
+                                            app.open_tunnel_inspector_mode(
+                                                None,
+                                                crate::ui::inspector::InspectorMode::Create,
+                                                cx,
+                                            );
+                                        }),
+                                    ),
+                                ),
+                        )
+                } else {
+                    let mut list = div()
+                        .id("port-forwarding-content-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_2p5();
+                    for tunnel in &self.tunnels {
+                        let tid = tunnel.id;
+                        let tname = tunnel.name.clone();
+                        let tname_del = tunnel.name.clone();
+                        let is_running = self
+                            .tabs
+                            .iter()
+                            .any(|t| t.name == format!("Tunnel: {}", tunnel.name));
+                        let type_label = match tunnel.rule.forwarding_type {
+                            shellumi_core::ForwardingType::Local => "Local (-L)",
+                            shellumi_core::ForwardingType::Remote => "Remote (-R)",
+                            shellumi_core::ForwardingType::Dynamic => "Dynamic (-D)",
+                        };
+                        let bind_str = format!(
+                            "{}:{}",
+                            tunnel.rule.bind_address.as_deref().unwrap_or("127.0.0.1"),
+                            tunnel.rule.bind_port
+                        );
+                        let dest_str = if tunnel.rule.forwarding_type
+                            == shellumi_core::ForwardingType::Dynamic
+                        {
+                            "SOCKS5".to_string()
+                        } else {
+                            format!(
+                                "{}:{}",
+                                tunnel.rule.target_host.as_deref().unwrap_or("—"),
+                                tunnel
+                                    .rule
+                                    .target_port
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "—".into())
+                            )
+                        };
+                        let gw_name = tunnel
+                            .host_id
+                            .and_then(|hid| match &self.hosts {
+                                HostState::Loaded(hosts) => {
+                                    hosts.iter().find(|h| h.id == hid).map(|h| h.name.clone())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "No gateway host".into());
+
+                        list = list.child(
+                            div()
+                                .id(("tunnel-row", tid as usize))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .px_4()
+                                .py_3()
+                                .rounded_lg()
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.open_tunnel_inspector_mode(
+                                        Some(tid),
+                                        crate::ui::inspector::InspectorMode::View,
+                                        cx,
+                                    );
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                        .child(tname),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded_md()
+                                                        .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                                                        .text_xs()
+                                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                        .child(type_label),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded_md()
+                                                        .bg(if is_running {
+                                                            rgba(0x22c55e22)
+                                                        } else {
+                                                            rgba(0x64748b22)
+                                                        })
+                                                        .text_xs()
+                                                        .text_color(if is_running {
+                                                            rgb(MacTheme::SUCCESS)
+                                                        } else {
+                                                            rgb(MacTheme::TEXT_TERTIARY)
+                                                        })
+                                                        .child(if is_running {
+                                                            "Running"
+                                                        } else {
+                                                            "Stopped"
+                                                        }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child(format!(
+                                                    "{bind_str} → {dest_str} · via {gw_name}"
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            button(
+                                                ("tunnel-toggle-btn", tid as usize),
+                                                if is_running { "Stop" } else { "Start" },
+                                            )
+                                            .on_click(cx.listener(move |app, _, window, cx| {
+                                                cx.stop_propagation();
+                                                app.toggle_saved_tunnel(tid, window, cx);
+                                            })),
+                                        )
+                                        .child(
+                                            button(("tunnel-edit-btn", tid as usize), "Edit")
+                                                .on_click(cx.listener(move |app, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    app.open_tunnel_inspector_mode(
+                                                        Some(tid),
+                                                        crate::ui::inspector::InspectorMode::Edit,
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                        .child(
+                                            button(("tunnel-del-btn", tid as usize), "Delete")
+                                                .on_click(cx.listener(move |app, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    app.delete_confirm = Some(
+                                                        crate::DeleteTarget::Tunnel(
+                                                            tid,
+                                                            tname_del.clone(),
+                                                        ),
+                                                    );
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                ),
+                        );
+                    }
+                    list
+                };
                 div()
                     .flex_1()
                     .min_w_0()

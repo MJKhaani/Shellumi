@@ -439,153 +439,161 @@ impl Shellumi {
         groups.sort_unstable();
         groups.dedup();
 
-        let groups_section = if self.selected_group.is_none()
-            && !groups.is_empty()
-            && query.is_empty()
-        {
-            let mut grid = div().flex().flex_wrap().gap_3();
-            for (idx, group) in groups.iter().enumerate() {
-                let grp_name = group.to_string();
-                let grp_menu_name = group.to_string();
-                let count = hosts
-                    .iter()
-                    .filter(|h| h.group_name.as_deref() == Some(*group))
-                    .count();
-                let card = div()
-                    .id(("group-card", idx))
-                    .w(px(card_width))
-                    .h(px(58.0))
-                    .rounded_lg()
-                    .bg(rgb(MacTheme::SURFACE))
-                    .border_1()
-                    .border_color(rgb(MacTheme::BORDER))
-                    .p_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .cursor_pointer()
-                    .hover(|s| {
-                        s.bg(rgb(MacTheme::SURFACE_HOVER))
-                            .border_color(rgb(MacTheme::ACCENT_BLUE))
-                    })
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.selected_group = Some(grp_name.clone());
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .w(px(32.0))
-                                    .h(px(32.0))
-                                    .rounded_md()
-                                    .bg(rgb(MacTheme::BADGE_NAVY))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_sm()
-                                    .child(
-                                        if let Some(p) = resolve_icon_path("groups", false, 48) {
-                                            div()
-                                                .w(px(32.0))
-                                                .h(px(32.0))
-                                                .child(gpui::img(p).size_full())
+        let groups_section =
+            if self.selected_group.is_none() && !groups.is_empty() && query.is_empty() {
+                let mut grid = div().flex().flex_wrap().gap_3();
+                for (idx, group) in groups.iter().enumerate() {
+                    let grp_name = group.to_string();
+                    let grp_menu_name = group.to_string();
+                    let count = hosts
+                        .iter()
+                        .filter(|h| h.group_name.as_deref() == Some(*group))
+                        .count();
+                    let card = div()
+                        .id(("group-card", idx))
+                        .w(px(card_width))
+                        .h(px(58.0))
+                        .rounded_lg()
+                        .bg(rgb(MacTheme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .p_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .cursor_pointer()
+                        .hover(|s| {
+                            s.bg(rgb(MacTheme::SURFACE_HOVER))
+                                .border_color(rgb(MacTheme::ACCENT_BLUE))
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.selected_group = Some(grp_name.clone());
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .w(px(32.0))
+                                        .h(px(32.0))
+                                        .rounded_md()
+                                        .bg(rgb(MacTheme::BADGE_NAVY))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_sm()
+                                        .child(
+                                            if let Some(p) = resolve_icon_path("groups", false, 48)
+                                            {
+                                                div()
+                                                    .w(px(32.0))
+                                                    .h(px(32.0))
+                                                    .child(gpui::img(p).size_full())
+                                                    .into_any_element()
+                                            } else {
+                                                crate::ui::icon::Icon::new(
+                                                    crate::ui::icon::IconName::Groups,
+                                                )
+                                                .size(32.0)
                                                 .into_any_element()
-                                        } else {
-                                            crate::ui::icon::Icon::new(
-                                                crate::ui::icon::IconName::Groups,
-                                            )
-                                            .size(32.0)
-                                            .into_any_element()
-                                        },
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                            .truncate()
-                                            .child(group.to_string()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                            .child(format!("{count} hosts")),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(("group-menu-btn", idx))
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                            .hover(|s| {
-                                s.text_color(rgb(MacTheme::TEXT_PRIMARY))
-                                    .bg(rgb(MacTheme::INPUT_BG))
-                            })
-                            .on_click(cx.listener(
-                                move |app, event: &gpui::ClickEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    let position = event.position();
-                                    let size = window.viewport_size();
-                                    let x = (position.x.to_f64() as f32)
-                                        .clamp(0.0, (size.width.to_f64() as f32 - 210.0).max(0.0));
-                                    let y = (position.y.to_f64() as f32)
-                                        .clamp(0.0, (size.height.to_f64() as f32 - 260.0).max(0.0));
-                                    app.group_context_menu = Some((grp_menu_name.clone(), x, y));
-                                    cx.notify();
-                                },
-                            ))
-                            .child(if let Some(p) = resolve_icon_path("more", false, 48) {
-                                div()
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .child(gpui::img(p).size_full())
-                                    .into_any_element()
-                            } else {
-                                crate::ui::icon::Icon::new(crate::ui::icon::IconName::More)
-                                    .size(20.0)
-                                    .into_any_element()
-                            }),
-                    );
-                grid = grid.child(card);
-            }
-            Some(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                            .child("Groups"),
-                    )
-                    .child(grid),
-            )
-        } else {
-            None
-        };
+                                            },
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                .truncate()
+                                                .child(group.to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child(format!("{count} hosts")),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("group-menu-btn", idx))
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .hover(|s| {
+                                    s.text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .bg(rgb(MacTheme::INPUT_BG))
+                                })
+                                .on_click(cx.listener(
+                                    move |app, event: &gpui::ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        let position = event.position();
+                                        let size = window.viewport_size();
+                                        let placement =
+                                            crate::ui::components::popover::place_context_menu(
+                                                position.x.to_f64() as f32,
+                                                position.y.to_f64() as f32,
+                                                200.0,
+                                                240.0,
+                                                size.width.to_f64() as f32,
+                                                size.height.to_f64() as f32,
+                                            );
+                                        app.group_context_menu = Some((
+                                            grp_menu_name.clone(),
+                                            placement.left,
+                                            placement.top,
+                                        ));
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(if let Some(p) = resolve_icon_path("more", false, 48) {
+                                    div()
+                                        .w(px(20.0))
+                                        .h(px(20.0))
+                                        .child(gpui::img(p).size_full())
+                                        .into_any_element()
+                                } else {
+                                    crate::ui::icon::Icon::new(crate::ui::icon::IconName::More)
+                                        .size(20.0)
+                                        .into_any_element()
+                                }),
+                        );
+                    grid = grid.child(card);
+                }
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                .child("Groups"),
+                        )
+                        .child(grid),
+                )
+            } else {
+                None
+            };
 
         // Filtering and sorting
         let mut filtered: Vec<&SavedHost> = hosts

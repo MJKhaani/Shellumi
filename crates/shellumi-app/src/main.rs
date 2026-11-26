@@ -2921,11 +2921,13 @@ impl Shellumi {
 
     fn render_vault_dropdown_overlay(
         &self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Stateful<gpui::Div>> {
         if !self.vault_dropdown_open {
             return None;
         }
+        let trigger_bounds = self.vault_trigger_bounds?;
         Some(
             div()
                 .id("vault-dropdown-backdrop")
@@ -2952,20 +2954,23 @@ impl Shellumi {
                         .cloned()
                         .collect();
 
-                    let (menu_top, menu_left) = if let Some(b) = self.vault_trigger_bounds {
-                        (
-                            f32::from(b.origin.y + b.size.height) + 4.0,
-                            f32::from(b.origin.x).max(8.0),
-                        )
-                    } else {
-                        (46.0, 84.0)
-                    };
+                    let win_size = window.bounds().size;
+                    let placement = crate::ui::components::popover::place_popover_from_trigger(
+                        trigger_bounds,
+                        240.0,
+                        320.0,
+                        win_size.width.to_f64() as f32,
+                        win_size.height.to_f64() as f32,
+                        crate::ui::components::PopoverAnchor::BottomLeft,
+                    );
                     let mut menu = div()
                         .id("vault-dropdown-menu")
                         .absolute()
-                        .top(px(menu_top))
-                        .left(px(menu_left))
+                        .top(px(placement.top))
+                        .left(px(placement.left))
                         .w(px(240.0))
+                        .max_h(px(placement.max_height))
+                        .overflow_y_scroll()
                         .rounded_lg()
                         .bg(rgb(MacTheme::SURFACE))
                         .border_1()
@@ -3257,7 +3262,11 @@ impl Shellumi {
                                 .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.vault_dropdown_open = false;
-                                    app.open_team_modal(cx);
+                                    app.open_team_inspector_mode(
+                                        None,
+                                        crate::ui::inspector::InspectorMode::View,
+                                        cx,
+                                    );
                                 }))
                                 .child("👥 Manage Team Vaults…"),
                         )
@@ -3274,24 +3283,24 @@ impl Shellumi {
             return None;
         }
 
-        let window_w = window.bounds().size.width.to_f64() as f32;
-        let (top_pos, left_pos) = if let Some(b) = self.tab_overflow_trigger_bounds {
-            let x = f32::from(b.origin.x)
-                .min((window_w - 292.0).max(8.0))
-                .max(8.0);
-            let y = f32::from(b.origin.y + b.size.height) + 4.0;
-            (y, x)
-        } else {
-            (46.0, (window_w - 300.0).min(self.tab_overflow_x).max(180.0))
-        };
+        let trigger_bounds = self.tab_overflow_trigger_bounds?;
+        let win_size = window.bounds().size;
+        let placement = crate::ui::components::popover::place_popover_from_trigger(
+            trigger_bounds,
+            280.0,
+            320.0,
+            win_size.width.to_f64() as f32,
+            win_size.height.to_f64() as f32,
+            crate::ui::components::PopoverAnchor::BottomRight,
+        );
 
         let mut list = div()
             .id("tab-overflow-popover")
             .absolute()
-            .top(px(top_pos))
-            .left(px(left_pos))
+            .top(px(placement.top))
+            .left(px(placement.left))
             .w(px(280.0))
-            .max_h(px(320.0))
+            .max_h(px(placement.max_height.min(320.0)))
             .overflow_y_scroll()
             .bg(rgb(MacTheme::SURFACE))
             .border_1()

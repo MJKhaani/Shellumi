@@ -10,6 +10,7 @@ use shellumi_core::server::types::{
 use shellumi_core::server::ShellumiServerClient;
 
 impl Shellumi {
+    #[allow(dead_code)]
     pub(crate) fn open_team_modal(&mut self, cx: &mut Context<Self>) {
         let new_vault_name =
             cx.new(|cx| TextInput::new(cx, "", "Team vault name (e.g. Platform Team)"));

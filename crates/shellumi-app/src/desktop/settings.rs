@@ -242,7 +242,11 @@ impl Shellumi {
                         "Manage member key envelopes, epoch rotations, and collaborative access.".into(),
                         button("open-team-sharing-btn", "Manage Team & Keys")
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.open_team_modal(cx);
+                                app.open_team_inspector_mode(
+                                    None,
+                                    crate::ui::inspector::InspectorMode::View,
+                                    cx,
+                                );
                             }))
                             .into_any_element(),
                     ))

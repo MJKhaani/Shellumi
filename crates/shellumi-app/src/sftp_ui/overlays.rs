@@ -12,18 +12,23 @@ impl Shellumi {
         let entry_path = ctx_menu.entry_path.clone();
         let is_dir = ctx_menu.is_dir;
 
-        let left_offset = if ctx_menu.cursor_x > 0.0 {
-            px((ctx_menu.cursor_x - 10.0).clamp(16.0, 950.0))
+        let raw_x = if ctx_menu.cursor_x > 0.0 {
+            ctx_menu.cursor_x - 10.0
         } else if is_left {
-            px(120.0)
+            120.0
         } else {
-            px(600.0)
+            600.0
         };
-        let top_offset = if ctx_menu.cursor_y > 0.0 {
-            px((ctx_menu.cursor_y - 10.0).clamp(60.0, 550.0))
+        let raw_y = if ctx_menu.cursor_y > 0.0 {
+            ctx_menu.cursor_y - 10.0
         } else {
-            px(120.0 + (ctx_menu.target_idx as f32 * 36.0).min(380.0))
+            120.0 + (ctx_menu.target_idx as f32 * 36.0).min(380.0)
         };
+        let placement = crate::ui::components::popover::place_context_menu(
+            raw_x, raw_y, 220.0, 260.0, 1200.0, 720.0,
+        );
+        let left_offset = px(placement.left);
+        let top_offset = px(placement.top);
 
         let has_item = !entry_name.is_empty();
 

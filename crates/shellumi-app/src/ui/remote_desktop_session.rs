@@ -1571,41 +1571,19 @@ impl Shellumi {
                                                 None
                                             })
                                             .children(state.password_input.as_ref().map(|input| {
-                                                let is_masked = input.read(cx).is_masked();
-                                                let input_entity = input.clone();
                                                 div()
                                                     .flex()
                                                     .flex_col()
                                                     .gap_1()
                                                     .child(
                                                         div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_between()
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                                                    .child(if is_vnc {
-                                                                        "Password (macOS user password or VNC password)"
-                                                                    } else {
-                                                                        "Password (held in memory for this session only)"
-                                                                    }),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .id(("toggle-password-visibility", tab_idx))
-                                                                    .text_xs()
-                                                                    .cursor_pointer()
-                                                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                                                    .hover(|s| s.text_color(rgb(MacTheme::TEXT_PRIMARY)))
-                                                                    .on_click(cx.listener(move |_app, _, _, cx| {
-                                                                        input_entity.update(cx, |input, cx| {
-                                                                            input.toggle_masked(cx);
-                                                                        });
-                                                                    }))
-                                                                    .child(if is_masked { "👁️ Show" } else { "🔒 Hide" }),
-                                                            ),
+                                                            .text_xs()
+                                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                            .child(if is_vnc {
+                                                                "Password (macOS user password or VNC password)"
+                                                            } else {
+                                                                "Password (held in memory for this session only)"
+                                                            }),
                                                     )
                                                     .child(input.clone())
                                             })),

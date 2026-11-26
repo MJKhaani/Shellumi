@@ -58,6 +58,7 @@ pub(crate) struct TextInput {
     disabled: bool,
     read_only: bool,
     has_error: bool,
+    was_focused: bool,
 }
 
 impl Drop for TextInput {
@@ -714,6 +715,13 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
         let is_focused = focus_handle.is_focused(window);
+        if self.is_secret
+            && !self.masked
+            && ((self.was_focused && !is_focused) || !window.is_window_active())
+        {
+            self.masked = true;
+        }
+        self.was_focused = is_focused;
 
         let base = div()
             .flex()
@@ -812,7 +820,10 @@ impl Render for TextInput {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
-                        .on_click(cx.listener(|input, _, _, cx| {
+                        .on_click(cx.listener(|input, _, window, cx| {
+                            if let Some(fh) = &input.focus_handle {
+                                window.focus(fh);
+                            }
                             input.toggle_masked(cx);
                         }))
                         .child(
@@ -856,6 +867,7 @@ impl TextInput {
             disabled: false,
             read_only: false,
             has_error: false,
+            was_focused: false,
         }
     }
     #[cfg(test)]
@@ -877,6 +889,7 @@ impl TextInput {
             disabled: false,
             read_only: false,
             has_error: false,
+            was_focused: false,
         }
     }
     pub(crate) fn bare(mut self) -> Self {

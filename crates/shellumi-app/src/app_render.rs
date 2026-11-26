@@ -214,7 +214,7 @@ impl Render for Shellumi {
                 container = container.child(self.render_unified_inspector(window, cx));
             }
             let mut result = root.child(container);
-            if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
+            if let Some(dropdown) = self.render_vault_dropdown_overlay(window, cx) {
                 result = result.child(dropdown);
             }
             if let Some(overflow) = self.render_tab_overflow_popover(window, cx) {
@@ -1462,7 +1462,7 @@ impl Render for Shellumi {
                 if let Some(modal) = &self.setup_wizard_modal {
                     result = result.child(self.render_setup_wizard_modal(modal, cx));
                 }
-                if let Some(dropdown) = self.render_vault_dropdown_overlay(cx) {
+                if let Some(dropdown) = self.render_vault_dropdown_overlay(window, cx) {
                     result = result.child(dropdown);
                 }
                 if let Some(overflow) = self.render_tab_overflow_popover(window, cx) {
