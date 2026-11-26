@@ -407,6 +407,8 @@ pub struct SyncHostPayload {
     pub protocol_config: Option<String>,
     #[serde(default)]
     pub identity_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_name: Option<String>,
 }
 
 fn default_host_protocol() -> String {
@@ -4601,12 +4603,12 @@ impl HostStore {
             existing_identity_id,
             new_identity,
             None,
-            None,
+            false,
         )
         .await
     }
 
-    /// Single-transaction atomic host + optional identity + optional sync mutation + journal commit.
+    /// Single-transaction atomic host + optional identity + optional sync mutations + journal commit.
     #[allow(clippy::too_many_arguments)]
     pub async fn save_host_with_identity_and_journal_tx(
         &mut self,
@@ -4622,7 +4624,44 @@ impl HostStore {
         existing_identity_id: Option<i64>,
         new_identity: Option<&shellumi_core::NewIdentity>,
         journal_op_id: Option<&str>,
-        sync_mutation: Option<&PendingSyncMutation<'_>>,
+        record_sync_mutations: bool,
+    ) -> Result<(i64, Option<i64>), StorageError> {
+        self.save_host_with_identity_and_journal_tx_inner(
+            host_id,
+            name,
+            destination,
+            group_name,
+            tags,
+            jump_host,
+            startup_snippet_id,
+            protocol,
+            protocol_config,
+            existing_identity_id,
+            new_identity,
+            journal_op_id,
+            record_sync_mutations,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn save_host_with_identity_and_journal_tx_inner(
+        &mut self,
+        host_id: Option<i64>,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+        existing_identity_id: Option<i64>,
+        new_identity: Option<&shellumi_core::NewIdentity>,
+        journal_op_id: Option<&str>,
+        record_sync_mutations: bool,
+        inject_sync_failure: bool,
     ) -> Result<(i64, Option<i64>), StorageError> {
         let host_name = validated_name(name)?;
         let group = validated_group(group_name)?;
@@ -4702,9 +4741,9 @@ impl HostStore {
                             destination.host(),
                             destination.username(),
                             i64::from(destination.port().get()),
-                            group,
+                            group.as_deref(),
                             tags_serialized,
-                            jump,
+                            jump.as_deref(),
                             startup_snippet_id,
                             proto,
                             protocol_config,
@@ -4727,9 +4766,9 @@ impl HostStore {
                             destination.host(),
                             destination.username(),
                             i64::from(destination.port().get()),
-                            group,
+                            group.as_deref(),
                             tags_serialized,
-                            jump,
+                            jump.as_deref(),
                             startup_snippet_id,
                             proto,
                             protocol_config,
@@ -4741,22 +4780,81 @@ impl HostStore {
                 self.connection.last_insert_rowid()
             };
 
-            if let Some(m) = sync_mutation {
+            if record_sync_mutations {
+                if inject_sync_failure {
+                    return Err(StorageError::Serialization(
+                        "Injected sync mutation insertion failure".to_string(),
+                    ));
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
+                let mut resolved_identity_name = None;
+                if let Some(ident) = new_identity {
+                    resolved_identity_name = Some(ident.name.clone());
+                    let ident_payload = SyncIdentityPayload {
+                        name: ident.name.clone(),
+                        username: ident.username.clone(),
+                        auth_method: ident.auth_method.clone(),
+                        password_secret_ref: None,
+                        key_path: ident.key_path.clone(),
+                        passphrase_secret_ref: None,
+                        certificate_path: ident.certificate_path.clone(),
+                        tags: ident.tags.clone(),
+                        comment: ident.comment.clone(),
+                    };
+                    let ident_json = serde_json::to_string(&ident_payload)
+                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                    self.connection
+                        .execute(
+                            "INSERT INTO vault_mutations (vault_id, object_id, entity_type, expected_revision, deleted, payload_json, created_at, idempotency_key, key_epoch, device_counter)
+                             VALUES (?1, ?2, 'identity', 0, 0, ?3, ?4, NULL, 0, 0)",
+                            (
+                                self.host_vault_id.as_str(),
+                                ident.name.as_str(),
+                                ident_json.as_str(),
+                                now,
+                            ),
+                        )
+                        .await?;
+                } else if let Some(id_val) = resolved_identity_id {
+                    let mut rows = self
+                        .connection
+                        .query(
+                            "SELECT name FROM identities WHERE id = ?1 AND vault_id = ?2",
+                            (id_val, self.host_vault_id.as_str()),
+                        )
+                        .await?;
+                    if let Some(row) = rows.next().await? {
+                        resolved_identity_name = row.get::<String>(0).ok();
+                    }
+                }
+
+                let host_payload = SyncHostPayload {
+                    name: host_name.to_string(),
+                    hostname: destination.host().to_string(),
+                    username: destination.username().to_string(),
+                    port: destination.port().get(),
+                    group_name: group.clone(),
+                    tags: tags.to_vec(),
+                    jump_host: jump.clone(),
+                    startup_snippet_id,
+                    protocol: proto.to_string(),
+                    protocol_config: protocol_config.map(ToString::to_string),
+                    identity_id: resolved_identity_id,
+                    identity_name: resolved_identity_name,
+                };
+                let host_json = serde_json::to_string(&host_payload)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 self.connection
                     .execute(
                         "INSERT INTO vault_mutations (vault_id, object_id, entity_type, expected_revision, deleted, payload_json, created_at, idempotency_key, key_epoch, device_counter)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 0, 0)",
+                         VALUES (?1, ?2, 'host', 0, 0, ?3, ?4, NULL, 0, 0)",
                         (
                             self.host_vault_id.as_str(),
-                            m.entity_id,
-                            m.entity_type,
-                            m.version,
-                            if m.deleted { 1i64 } else { 0i64 },
-                            m.payload_json,
+                            host_name,
+                            host_json.as_str(),
                             now,
                         ),
                     )
@@ -7702,6 +7800,7 @@ impl HostStore {
                 protocol: host.protocol.clone(),
                 protocol_config: host.protocol_config.clone(),
                 identity_id: host.identity_id,
+                identity_name: None,
             };
             let object_id = format!("{}:{}", host.name, host.destination.host());
             let envelope = shellumi_core::encrypt_entity_with_iterations(
@@ -13752,13 +13851,6 @@ mod tests {
             tags: vec![],
             comment: None,
         };
-        let sync_mut = PendingSyncMutation {
-            entity_id: "Atomic Host",
-            entity_type: "host",
-            version: 0,
-            deleted: false,
-            payload_json: Some("{}"),
-        };
         let (saved_host_id, saved_ident_id) = store
             .save_host_with_identity_and_journal_tx(
                 None,
@@ -13773,7 +13865,7 @@ mod tests {
                 None,
                 Some(&new_ident),
                 Some(active_op_id),
-                Some(&sync_mut),
+                true,
             )
             .await
             .unwrap();
@@ -13817,13 +13909,6 @@ mod tests {
 
         // 3. Failed transaction with invalid journal_op_id rolls back host, identity, and sync mutation atomically.
         let bad_dest = SshDestination::new("10.0.0.51", "ops2", 22).unwrap();
-        let bad_mut = PendingSyncMutation {
-            entity_id: "RolledBack Host",
-            entity_type: "host",
-            version: 0,
-            deleted: false,
-            payload_json: Some("{}"),
-        };
         let err = store
             .save_host_with_identity_and_journal_tx(
                 None,
@@ -13838,7 +13923,7 @@ mod tests {
                 None,
                 None,
                 Some("missing-op-id"),
-                Some(&bad_mut),
+                true,
             )
             .await;
         assert!(err.is_err());
@@ -13862,5 +13947,236 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn test_synced_host_identity_association_and_replay_across_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let db1 = dir.path().join("client1.db");
+        let db2 = dir.path().join("client2.db");
+        let vid = shellumi_core::VaultId::new("vault-sync-assoc").unwrap();
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let vault_creds = shellumi_core::VaultCredentialStore::new(&cred_store, &vid);
+
+        let mut store1 = HostStore::open(db1.to_str().unwrap()).await.unwrap();
+        store1.set_vault_id(vid.clone());
+
+        // 1. Create host + reusable identity in a single synced transaction.
+        let pw_ref = vault_creds
+            .store_unique("identity-password", "pw1")
+            .unwrap();
+        let op1 = "op-sync-1";
+        let _guard1 = HostStore::acquire_credential_op_guard(op1);
+        store1
+            .record_credential_operation(&CredentialOperationRecord {
+                operation_id: op1.to_string(),
+                vault_id: vid.as_str().to_string(),
+                target_host_id: None,
+                target_identity_id: None,
+                operation_type: "save_host_with_new_identity".to_string(),
+                old_refs: vec![],
+                planned_new_refs: vec![pw_ref.clone()],
+                phase: CredentialOpPhase::Staged,
+                cleanup_status: CredentialCleanupStatus::Pending,
+                last_error: None,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+
+        let dest = SshDestination::new("10.1.2.3", "deploy", 22).unwrap();
+        let new_ident = shellumi_core::NewIdentity {
+            name: "Deploy Key".to_string(),
+            username: "deploy".to_string(),
+            auth_method: shellumi_core::AuthMethod::Password,
+            password_secret_ref: Some(pw_ref.clone()),
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+        };
+        let (host_id, ident_id) = store1
+            .save_host_with_identity_and_journal_tx(
+                None,
+                "Prod App",
+                &dest,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                None,
+                Some(&new_ident),
+                Some(op1),
+                true,
+            )
+            .await
+            .unwrap();
+        let ident_id = ident_id.unwrap();
+        drop(_guard1);
+
+        let saved_host = store1.get_host(host_id).await.unwrap().unwrap();
+        assert_eq!(saved_host.identity_id, Some(ident_id));
+
+        // 2. Verify queued mutations: identity first, then host with non-null identity_id & identity_name.
+        let mutations = store1.get_pending_mutations(vid.as_str()).await.unwrap();
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].entity_type, "identity");
+        assert_eq!(mutations[1].entity_type, "host");
+        let host_payload: SyncHostPayload =
+            serde_json::from_str(mutations[1].payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(host_payload.identity_id, Some(ident_id));
+        assert_eq!(host_payload.identity_name.as_deref(), Some("Deploy Key"));
+
+        // 3. Replay mutations into a second isolated store with a different pre-existing identity (different local numeric ID).
+        let mut store2 = HostStore::open(db2.to_str().unwrap()).await.unwrap();
+        store2.set_vault_id(vid.clone());
+        store2
+            .create_identity(&shellumi_core::NewIdentity {
+                name: "Other Local Identity".to_string(),
+                username: "other".to_string(),
+                auth_method: shellumi_core::AuthMethod::Agent,
+                password_secret_ref: None,
+                key_path: None,
+                passphrase_secret_ref: None,
+                certificate_path: None,
+                tags: vec![],
+                comment: None,
+            })
+            .await
+            .unwrap();
+        let passphrase = "sync-passphrase-for-replay";
+        let dev = uuid::Uuid::new_v4();
+        let items: Vec<shellumi_core::server::SyncChangeItem> = mutations
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let env = match m.entity_type.as_str() {
+                    "identity" => {
+                        let p: SyncIdentityPayload =
+                            serde_json::from_str(m.payload_json.as_deref().unwrap()).unwrap();
+                        shellumi_core::encrypt_entity(passphrase, "identity", &m.object_id, &p)
+                            .unwrap()
+                    }
+                    "host" => {
+                        let p: SyncHostPayload =
+                            serde_json::from_str(m.payload_json.as_deref().unwrap()).unwrap();
+                        shellumi_core::encrypt_entity(passphrase, "host", &m.object_id, &p).unwrap()
+                    }
+                    _ => unreachable!(),
+                };
+                shellumi_core::server::SyncChangeItem {
+                    sequence: (i + 1) as u64,
+                    object_id: m.object_id.clone(),
+                    entity_type: m.entity_type.clone(),
+                    revision: 1,
+                    deleted: m.deleted,
+                    author_device_id: dev,
+                    encrypted_envelope: Some(env),
+                    updated_at: 1000,
+                }
+            })
+            .collect();
+        for item in &items {
+            assert!(
+                server_sync::apply_change_item(&mut store2, vid.as_str(), passphrase, item)
+                    .await
+                    .unwrap()
+            );
+        }
+        let replayed_ident = store2
+            .list_identities()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|i| i.name == "Deploy Key")
+            .unwrap();
+        assert_ne!(replayed_ident.id, ident_id);
+        let replayed_host = store2
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|h| h.name == "Prod App")
+            .unwrap();
+        assert_eq!(replayed_host.identity_id, Some(replayed_ident.id));
+
+        // 4. Inject sync mutation failure -> full rollback of host, identity, and journal stays Staged.
+        let staged_fail_ref = vault_creds
+            .store_unique("identity-password", "pw-fail")
+            .unwrap();
+        let op_fail = "op-sync-fail";
+        store1
+            .record_credential_operation(&CredentialOperationRecord {
+                operation_id: op_fail.to_string(),
+                vault_id: vid.as_str().to_string(),
+                target_host_id: None,
+                target_identity_id: None,
+                operation_type: "save_host_with_new_identity".to_string(),
+                old_refs: vec![],
+                planned_new_refs: vec![staged_fail_ref.clone()],
+                phase: CredentialOpPhase::Staged,
+                cleanup_status: CredentialCleanupStatus::Pending,
+                last_error: None,
+                updated_at: 200,
+            })
+            .await
+            .unwrap();
+        let fail_ident = shellumi_core::NewIdentity {
+            name: "Fail Ident".to_string(),
+            username: "fail".to_string(),
+            auth_method: shellumi_core::AuthMethod::Password,
+            password_secret_ref: Some(staged_fail_ref.clone()),
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+        };
+        let fail_res = store1
+            .save_host_with_identity_and_journal_tx_inner(
+                None,
+                "Fail Host",
+                &dest,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                None,
+                Some(&fail_ident),
+                Some(op_fail),
+                true,
+                true,
+            )
+            .await;
+        assert!(fail_res.is_err());
+        assert!(!store1
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|h| h.name == "Fail Host"));
+        assert!(!store1
+            .list_identities()
+            .await
+            .unwrap()
+            .iter()
+            .any(|i| i.name == "Fail Ident"));
+
+        // Reopen store1 and verify journal recovery cleans up staged_fail_ref and keeps committed op1 intact.
+        drop(store1);
+        let mut reopened = HostStore::open(db1.to_str().unwrap()).await.unwrap();
+        reopened.set_vault_id(vid.clone());
+        let recovered = reopened
+            .reconcile_credential_operations(&cred_store)
+            .await
+            .unwrap();
+        assert_eq!(recovered, 2); // op1 (Committed->Completed) + op_fail (Staged->RolledBack)
+        assert!(vault_creds.resolve(&staged_fail_ref).unwrap().is_none());
+        assert!(vault_creds.resolve(&pw_ref).unwrap().is_some());
     }
 }

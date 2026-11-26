@@ -1119,36 +1119,6 @@ impl Shellumi {
                         .map_err(|e| e.to_string())?;
                 }
 
-                let sync_payload_json = if is_remote {
-                    let payload = shellumi_storage::SyncHostPayload {
-                        name: name.clone(),
-                        hostname: destination.host().to_string(),
-                        username: destination.username().to_string(),
-                        port: destination.port().into(),
-                        group_name: group.clone(),
-                        tags: tags.clone(),
-                        jump_host: jump_host.clone(),
-                        startup_snippet_id,
-                        protocol: proto.to_string(),
-                        protocol_config: proto_config.clone(),
-                        identity_id,
-                    };
-                    serde_json::to_string(&payload).ok()
-                } else {
-                    None
-                };
-                let sync_mutation = if is_remote {
-                    Some(shellumi_storage::PendingSyncMutation {
-                        entity_id: &name,
-                        entity_type: "host",
-                        version: 0,
-                        deleted: false,
-                        payload_json: sync_payload_json.as_deref(),
-                    })
-                } else {
-                    None
-                };
-
                 let tx_res = store
                     .save_host_with_identity_and_journal_tx(
                         id,
@@ -1167,7 +1137,7 @@ impl Shellumi {
                         } else {
                             None
                         },
-                        sync_mutation.as_ref(),
+                        is_remote,
                     )
                     .await;
 

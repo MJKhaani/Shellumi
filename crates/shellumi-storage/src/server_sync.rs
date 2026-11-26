@@ -3455,7 +3455,7 @@ impl HostStore {
 }
 
 /// Applies an incoming sync change record (tombstone or encrypted envelope) to local tables.
-async fn apply_change_item(
+pub(crate) async fn apply_change_item(
     store: &mut HostStore,
     vault_str: &str,
     passphrase: &str,
@@ -3525,6 +3525,22 @@ async fn apply_change_item(
             "host" => {
                 if let Ok(payload) = decrypt_entity::<SyncHostPayload>(passphrase, env) {
                     let tags_str = payload.tags.join(",");
+                    let resolved_identity_id = if let Some(ref iname) = payload.identity_name {
+                        let mut rows = store
+                            .connection
+                            .query(
+                                "SELECT id FROM identities WHERE name = ?1 AND vault_id = ?2",
+                                (iname.as_str(), vault_str),
+                            )
+                            .await?;
+                        if let Some(row) = rows.next().await? {
+                            row.get::<i64>(0).ok().or(payload.identity_id)
+                        } else {
+                            payload.identity_id
+                        }
+                    } else {
+                        payload.identity_id
+                    };
                     store
                         .connection
                         .execute(
@@ -3548,7 +3564,7 @@ async fn apply_change_item(
                                 payload.startup_snippet_id,
                                 payload.protocol.as_str(),
                                 payload.protocol_config.as_deref(),
-                                payload.identity_id,
+                                resolved_identity_id,
                                 vault_str,
                             ),
                         )
@@ -4279,6 +4295,7 @@ mod tests {
             protocol: "ssh".to_string(),
             protocol_config: None,
             identity_id: None,
+            identity_name: None,
         };
         let host_env = encrypt_entity(passphrase, "host", "recovered-host", &host).unwrap();
 
@@ -4382,6 +4399,7 @@ mod tests {
             protocol: "ssh".to_string(),
             protocol_config: None,
             identity_id: None,
+            identity_name: None,
         };
         let host_env = encrypt_entity(passphrase, "host", "remote-db-01", &remote_host).unwrap();
 
@@ -4415,6 +4433,7 @@ mod tests {
             protocol: "ssh".to_string(),
             protocol_config: None,
             identity_id: None,
+            identity_name: None,
         };
         store
             .record_pending_mutation(
