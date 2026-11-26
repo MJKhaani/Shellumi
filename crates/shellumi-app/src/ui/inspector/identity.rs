@@ -268,8 +268,71 @@ impl Shellumi {
             .open(vault_id, target, mode, None)
         {
             self.selected_host_id = None;
-            self.open_identity_modal(identity_id, cx);
+            if mode == InspectorMode::View {
+                self.identity_modal = None;
+            } else {
+                self.open_identity_modal(identity_id, cx);
+            }
+            self.invalidate_layout();
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::inspector::coordinator::{InspectorCoordinator, NavigationRequest};
+
+    #[test]
+    fn test_identity_team_provider_create_view_edit_save_cancel_lifecycle() {
+        let mut coord = InspectorCoordinator::new();
+        let vault = "vault-main".to_string();
+
+        // 1. Create -> Save -> View -> Edit -> Dirty Cancel Guard -> Discard -> Close
+        assert!(coord.open(
+            vault.clone(),
+            InspectorTarget::Identity(None),
+            InspectorMode::Create,
+            None
+        ));
+        assert_eq!(coord.active().unwrap().mode, InspectorMode::Create);
+        let gen1 = coord.start_save().expect("first save should start");
+        assert!(coord.complete_save(&vault, gen1, InspectorTarget::Identity(Some(7))));
+        assert_eq!(coord.active().unwrap().mode, InspectorMode::View);
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Identity(Some(7))
+        );
+
+        assert!(coord.open(
+            vault.clone(),
+            InspectorTarget::Identity(Some(7)),
+            InspectorMode::Edit,
+            None
+        ));
+        coord.set_dirty(true);
+        assert!(!coord.request_navigation(NavigationRequest::CloseInspector));
+        assert!(coord.is_guard_active());
+        coord.confirm_discard();
+        assert!(!coord.is_open());
+
+        // 2. TeamMember & Provider targets replace cleanly through the single coordinator
+        assert!(coord.open(
+            vault.clone(),
+            InspectorTarget::TeamMember(Some("member-1".into())),
+            InspectorMode::View,
+            None
+        ));
+        assert!(coord.open(
+            vault,
+            InspectorTarget::Provider(None),
+            InspectorMode::Create,
+            None
+        ));
+        assert_eq!(
+            coord.active().unwrap().target,
+            InspectorTarget::Provider(None)
+        );
     }
 }

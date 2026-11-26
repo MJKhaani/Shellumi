@@ -2,6 +2,7 @@
 use super::*;
 
 impl Shellumi {
+    #[allow(dead_code)]
     pub(crate) fn render_identity_modal(
         &self,
         modal: &IdentityModalState,
