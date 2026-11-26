@@ -392,19 +392,34 @@ mod tests {
         let cmd = TerminalCommand::new("/bin/echo").arg("hello from pty");
         let session = PtySession::spawn(&cmd, 24, 80).expect("failed to spawn echo in PTY");
         let mut reader = session.try_clone_reader().expect("failed to clone reader");
-
-        let mut output = Vec::new();
-        let mut buf = [0u8; 1024];
-        // Read until EOF from echo
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
             }
-            output.extend_from_slice(&buf[..n]);
-        }
+        });
 
         let mut term = Terminal::new(24, 80);
-        term.process_bytes(&output);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    term.process_bytes(&chunk);
+                    if term.screen_to_string().contains("hello from pty") {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        drop(session);
         assert!(term.screen_to_string().contains("hello from pty"));
     }
 
