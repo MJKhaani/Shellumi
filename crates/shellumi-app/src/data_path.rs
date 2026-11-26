@@ -300,7 +300,11 @@ pub(crate) fn safe_move_file(src: &Path, dst: &Path) -> Result<(), String> {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         match std::fs::hard_link(src, dst) {
-            Ok(()) => std::fs::File::open(dst)?.sync_all()?,
+            Ok(()) => std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(dst)?
+                .sync_all()?,
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                 let mut copy = tempfile::NamedTempFile::new_in(parent)?;
                 std::io::copy(&mut std::fs::File::open(src)?, copy.as_file_mut())?;

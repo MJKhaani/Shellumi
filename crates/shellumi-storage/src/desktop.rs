@@ -1378,8 +1378,8 @@ mod connection_tests {
         let vid = shellumi_core::VaultId::new(crate::LEGACY_LOCAL_VAULT_ID).unwrap();
         store.set_vault_id(vid.clone());
 
-        let cred_store = shellumi_core::default_credential_store();
-        let vault_store = shellumi_core::VaultCredentialStore::new(&*cred_store, &vid);
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let vault_store = shellumi_core::VaultCredentialStore::new(&cred_store, &vid);
         let group_pw_ref = vault_store
             .store_unique("identity-password", "group-pw")
             .unwrap();
@@ -1425,9 +1425,12 @@ mod connection_tests {
             )
             .await
             .unwrap();
-        let ask_plan = resolve_connection(path_str, ask_host_id).await.unwrap();
-        assert!(!ask_plan.uses_askpass());
-        assert!(ask_plan.password_ref.is_none());
+        let ask_host = store.get_host(ask_host_id).await.unwrap().unwrap();
+        let ask_resolved = resolve_protocol_auth(&store, &ask_host, &cred_store)
+            .await
+            .unwrap();
+        assert_eq!(ask_resolved.source, ResolvedAuthSource::AskOnConnect);
+        assert!(ask_resolved.identity.is_none());
 
         // 2. Host-specific SSH key + passphrase in protocol_config
         let key_file = dir.path().join("id with spaces");
@@ -1452,14 +1455,18 @@ mod connection_tests {
             )
             .await
             .unwrap();
-        let mosh_plan = resolve_connection(path_str, mosh_host_id).await.unwrap();
-        assert!(mosh_plan.uses_askpass());
-        assert!(mosh_plan.identity_file.is_some());
-        assert_eq!(mosh_plan.passphrase_ref, Some(pass_ref));
+        let mosh_host = store.get_host(mosh_host_id).await.unwrap().unwrap();
+        let mosh_resolved = resolve_protocol_auth(&store, &mosh_host, &cred_store)
+            .await
+            .unwrap();
+        assert_eq!(mosh_resolved.source, ResolvedAuthSource::HostSpecific);
+        let mosh_ident = mosh_resolved.identity.unwrap();
+        assert_eq!(mosh_ident.key_path.as_deref(), key_file.to_str());
+        assert_eq!(mosh_ident.passphrase_secret_ref, Some(pass_ref));
 
         // 3. Cross-vault host_secret_ref must be rejected
         let other_vid = shellumi_core::VaultId::new("other-vault").unwrap();
-        let other_store = shellumi_core::VaultCredentialStore::new(&*cred_store, &other_vid);
+        let other_store = shellumi_core::VaultCredentialStore::new(&cred_store, &other_vid);
         let foreign_ref = other_store.store_unique("host-password", "x").unwrap();
         let bad_cfg = serde_json::json!({ "host_secret_ref": foreign_ref }).to_string();
         let bad_host_id = store
@@ -1476,7 +1483,10 @@ mod connection_tests {
             )
             .await
             .unwrap();
-        assert!(resolve_connection(path_str, bad_host_id).await.is_err());
+        let bad_host = store.get_host(bad_host_id).await.unwrap().unwrap();
+        assert!(resolve_protocol_auth(&store, &bad_host, &cred_store)
+            .await
+            .is_err());
 
         // 4. RDP group identity inheritance + explicit Ask/NoAuth blocking fallback
         let rdp_group_pass_ref = vault_store
@@ -1521,13 +1531,21 @@ mod connection_tests {
             )
             .await
             .unwrap();
-        let (uname, pwd, src) =
-            resolve_remote_desktop_auth_with_key(path_str, rdp_inherited_id, None, None)
-                .await
-                .unwrap();
-        assert_eq!(uname.as_deref(), Some("corpuser"));
-        assert_eq!(pwd.as_deref(), Some("rdp-secret"));
-        assert_eq!(src, ResolvedAuthSource::InheritedGroup(rdp_ident_id));
+        let rdp_inherited = store.get_host(rdp_inherited_id).await.unwrap().unwrap();
+        let rdp_resolved = resolve_protocol_auth(&store, &rdp_inherited, &cred_store)
+            .await
+            .unwrap();
+        assert_eq!(
+            rdp_resolved.source,
+            ResolvedAuthSource::InheritedGroup(rdp_ident_id)
+        );
+        let rdp_ident = rdp_resolved.identity.unwrap();
+        assert_eq!(rdp_ident.username, "corpuser");
+        let rdp_pwd = vault_store
+            .resolve(rdp_ident.password_secret_ref.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(rdp_pwd.expose_secret(), "rdp-secret");
 
         // Explicit Ask on Connect blocks group fallback for RDP
         let rdp_ask_id = store
@@ -1544,12 +1562,11 @@ mod connection_tests {
             )
             .await
             .unwrap();
-        let (uname2, pwd2, src2) =
-            resolve_remote_desktop_auth_with_key(path_str, rdp_ask_id, None, None)
-                .await
-                .unwrap();
-        assert_eq!(uname2, None);
-        assert_eq!(pwd2, None);
-        assert_eq!(src2, ResolvedAuthSource::AskOnConnect);
+        let rdp_ask = store.get_host(rdp_ask_id).await.unwrap().unwrap();
+        let rdp_ask_resolved = resolve_protocol_auth(&store, &rdp_ask, &cred_store)
+            .await
+            .unwrap();
+        assert_eq!(rdp_ask_resolved.source, ResolvedAuthSource::AskOnConnect);
+        assert!(rdp_ask_resolved.identity.is_none());
     }
 }

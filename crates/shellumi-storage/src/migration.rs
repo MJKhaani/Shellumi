@@ -1231,7 +1231,11 @@ impl MigrationEngine {
             checkpoint(&source).await?;
             drop(source);
             io(
-                File::open(&source_path).and_then(|f| f.sync_all()),
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&source_path)
+                    .and_then(|f| f.sync_all()),
                 "Flush upgraded migration source",
             )?;
             journal.source_digest = Some(digest(&source_path)?);

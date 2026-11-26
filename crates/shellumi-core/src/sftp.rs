@@ -260,24 +260,26 @@ impl PathUtils {
 
     /// Safely joins a directory base path with a child name, normalizing `..` components.
     pub fn join_path(base: &str, child: &str) -> String {
-        let mut path_buf = PathBuf::from(base);
-        for comp in Path::new(child).components() {
+        let mut segments: Vec<&str> = if child.starts_with('/') {
+            Vec::new()
+        } else {
+            base.split('/')
+                .filter(|s| !s.is_empty() && *s != ".")
+                .collect()
+        };
+        for comp in child.split('/') {
             match comp {
-                Component::Normal(c) => path_buf.push(c),
-                Component::ParentDir => {
-                    path_buf.pop();
+                "" | "." => {}
+                ".." => {
+                    segments.pop();
                 }
-                Component::RootDir => {
-                    path_buf = PathBuf::from("/");
-                }
-                _ => {}
+                c => segments.push(c),
             }
         }
-        let s = path_buf.to_string_lossy().to_string();
-        if s.is_empty() {
+        if segments.is_empty() {
             "/".to_string()
         } else {
-            s
+            format!("/{}", segments.join("/"))
         }
     }
 
