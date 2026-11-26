@@ -1362,7 +1362,8 @@ impl HostStore {
                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'OwnershipVerified', ?10
                  WHERE NOT EXISTS (
                     SELECT 1 FROM device_replacements
-                    WHERE server_instance_id = ?2 AND replacement_device_id = ?3
+                    WHERE server_instance_id = ?2
+                      AND (replacement_device_id = ?3 OR (account_id = ?7 AND replacement_device_id IS NULL))
                       AND stage NOT IN ('Completed', 'Canceled')
                  ) ON CONFLICT DO NOTHING",
                     (
@@ -1603,7 +1604,10 @@ impl HostStore {
                 .change_replacement_stage(&mut operation, "ReplacementVerified")
                 .await?;
         }
-        if operation.stage == "RevocationDispatched" {
+        if matches!(
+            operation.stage.as_str(),
+            "RevocationDispatched" | "RevocationRejected"
+        ) {
             binding.verify_membership(client, user, None)?;
             let devices = client.list_devices().map_err(enrollment_network_error)?;
             let mut old = devices
@@ -1622,7 +1626,7 @@ impl HostStore {
                     .unwrap_or(self)
                     .change_replacement_stage(&mut operation, "RevocationConfirmed")
                     .await?;
-            } else if !explicit_retry {
+            } else if !explicit_retry && operation.stage == "RevocationDispatched" {
                 return Err(enrollment_denied("Old-device revocation needs reconciliation. Use Replace Keys for the same device to recheck ownership and retry."));
             }
         }
@@ -1935,9 +1939,15 @@ impl HostStore {
             .connection
             .query(
                 "SELECT 1 FROM device_replacements
-             WHERE server_instance_id = ?1 AND (old_device_id = ?2 OR replacement_device_id = ?2)
+             WHERE server_instance_id = ?1
+               AND (old_device_id = ?2 OR replacement_device_id = ?2
+                    OR (account_id = ?3 AND replacement_device_id IS NULL))
                AND stage NOT IN ('Completed', 'Canceled')",
-                (scope.server_instance_id, device_id.to_string()),
+                (
+                    scope.server_instance_id,
+                    device_id.to_string(),
+                    member.user_id.as_str(),
+                ),
             )
             .await?;
         if pending.next().await?.is_some() {
@@ -4226,6 +4236,54 @@ mod tests {
         assert!(err_msg.contains("Server instance mismatch"));
     }
 
+    #[test]
+    fn device_journal_lock_worker() {
+        let Ok(path) = std::env::var("SHELLUMI_TEST_DEVICE_JOURNAL_DB") else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let store = runtime.block_on(HostStore::open(&path)).unwrap();
+        let guard = store.lock_device_journal(".device-change.lock");
+        if std::env::var_os("SHELLUMI_TEST_DEVICE_JOURNAL_EXPECT_BUSY").is_some() {
+            assert!(guard.is_err());
+        } else {
+            assert!(guard.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn device_journal_excludes_other_processes_and_releases_on_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shared.db");
+        let store = HostStore::open(path.to_str().unwrap()).await.unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let run_worker = |expect_busy| {
+            let mut child = std::process::Command::new(&exe);
+            child
+                .args(["--exact", "server_sync::tests::device_journal_lock_worker"])
+                .env("SHELLUMI_TEST_DEVICE_JOURNAL_DB", &path)
+                .env_remove("SHELLUMI_TEST_DEVICE_JOURNAL_EXPECT_BUSY");
+            if expect_busy {
+                child.env("SHELLUMI_TEST_DEVICE_JOURNAL_EXPECT_BUSY", "1");
+            }
+            let result = child.output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        };
+
+        let guard = store.lock_device_journal(".device-change.lock").unwrap();
+        run_worker(true);
+        drop(guard);
+        run_worker(false);
+        assert!(store.lock_device_journal(".device-change.lock").is_ok());
+    }
+
     #[tokio::test]
     async fn test_authenticated_x25519_team_device_enrollment_lifecycle_and_security() {
         use shellumi_core::server::crypto::{
@@ -4245,6 +4303,7 @@ mod tests {
 
         struct StatefulEnrollmentTransport {
             user_id: Uuid,
+            other_authenticated_user: Mutex<Option<Uuid>>,
             username: String,
             vault_id: Uuid,
             server_instance_id: Uuid,
@@ -4286,7 +4345,12 @@ mod tests {
 
                 if method == "GET" && url.ends_with("/api/v1/me") {
                     let resp = MeResponse {
-                        user_id: self.0.user_id,
+                        user_id: self
+                            .0
+                            .other_authenticated_user
+                            .lock()
+                            .unwrap()
+                            .unwrap_or(self.0.user_id),
                         username: self.0.username.clone(),
                         email: self.0.username.clone(),
                         organizations: vec![],
@@ -4629,6 +4693,7 @@ mod tests {
             expected_invite_token: "tok-valid-123".into(),
             devices: Mutex::new(Vec::new()),
             forge_wrong_user: Mutex::new(false),
+            other_authenticated_user: Mutex::new(None),
             require_epoch_key: Default::default(),
             provide_epoch_key: Default::default(),
             omit_from_list: Mutex::new(false),
@@ -5019,6 +5084,25 @@ mod tests {
             .unwrap()
             .iter()
             .any(|device| device.device_id == old_id && device.revoked_at.is_none()));
+        // The replacement may already be registered, but its UUID is still unknown
+        // to the registry. No device on this account can be safely retired yet.
+        let before_revocations = transport.revocation_requests.load(SeqCst);
+        let mut other_window = HostStore::open(db_file.to_str().unwrap()).await.unwrap();
+        other_window.set_vault_id(VaultId::new(local_vault_id).unwrap());
+        assert!(other_window
+            .revoke_device_with_server(
+                &binding,
+                "mem-alice",
+                Uuid::parse_str(&dev2.device_id).unwrap(),
+                &auth_client
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            transport.revocation_requests.load(SeqCst),
+            before_revocations
+        );
+        drop(other_window);
         let before = request_count();
         drop(store);
         let mut store = HostStore::open(db_file.to_str().unwrap()).await.unwrap();
@@ -5058,6 +5142,27 @@ mod tests {
             )
             .await
             .unwrap();
+        *transport.other_authenticated_user.lock().unwrap() = Some(Uuid::new_v4());
+        assert_eq!(
+            store
+                .recover_incomplete_enrollments(&binding, &mut auth_client, &cred_store)
+                .await
+                .unwrap(),
+            0
+        );
+        *transport.other_authenticated_user.lock().unwrap() = None;
+        let mut different_server = binding.clone();
+        different_server.server_instance_id = Some(Uuid::new_v4().to_string());
+        assert!(store
+            .recover_incomplete_enrollments(&different_server, &mut auth_client, &cred_store)
+            .await
+            .is_err());
+        assert_eq!(request_count(), before);
+        assert_eq!(
+            transport.revocation_requests.load(SeqCst),
+            before_revocations
+        );
+
         // Fail the authorization write after the journal and member writes have begun.
         store
             .connection
