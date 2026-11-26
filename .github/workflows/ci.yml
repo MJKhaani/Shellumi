@@ -1,29 +1,115 @@
-name: Workspace verification
+name: CI
 
 on:
   push:
+    branches: [ main ]
   pull_request:
-  workflow_dispatch:
+    branches: [ main ]
 
-permissions:
-  contents: read
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  verify:
+  verify-macos:
+    name: Verify (macOS)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust components
-        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
-      - name: Check Metal compiler
-        run: |
-          if ! xcrun --find metal; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun --find metal
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Check workspace lints
+
+      - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Test workspace
+
+      - name: Run workspace tests
+        run: cargo test --locked --workspace
+
+  verify-linux:
+    name: Verify (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI & audio system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libfontconfig1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev desktop-file-utils
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Validate desktop entry (Terminal=false)
+        run: |
+          desktop-file-validate packaging/linux/shellumi.desktop
+          grep -q '^Terminal=false$' packaging/linux/shellumi.desktop
+
+      - name: Run clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --locked --workspace
+
+  verify-windows:
+    name: Verify (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
         run: cargo test --locked --workspace

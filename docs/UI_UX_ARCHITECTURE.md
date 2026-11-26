@@ -35,6 +35,9 @@
 8. **Mathematical Canvas Bounds & Pointer Translation:**
    Remote canvas interaction uses measured display bounds to map window pointer events to framebuffer coordinates, properly handling letterboxing, centering, clipping, panning in 100% zoom, and stretch modes.
 
+9. **Crash-Safe Vault-Scoped Credentials & Session Keys:**
+   Credential writes use a durable `credential_operations` journal (`Planned` -> `Staged` -> `Committed` -> `Completed` / `RetryPending`) with CSPRNG vault-scoped references and post-commit cleanup. Remote desktop async workers and resize timers bind to `RemoteSessionKey { tab_id, connection_generation }` rather than mutable tab indices.
+
 ---
 
 ## 2. Interaction Surface Taxonomy

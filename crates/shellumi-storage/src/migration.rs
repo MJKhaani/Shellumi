@@ -621,12 +621,22 @@ const TABLES: &[&str] = &[
     "discovered_hosts",
     "session_recordings",
     "vault_directories",
+    "credential_operations",
     "sqlite_sequence",
 ];
 
 fn filter(table: &str, default: bool) -> &'static str {
     match table {
-        "snippets" | "identities" | "groups" | "hosts" | "tunnels" | "workspaces" | "vault_mutations" | "session_recordings" | "shared_vault_key_envelopes" => "vault_id = ?1",
+        "snippets"
+        | "identities"
+        | "groups"
+        | "hosts"
+        | "tunnels"
+        | "workspaces"
+        | "vault_mutations"
+        | "session_recordings"
+        | "shared_vault_key_envelopes"
+        | "credential_operations" => "vault_id = ?1",
         "vault_sync_state" if !default => "vault_id = ?1",
         "transfer_history" if default => "host_id IS NULL OR host_id IN (SELECT id FROM hosts WHERE vault_id = ?1)",
         "transfer_history" => "host_id IN (SELECT id FROM hosts WHERE vault_id = ?1)",

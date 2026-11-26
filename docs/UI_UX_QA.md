@@ -116,3 +116,17 @@ Use a local vault database and a controlled HTTP transport for enrollment QA.
 - Send an invitation and confirm the Team Inspector shows its metadata and enables Copy Invite Token only for the originating vault and member. Switch members or vaults, dismiss or lock the Inspector, or wait for expiry. Confirm both the metadata and copy action disappear. Delay the invitation response until after navigation and confirm the new Inspector stays unchanged.
 - Simulate a lost registration response after the remote device exists. Reopen and unlock the vault, then use Resume Enrollment in the Team Inspector. Check that it recovers the same device and that repeated recovery issues no registration request.
 - Simulate an unverifiable registration or a revoked old device. Confirm Replace Keys leaves the old device unchanged. For a successful replacement, confirm the existing global-revocation warning is shown and the client authorizes the replacement before sending revocation.
+
+---
+
+## 7. Remediation Verification & Platform Coverage
+
+| Check Area | Outcome | Evidence / Notes |
+| --- | --- | --- |
+| Windows/Linux startup console suppression | **Code Verified / Native Runtime NOT TESTED** | `#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`, `shellumi_core::process::background_command()` (`CREATE_NO_WINDOW`), `Terminal=false` in `packaging/linux/shellumi.desktop`. Native Windows/Linux runtime launch not executed on macOS host (`NOT TESTED`). |
+| Vault-scoped credential persistence & journal recovery | **PASS** | `shellumi-core` credential tests (15/15) and `shellumi-storage` crash-recovery & cross-vault isolation tests (`test_credential_journal_crash_recovery_and_in_use_protection`, `test_save_host_with_identity_tx_atomic_and_rollback`). |
+| Shared protocol auth resolution (SSH/Mosh/RDP/VNC/Telnet/Serial/Local) | **PASS** | `shellumi-storage` `desktop` tests (9/9) including host-specific credentials, Mosh SSH bootstrap, and explicit Ask-on-Connect without group fallback. |
+| RemoteSessionKey & debounced auto RD resizing | **PASS** | `shellumi-app` `remote_desktop` tests (16/16) including `test_rd_auto_resize_state_coalesces_and_isolates_generations` and `test_compute_legal_rdp_resize_clamps_area_and_aligns_even_width`. |
+| Measured popover placement & secret field remasking | **PASS** | `shellumi-app` `popover` (2/2) and `text_input` (3/3); `(46.0, 84.0)` fallback removed; duplicate RD password toggle removed; remask on blur / inactive window enabled. |
+| Cross-platform CI matrix | **Configured (Pending GitHub Actions Run)** | `.github/workflows/ci.yml` defines `verify-macos`, `verify-linux`, and `verify-windows` jobs. |
+
