@@ -764,7 +764,9 @@ pub(crate) enum DeleteTarget {
 
 struct Shellumi {
     sftp_jobs: std::collections::HashMap<(u64, u64), sftp_transfer::TransferJob>,
-    connecting_hosts: std::collections::HashSet<i64>,
+    pending_connections: std::collections::HashMap<i64, u64>,
+    next_connection_op_id: u64,
+    rd_credential_edit_gen: std::collections::HashMap<u64, u64>,
     desktop: desktop::DesktopUi,
     database: Option<String>,
     hosts: HostState,
@@ -869,6 +871,18 @@ struct Shellumi {
     pub(crate) vault_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) tab_overflow_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectionOperationContext {
+    pub window_id: gpui::WindowId,
+    pub vault_id: String,
+    pub vault_load_generation: u64,
+    pub host_id: i64,
+    pub operation_id: u64,
+    pub tab_id: Option<u64>,
+    pub connection_generation: Option<u64>,
+    pub credential_edit_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1462,7 +1476,9 @@ impl Shellumi {
             .detach();
         Self {
             sftp_jobs: std::collections::HashMap::new(),
-            connecting_hosts: std::collections::HashSet::new(),
+            pending_connections: std::collections::HashMap::new(),
+            next_connection_op_id: 1,
+            rd_credential_edit_gen: std::collections::HashMap::new(),
             desktop: desktop::DesktopUi::new(cx),
             database,
             hosts: HostState::NoDatabase,

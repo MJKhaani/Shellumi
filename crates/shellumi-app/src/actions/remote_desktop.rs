@@ -115,6 +115,21 @@ impl Shellumi {
         let domain_input =
             cx.new(|cx| TextInput::new(cx, domain.as_deref().unwrap_or(""), "Domain (optional)"));
         let password_input = cx.new(|cx| TextInput::new(cx, "", "Password…").masked());
+        cx.observe(&username_input, move |app, _, _| {
+            let entry = app.rd_credential_edit_gen.entry(tab_id).or_insert(0);
+            *entry = entry.wrapping_add(1);
+        })
+        .detach();
+        cx.observe(&domain_input, move |app, _, _| {
+            let entry = app.rd_credential_edit_gen.entry(tab_id).or_insert(0);
+            *entry = entry.wrapping_add(1);
+        })
+        .detach();
+        cx.observe(&password_input, move |app, _, _| {
+            let entry = app.rd_credential_edit_gen.entry(tab_id).or_insert(0);
+            *entry = entry.wrapping_add(1);
+        })
+        .detach();
         let rd_state = RemoteDesktopState {
             host_name: host.name.clone(),
             target,
@@ -207,7 +222,23 @@ impl Shellumi {
 
         if host_identity_id.is_some() || host_secret_ref.is_some() {
             if let Some(db_path) = self.active_vault_db_path() {
-                let vault_id = self.active_vault_id.clone();
+                let op_id = self.next_connection_op_id;
+                self.next_connection_op_id = self.next_connection_op_id.wrapping_add(1);
+                let op_ctx = crate::ConnectionOperationContext {
+                    window_id: window.window_handle().window_id(),
+                    vault_id: self.active_vault_id.clone(),
+                    vault_load_generation: self.vault_load_generation,
+                    host_id: host.id,
+                    operation_id: op_id,
+                    tab_id: Some(tab_id),
+                    connection_generation: Some(0),
+                    credential_edit_generation: self
+                        .rd_credential_edit_gen
+                        .get(&tab_id)
+                        .copied()
+                        .unwrap_or(0),
+                };
+                let vault_id = op_ctx.vault_id.clone();
                 let vault_key = self.active_vault_key();
                 let task = cx.background_executor().spawn(async move {
                     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -262,12 +293,26 @@ impl Shellumi {
                 });
 
                 cx.spawn(async move |app, cx| {
-                    let res = task.await;
+                    let mut res = task.await;
                     let _ = app.update(cx, |app, cx| {
+                        if let Err(reason) = app.validate_connection_op(&op_ctx, None) {
+                            tracing::warn!(
+                                tab_id = tab_id,
+                                host_id = op_ctx.host_id,
+                                operation_id = op_ctx.operation_id,
+                                reason = reason,
+                                "Discarded stale remote desktop credential resolution"
+                            );
+                            if let Ok((_, Some(ref mut pwd))) = res {
+                                use zeroize::Zeroize;
+                                pwd.zeroize();
+                            }
+                            return;
+                        }
                         if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
                             if let Some(rd) = &mut tab.remote_desktop_state {
                                 match res {
-                                    Ok((uname, pwd)) => {
+                                    Ok((uname, mut pwd)) => {
                                         if rd.username.is_none() {
                                             if let Some(u) = uname {
                                                 rd.username = Some(u.clone());
@@ -278,10 +323,16 @@ impl Shellumi {
                                                 }
                                             }
                                         }
-                                        if let Some(p) = pwd {
-                                            rd.password = Some(p);
-                                            rd.last_action_note =
-                                                Some("Saved credential loaded from vault".into());
+                                        if let Some(mut p) = pwd.take() {
+                                            if rd.password.is_none() {
+                                                rd.password = Some(p);
+                                                rd.last_action_note = Some(
+                                                    "Saved credential loaded from vault".into(),
+                                                );
+                                            } else {
+                                                use zeroize::Zeroize;
+                                                p.zeroize();
+                                            }
                                         }
                                     }
                                     Err(err) => {
