@@ -1,8 +1,8 @@
 use super::*;
 use shellumi_core::server::types::{
-    CapabilitiesResponse, DeviceResponse, KeyEnvelopeListResponse, KeyEnvelopeResponse, MeResponse,
-    RecipientDeviceResponse, RecipientDevicesResponse, ServerLimits, VaultListResponse,
-    VaultMemberListResponse, VaultMemberResponse, VaultResponse,
+    CapabilitiesResponse, DeviceChallengeResponse, DeviceResponse, KeyEnvelopeListResponse,
+    KeyEnvelopeResponse, MeResponse, RecipientDeviceResponse, RecipientDevicesResponse,
+    ServerLimits, VaultListResponse, VaultMemberListResponse, VaultMemberResponse, VaultResponse,
 };
 use shellumi_core::sync::{HttpRequest, HttpResponse, SyncError};
 use shellumi_core::{
@@ -236,11 +236,47 @@ struct Server {
     instance: Uuid,
     vaults: [Uuid; 3],
     devices: Mutex<Vec<DeviceResponse>>,
+    registration_count: AtomicUsize,
+    lose_registration: AtomicBool,
+    reject_registration: AtomicBool,
     delete_count: AtomicUsize,
     lose_delete: AtomicBool,
     missing_vault: Mutex<Option<Uuid>>,
     unauthorized_vault: Mutex<Option<Uuid>>,
     missing_envelope: Mutex<Option<Uuid>>,
+}
+
+impl Server {
+    fn new(fixture: &Fixture, devices: &[(Uuid, &RegistrationIntent)]) -> Arc<Self> {
+        Arc::new(Self {
+            user: fixture.user,
+            instance: fixture.server,
+            vaults: fixture.remote,
+            devices: Mutex::new(
+                devices
+                    .iter()
+                    .map(|(id, intent)| DeviceResponse {
+                        device_id: *id,
+                        user_id: fixture.user,
+                        device_name: intent.device_label.clone(),
+                        signing_public_key: intent.signing_public_key.clone(),
+                        agreement_public_key: intent.agreement_public_key.clone(),
+                        created_at: 1,
+                        last_seen_at: None,
+                        revoked_at: None,
+                    })
+                    .collect(),
+            ),
+            registration_count: Default::default(),
+            lose_registration: Default::default(),
+            reject_registration: Default::default(),
+            delete_count: Default::default(),
+            lose_delete: Default::default(),
+            missing_vault: Default::default(),
+            unauthorized_vault: Default::default(),
+            missing_envelope: Default::default(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -253,6 +289,47 @@ impl HttpTransport for Transport {
         }
         let server = &self.0;
         let url = request.url.as_str();
+        if request.method == "POST" && url.ends_with("/devices/challenge") {
+            return Ok(json(DeviceChallengeResponse {
+                challenge: "fixture-challenge".into(),
+                expires_at: 100,
+            }));
+        }
+        if request.method == "POST" && url.ends_with("/devices") {
+            server.registration_count.fetch_add(1, SeqCst);
+            if server.reject_registration.load(SeqCst) {
+                return Ok(HttpResponse::new(
+                    403,
+                    br#"{"error_code":"forbidden","message":"rejected"}"#.to_vec(),
+                ));
+            }
+            let registration: RegisterDeviceRequest =
+                serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(registration.challenge.as_deref(), Some("fixture-challenge"));
+            shellumi_core::server::crypto::verify_device_signature(
+                &registration.signing_public_key,
+                b"shellumi-device-challenge:fixture-challenge",
+                registration.challenge_signature.as_deref().unwrap(),
+            )
+            .unwrap();
+            let device = DeviceResponse {
+                device_id: Uuid::new_v4(),
+                user_id: server.user,
+                device_name: registration.device_name,
+                signing_public_key: registration.signing_public_key,
+                agreement_public_key: registration.agreement_public_key,
+                created_at: 1,
+                last_seen_at: None,
+                revoked_at: None,
+            };
+            server.devices.lock().unwrap().push(device.clone());
+            if server.lose_registration.load(SeqCst) {
+                return Err(SyncError::Network(
+                    "injected lost registration response".into(),
+                ));
+            }
+            return Ok(json(device));
+        }
         if request.method == "DELETE" {
             server.delete_count.fetch_add(1, SeqCst);
             let id = Uuid::parse_str(url.rsplit('/').next().unwrap()).unwrap();
@@ -444,30 +521,7 @@ async fn registry_reservations_and_multivault_handoff_survive_failures() {
         .checkpoint(&a, &replacement, "Completed", Some(new_id))
         .await;
     fixture.reserve(&registry, &operation).await;
-    let server = Arc::new(Server {
-        user: fixture.user,
-        instance: fixture.server,
-        vaults: fixture.remote,
-        devices: Mutex::new(
-            [(fixture.old, &old), (new_id, &replacement)]
-                .map(|(id, intent)| DeviceResponse {
-                    device_id: id,
-                    user_id: fixture.user,
-                    device_name: intent.device_label.clone(),
-                    signing_public_key: intent.signing_public_key.clone(),
-                    agreement_public_key: intent.agreement_public_key.clone(),
-                    created_at: 1,
-                    last_seen_at: None,
-                    revoked_at: None,
-                })
-                .to_vec(),
-        ),
-        delete_count: Default::default(),
-        lose_delete: Default::default(),
-        missing_vault: Default::default(),
-        unauthorized_vault: Default::default(),
-        missing_envelope: Default::default(),
-    });
+    let server = Server::new(&fixture, &[(fixture.old, &old), (new_id, &replacement)]);
     let mut client =
         ShellumiServerClient::with_transport("https://fixture.invalid", Transport(server.clone()));
     client.set_token("fixture-session-1");
@@ -656,6 +710,112 @@ async fn registry_reservations_and_multivault_handoff_survive_failures() {
         .unwrap());
     assert_eq!(server.delete_count.load(SeqCst), 1);
     assert_eq!(fixture.credentials.deletes.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn split_registry_recovery_preserves_ambiguous_registration_and_cleans_rejection() {
+    let fixture = Fixture::new().await;
+    let registry = fixture.open(0).await;
+    let mut a = fixture.open(1).await;
+    let first = registry
+        .resolve_verified_remote_vault_binding("vault-a", None)
+        .await
+        .unwrap();
+    let old = fixture.intent(&first);
+    a.save_enrolled_device(&local_device(&first, fixture.user, fixture.old, &old))
+        .await
+        .unwrap();
+    let server = Server::new(&fixture, &[(fixture.old, &old)]);
+    let mut client =
+        ShellumiServerClient::with_transport("https://fixture.invalid", Transport(server.clone()));
+    client.set_token("fixture-session-1");
+    server.lose_registration.store(true, SeqCst);
+    assert!(a
+        .replace_device_keys_for_member(
+            &first,
+            "vault-a",
+            fixture.old,
+            "Lost registration",
+            &mut client,
+            &fixture.credentials,
+            Some(&registry)
+        )
+        .await
+        .is_err());
+    assert_eq!(server.registration_count.load(SeqCst), 1);
+    assert_eq!(server.delete_count.load(SeqCst), 0);
+    assert!(registry
+        .has_pending_device_replacements("vault-a")
+        .await
+        .unwrap());
+    drop(a);
+    drop(registry);
+
+    let registry = fixture.open(0).await;
+    let mut a = fixture.open(1).await;
+    server.lose_registration.store(false, SeqCst);
+    *server.missing_envelope.lock().unwrap() = Some(fixture.remote[2]);
+    for _ in 0..2 {
+        assert!(a
+            .recover_incomplete_enrollments_with_registry(
+                &first,
+                &mut client,
+                &fixture.credentials,
+                Some(&registry)
+            )
+            .await
+            .is_err());
+        assert_eq!(server.registration_count.load(SeqCst), 1);
+        assert_eq!(server.delete_count.load(SeqCst), 0);
+    }
+
+    let mut b = fixture.open(2).await;
+    let second = registry
+        .resolve_verified_remote_vault_binding("vault-b", None)
+        .await
+        .unwrap();
+    client.set_token("fixture-session-2");
+    server.reject_registration.store(true, SeqCst);
+    assert!(b
+        .enroll_additional_device_for_member_with_binding(
+            &second,
+            "vault-b",
+            "Definite rejection",
+            &mut client,
+            &fixture.credentials
+        )
+        .await
+        .is_err());
+    let pending = b
+        .list_incomplete_enrollment_operations("vault-b")
+        .await
+        .unwrap();
+    assert_eq!(pending[0].stage, "CredentialCleanup");
+    assert_eq!(fixture.credentials.deletes.load(SeqCst), 0);
+    b.recover_incomplete_enrollments_with_registry(
+        &second,
+        &mut client,
+        &fixture.credentials,
+        Some(&registry),
+    )
+    .await
+    .unwrap();
+    assert!(b
+        .list_incomplete_enrollment_operations("vault-b")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(fixture.credentials.deletes.load(SeqCst), 2);
+    assert_eq!(server.registration_count.load(SeqCst), 2);
+    assert_eq!(server.delete_count.load(SeqCst), 0);
+    let (signing, agreement) = old.credential_refs();
+    for reference in [signing, agreement] {
+        assert!(
+            shellumi_core::resolve_secret_from_ref(&fixture.credentials, &reference)
+                .unwrap()
+                .is_some()
+        );
+    }
 }
 
 #[tokio::test]
