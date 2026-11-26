@@ -1263,8 +1263,8 @@ impl Shellumi {
             #[cfg(target_os = "macos")]
             let _ = std::process::Command::new("open").arg(&auth_url).spawn();
             #[cfg(target_os = "windows")]
-            let _ = std::process::Command::new("cmd")
-                .args(["/c", "start", &auth_url])
+            let _ = shellumi_core::process::background_command("cmd")
+                .args(["/c", "start", "", &auth_url])
                 .spawn();
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let _ = std::process::Command::new("xdg-open")

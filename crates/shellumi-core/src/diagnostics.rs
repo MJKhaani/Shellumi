@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::Command;
+
 use std::time::Instant;
 
 /// Category of an individual diagnostic check.
@@ -350,7 +350,7 @@ impl DiagnosticsRunner {
     /// Verifies system OpenSSH client binary.
     pub fn check_openssh_client(&self) -> DiagnosticCheck {
         let start = Instant::now();
-        match Command::new("ssh").arg("-V").output() {
+        match crate::process::background_command("ssh").arg("-V").output() {
             Ok(output) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let version_str = String::from_utf8_lossy(&output.stderr);

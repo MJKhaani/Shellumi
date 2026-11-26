@@ -795,7 +795,7 @@ pub fn public_ssh_records(home: &Path, keys: bool) -> Result<Vec<PublicSshRecord
                 continue;
             }
             let public_key = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let output = std::process::Command::new("ssh-keygen")
+            let output = shellumi_core::process::background_command("ssh-keygen")
                 .arg("-l")
                 .arg("-f")
                 .arg(&path)

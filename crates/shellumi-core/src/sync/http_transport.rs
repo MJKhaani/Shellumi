@@ -133,9 +133,9 @@ pub(super) fn curl_private_config(
 impl HttpTransport for SystemHttpTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, SyncError> {
         use std::io::Write as _;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
-        let mut cmd = Command::new("curl");
+        let mut cmd = crate::process::background_command("curl");
         cmd.arg("-q")
             .arg("-s")
             .arg("-S")

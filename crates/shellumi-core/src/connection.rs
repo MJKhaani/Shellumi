@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn certificate_paths_survive_openssh_configuration_parser() {
         let path = "/keys/certificate with spaces and \"quotes\".pub";
-        let output = std::process::Command::new("/usr/bin/ssh")
+        let output = crate::process::background_command("/usr/bin/ssh")
             .args([
                 "-G",
                 "-F",

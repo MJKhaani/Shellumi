@@ -484,11 +484,84 @@ impl<'a> VaultCredentialStore<'a> {
         }
     }
 
+    /// Generate a cryptographically random 256-bit hex identifier.
+    pub fn generate_credential_id() -> Result<String, CredentialError> {
+        use ring::rand::{SecureRandom, SystemRandom};
+        use std::fmt::Write;
+        let rng = SystemRandom::new();
+        let mut bytes = [0u8; 32];
+        rng.fill(&mut bytes)
+            .map_err(|_| CredentialError::Storage("CSPRNG failure generating credential ID".into()))?;
+        let mut hex = String::with_capacity(64);
+        for b in bytes {
+            let _ = write!(&mut hex, "{b:02x}");
+        }
+        Ok(hex)
+    }
+
+    /// Plan a canonical vault-scoped credential reference without writing to the store yet.
+    pub fn plan_unique_ref(&self, kind: &str) -> Result<String, CredentialError> {
+        let kind = validate_identifier(kind, "credential kind")?;
+        let id = Self::generate_credential_id()?;
+        let account = format!("{}{}", self.account_prefix, sha256_hex(&format!("{kind}:{id}")));
+        Ok(format_keychain_ref(DEFAULT_KEYCHAIN_SERVICE, &account))
+    }
+
+    /// Stage a secret at a previously planned canonical reference after verifying vault ownership.
+    pub fn store_planned(&self, planned_ref: &str, secret: &str) -> Result<(), CredentialError> {
+        let account = self.account_for_ref(planned_ref)?;
+        self.store.set_secret(DEFAULT_KEYCHAIN_SERVICE, &account, secret)
+    }
+
+    /// Store a secret under a fresh CSPRNG-backed vault-specific account and return its canonical reference.
+    pub fn store_unique(&self, kind: &str, secret: &str) -> Result<String, CredentialError> {
+        let planned = self.plan_unique_ref(kind)?;
+        self.store_planned(&planned, secret)?;
+        Ok(planned)
+    }
+
     /// Store under a vault-specific account and return a reference for persistence.
     pub fn store(&self, name: &str, secret: &str) -> Result<String, CredentialError> {
         let name = validate_identifier(name, "secret name")?;
         let account = format!("{}{}", self.account_prefix, sha256_hex(name));
         store_secret_to_ref(self.store, DEFAULT_KEYCHAIN_SERVICE, &account, secret)
+    }
+
+    /// Safely migrate a legacy noncanonical reference that was already loaded from an
+    /// owned row in this vault's database. Never weakens `validate_reference()`.
+    pub fn migrate_legacy_reference_if_owned(
+        &self,
+        legacy_ref: &str,
+        vault_id: &crate::vault::VaultId,
+        kind: &str,
+    ) -> Result<Option<String>, CredentialError> {
+        if self.validate_reference(legacy_ref).is_ok() {
+            return Ok(None);
+        }
+        let (service, account) = parse_keychain_ref(legacy_ref)?;
+        if service != DEFAULT_KEYCHAIN_SERVICE {
+            return Err(CredentialError::InvalidIdentifier(
+                "legacy reference service mismatch",
+            ));
+        }
+        if let Some(rest) = account.strip_prefix("desktop-host-") {
+            let expected_prefix = format!("{}-", vault_id.as_str());
+            if !rest.starts_with(&expected_prefix) {
+                return Err(CredentialError::InvalidIdentifier(
+                    "legacy host reference belongs to another vault",
+                ));
+            }
+        } else if !account.starts_with("desktop-identity-") && !account.starts_with("identity:") {
+            return Err(CredentialError::InvalidIdentifier(
+                "unrecognized legacy reference format",
+            ));
+        }
+
+        let Some(secret) = resolve_secret_from_ref(self.store, legacy_ref)? else {
+            return Ok(None);
+        };
+        let new_ref = self.store_unique(kind, secret.expose_secret())?;
+        Ok(Some(new_ref))
     }
 
     fn account_for_ref(&self, reference: &str) -> Result<String, CredentialError> {
@@ -658,7 +731,7 @@ impl CredentialStore for WindowsCredentialManagerStore {
         let secret = validate_secret(secret)?;
 
         let script = Self::build_store_script(service, account);
-        let mut child = std::process::Command::new(&self.shell)
+        let mut child = crate::process::background_command(&self.shell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -700,7 +773,7 @@ impl CredentialStore for WindowsCredentialManagerStore {
         let account = validate_identifier(account, "account")?;
 
         let script = Self::build_lookup_script(service, account);
-        let output = std::process::Command::new(&self.shell)
+        let output = crate::process::background_command(&self.shell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -731,7 +804,7 @@ impl CredentialStore for WindowsCredentialManagerStore {
         let account = validate_identifier(account, "account")?;
 
         let script = Self::build_delete_script(service, account);
-        let output = std::process::Command::new(&self.shell)
+        let output = crate::process::background_command(&self.shell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -815,7 +888,7 @@ impl CredentialStore for LinuxSecretServiceStore {
         let secret = validate_secret(secret)?;
 
         let args = Self::build_store_args(service, account);
-        let mut child = std::process::Command::new(&self.binary)
+        let mut child = crate::process::background_command(&self.binary)
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -858,7 +931,7 @@ impl CredentialStore for LinuxSecretServiceStore {
         let account = validate_identifier(account, "account")?;
 
         let args = Self::build_lookup_args(service, account);
-        let output = std::process::Command::new(&self.binary)
+        let output = crate::process::background_command(&self.binary)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -891,7 +964,7 @@ impl CredentialStore for LinuxSecretServiceStore {
         let account = validate_identifier(account, "account")?;
 
         let args = Self::build_clear_args(service, account);
-        let output = std::process::Command::new(&self.binary)
+        let output = crate::process::background_command(&self.binary)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -949,7 +1022,7 @@ pub fn probe_keychain_daemon() -> KeychainDaemonStatus {
             }
         }
         "linux" => {
-            let check = std::process::Command::new("secret-tool")
+            let check = crate::process::background_command("secret-tool")
                 .arg("--help")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -974,7 +1047,7 @@ pub fn probe_keychain_daemon() -> KeychainDaemonStatus {
             }
         }
         "windows" => {
-            let check = std::process::Command::new("powershell.exe")
+            let check = crate::process::background_command("powershell.exe")
                 .args([
                     "-NoProfile",
                     "-NonInteractive",

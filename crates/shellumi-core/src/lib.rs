@@ -19,6 +19,7 @@ pub mod known_hosts;
 pub mod logging;
 pub mod mobile;
 pub mod palette;
+pub mod process;
 pub mod protocol;
 pub mod recording;
 pub mod server;

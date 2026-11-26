@@ -475,7 +475,7 @@ impl SftpClient {
             .into());
         }
         let timeout = std::time::Duration::from_secs(options.timeout_seconds.into());
-        let mut cmd = std::process::Command::new("ssh");
+        let mut cmd = crate::process::background_command("ssh");
         if let Some(config) = &options.ssh_config_file {
             cmd.arg("-F").arg(config);
         }

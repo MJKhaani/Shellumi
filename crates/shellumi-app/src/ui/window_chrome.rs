@@ -5,7 +5,7 @@
 //! with a minimal client-side control strip rendered *only* when a compositor (e.g. Wayland)
 //! forces `Decorations::Client`.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use gpui::point;
 use gpui::{
     div, prelude::*, px, rgb, size, Bounds, Context, FontWeight, MouseButton, ParentElement,

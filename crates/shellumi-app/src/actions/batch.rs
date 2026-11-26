@@ -228,7 +228,7 @@ impl Shellumi {
         let task = cx.background_executor().spawn(async move {
             let mut runner = BatchRunner::new(plan);
             let summary = runner.execute_sync(|target, cmd| {
-                let mut proc = std::process::Command::new("ssh");
+                let mut proc = shellumi_core::process::background_command("ssh");
                 proc.args(target.destination.openssh_arguments());
                 proc.arg(cmd);
                 match proc.output() {
