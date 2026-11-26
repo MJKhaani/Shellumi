@@ -9506,6 +9506,11 @@ mod tests {
             .unwrap();
         store
             .connection
+            .execute("DROP INDEX IF EXISTS idx_identities_vault_sync_id", ())
+            .await
+            .unwrap();
+        store
+            .connection
             .execute("ALTER TABLE identities DROP COLUMN vault_id", ())
             .await
             .unwrap();
@@ -9727,6 +9732,11 @@ mod tests {
         store
             .connection
             .execute("DROP INDEX hosts_vault_id_idx", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute("DROP INDEX IF EXISTS idx_hosts_vault_sync_id", ())
             .await
             .unwrap();
         store
@@ -14263,7 +14273,7 @@ mod tests {
         let mut mut_rows = store
             .connection
             .query(
-                "SELECT COUNT(*) FROM vault_mutations WHERE object_id = 'Atomic Host'",
+                "SELECT COUNT(*) FROM vault_mutations WHERE entity_type = 'host' AND payload_json LIKE '%\"Atomic Host\"%'",
                 (),
             )
             .await
