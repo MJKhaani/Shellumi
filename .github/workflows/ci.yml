@@ -42,6 +42,11 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --workspace
 
+      - name: Build release binaries
+        run: |
+          cargo build --locked --release -p shellumi-app
+          cargo build --locked --release -p shellumi-cli
+
   verify-linux:
     name: Verify (Linux)
     runs-on: ubuntu-latest
@@ -61,7 +66,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -73,6 +78,9 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       - name: Validate desktop entry (Terminal=false)
         run: |
@@ -85,6 +93,11 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --workspace
 
+      - name: Build release binaries
+        run: |
+          cargo build --locked --release -p shellumi-app
+          cargo build --locked --release -p shellumi-cli
+
   verify-windows:
     name: Verify (Windows)
     runs-on: windows-latest
@@ -95,7 +108,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -108,8 +121,28 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Run workspace tests
         run: cargo test --locked --workspace
+
+      - name: Build release binaries and verify PE subsystems
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p shellumi-app
+          cargo build --locked --release -p shellumi-cli
+          function Get-PeSubsystem([string]$path) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            return [BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          }
+          $appSub = Get-PeSubsystem "target/release/shellumi-app.exe"
+          $cliSub = Get-PeSubsystem "target/release/shellumi-cli.exe"
+          Write-Host "shellumi-app.exe PE subsystem: $appSub (expected 2 = WINDOWS_GUI)"
+          Write-Host "shellumi-cli.exe PE subsystem: $cliSub (expected 3 = WINDOWS_CUI)"
+          if ($appSub -ne 2) { throw "shellumi-app.exe must use WINDOWS_GUI subsystem (2), got $appSub" }
+          if ($cliSub -ne 3) { throw "shellumi-cli.exe must use WINDOWS_CUI subsystem (3), got $cliSub" }
