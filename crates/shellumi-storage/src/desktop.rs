@@ -911,24 +911,87 @@ pub async fn resolve_connection_with_key(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Host no longer exists.")?;
-    if !host.is_ssh() {
-        return Err("The selected host is no longer an SSH host.".into());
+    let proto = host.protocol();
+    if proto != shellumi_core::ConnectionProtocol::Ssh
+        && proto != shellumi_core::ConnectionProtocol::Mosh
+    {
+        return Err("The selected host does not use SSH authentication.".into());
     }
     let group = if let Some(name) = &host.group_name {
         store.get_group(name).await.map_err(|e| e.to_string())?
     } else {
         None
     };
-    let identity_id = host
-        .identity_id
-        .or_else(|| group.as_ref().and_then(|group| group.identity_id));
-    let mut identity = if let Some(id) = identity_id {
+
+    let cfg_map = host
+        .protocol_config
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok())
+        .unwrap_or_default();
+    let cfg_str = |k: &str| {
+        cfg_map
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    };
+    let auth_mode = cfg_str("auth_mode");
+    let host_secret_ref = cfg_str("host_secret_ref");
+    let host_key_path = cfg_str("host_key_path");
+    let host_passphrase_ref = cfg_str("host_passphrase_ref");
+
+    let mut identity = if let Some(id) = host.identity_id {
         Some(
             store
                 .get_identity(id)
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or("Selected identity no longer exists.")?
+                .to_identity(),
+        )
+    } else if host_secret_ref.is_some() || host_key_path.is_some() {
+        let cred_store = shellumi_core::default_credential_store();
+        let vault_store =
+            shellumi_core::VaultCredentialStore::new(&*cred_store, &store.host_vault_id);
+        for r in [&host_secret_ref, &host_passphrase_ref]
+            .into_iter()
+            .flatten()
+        {
+            vault_store
+                .validate_reference(r)
+                .map_err(|e| format!("Invalid host credential reference: {e}"))?;
+        }
+        let auth_method = if host_key_path.is_some() {
+            shellumi_core::AuthMethod::PublicKey {
+                key_name: host.name.clone(),
+            }
+        } else {
+            shellumi_core::AuthMethod::Password
+        };
+        Some(shellumi_core::Identity {
+            id: 0,
+            name: format!("{} (host-specific)", host.name),
+            username: host.destination.username().to_string(),
+            auth_method,
+            password_secret_ref: host_secret_ref,
+            key_path: host_key_path,
+            passphrase_secret_ref: host_passphrase_ref,
+            certificate_path: None,
+            tags: Vec::new(),
+            comment: None,
+            created_at: None,
+            updated_at: None,
+        })
+    } else if auth_mode.as_deref() == Some("ask") {
+        // Explicit Ask on Connect must never silently fall back to group inheritance.
+        None
+    } else if let Some(group_identity_id) = group.as_ref().and_then(|g| g.identity_id) {
+        Some(
+            store
+                .get_identity(group_identity_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Group identity no longer exists.")?
                 .to_identity(),
         )
     } else {
@@ -1133,9 +1196,119 @@ mod connection_tests {
         assert!(resolve_connection(path, telnet)
             .await
             .unwrap_err()
-            .contains("no longer an SSH host"));
+            .contains("does not use SSH authentication"));
         let plan = resolve_connection(path, normal).await.unwrap();
         assert_eq!(plan.ssh_arguments, dest.openssh_arguments());
         assert!(!plan.uses_askpass());
+    }
+
+    #[tokio::test]
+    async fn resolves_host_specific_credentials_mosh_and_explicit_ask_without_group_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host_auth.db");
+        let path_str = path.to_str().unwrap();
+        let mut store = HostStore::open(path_str).await.unwrap();
+        let vid = shellumi_core::VaultId::new(crate::LEGACY_LOCAL_VAULT_ID).unwrap();
+        store.set_vault_id(vid.clone());
+
+        let cred_store = shellumi_core::default_credential_store();
+        let vault_store = shellumi_core::VaultCredentialStore::new(&*cred_store, &vid);
+        let group_pw_ref = vault_store
+            .store_unique("identity-password", "group-pw")
+            .unwrap();
+        let group_ident_id = store
+            .create_identity(&NewIdentity {
+                name: "Group Ident".into(),
+                username: "groupuser".into(),
+                auth_method: AuthMethod::Password,
+                password_secret_ref: Some(group_pw_ref),
+                key_path: None,
+                passphrase_secret_ref: None,
+                certificate_path: None,
+                tags: vec![],
+                comment: None,
+            })
+            .await
+            .unwrap();
+        store
+            .add_group(&HostGroup {
+                name: "Prod".into(),
+                default_username: Some("groupuser".into()),
+                default_port: Some(std::num::NonZeroU16::new(22).unwrap()),
+                identity_id: Some(group_ident_id),
+                tags: vec![],
+            })
+            .await
+            .unwrap();
+
+        let dest = SshDestination::new("app.example.test", "deploy", 2222).unwrap();
+
+        // 1. Explicit Ask on Connect must NOT inherit group identity
+        let ask_host_id = store
+            .add_full(
+                "AskHost",
+                &dest,
+                Some("Prod"),
+                &[],
+                None,
+                None,
+                "ssh",
+                Some(r#"{"auth_mode":"ask"}"#),
+                None,
+            )
+            .await
+            .unwrap();
+        let ask_plan = resolve_connection(path_str, ask_host_id).await.unwrap();
+        assert!(!ask_plan.uses_askpass());
+        assert!(ask_plan.password_ref.is_none());
+
+        // 2. Host-specific SSH key + passphrase in protocol_config
+        let key_file = dir.path().join("id with spaces");
+        std::fs::write(&key_file, "dummy").unwrap();
+        let pass_ref = vault_store.store_unique("host-passphrase", "kpw").unwrap();
+        let host_cfg = serde_json::json!({
+            "host_key_path": key_file.to_str().unwrap(),
+            "host_passphrase_ref": pass_ref,
+        })
+        .to_string();
+        let mosh_host_id = store
+            .add_full(
+                "MoshHost",
+                &dest,
+                None,
+                &[],
+                None,
+                None,
+                "mosh",
+                Some(&host_cfg),
+                None,
+            )
+            .await
+            .unwrap();
+        let mosh_plan = resolve_connection(path_str, mosh_host_id).await.unwrap();
+        assert!(mosh_plan.uses_askpass());
+        assert!(mosh_plan.identity_file.is_some());
+        assert_eq!(mosh_plan.passphrase_ref, Some(pass_ref));
+
+        // 3. Cross-vault host_secret_ref must be rejected
+        let other_vid = shellumi_core::VaultId::new("other-vault").unwrap();
+        let other_store = shellumi_core::VaultCredentialStore::new(&*cred_store, &other_vid);
+        let foreign_ref = other_store.store_unique("host-password", "x").unwrap();
+        let bad_cfg = serde_json::json!({ "host_secret_ref": foreign_ref }).to_string();
+        let bad_host_id = store
+            .add_full(
+                "ForeignRefHost",
+                &dest,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                Some(&bad_cfg),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(resolve_connection(path_str, bad_host_id).await.is_err());
     }
 }

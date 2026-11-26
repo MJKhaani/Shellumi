@@ -409,48 +409,113 @@ impl Shellumi {
         match proto {
             ConnectionProtocol::Ssh => self.launch_saved_connection(host, false, window, cx),
             ConnectionProtocol::Mosh => {
-                let mosh_cfg = host
-                    .protocol_config
-                    .as_deref()
-                    .and_then(|c| serde_json::from_str::<MoshConfig>(c).ok())
-                    .unwrap_or_default();
-                let mut dest = host.destination.clone();
-                if dest.username().is_empty() {
-                    if let Some(ident) = host
-                        .identity_id
-                        .and_then(|id| self.identities.iter().find(|i| i.id == id))
-                    {
-                        if !ident.username.is_empty() {
-                            if let Ok(updated) =
-                                SshDestination::new(dest.host(), &ident.username, dest.port().get())
+                let Some(path) = self.active_vault_db_path() else {
+                    return;
+                };
+                if !self.connecting_hosts.insert(host.id) {
+                    return;
+                }
+                let host = host.clone();
+                let host_id = host.id;
+                let active_vault_id = self.active_vault_id.clone();
+                let active_vault_id_task = active_vault_id.clone();
+                let active_key = self.active_vault_key();
+                let vault_gen = self.vault_load_generation;
+                let handle = window.window_handle();
+                self.desktop.message = Some("Resolving Mosh SSH bootstrap credentials…".into());
+                cx.notify();
+
+                let task = cx.background_executor().spawn(async move {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    runtime.block_on(shellumi_storage::desktop::resolve_connection_with_key(
+                        &path,
+                        host_id,
+                        Some(&active_vault_id_task),
+                        active_key.as_ref(),
+                    ))
+                });
+
+                cx.spawn(async move |app, cx| {
+                    let result = task.await;
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            app.connecting_hosts.remove(&host_id);
+                            if app.active_vault_id != active_vault_id
+                                || app.vault_load_generation != vault_gen
                             {
-                                dest = updated;
+                                tracing::warn!(
+                                    "Discarded stale Mosh credential resolution after vault change"
+                                );
+                                return;
                             }
-                        }
-                    }
-                }
-                let mut mosh_args = mosh_cfg.build_arguments(&dest, host.jump_host.as_deref());
-                if let Some(ident) = host
-                    .identity_id
-                    .and_then(|id| self.identities.iter().find(|i| i.id == id))
-                {
-                    if let Some(ref key_path) = ident.key_path {
-                        if !key_path.trim().is_empty() {
-                            let ssh_flag =
-                                format!("ssh -p {} -i {}", dest.port().get(), key_path.trim());
-                            mosh_args.insert(0, format!("--ssh={ssh_flag}"));
-                        }
-                    }
-                }
-                let command = TerminalCommand::new("mosh").args(mosh_args);
-                self.start_session_with_startup(
-                    host.name.clone(),
-                    SessionKind::Mosh,
-                    command,
-                    None,
-                    window,
-                    cx,
-                );
+                            match result {
+                                Err(error) => {
+                                    app.desktop.message =
+                                        Some(format!("Mosh could not start: {error}"));
+                                    cx.notify();
+                                }
+                                Ok(plan) => {
+                                    app.desktop.message = None;
+                                    let mosh_cfg = host
+                                        .protocol_config
+                                        .as_deref()
+                                        .and_then(|c| serde_json::from_str::<MoshConfig>(c).ok())
+                                        .unwrap_or_default();
+                                    let mut mosh_args = mosh_cfg.build_arguments(
+                                        &plan.destination,
+                                        plan.jump_host.as_deref(),
+                                    );
+                                    let mut ssh_parts = vec!["ssh".to_string()];
+                                    ssh_parts.push("-p".to_string());
+                                    ssh_parts.push(plan.destination.port().get().to_string());
+                                    if let Some(ref key_path) = plan.identity_file {
+                                        ssh_parts.push("-i".to_string());
+                                        ssh_parts.push(key_path.clone());
+                                    }
+                                    if let Some(ref cert_path) = plan.certificate_file {
+                                        ssh_parts.push("-o".to_string());
+                                        ssh_parts.push(format!("CertificateFile={cert_path}"));
+                                    }
+                                    for (flag, val) in &plan.authentication_options {
+                                        ssh_parts.push(flag.clone());
+                                        ssh_parts.push(val.clone());
+                                    }
+                                    let escaped_ssh = ssh_parts
+                                        .iter()
+                                        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    mosh_args.insert(0, format!("--ssh={escaped_ssh}"));
+
+                                    let mut command = TerminalCommand::new("mosh").args(mosh_args);
+                                    if let Ok(env_vars) = crate::askpass::environment(&plan) {
+                                        for (k, v) in env_vars {
+                                            command = command.env(k, v);
+                                        }
+                                    }
+                                    let startup = host.startup_snippet_id.map(|id| {
+                                        app.snippets
+                                            .iter()
+                                            .find(|s| s.id == id)
+                                            .map(|s| s.name.clone())
+                                            .unwrap_or_else(|| format!("#{id}"))
+                                    });
+                                    app.start_session_with_startup(
+                                        host.name.clone(),
+                                        SessionKind::Mosh,
+                                        command,
+                                        startup,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }
+                        });
+                    });
+                })
+                .detach();
             }
             ConnectionProtocol::Telnet => {
                 let telnet_cfg = host
