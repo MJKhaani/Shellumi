@@ -125,6 +125,11 @@ impl Shellumi {
                 );
             }
             if let Some(def) = &var.default_value {
+                let badge_text = if var.is_secret {
+                    "Default configured".to_string()
+                } else {
+                    format!("default: {def}")
+                };
                 var_header = var_header.child(
                     div()
                         .px_2()
@@ -133,7 +138,7 @@ impl Shellumi {
                         .bg(rgb(0x183048))
                         .text_xs()
                         .text_color(rgb(MacTheme::ACCENT_BLUE))
-                        .child(format!("default: {def}")),
+                        .child(badge_text),
                 );
             }
 

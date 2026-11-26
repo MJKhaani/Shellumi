@@ -2,6 +2,7 @@
 //! Shared UI primitives, design tokens, and standard components.
 
 pub mod button;
+pub mod field;
 pub mod form;
 pub mod inspector_shell;
 pub mod popover;
@@ -9,6 +10,7 @@ pub mod safety_alert;
 pub mod status;
 
 pub use button::{AppButton, ButtonSize, ButtonVariant, IconButton};
+pub(crate) use field::{PasswordField, TextField};
 pub use form::{
     error_notice, form_field, form_section, inline_notice, simple_field, simple_section,
     toggle_switch, validation_message,

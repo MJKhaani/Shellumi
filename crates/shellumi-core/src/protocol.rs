@@ -1446,5 +1446,273 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+/// Authentication credential mechanism supported by a protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Password,
+    SshKey,
+    SshAgent,
+    Interactive,
+    RdpPassword,
+    VncPassword,
+    VncUsernamePassword,
+    None,
+}
+
+impl CredentialKind {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Password => "Password",
+            Self::SshKey => "SSH Key / Certificate",
+            Self::SshAgent => "SSH Agent",
+            Self::Interactive => "Keyboard Interactive",
+            Self::RdpPassword => "Username & Password",
+            Self::VncPassword => "VNC Password",
+            Self::VncUsernamePassword => "Username & Password (ARD)",
+            Self::None => "No Authentication",
+        }
+    }
+}
+
+/// Persistence choice when entering credentials inline on a host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersistenceChoice {
+    SessionOnly,
+    SaveForThisHost,
+    SaveAsIdentity { name: String },
+}
+
+/// Source of authentication credentials for a host connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthSource {
+    AskOnConnect,
+    ExistingIdentity { identity_id: i64 },
+    EnterCredentials { persist: PersistenceChoice },
+    InheritGroup,
+    NoAuthentication,
+    NotApplicable,
+}
+
+/// Explicit secret update intent when editing an existing saved credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretUpdateAction {
+    Keep,
+    Replace,
+    Remove,
+}
+
+/// Capability description derived from `ConnectionProtocol` and backend support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProtocolCapabilities {
+    pub protocol: ConnectionProtocol,
+    pub default_port: Option<u16>,
+    pub uses_network_host: bool,
+    pub uses_network_port: bool,
+    pub supports_username: bool,
+    pub supports_domain: bool,
+    pub supports_jump_host: bool,
+    pub supports_startup_snippet: bool,
+    pub supports_display_options: bool,
+    pub supports_tls_strict: bool,
+    pub supports_audio_mic: bool,
+    pub supports_serial_options: bool,
+    pub allows_saved_identity: bool,
+    pub allows_ask_on_connect: bool,
+    pub allows_group_inheritance: bool,
+    pub allows_no_auth: bool,
+    pub supported_credentials: &'static [CredentialKind],
+    pub cleartext_warning: Option<&'static str>,
+}
+
+impl ProtocolCapabilities {
+    pub const fn for_protocol(protocol: ConnectionProtocol) -> Self {
+        match protocol {
+            ConnectionProtocol::Ssh => Self {
+                protocol,
+                default_port: Some(22),
+                uses_network_host: true,
+                uses_network_port: true,
+                supports_username: true,
+                supports_domain: false,
+                supports_jump_host: true,
+                supports_startup_snippet: true,
+                supports_display_options: false,
+                supports_tls_strict: false,
+                supports_audio_mic: false,
+                supports_serial_options: false,
+                allows_saved_identity: true,
+                allows_ask_on_connect: true,
+                allows_group_inheritance: true,
+                allows_no_auth: false,
+                supported_credentials: &[
+                    CredentialKind::Password,
+                    CredentialKind::SshKey,
+                    CredentialKind::SshAgent,
+                    CredentialKind::Interactive,
+                ],
+                cleartext_warning: None,
+            },
+            ConnectionProtocol::Mosh => Self {
+                protocol,
+                default_port: Some(22),
+                uses_network_host: true,
+                uses_network_port: true,
+                supports_username: true,
+                supports_domain: false,
+                supports_jump_host: true,
+                supports_startup_snippet: true,
+                supports_display_options: false,
+                supports_tls_strict: false,
+                supports_audio_mic: false,
+                supports_serial_options: false,
+                allows_saved_identity: true,
+                allows_ask_on_connect: true,
+                allows_group_inheritance: true,
+                allows_no_auth: false,
+                supported_credentials: &[
+                    CredentialKind::Password,
+                    CredentialKind::SshKey,
+                    CredentialKind::SshAgent,
+                    CredentialKind::Interactive,
+                ],
+                cleartext_warning: None,
+            },
+            ConnectionProtocol::Rdp => Self {
+                protocol,
+                default_port: Some(3389),
+                uses_network_host: true,
+                uses_network_port: true,
+                supports_username: true,
+                supports_domain: true,
+                supports_jump_host: false,
+                supports_startup_snippet: false,
+                supports_display_options: true,
+                supports_tls_strict: true,
+                supports_audio_mic: true,
+                supports_serial_options: false,
+                allows_saved_identity: true,
+                allows_ask_on_connect: true,
+                allows_group_inheritance: false,
+                allows_no_auth: false,
+                supported_credentials: &[CredentialKind::RdpPassword],
+                cleartext_warning: None,
+            },
+            ConnectionProtocol::Vnc => Self {
+                protocol,
+                default_port: Some(5900),
+                uses_network_host: true,
+                uses_network_port: true,
+                supports_username: true,
+                supports_domain: false,
+                supports_jump_host: false,
+                supports_startup_snippet: false,
+                supports_display_options: true,
+                supports_tls_strict: false,
+                supports_audio_mic: false,
+                supports_serial_options: false,
+                allows_saved_identity: true,
+                allows_ask_on_connect: true,
+                allows_group_inheritance: false,
+                allows_no_auth: true,
+                supported_credentials: &[
+                    CredentialKind::VncPassword,
+                    CredentialKind::VncUsernamePassword,
+                    CredentialKind::None,
+                ],
+                cleartext_warning: None,
+            },
+            ConnectionProtocol::Telnet => Self {
+                protocol,
+                default_port: Some(23),
+                uses_network_host: true,
+                uses_network_port: true,
+                supports_username: true,
+                supports_domain: false,
+                supports_jump_host: false,
+                supports_startup_snippet: true,
+                supports_display_options: false,
+                supports_tls_strict: false,
+                supports_audio_mic: false,
+                supports_serial_options: false,
+                allows_saved_identity: false,
+                allows_ask_on_connect: false,
+                allows_group_inheritance: false,
+                allows_no_auth: false,
+                supported_credentials: &[CredentialKind::Interactive],
+                cleartext_warning: Some(
+                    "Telnet transmits credentials, keystrokes, and session data in cleartext.",
+                ),
+            },
+            ConnectionProtocol::Serial => Self {
+                protocol,
+                default_port: None,
+                uses_network_host: false,
+                uses_network_port: false,
+                supports_username: false,
+                supports_domain: false,
+                supports_jump_host: false,
+                supports_startup_snippet: false,
+                supports_display_options: false,
+                supports_tls_strict: false,
+                supports_audio_mic: false,
+                supports_serial_options: true,
+                allows_saved_identity: false,
+                allows_ask_on_connect: false,
+                allows_group_inheritance: false,
+                allows_no_auth: true,
+                supported_credentials: &[CredentialKind::None],
+                cleartext_warning: None,
+            },
+            ConnectionProtocol::Local => Self {
+                protocol,
+                default_port: None,
+                uses_network_host: false,
+                uses_network_port: false,
+                supports_username: false,
+                supports_domain: false,
+                supports_jump_host: false,
+                supports_startup_snippet: true,
+                supports_display_options: false,
+                supports_tls_strict: false,
+                supports_audio_mic: false,
+                supports_serial_options: false,
+                allows_saved_identity: false,
+                allows_ask_on_connect: false,
+                allows_group_inheritance: false,
+                allows_no_auth: true,
+                supported_credentials: &[CredentialKind::None],
+                cleartext_warning: None,
+            },
+        }
+    }
+
+    /// Return whether an existing `AuthMethod` identity is compatible with this protocol.
+    pub fn is_auth_method_compatible(&self, method: &crate::AuthMethod) -> bool {
+        if !self.allows_saved_identity {
+            return false;
+        }
+        match self.protocol {
+            ConnectionProtocol::Ssh | ConnectionProtocol::Mosh => true,
+            ConnectionProtocol::Rdp | ConnectionProtocol::Vnc => {
+                matches!(method, crate::AuthMethod::Password)
+            }
+            ConnectionProtocol::Telnet | ConnectionProtocol::Serial | ConnectionProtocol::Local => {
+                false
+            }
+        }
+    }
+
+    pub fn default_port_str(&self) -> &'static str {
+        match self.default_port {
+            Some(22) => "22",
+            Some(23) => "23",
+            Some(3389) => "3389",
+            Some(5900) => "5900",
+            _ => "",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

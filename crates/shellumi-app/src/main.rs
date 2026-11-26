@@ -35,9 +35,9 @@ mod vault_rotation;
 pub use theme::{caption, card, glyph_badge, heading, item, pill, subheader, MacTheme};
 
 use gpui::{
-    actions, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context,
-    Entity, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Menu, MenuItem, OsAction,
-    SystemMenuType, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, rgba, size, App, Application, Bounds, Context, Entity,
+    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Menu, MenuItem, OsAction,
+    SystemMenuType, Window,
 };
 use session::{Session, SessionEvent};
 #[cfg(test)]
@@ -844,6 +844,8 @@ struct Shellumi {
     #[allow(dead_code)]
     pub(crate) inspector_coordinator: ui::inspector::InspectorCoordinator,
     pub(crate) current_inspector_width: Option<f32>,
+    pub(crate) measured_workspace_width: Option<f32>,
+    pub(crate) layout_epoch: u64,
     pub(crate) vault_load_generation: u64,
     pub(crate) tab_overflow_menu_open: bool,
     pub(crate) tab_overflow_x: f32,
@@ -857,8 +859,27 @@ struct Shellumi {
     pub(crate) provider_form: Option<ProviderFormState>,
     pub(crate) team_form: Option<TeamFormState>,
     pub(crate) pending_window_action: Option<PendingWindowAction>,
-    pub(crate) rd_canvas_bounds: std::collections::HashMap<usize, gpui::Bounds<gpui::Pixels>>,
+    pub(crate) approved_close_once: bool,
+    pub(crate) rd_canvas_measurements: std::collections::HashMap<u64, CanvasMeasurement>,
+    pub(crate) rd_pan_state: std::collections::HashMap<u64, shellumi_remote_desktop::PanState>,
+    pub(crate) rd_resize_state: std::collections::HashMap<u64, RdAutoResizeState>,
+    pub(crate) vault_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    pub(crate) tab_overflow_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CanvasMeasurement {
+    pub tab_id: u64,
+    pub layout_epoch: u64,
+    pub viewport: gpui::Bounds<gpui::Pixels>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RdAutoResizeState {
+    pub desired: Option<(u32, u32)>,
+    pub last_sent: Option<(u32, u32)>,
+    pub pending_token: u64,
 }
 
 #[allow(dead_code)] // Retained status variants for the unfinished sync integration.
@@ -1086,7 +1107,52 @@ enum HostEditorCategory {
     Advanced,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostAuthSourceKind {
+    AskOnConnect,
+    ExistingIdentity,
+    EnterCredentials,
+    InheritGroup,
+    NoAuthentication,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostPersistenceChoice {
+    SessionOnly,
+    SaveForThisHost,
+    SaveAsIdentity,
+}
+
+/// Non-secret authentication metadata stored in `protocol_config` (never contains plaintext secrets).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HostAuthMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_secret_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum HostEditEvent {
+    SetProtocol(ConnectionProtocol),
+    SelectIdentity(Option<i64>),
+    SetAuthSource(HostAuthSourceKind),
+    SetCredentialKind(shellumi_core::CredentialKind),
+    SetPersistence(HostPersistenceChoice),
+    SetSecretUpdateAction(shellumi_core::SecretUpdateAction),
+    SetRdColorDepth(u8),
+    ToggleRdViewOnly,
+    ToggleRdTlsStrict,
+    ToggleRdAudio,
+    ToggleRdMicrophone,
+    SetSerialDataBits(u8),
+    SetSerialParity(shellumi_core::SerialParity),
+    SetSerialStopBits(shellumi_core::SerialStopBits),
+    SetSerialFlowControl(shellumi_core::SerialFlowControl),
+}
+
 struct HostForm {
+    draft_generation: u64,
     active_category: HostEditorCategory,
     identity_id: Option<i64>,
     id: Option<i64>,
@@ -1094,18 +1160,37 @@ struct HostForm {
     hostname: Entity<TextInput>,
     username: Entity<TextInput>,
     port: Entity<TextInput>,
+    port_is_manual: bool,
     group: Entity<TextInput>,
     tags: Entity<TextInput>,
     jump_host: Entity<TextInput>,
     startup_snippet: Entity<TextInput>,
     protocol: ConnectionProtocol,
     protocol_config: Option<String>,
+    auth_source_kind: HostAuthSourceKind,
+    credential_kind: shellumi_core::CredentialKind,
+    persistence_choice: HostPersistenceChoice,
+    auth_password: Entity<TextInput>,
+    auth_key_path: Entity<TextInput>,
+    auth_passphrase: Entity<TextInput>,
+    new_identity_name: Entity<TextInput>,
+    new_identity_tags: Entity<TextInput>,
+    secret_update_action: shellumi_core::SecretUpdateAction,
+    host_secret_ref: Option<String>,
+    has_host_secret: bool,
     rd_domain: Entity<TextInput>,
     rd_width: Entity<TextInput>,
     rd_height: Entity<TextInput>,
     rd_color_depth: u8,
     rd_view_only: bool,
     rd_tls_strict: bool,
+    rd_enable_audio: bool,
+    rd_enable_microphone: bool,
+    serial_baud: Entity<TextInput>,
+    serial_data_bits: u8,
+    serial_parity: shellumi_core::SerialParity,
+    serial_stop_bits: shellumi_core::SerialStopBits,
+    serial_flow_control: shellumi_core::SerialFlowControl,
 }
 
 fn format_endpoint(username: &str, hostname: &str, port: u16) -> String {
@@ -1220,6 +1305,13 @@ impl Shellumi {
             std::future::ready(())
         })
         .detach();
+        let entity = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(entity) = entity.upgrade() else {
+                return true;
+            };
+            entity.update(cx, |app, cx| app.handle_window_close_request(window, cx))
+        });
         let focus = cx.focus_handle();
         window.focus(&focus);
         let search_input =
@@ -1329,6 +1421,8 @@ impl Shellumi {
             delete_confirm: None,
             inspector_coordinator: ui::inspector::InspectorCoordinator::new(),
             current_inspector_width: Some(crate::ui::layout::INSPECTOR_PREFERRED_WIDTH),
+            measured_workspace_width: None,
+            layout_epoch: 0,
             vault_load_generation: 0,
             tab_overflow_menu_open: false,
             tab_overflow_x: 220.0,
@@ -1339,7 +1433,12 @@ impl Shellumi {
             provider_form: None,
             team_form: None,
             pending_window_action: None,
-            rd_canvas_bounds: std::collections::HashMap::new(),
+            approved_close_once: false,
+            rd_canvas_measurements: std::collections::HashMap::new(),
+            rd_pan_state: std::collections::HashMap::new(),
+            rd_resize_state: std::collections::HashMap::new(),
+            vault_trigger_bounds: None,
+            tab_overflow_trigger_bounds: None,
             pending_rotation_recoveries: Vec::new(),
             rd_display_menu_open: false,
             rd_keyboard_menu_open: false,
@@ -1367,16 +1466,7 @@ impl Shellumi {
             format!("Shellumi — {vault_name}")
         };
         let _ = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(940.0), px(650.0))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(title.into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.0), px(14.0))),
-                }),
-                ..Default::default()
-            },
+            ui::window_chrome::shellumi_window_options(title, bounds),
             |window, cx| {
                 let view = cx
                     .new(|cx| Shellumi::new_with_vault(database, vault_id, vault_name, window, cx));
@@ -2078,21 +2168,64 @@ impl Shellumi {
                     .child("Settings"),
             )
     }
+    /// Evaluate whether the current window may close, routing dirty drafts through the
+    /// inspector navigation guard (`NavigationRequest::CloseWindow`).
+    pub(crate) fn handle_window_close_request(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.approved_close_once {
+            self.approved_close_once = false;
+            return true;
+        }
+        if !self
+            .inspector_coordinator
+            .request_navigation(ui::inspector::NavigationRequest::CloseWindow)
+        {
+            tracing::debug!(
+                vault_id = %self.active_vault_id,
+                "Window close vetoed by dirty inspector guard"
+            );
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
     fn render_unified_top_bar(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let is_hosts_view = self.page.is_none() && self.active_tab_idx.is_none();
+        let chrome = ui::window_chrome::ChromeMetrics::from_window(window);
 
-        #[cfg(target_os = "macos")]
-        let traffic_spacer = div().w(px(80.0)).h_full().flex_shrink_0();
-        #[cfg(not(target_os = "macos"))]
-        let traffic_spacer = div().w(px(12.0)).h_full().flex_shrink_0();
+        let traffic_spacer = div()
+            .w(px(chrome.left_reserved_width))
+            .h_full()
+            .flex_shrink_0();
+
+        let vault_bounds_sensor = {
+            let view = cx.entity().downgrade();
+            gpui::canvas(
+                move |bounds, _window, cx| {
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |app, _cx| {
+                            app.vault_trigger_bounds = Some(bounds);
+                        });
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
 
         // 1. Split Vault Button: Clicking name returns to main view without menu; clicking arrow toggles menu
         let vault_btn = div()
             .id("topbar-vault-btn-container")
+            .relative()
             .flex()
             .items_center()
             .h(px(32.0))
@@ -2104,6 +2237,7 @@ impl Shellumi {
             })
             .border_1()
             .border_color(rgb(MacTheme::BORDER))
+            .child(vault_bounds_sensor)
             .child(
                 div()
                     .id("topbar-vault-name-btn")
@@ -2355,7 +2489,13 @@ impl Shellumi {
 
         let window_w = window.bounds().size.width.to_f64() as f32;
         let total_tabs = self.tabs.len();
-        let max_visible_tabs = (((window_w - 600.0) / 140.0).floor() as usize).clamp(1, 10);
+        let topbar_geom = ui::layout::calculate_topbar_geometry_with_chrome(
+            window_w,
+            total_tabs,
+            is_hosts_view,
+            chrome.total_reserved_width(),
+        );
+        let max_visible_tabs = topbar_geom.max_visible_tabs.clamp(1, 10);
         let active_idx = self.active_tab_idx;
 
         // When many tabs exist, compute visible slice ensuring active tab is always visible
@@ -2514,9 +2654,25 @@ impl Shellumi {
 
         if overflow_count > 0 {
             let overflow_btn_x = 220.0 + (visible_indices.len() as f32 * 140.0);
+            let overflow_sensor = {
+                let view = cx.entity().downgrade();
+                gpui::canvas(
+                    move |bounds, _window, cx| {
+                        cx.defer(move |cx| {
+                            let _ = view.update(cx, |app, _cx| {
+                                app.tab_overflow_trigger_bounds = Some(bounds);
+                            });
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+            };
             tabs_row = tabs_row.child(
                 div()
                     .id("topbar-tabs-overflow-btn")
+                    .relative()
                     .px_2()
                     .py_1()
                     .h(px(26.0))
@@ -2545,6 +2701,7 @@ impl Shellumi {
                         app.tab_overflow_menu_open = !app.tab_overflow_menu_open;
                         cx.notify();
                     }))
+                    .child(overflow_sensor)
                     .child(format!("+{} more", overflow_count)),
             );
         }
@@ -2662,10 +2819,16 @@ impl Shellumi {
                         .text_color(rgb(MacTheme::TEXT_PRIMARY))
                 })
                 .on_click(cx.listener(|app, _, window, cx| app.open_command_palette(window, cx)))
-                .child("⌘K"),
+                .child(if cfg!(target_os = "macos") {
+                    "⌘K"
+                } else {
+                    "Ctrl+K"
+                }),
         );
 
-        div()
+        let client_controls = ui::window_chrome::render_client_window_controls(window, cx);
+
+        let bar = div()
             .id("unified-topbar")
             .w_full()
             .h(px(48.0))
@@ -2695,8 +2858,10 @@ impl Shellumi {
                     .gap_3()
                     .flex_shrink_0()
                     .children(quick_connect_box)
-                    .child(right_actions),
-            )
+                    .child(right_actions)
+                    .children(client_controls),
+            );
+        ui::window_chrome::configure_topbar_drag(bar, chrome.mode)
     }
 
     fn render_vault_dropdown_overlay(
@@ -2732,11 +2897,19 @@ impl Shellumi {
                         .cloned()
                         .collect();
 
+                    let (menu_top, menu_left) = if let Some(b) = self.vault_trigger_bounds {
+                        (
+                            f32::from(b.origin.y + b.size.height) + 4.0,
+                            f32::from(b.origin.x).max(8.0),
+                        )
+                    } else {
+                        (46.0, 84.0)
+                    };
                     let mut menu = div()
                         .id("vault-dropdown-menu")
                         .absolute()
-                        .top(px(46.0))
-                        .left(px(84.0))
+                        .top(px(menu_top))
+                        .left(px(menu_left))
                         .w(px(240.0))
                         .rounded_lg()
                         .bg(rgb(MacTheme::SURFACE))
@@ -3047,12 +3220,20 @@ impl Shellumi {
         }
 
         let window_w = window.bounds().size.width.to_f64() as f32;
-        let left_pos = (window_w - 300.0).min(self.tab_overflow_x).max(180.0);
+        let (top_pos, left_pos) = if let Some(b) = self.tab_overflow_trigger_bounds {
+            let x = f32::from(b.origin.x)
+                .min((window_w - 292.0).max(8.0))
+                .max(8.0);
+            let y = f32::from(b.origin.y + b.size.height) + 4.0;
+            (y, x)
+        } else {
+            (46.0, (window_w - 300.0).min(self.tab_overflow_x).max(180.0))
+        };
 
         let mut list = div()
             .id("tab-overflow-popover")
             .absolute()
-            .top(px(46.0))
+            .top(px(top_pos))
             .left(px(left_pos))
             .w(px(280.0))
             .max_h(px(320.0))
@@ -3463,16 +3644,7 @@ fn main() {
             ]);
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
             cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(940.0), px(650.0))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Shellumi — Personal".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(14.0), px(14.0))),
-                    }),
-                    ..Default::default()
-                },
+                ui::window_chrome::shellumi_window_options("Shellumi — Personal", bounds),
                 |window, cx| {
                     let view = cx.new(|cx| Shellumi::new(database, window, cx));
                     view.update(cx, |app, cx| {

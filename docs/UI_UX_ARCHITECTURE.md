@@ -179,3 +179,16 @@ Canvas-Local Coordinates (cx, cy)
          ▼
 Framebuffer Coordinates (fx, fy) -> Dispatched to Protocol Worker
 ```
+
+---
+
+## 6. Remediation Architecture Notes (2026-11-26)
+
+- **Cross-Platform Window Chrome (`ui/window_chrome.rs`):** `shellumi_window_options` configures transparent titlebar + traffic lights (`14, 14`) on macOS and `WindowDecorations::Server` (`appears_transparent: false`) on Windows and Linux. Client-side fallback controls (`ChromeMode::ClientFallback`) are rendered *only* when a compositor forces `Decorations::Client`. `ChromeMetrics::from_window` drives `calculate_topbar_geometry_with_chrome`, and `window.on_window_should_close` routes OS close requests through `NavigationRequest::CloseWindow` (closing only that window via `window.remove_window()`).
+- **Setup Wizard Exemption:** The existing first-run setup wizard (`ui/setup_wizard_modal.rs`, `actions/setup_wizard.rs`) is explicitly preserved unchanged in layout, navigation, and recovery behavior.
+- **Capability-Driven Host & Identity Credentials:** `ProtocolCapabilities::for_protocol` in `shellumi-core` governs protocol-specific fields, identity compatibility (`is_auth_method_compatible`), default port transitions, and inline credential persistence (`SessionOnly`, `SaveForThisHost`, `SaveAsIdentity` via atomic `HostStore::save_host_with_identity_tx`).
+- **Adding Hosts with Credentials (User Guide):**
+  - *Existing Identity:* In Host Edit/Create -> **Auth**, select **Existing Identity** to pick from protocol-compatible identities in the current vault.
+  - *Create Reusable Identity Inline:* Select **Enter Credentials** -> **Save as Identity**, enter credentials and an identity name, and click **Save**; both the identity and host are persisted atomically in the vault.
+  - *Host-Only vs. Ask on Connect:* **Save for This Host** stores a vault-scoped credential reference for this host without cluttering the reusable identity list; **Ask on Connect** / **Session Only** prompts at connection time without storing secrets.
+  - *Protocol-Specific Fields:* SSH/Mosh expose username, key/password/agent, jump host, and startup snippet; RDP exposes username, domain, display resolution, color depth, view-only, strict TLS, audio, and mic; VNC exposes optional username, password/no-auth, resolution, color depth, and view-only; Telnet warns on cleartext; Serial/Local hide remote network/credential tabs.

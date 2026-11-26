@@ -215,21 +215,59 @@ impl Shellumi {
             .child(self.render_detail_row("Tags", tags_str));
         body = body.child(simple_section("Organization", org_items));
 
-        // Authentication & Security
-        let id_name = if let Some(identity_id) = host.identity_id {
-            self.identities
+        // Authentication & Security (protocol-aware)
+        let caps = shellumi_core::ProtocolCapabilities::for_protocol(host.protocol());
+        let auth_meta = host
+            .protocol_config
+            .as_deref()
+            .and_then(|c| serde_json::from_str::<crate::HostAuthMetadata>(c).ok())
+            .unwrap_or_default();
+
+        let (auth_label, auth_value) = if !caps.allows_saved_identity && !caps.allows_ask_on_connect
+        {
+            if caps.allows_no_auth {
+                ("Authentication", "No remote authentication".to_string())
+            } else {
+                ("Authentication", "Interactive remote login".to_string())
+            }
+        } else if let Some(identity_id) = host.identity_id {
+            let id_summary = self
+                .identities
                 .iter()
                 .find(|i| i.id == identity_id)
-                .map(|i| i.name.clone())
-                .unwrap_or_else(|| format!("Identity #{}", identity_id))
+                .map(|i| format!("{} ({})", i.name, i.auth_method))
+                .unwrap_or_else(|| format!("Identity #{}", identity_id));
+            ("Saved Identity", id_summary)
+        } else if auth_meta.host_secret_ref.is_some() {
+            (
+                "Credential",
+                "Host-private credential configured".to_string(),
+            )
+        } else if auth_meta.auth_mode.as_deref() == Some("no_auth") && caps.allows_no_auth {
+            ("Authentication", "No authentication".to_string())
         } else {
-            "Password / Default Agent".into()
+            ("Authentication", "Ask on connect".to_string())
         };
-        let auth_items = div()
+
+        let mut auth_items = div()
             .flex()
             .flex_col()
             .gap_1()
-            .child(self.render_detail_row("Identity Key", id_name));
+            .child(self.render_detail_row(auth_label, auth_value));
+        if caps.supports_username && !host.destination.username().is_empty() {
+            auth_items = auth_items
+                .child(self.render_detail_row("Username", host.destination.username().to_string()));
+        }
+        if host.is_rdp() {
+            if let Some(cfg) = host.rdp_config() {
+                if let Some(ref dom) = cfg.domain {
+                    if !dom.is_empty() {
+                        auth_items =
+                            auth_items.child(self.render_detail_row("Domain", dom.clone()));
+                    }
+                }
+            }
+        }
         body = body.child(simple_section("Authentication", auth_items));
 
         // Proxy / Jump Host (if present)
@@ -335,7 +373,6 @@ impl Shellumi {
             );
         };
 
-        let active_cat = form.active_category;
         let title = if is_create { "New Host" } else { "Edit Host" };
 
         let back_btn = InspectorShell::close_button(
@@ -355,14 +392,34 @@ impl Shellumi {
             Some(back_btn),
         );
 
-        // Category tab selector
-        let editor_categories = [
+        let proto = form.protocol;
+        let draft_gen = form.draft_generation;
+        let caps = shellumi_core::ProtocolCapabilities::for_protocol(proto);
+
+        let mut editor_categories = vec![
             (HostEditorCategory::General, "General"),
             (HostEditorCategory::Connection, "Connection"),
-            (HostEditorCategory::Authentication, "Auth"),
-            (HostEditorCategory::Proxy, "Proxy"),
-            (HostEditorCategory::Advanced, "Advanced"),
         ];
+        if caps.allows_saved_identity
+            || caps.allows_ask_on_connect
+            || caps.cleartext_warning.is_some()
+        {
+            editor_categories.push((HostEditorCategory::Authentication, "Auth"));
+        }
+        if caps.supports_jump_host {
+            editor_categories.push((HostEditorCategory::Proxy, "Proxy"));
+        }
+        if caps.supports_startup_snippet || caps.supports_display_options {
+            editor_categories.push((HostEditorCategory::Advanced, "Advanced"));
+        }
+        let active_cat = if editor_categories
+            .iter()
+            .any(|(c, _)| *c == form.active_category)
+        {
+            form.active_category
+        } else {
+            HostEditorCategory::General
+        };
 
         let mut cat_tabs = div()
             .flex()
@@ -411,44 +468,75 @@ impl Shellumi {
         // Form category body
         let mut form_body = div().flex().flex_col().gap_3().child(cat_tabs);
 
+        if let Some(warning_msg) = caps.cleartext_warning {
+            form_body = form_body.child(crate::ui::components::inline_notice(
+                None::<gpui::AnyElement>,
+                warning_msg,
+                true,
+            ));
+        }
+
         match active_cat {
             HostEditorCategory::General => {
                 form_body = form_body
+                    .child(self.render_protocol_selector(proto, draft_gen, cx))
                     .child(simple_field("Host Name", form.name.clone()))
                     .child(simple_field("Group (optional)", form.group.clone()))
                     .child(simple_field("Tags (comma separated)", form.tags.clone()));
             }
             HostEditorCategory::Connection => {
-                let proto = form.protocol;
-                form_body = form_body
-                    .child(self.render_protocol_selector(proto, cx))
-                    .child(simple_field("Hostname or IP", form.hostname.clone()))
-                    .child(simple_field("Port", form.port.clone()));
+                form_body = form_body.child(self.render_protocol_selector(proto, draft_gen, cx));
+                if proto == ConnectionProtocol::Serial {
+                    form_body = form_body
+                        .child(simple_field("Serial Device Path", form.hostname.clone()))
+                        .child(simple_field("Baud Rate", form.serial_baud.clone()))
+                        .child(self.render_serial_options(
+                            draft_gen,
+                            form.serial_data_bits,
+                            form.serial_parity,
+                            form.serial_stop_bits,
+                            form.serial_flow_control,
+                            cx,
+                        ));
+                } else if proto == ConnectionProtocol::Local {
+                    form_body = form_body.child(crate::ui::components::inline_notice(
+                        None::<gpui::AnyElement>,
+                        "Launches your local system shell without remote network credentials.",
+                        false,
+                    ));
+                } else {
+                    form_body = form_body
+                        .child(simple_field("Hostname or IP", form.hostname.clone()))
+                        .child(simple_field(
+                            if proto == ConnectionProtocol::Mosh {
+                                "SSH Bootstrap Port"
+                            } else {
+                                "Port"
+                            },
+                            form.port.clone(),
+                        ));
+                }
             }
             HostEditorCategory::Authentication => {
-                form_body = form_body
-                    .child(simple_field("Username", form.username.clone()))
-                    .child(self.render_identity_picker(form.identity_id, cx));
+                form_body = form_body.child(self.render_host_auth_section(form, &caps, cx));
             }
             HostEditorCategory::Proxy => {
                 form_body =
                     form_body.child(simple_field("Jump Host / Bastion", form.jump_host.clone()));
             }
             HostEditorCategory::Advanced => {
-                form_body = form_body.child(simple_field(
-                    "Startup Snippet",
-                    form.startup_snippet.clone(),
-                ));
+                if caps.supports_startup_snippet {
+                    form_body = form_body.child(simple_field(
+                        "Startup Snippet",
+                        form.startup_snippet.clone(),
+                    ));
+                }
 
-                if form.protocol == ConnectionProtocol::Rdp {
+                if caps.supports_display_options {
                     form_body = form_body
-                        .child(simple_field("Domain", form.rd_domain.clone()))
-                        .child(simple_field("Width", form.rd_width.clone()))
-                        .child(simple_field("Height", form.rd_height.clone()));
-                } else if form.protocol == ConnectionProtocol::Vnc {
-                    form_body = form_body
-                        .child(simple_field("Width", form.rd_width.clone()))
-                        .child(simple_field("Height", form.rd_height.clone()));
+                        .child(simple_field("Display Width", form.rd_width.clone()))
+                        .child(simple_field("Display Height", form.rd_height.clone()))
+                        .child(self.render_rd_options(form, cx));
                 }
             }
         }
@@ -503,7 +591,12 @@ impl Shellumi {
     }
 
     /// Helper to render protocol selector pills.
-    fn render_protocol_selector(&self, current: ConnectionProtocol, cx: &mut Context<Self>) -> Div {
+    fn render_protocol_selector(
+        &self,
+        current: ConnectionProtocol,
+        draft_gen: u64,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let protocols = [
             ConnectionProtocol::Ssh,
             ConnectionProtocol::Rdp,
@@ -552,7 +645,11 @@ impl Shellumi {
                         }
                     })
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        app.set_form_protocol(proto, cx);
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetProtocol(proto),
+                            cx,
+                        );
                     }))
                     .child(proto.display_name()),
             );
@@ -571,15 +668,368 @@ impl Shellumi {
             .child(row)
     }
 
-    /// Helper to render identity picker dropdown/list.
-    fn render_identity_picker(&self, selected_id: Option<i64>, cx: &mut Context<Self>) -> Div {
-        let none_sel = selected_id.is_none();
+    /// Render capability-driven Authentication section in Host Edit/Create mode.
+    fn render_host_auth_section(
+        &self,
+        form: &crate::HostForm,
+        caps: &shellumi_core::ProtocolCapabilities,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let draft_gen = form.draft_generation;
+        let mut section = div().flex().flex_col().gap_3();
+
+        if caps.supports_username {
+            section = section.child(simple_field("Username", form.username.clone()));
+        }
+        if caps.supports_domain {
+            section = section.child(simple_field("Domain (optional)", form.rd_domain.clone()));
+        }
+
+        if !caps.allows_saved_identity && !caps.allows_ask_on_connect {
+            return section.child(crate::ui::components::inline_notice(
+                None::<gpui::AnyElement>,
+                "Credentials are entered directly in the remote session after connecting.",
+                false,
+            ));
+        }
+
+        // Credential source selector
+        let mut sources = Vec::new();
+        if caps.allows_saved_identity {
+            sources.push((
+                crate::HostAuthSourceKind::ExistingIdentity,
+                "Existing Identity",
+            ));
+            sources.push((
+                crate::HostAuthSourceKind::EnterCredentials,
+                "Enter Credentials",
+            ));
+        }
+        if caps.allows_ask_on_connect {
+            sources.push((crate::HostAuthSourceKind::AskOnConnect, "Ask on Connect"));
+        }
+        if caps.allows_group_inheritance {
+            sources.push((crate::HostAuthSourceKind::InheritGroup, "Inherit Group"));
+        }
+        if caps.allows_no_auth {
+            sources.push((crate::HostAuthSourceKind::NoAuthentication, "No Auth"));
+        }
+
+        let mut source_row = div().flex().flex_wrap().gap_1p5();
+        for (idx, (src, label)) in sources.into_iter().enumerate() {
+            let is_sel = form.auth_source_kind == src;
+            source_row = source_row.child(
+                div()
+                    .id(("host-auth-src", idx))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .font_weight(if is_sel {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .bg(if is_sel {
+                        accent_blue()
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetAuthSource(src),
+                            cx,
+                        );
+                    }))
+                    .child(label),
+            );
+        }
+
+        section = section.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_secondary())
+                        .child("Credential Source"),
+                )
+                .child(source_row),
+        );
+
+        match form.auth_source_kind {
+            crate::HostAuthSourceKind::ExistingIdentity => {
+                section = section.child(self.render_compatible_identity_picker(
+                    form.identity_id,
+                    draft_gen,
+                    caps,
+                    cx,
+                ));
+            }
+            crate::HostAuthSourceKind::EnterCredentials => {
+                // Method selector when multiple methods exist
+                if caps.supported_credentials.len() > 1 {
+                    let mut method_row = div().flex().flex_wrap().gap_1p5();
+                    for (idx, &kind) in caps.supported_credentials.iter().enumerate() {
+                        if kind == shellumi_core::CredentialKind::None {
+                            continue;
+                        }
+                        let is_sel = form.credential_kind == kind;
+                        method_row = method_row.child(
+                            div()
+                                .id(("host-cred-kind", idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .bg(if is_sel {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::INPUT_BG)
+                                })
+                                .text_color(if is_sel {
+                                    accent_blue()
+                                } else {
+                                    text_secondary()
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.apply_host_edit(
+                                        draft_gen,
+                                        crate::HostEditEvent::SetCredentialKind(kind),
+                                        cx,
+                                    );
+                                }))
+                                .child(kind.display_name()),
+                        );
+                    }
+                    section = section.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_secondary())
+                                    .child("Authentication Method"),
+                            )
+                            .child(method_row),
+                    );
+                }
+
+                if form.has_host_secret {
+                    let mut action_row = div().flex().gap_1p5();
+                    for (idx, (act, label)) in [
+                        (shellumi_core::SecretUpdateAction::Keep, "Keep Saved"),
+                        (shellumi_core::SecretUpdateAction::Replace, "Replace"),
+                        (shellumi_core::SecretUpdateAction::Remove, "Remove"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let is_sel = form.secret_update_action == act;
+                        action_row = action_row.child(
+                            div()
+                                .id(("host-secret-act", idx))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .bg(if is_sel {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::INPUT_BG)
+                                })
+                                .text_color(if is_sel {
+                                    accent_blue()
+                                } else {
+                                    text_secondary()
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.apply_host_edit(
+                                        draft_gen,
+                                        crate::HostEditEvent::SetSecretUpdateAction(act),
+                                        cx,
+                                    );
+                                }))
+                                .child(label),
+                        );
+                    }
+                    section = section.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_secondary())
+                                    .child("Saved Host Credential"),
+                            )
+                            .child(action_row),
+                    );
+                }
+
+                match form.credential_kind {
+                    shellumi_core::CredentialKind::SshKey => {
+                        section = section
+                            .child(crate::ui::components::TextField::new(
+                                "Private Key Path",
+                                form.auth_key_path.clone(),
+                            ))
+                            .child(crate::ui::components::PasswordField::new(
+                                "Key Passphrase (optional)",
+                                form.auth_passphrase.clone(),
+                            ));
+                    }
+                    shellumi_core::CredentialKind::SshAgent
+                    | shellumi_core::CredentialKind::Interactive
+                    | shellumi_core::CredentialKind::None => {}
+                    _ => {
+                        section = section.child(crate::ui::components::PasswordField::new(
+                            "Password",
+                            form.auth_password.clone(),
+                        ));
+                    }
+                }
+
+                // Persistence choice
+                let mut persist_row = div().flex().flex_wrap().gap_1p5();
+                for (idx, (choice, label)) in [
+                    (crate::HostPersistenceChoice::SessionOnly, "Session Only"),
+                    (
+                        crate::HostPersistenceChoice::SaveForThisHost,
+                        "Save for This Host",
+                    ),
+                    (
+                        crate::HostPersistenceChoice::SaveAsIdentity,
+                        "Save as Identity",
+                    ),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let is_sel = form.persistence_choice == choice;
+                    persist_row = persist_row.child(
+                        div()
+                            .id(("host-persist-opt", idx))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .bg(if is_sel {
+                                accent_blue()
+                            } else {
+                                rgb(MacTheme::INPUT_BG)
+                            })
+                            .text_color(if is_sel {
+                                rgb(0xffffff)
+                            } else {
+                                text_secondary()
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.apply_host_edit(
+                                    draft_gen,
+                                    crate::HostEditEvent::SetPersistence(choice),
+                                    cx,
+                                );
+                            }))
+                            .child(label),
+                    );
+                }
+                section = section.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(text_secondary())
+                                .child("Credential Persistence"),
+                        )
+                        .child(persist_row),
+                );
+
+                if form.persistence_choice == crate::HostPersistenceChoice::SessionOnly {
+                    section = section.child(crate::ui::components::inline_notice(
+                        None::<gpui::AnyElement>,
+                        "Entered secrets are not saved to the vault; future sessions will prompt again.",
+                        false,
+                    ));
+                } else if form.persistence_choice == crate::HostPersistenceChoice::SaveAsIdentity {
+                    section = section
+                        .child(
+                            crate::ui::components::TextField::new(
+                                "New Identity Name",
+                                form.new_identity_name.clone(),
+                            )
+                            .required(true),
+                        )
+                        .child(crate::ui::components::TextField::new(
+                            "Identity Tags (optional)",
+                            form.new_identity_tags.clone(),
+                        ));
+                }
+            }
+            crate::HostAuthSourceKind::AskOnConnect => {
+                section = section.child(crate::ui::components::inline_notice(
+                    None::<gpui::AnyElement>,
+                    "You will be prompted for credentials when connecting.",
+                    false,
+                ));
+            }
+            crate::HostAuthSourceKind::InheritGroup => {
+                section = section.child(crate::ui::components::inline_notice(
+                    None::<gpui::AnyElement>,
+                    "Uses the parent group's default identity and username if configured.",
+                    false,
+                ));
+            }
+            crate::HostAuthSourceKind::NoAuthentication => {
+                section = section.child(crate::ui::components::inline_notice(
+                    None::<gpui::AnyElement>,
+                    "Connects without sending a password or key.",
+                    true,
+                ));
+            }
+        }
+
+        section
+    }
+
+    /// Helper to render compatible identity picker list for the active protocol.
+    fn render_compatible_identity_picker(
+        &self,
+        selected_id: Option<i64>,
+        draft_gen: u64,
+        caps: &shellumi_core::ProtocolCapabilities,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let compatible: Vec<_> = self
+            .identities
+            .iter()
+            .filter(|id| caps.is_auth_method_compatible(&id.auth_method))
+            .collect();
+
         let mut list = div()
             .id("host-inspector-identity-picker")
             .flex()
             .flex_col()
             .gap_1()
-            .max_h(px(120.0))
+            .max_h(px(140.0))
             .overflow_y_scroll()
             .bg(rgb(MacTheme::INPUT_BG))
             .border_1()
@@ -587,68 +1037,59 @@ impl Shellumi {
             .rounded_md()
             .p_1();
 
-        list = list.child(
-            div()
-                .id("host-id-opt-none")
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .text_xs()
-                .bg(if none_sel {
-                    rgb(MacTheme::SURFACE_ACTIVE)
-                } else {
-                    rgb(MacTheme::INPUT_BG)
-                })
-                .text_color(if none_sel {
-                    accent_blue()
-                } else {
-                    text_secondary()
-                })
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                .on_click(cx.listener(|app, _, _, cx| {
-                    if let Some(form) = &mut app.form {
-                        form.identity_id = None;
-                        cx.notify();
-                    }
-                }))
-                .child(if none_sel {
-                    "✓ None (Password or default agent)"
-                } else {
-                    "None (Password or default agent)"
-                }),
-        );
-
-        for (idx, id) in self.identities.iter().enumerate() {
-            let is_sel = selected_id == Some(id.id);
-            let id_val = id.id;
+        if compatible.is_empty() {
             list = list.child(
                 div()
-                    .id(("host-id-opt", idx))
                     .px_2()
-                    .py_1()
-                    .rounded_sm()
+                    .py_1p5()
                     .text_xs()
-                    .bg(if is_sel {
-                        rgb(MacTheme::SURFACE_ACTIVE)
-                    } else {
-                        rgb(MacTheme::INPUT_BG)
-                    })
-                    .text_color(if is_sel {
-                        accent_blue()
-                    } else {
-                        text_primary()
-                    })
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(form) = &mut app.form {
-                            form.identity_id = Some(id_val);
-                            cx.notify();
-                        }
-                    }))
-                    .child(format!("{} {}", if is_sel { "✓" } else { " " }, id.name)),
+                    .text_color(text_secondary())
+                    .child("No compatible identities in this vault. Choose 'Enter Credentials' -> 'Save as Identity' to create one."),
             );
+        } else {
+            for (idx, id) in compatible.into_iter().enumerate() {
+                let is_sel = selected_id == Some(id.id);
+                let id_val = id.id;
+                let user_suffix = if id.username.is_empty() {
+                    String::new()
+                } else {
+                    format!(" • {}", id.username)
+                };
+                list = list.child(
+                    div()
+                        .id(("host-id-opt", idx))
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .bg(if is_sel {
+                            rgb(MacTheme::SURFACE_ACTIVE)
+                        } else {
+                            rgb(MacTheme::INPUT_BG)
+                        })
+                        .text_color(if is_sel {
+                            accent_blue()
+                        } else {
+                            text_primary()
+                        })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.apply_host_edit(
+                                draft_gen,
+                                crate::HostEditEvent::SelectIdentity(Some(id_val)),
+                                cx,
+                            );
+                        }))
+                        .child(format!(
+                            "{} {}{} ({})",
+                            if is_sel { "✓" } else { " " },
+                            id.name,
+                            user_suffix,
+                            id.auth_method
+                        )),
+                );
+            }
         }
 
         div()
@@ -659,9 +1100,304 @@ impl Shellumi {
                 div()
                     .text_xs()
                     .text_color(text_secondary())
-                    .child("Key / Identity"),
+                    .child("Compatible Vault Identities"),
             )
             .child(list)
+    }
+
+    fn render_rd_options(&self, form: &crate::HostForm, cx: &mut Context<Self>) -> Div {
+        let draft_gen = form.draft_generation;
+        let proto = form.protocol;
+        let color_depth = form.rd_color_depth;
+        let view_only = form.rd_view_only;
+        let tls_strict = form.rd_tls_strict;
+        let enable_audio = form.rd_enable_audio;
+        let enable_microphone = form.rd_enable_microphone;
+        let mut depth_row = div().flex().gap_1p5();
+        for depth in [16u8, 24, 32] {
+            let is_sel = color_depth == depth;
+            depth_row = depth_row.child(
+                div()
+                    .id(("rd-depth-opt", depth as usize))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(if is_sel {
+                        accent_blue()
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetRdColorDepth(depth),
+                            cx,
+                        );
+                    }))
+                    .child(format!("{depth}-bit")),
+            );
+        }
+
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_secondary())
+                            .child("Color Depth"),
+                    )
+                    .child(depth_row),
+            )
+            .child(
+                crate::ui::components::toggle_switch("rd-view-only-toggle", view_only, "View Only")
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(draft_gen, crate::HostEditEvent::ToggleRdViewOnly, cx);
+                    })),
+            );
+
+        if proto == ConnectionProtocol::Rdp {
+            container = container
+                .child(
+                    crate::ui::components::toggle_switch(
+                        "rd-tls-strict-toggle",
+                        tls_strict,
+                        "Strict TLS / NLA Verification",
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(draft_gen, crate::HostEditEvent::ToggleRdTlsStrict, cx);
+                    })),
+                )
+                .child(
+                    crate::ui::components::toggle_switch(
+                        "rd-audio-toggle",
+                        enable_audio,
+                        "Audio Redirection",
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(draft_gen, crate::HostEditEvent::ToggleRdAudio, cx);
+                    })),
+                )
+                .child(
+                    crate::ui::components::toggle_switch(
+                        "rd-mic-toggle",
+                        enable_microphone,
+                        "Microphone Redirection",
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::ToggleRdMicrophone,
+                            cx,
+                        );
+                    })),
+                );
+        }
+
+        container
+    }
+
+    fn render_serial_options(
+        &self,
+        draft_gen: u64,
+        data_bits: u8,
+        parity: shellumi_core::SerialParity,
+        stop_bits: shellumi_core::SerialStopBits,
+        flow_control: shellumi_core::SerialFlowControl,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut bits_row = div().flex().gap_1p5();
+        for bits in [5u8, 6, 7, 8] {
+            let is_sel = data_bits == bits;
+            bits_row = bits_row.child(
+                div()
+                    .id(("serial-bits", bits as usize))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(if is_sel {
+                        accent_blue()
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetSerialDataBits(bits),
+                            cx,
+                        );
+                    }))
+                    .child(format!("{bits}")),
+            );
+        }
+
+        let mut parity_row = div().flex().gap_1p5();
+        for (idx, (p, label)) in [
+            (shellumi_core::SerialParity::None, "None"),
+            (shellumi_core::SerialParity::Even, "Even"),
+            (shellumi_core::SerialParity::Odd, "Odd"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let is_sel = parity == p;
+            parity_row = parity_row.child(
+                div()
+                    .id(("serial-parity", idx))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(if is_sel {
+                        accent_blue()
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetSerialParity(p),
+                            cx,
+                        );
+                    }))
+                    .child(label),
+            );
+        }
+
+        let mut stop_row = div().flex().gap_1p5();
+        for (idx, (s, label)) in [
+            (shellumi_core::SerialStopBits::One, "1"),
+            (shellumi_core::SerialStopBits::Two, "2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let is_sel = stop_bits == s;
+            stop_row = stop_row.child(
+                div()
+                    .id(("serial-stop", idx))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(if is_sel {
+                        accent_blue()
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetSerialStopBits(s),
+                            cx,
+                        );
+                    }))
+                    .child(label),
+            );
+        }
+
+        let mut flow_row = div().flex().gap_1p5();
+        for (idx, (f, label)) in [
+            (shellumi_core::SerialFlowControl::None, "None"),
+            (shellumi_core::SerialFlowControl::Software, "XON/XOFF"),
+            (shellumi_core::SerialFlowControl::Hardware, "RTS/CTS"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let is_sel = flow_control == f;
+            flow_row = flow_row.child(
+                div()
+                    .id(("serial-flow", idx))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(if is_sel {
+                        accent_blue()
+                    } else {
+                        rgb(MacTheme::INPUT_BG)
+                    })
+                    .text_color(if is_sel {
+                        rgb(0xffffff)
+                    } else {
+                        text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.apply_host_edit(
+                            draft_gen,
+                            crate::HostEditEvent::SetSerialFlowControl(f),
+                            cx,
+                        );
+                    }))
+                    .child(label),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(text_secondary())
+                    .child("Data Bits"),
+            )
+            .child(bits_row)
+            .child(div().text_xs().text_color(text_secondary()).child("Parity"))
+            .child(parity_row)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(text_secondary())
+                    .child("Stop Bits"),
+            )
+            .child(stop_row)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(text_secondary())
+                    .child("Flow Control"),
+            )
+            .child(flow_row)
     }
 
     /// Helper to render a labeled detail row.

@@ -288,7 +288,11 @@ impl Shellumi {
                 cx.notify();
             }
             PaletteAction::AddNewTunnel => {
-                self.open_tunnel_modal(cx);
+                self.open_tunnel_inspector_mode(
+                    None,
+                    crate::ui::inspector::InspectorMode::Create,
+                    cx,
+                );
             }
             PaletteAction::NavigateToHosts => {
                 self.active_tab_idx = None;
@@ -302,13 +306,21 @@ impl Shellumi {
                 }
             }
             PaletteAction::OpenTeamCollaboration => {
-                self.open_team_modal(cx);
+                self.open_team_inspector_mode(
+                    None,
+                    crate::ui::inspector::InspectorMode::Create,
+                    cx,
+                );
             }
             PaletteAction::ToggleMultiplayerCollaboration => {
                 self.toggle_multiplayer_on_active_tab(cx);
             }
             PaletteAction::OpenInfrastructureManager | PaletteAction::SyncCloudInfrastructure => {
-                self.open_infra_modal(cx);
+                self.open_provider_inspector_mode(
+                    None,
+                    crate::ui::inspector::InspectorMode::Create,
+                    cx,
+                );
             }
             PaletteAction::ImportAnsibleInventory => {
                 self.open_infra_modal(cx);

@@ -2,7 +2,8 @@
 
 This file is the **acceptance contract** for the unified-inspector redesign. All cases must be evaluated with an isolated, deterministic fixture environment. The categories are **U** (pure Rust unit/property), **G** (GPUI rendered/interaction), **N** (native app automation or manual acceptance), **V** (visual screenshot review), **E** (end-to-end storage/protocol/server). Automate U/G/E by default. N/V are not substitutes for functional assertions and require environment evidence.
 
-**Baseline:** main `a4132558e8127a177a92c81ec7554492d176ae03`. **Target GPUI:** `=0.2.2`. Do not assume APIs from newer GPUI versions without verification. Track each row as `PASS`, `FAIL`, `NOT TESTED`, or documented `NOT APPLICABLE`; never count unexecuted tests as passes.
+**Baseline:** main `a4132558e8127a177a92c81ec7554492d176ae03` (remediation baseline `de8c9abe0699df2eff639c240ca43a91c45e6327`). **Target GPUI:** `=0.2.2`. Do not assume APIs from newer GPUI versions without verification. Track each row as `PASS`, `FAIL`, `NOT TESTED`, or documented `NOT APPLICABLE`; never count unexecuted tests as passes.
+Note: Native Windows/Linux window-chrome and live RDP/VNC server visual checks (`N`, `V`) are recorded as `NOT TESTED` when executed solely on a headless or macOS-only runner.
 
 ## Fixture labels
 

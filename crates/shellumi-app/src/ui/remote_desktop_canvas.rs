@@ -2,7 +2,7 @@
 
 use super::*;
 use gpui::{ClickEvent, ObjectFit, RenderImage};
-use shellumi_remote_desktop::{translate_coordinates, FramebufferSnapshot, ScaleMode};
+use shellumi_remote_desktop::{CanvasTransform, FramebufferSnapshot, PanState, ScaleMode};
 use std::sync::Arc;
 
 /// Convert a thread-safe `FramebufferSnapshot` into a GPUI `RenderImage`.
@@ -29,21 +29,88 @@ impl Shellumi {
         state: &RemoteDesktopState,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let tab_id = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.id)
+            .unwrap_or(tab_idx as u64);
+        let layout_epoch = self.layout_epoch;
+
+        let view = cx.entity().downgrade();
+        let bounds_sensor = gpui::canvas(
+            move |bounds, _window, cx| {
+                let w = f32::from(bounds.size.width);
+                let h = f32::from(bounds.size.height);
+                if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+                    return;
+                }
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |app, cx| {
+                        if app.layout_epoch != layout_epoch {
+                            return;
+                        }
+                        let is_active_tab = app
+                            .active_tab_idx
+                            .and_then(|idx| app.tabs.get(idx))
+                            .is_some_and(|t| t.id == tab_id);
+                        if !is_active_tab {
+                            return;
+                        }
+                        let new_m = crate::CanvasMeasurement {
+                            tab_id,
+                            layout_epoch,
+                            viewport: bounds,
+                        };
+                        let changed = app
+                            .rd_canvas_measurements
+                            .get(&tab_id)
+                            .is_none_or(|prev| *prev != new_m);
+                        if changed {
+                            app.rd_canvas_measurements.insert(tab_id, new_m);
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+
         if let Some(render_image) = &state.render_image {
             let image_source: gpui::ImageSource = render_image.clone().into();
-            let object_fit = match state.scale_mode {
-                RemoteDesktopScaleMode::Fit => ObjectFit::Contain,
-                RemoteDesktopScaleMode::Original => ObjectFit::None,
-                RemoteDesktopScaleMode::Fill => ObjectFit::Fill,
-            };
 
-            let fb_width = state.width;
-            let fb_height = state.height;
+            // Use actual displayed framebuffer dimensions, not requested state.width/height.
+            let img_size = render_image.size(0);
+            let fb_width = (img_size.width.0.max(0) as u32).max(1);
+            let fb_height = (img_size.height.0.max(0) as u32).max(1);
             let scale_mode = match state.scale_mode {
                 RemoteDesktopScaleMode::Fit => ScaleMode::Fit,
                 RemoteDesktopScaleMode::Original => ScaleMode::Original,
                 RemoteDesktopScaleMode::Fill => ScaleMode::Fill,
             };
+            let pan = self.rd_pan_state.get(&tab_id).copied().unwrap_or_default();
+
+            let measurement = self
+                .rd_canvas_measurements
+                .get(&tab_id)
+                .filter(|m| m.tab_id == tab_id && m.layout_epoch == layout_epoch);
+
+            let transform = measurement.and_then(|m| {
+                CanvasTransform::new(
+                    (
+                        f64::from(f32::from(m.viewport.origin.x)),
+                        f64::from(f32::from(m.viewport.origin.y)),
+                    ),
+                    (
+                        f64::from(f32::from(m.viewport.size.width)),
+                        f64::from(f32::from(m.viewport.size.height)),
+                    ),
+                    (fb_width, fb_height),
+                    scale_mode,
+                    (pan.x, pan.y),
+                )
+            });
 
             let reconnect_overlay = if let RemoteDesktopStatus::Reconnecting {
                 attempt,
@@ -78,111 +145,212 @@ impl Shellumi {
                 None
             };
 
-            let view = cx.entity().downgrade();
-            let bounds_sensor = gpui::canvas(
-                move |bounds, _window, cx| {
-                    cx.defer(move |cx| {
-                        let _ = view.update(cx, |app, _cx| {
-                            app.rd_canvas_bounds.insert(tab_idx, bounds);
-                        });
-                    });
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0();
+            // Pan controls in Original mode when frame exceeds viewport on either axis
+            let pan_overlay = if scale_mode == ScaleMode::Original {
+                if let Some(tx) = transform {
+                    let overflow_x = (fb_width as f64 - tx.viewport_size.0).max(0.0);
+                    let overflow_y = (fb_height as f64 - tx.viewport_size.1).max(0.0);
+                    if overflow_x > 1.0 || overflow_y > 1.0 {
+                        let vp_size = tx.viewport_size;
+                        Some(
+                            div()
+                                .id(("rd-pan-bar", tab_id))
+                                .absolute()
+                                .bottom(px(12.0))
+                                .right(px(12.0))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgba(0x18181add))
+                                .border_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                                .child(
+                                    div()
+                                        .id(("rd-pan-left", tab_id))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            let cur = app
+                                                .rd_pan_state
+                                                .get(&tab_id)
+                                                .copied()
+                                                .unwrap_or_default();
+                                            let next = PanState {
+                                                x: cur.x - 120.0,
+                                                y: cur.y,
+                                            }
+                                            .clamped(vp_size, (fb_width, fb_height));
+                                            app.rd_pan_state.insert(tab_id, next);
+                                            cx.notify();
+                                        }))
+                                        .child("←"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("rd-pan-up", tab_id))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            let cur = app
+                                                .rd_pan_state
+                                                .get(&tab_id)
+                                                .copied()
+                                                .unwrap_or_default();
+                                            let next = PanState {
+                                                x: cur.x,
+                                                y: cur.y - 120.0,
+                                            }
+                                            .clamped(vp_size, (fb_width, fb_height));
+                                            app.rd_pan_state.insert(tab_id, next);
+                                            cx.notify();
+                                        }))
+                                        .child("↑"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("rd-pan-down", tab_id))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            let cur = app
+                                                .rd_pan_state
+                                                .get(&tab_id)
+                                                .copied()
+                                                .unwrap_or_default();
+                                            let next = PanState {
+                                                x: cur.x,
+                                                y: cur.y + 120.0,
+                                            }
+                                            .clamped(vp_size, (fb_width, fb_height));
+                                            app.rd_pan_state.insert(tab_id, next);
+                                            cx.notify();
+                                        }))
+                                        .child("↓"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("rd-pan-right", tab_id))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            let cur = app
+                                                .rd_pan_state
+                                                .get(&tab_id)
+                                                .copied()
+                                                .unwrap_or_default();
+                                            let next = PanState {
+                                                x: cur.x + 120.0,
+                                                y: cur.y,
+                                            }
+                                            .clamped(vp_size, (fb_width, fb_height));
+                                            app.rd_pan_state.insert(tab_id, next);
+                                            cx.notify();
+                                        }))
+                                        .child("→"),
+                                ),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-            let viewport_container = div()
-                .id(("rd-canvas-viewport", tab_idx))
+            let mut viewport_container = div()
+                .id(("rd-canvas-viewport", tab_id))
                 .relative()
                 .w_full()
                 .h_full()
                 .overflow_hidden()
                 .bg(rgb(0x0c0f14))
-                .flex()
-                .items_center()
-                .justify_center()
                 .cursor_pointer()
-                .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
-                    if let Some(pos) = event.mouse_position() {
-                        let (origin_x, origin_y, canvas_w, canvas_h) =
-                            if let Some(b) = app.rd_canvas_bounds.get(&tab_idx) {
-                                (
-                                    f32::from(b.origin.x),
-                                    f32::from(b.origin.y),
-                                    f32::from(b.size.width),
-                                    f32::from(b.size.height),
-                                )
-                            } else {
-                                let vp = window.viewport_size();
-                                let total_w = vp.width.to_f64() as f32;
-                                let total_h = vp.height.to_f64() as f32;
+                .on_click(cx.listener(move |app, event: &ClickEvent, _window, cx| {
+                    let Some(pos) = event.mouse_position() else {
+                        return;
+                    };
+                    let Some(cur_tab_idx) = app.tabs.iter().position(|t| t.id == tab_id) else {
+                        return;
+                    };
+                    let Some(cur_rd) = app.tabs[cur_tab_idx].remote_desktop_state.as_ref() else {
+                        return;
+                    };
+                    if cur_rd.view_only {
+                        return;
+                    }
+                    let Some(m) = app
+                        .rd_canvas_measurements
+                        .get(&tab_id)
+                        .filter(|m| m.tab_id == tab_id && m.layout_epoch == app.layout_epoch)
+                    else {
+                        // Never fall back to estimated geometry when measurement is missing or stale.
+                        return;
+                    };
+                    let Some(img) = cur_rd.render_image.as_ref() else {
+                        return;
+                    };
+                    let sz = img.size(0);
+                    let cur_fw = sz.width.0.max(0) as u32;
+                    let cur_fh = sz.height.0.max(0) as u32;
+                    let cur_mode = match cur_rd.scale_mode {
+                        RemoteDesktopScaleMode::Fit => ScaleMode::Fit,
+                        RemoteDesktopScaleMode::Original => ScaleMode::Original,
+                        RemoteDesktopScaleMode::Fill => ScaleMode::Fill,
+                    };
+                    let cur_pan = app.rd_pan_state.get(&tab_id).copied().unwrap_or_default();
+                    let Some(tx) = CanvasTransform::new(
+                        (
+                            f64::from(f32::from(m.viewport.origin.x)),
+                            f64::from(f32::from(m.viewport.origin.y)),
+                        ),
+                        (
+                            f64::from(f32::from(m.viewport.size.width)),
+                            f64::from(f32::from(m.viewport.size.height)),
+                        ),
+                        (cur_fw, cur_fh),
+                        cur_mode,
+                        (cur_pan.x, cur_pan.y),
+                    ) else {
+                        return;
+                    };
 
-                                let sidebar_w = if app.sidebar_visible {
-                                    if app.sidebar_collapsed {
-                                        56.0
-                                    } else {
-                                        crate::theme::MacTheme::SIDEBAR_WIDTH
-                                    }
-                                } else {
-                                    0.0
-                                };
-                                let inspector_open = app.inspector_coordinator.is_open();
-                                let geom = crate::ui::layout::calculate_layout(
-                                    total_w,
-                                    sidebar_w,
-                                    inspector_open,
-                                    None,
-                                );
-                                let topbar_h: f32 = 48.0;
-                                let toolbar_h: f32 = 36.0;
-
-                                (
-                                    sidebar_w,
-                                    topbar_h + toolbar_h,
-                                    geom.primary_content_width.max(100.0),
-                                    (total_h - topbar_h - toolbar_h).max(100.0),
-                                )
-                            };
-
-                        let px_x = pos.x.to_f64() as f32;
-                        let px_y = pos.y.to_f64() as f32;
-
-                        // Reject clicks landing outside the measured canvas geometry
-                        if px_x < origin_x
-                            || px_x > origin_x + canvas_w
-                            || px_y < origin_y
-                            || px_y > origin_y + canvas_h
-                        {
-                            return;
-                        }
-
-                        let screen_x = (px_x - origin_x).max(0.0);
-                        let screen_y = (px_y - origin_y).max(0.0);
-
-                        if let Some((remote_x, remote_y)) = translate_coordinates(
-                            screen_x, screen_y, canvas_w, canvas_h, fb_width, fb_height, scale_mode,
-                        ) {
-                            app.remote_desktop_click_canvas(tab_idx, remote_x, remote_y, cx);
-                        }
+                    if let Some((remote_x, remote_y)) =
+                        tx.map_window_point_to_remote(pos.x.to_f64(), pos.y.to_f64())
+                    {
+                        app.remote_desktop_click_canvas(cur_tab_idx, remote_x, remote_y, cx);
                     }
                 }))
-                .child(bounds_sensor)
-                .child(
-                    div()
-                        .w_full()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            gpui::img(image_source)
-                                .w_full()
-                                .h_full()
-                                .object_fit(object_fit),
-                        ),
-                )
-                .children(reconnect_overlay);
+                .child(bounds_sensor);
+
+            if let Some(tx) = transform {
+                viewport_container = viewport_container.child(
+                    gpui::img(image_source)
+                        .absolute()
+                        .left(px(tx.image_origin.0 as f32))
+                        .top(px(tx.image_origin.1 as f32))
+                        .w(px(tx.image_size.0 as f32))
+                        .h(px(tx.image_size.1 as f32))
+                        .object_fit(ObjectFit::Fill),
+                );
+            }
+
+            viewport_container = viewport_container
+                .children(reconnect_overlay)
+                .children(pan_overlay);
 
             div()
                 .flex_1()
@@ -190,9 +358,11 @@ impl Shellumi {
                 .overflow_hidden()
                 .child(viewport_container)
         } else {
-            // Awaiting genuine framebuffer frames from background protocol task
+            // Awaiting genuine framebuffer frames from background protocol task;
+            // still mount the bounds sensor so Match Viewport / auto-resize can measure.
             let placeholder_container = div()
-                .id(("rd-canvas-placeholder", tab_idx))
+                .id(("rd-canvas-placeholder", tab_id))
+                .relative()
                 .w_full()
                 .h_full()
                 .bg(rgb(0x0c0f14))
@@ -201,6 +371,7 @@ impl Shellumi {
                 .items_center()
                 .justify_center()
                 .gap_3()
+                .child(bounds_sensor)
                 .child(div().text_2xl().child("📡"))
                 .child(
                     div()
@@ -228,7 +399,7 @@ impl Shellumi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shellumi_remote_desktop::{Framebuffer, Rect};
+    use shellumi_remote_desktop::{translate_coordinates, Framebuffer, Rect};
 
     #[test]
     fn verifies_deterministic_test_frame_converts_to_render_image() {

@@ -125,8 +125,9 @@ pub use protocol::{
     parse_rdp_negotiation_response, parse_rfb_framebuffer_update_header,
     parse_rfb_rectangle_header, parse_rfb_server_cut_text, parse_rfb_server_init,
     parse_rfb_version, parse_telnet_stream, parse_tpkt_packet, rfb_constants, telnet_constants,
-    ConnectionProtocol, MoshConfig, MoshPredictMode, ProtocolEndpoint, ProtocolError, RdpConfig,
-    RfbPixelFormat, RfbRectangleHeader, RfbServerInit, SerialConfig, SerialDataBits,
+    AuthSource, ConnectionProtocol, CredentialKind, MoshConfig, MoshPredictMode, PersistenceChoice,
+    ProtocolCapabilities, ProtocolEndpoint, ProtocolError, RdpConfig, RfbPixelFormat,
+    RfbRectangleHeader, RfbServerInit, SecretUpdateAction, SerialConfig, SerialDataBits,
     SerialFlowControl, SerialParity, SerialStopBits, TelnetCommandFrame, TelnetConfig, VncConfig,
 };
 

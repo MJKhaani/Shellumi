@@ -52,8 +52,13 @@ impl Shellumi {
                 } else {
                     Some(host.destination.username().to_string())
                 };
+                let target_fmt = if vnc_cfg.host.contains(':') && !vnc_cfg.host.starts_with('[') {
+                    format!("[{}]:{}", vnc_cfg.host, vnc_cfg.port)
+                } else {
+                    format!("{}:{}", vnc_cfg.host, vnc_cfg.port)
+                };
                 (
-                    format!("{}:{}", vnc_cfg.host, vnc_cfg.port),
+                    target_fmt,
                     vnc_cfg.width as u32,
                     vnc_cfg.height as u32,
                     vnc_cfg.color_depth,
@@ -77,8 +82,13 @@ impl Shellumi {
                         Some(host.destination.username().to_string())
                     }
                 });
+                let target_fmt = if rdp_cfg.host.contains(':') && !rdp_cfg.host.starts_with('[') {
+                    format!("[{}]:{}", rdp_cfg.host, rdp_cfg.port)
+                } else {
+                    format!("{}:{}", rdp_cfg.host, rdp_cfg.port)
+                };
                 (
-                    format!("{}:{}", rdp_cfg.host, rdp_cfg.port),
+                    target_fmt,
                     rdp_cfg.screen_width as u32,
                     rdp_cfg.screen_height as u32,
                     rdp_cfg.color_depth,
@@ -184,6 +194,113 @@ impl Shellumi {
         self.active_tab_idx = Some(self.tabs.len() - 1);
         window.focus(&self.focus);
         cx.notify();
+
+        // Asynchronously resolve saved identity or host-scoped credential for this remote desktop tab
+        let host_identity_id = host.identity_id;
+        let host_secret_ref = host
+            .protocol_config
+            .as_deref()
+            .and_then(|c| serde_json::from_str::<crate::HostAuthMetadata>(c).ok())
+            .and_then(|m| m.host_secret_ref);
+
+        if host_identity_id.is_some() || host_secret_ref.is_some() {
+            if let Some(db_path) = self.active_vault_db_path() {
+                let vault_id = self.active_vault_id.clone();
+                let vault_key = self.active_vault_key();
+                let task = cx.background_executor().spawn(async move {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    runtime.block_on(async {
+                        let cred_store = shellumi_core::default_credential_store();
+                        if let Some(ref_uri) = host_secret_ref {
+                            let vid = shellumi_core::VaultId::new(&vault_id)
+                                .map_err(|e| e.to_string())?;
+                            let vault_store =
+                                shellumi_core::VaultCredentialStore::new(cred_store.as_ref(), &vid);
+                            vault_store
+                                .validate_reference(&ref_uri)
+                                .map_err(|e| e.to_string())?;
+                            let secret = shellumi_core::resolve_secret_from_ref(
+                                cred_store.as_ref(),
+                                &ref_uri,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            return Ok::<(Option<String>, Option<String>), String>((
+                                None,
+                                secret.map(|s| s.expose_secret().to_string()),
+                            ));
+                        }
+                        if let Some(id_val) = host_identity_id {
+                            let mut store = HostStore::open_with_key(&db_path, vault_key.as_ref())
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            if let Ok(vid) = shellumi_core::VaultId::new(&vault_id) {
+                                store.set_vault_id(vid);
+                            }
+                            let ident = store
+                                .get_identity(id_val)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| {
+                                    "Selected identity not found in vault".to_string()
+                                })?;
+                            let secret = store
+                                .resolve_identity_password(&ident, cred_store.as_ref())
+                                .map_err(|e| e.to_string())?;
+                            let uname = if ident.username.is_empty() || ident.username == "-" {
+                                None
+                            } else {
+                                Some(ident.username)
+                            };
+                            return Ok((uname, secret.map(|s| s.expose_secret().to_string())));
+                        }
+                        Ok((None, None))
+                    })
+                });
+
+                cx.spawn(async move |app, cx| {
+                    let res = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
+                            if let Some(rd) = &mut tab.remote_desktop_state {
+                                match res {
+                                    Ok((uname, pwd)) => {
+                                        if rd.username.is_none() {
+                                            if let Some(u) = uname {
+                                                rd.username = Some(u.clone());
+                                                if let Some(input) = &rd.username_input {
+                                                    input.update(cx, |inp, cx| {
+                                                        inp.set_value(&u, cx)
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        if let Some(p) = pwd {
+                                            rd.password = Some(p);
+                                            rd.last_action_note =
+                                                Some("Saved credential loaded from vault".into());
+                                        }
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            tab_id = tab_id,
+                                            error = %err,
+                                            "Failed to resolve saved remote desktop credential"
+                                        );
+                                        rd.last_action_note = Some(format!(
+                                            "Saved credential unavailable ({err}); enter password"
+                                        ));
+                                    }
+                                }
+                                cx.notify();
+                            }
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     pub(crate) fn launch_quick_connect_remote_desktop(
@@ -525,14 +642,12 @@ impl Shellumi {
                     RemoteDesktopProtocol::Vnc => 5900,
                     RemoteDesktopProtocol::Rdp => 3389,
                 };
-                let (host, port) = {
-                    let parts: Vec<&str> = rd.target.split(':').collect();
-                    let h = parts.first().copied().unwrap_or("127.0.0.1").to_string();
-                    let p: u16 = parts
-                        .get(1)
-                        .and_then(|p| p.parse().ok())
-                        .unwrap_or(default_port);
-                    (h, p)
+                let (host, port) = if let Some((h_part, p_part)) = rd.target.rsplit_once(':') {
+                    let clean_h = h_part.trim_start_matches('[').trim_end_matches(']');
+                    let p: u16 = p_part.parse().unwrap_or(default_port);
+                    (clean_h.to_string(), p)
+                } else {
+                    (rd.target.clone(), default_port)
                 };
 
                 if let Some(input) = &rd.username_input {
@@ -554,11 +669,10 @@ impl Shellumi {
                 }
 
                 if let Some(input) = &rd.password_input {
-                    let pwd = input.read(cx).value().trim().to_string();
+                    // Preserve exact password whitespace; only replace resolved password if user typed a new one.
+                    let pwd = input.read(cx).value().to_string();
                     if !pwd.is_empty() {
                         rd.password = Some(pwd);
-                    } else {
-                        rd.password = None;
                     }
                 }
 
@@ -1049,5 +1163,99 @@ impl Shellumi {
                 cx.notify();
             }
         }
+    }
+
+    /// Compute a legal RDP display resolution from measured viewport dimensions,
+    /// clamping against backend limits, preserving aspect ratio under `max_monitor_area`,
+    /// and aligning width to an even number.
+    pub(crate) fn compute_legal_rdp_resize(
+        viewport_w: f32,
+        viewport_h: f32,
+        max_area: Option<u64>,
+    ) -> Option<(u32, u32)> {
+        if !viewport_w.is_finite()
+            || !viewport_h.is_finite()
+            || viewport_w <= 0.0
+            || viewport_h <= 0.0
+        {
+            return None;
+        }
+        let mut w = (viewport_w.floor() as u32).clamp(200, 8192);
+        let mut h = (viewport_h.floor() as u32).clamp(200, 8192);
+
+        if let Some(area_cap) = max_area {
+            let area = (w as u64) * (h as u64);
+            if area > area_cap && area_cap >= 200 * 200 {
+                let scale = ((area_cap as f64) / (area as f64)).sqrt();
+                w = ((w as f64 * scale).floor() as u32).clamp(200, 8192);
+                h = ((h as f64 * scale).floor() as u32).clamp(200, 8192);
+            }
+        }
+
+        // RDP requires even width
+        w &= !1;
+        if w < 200 {
+            w = 200;
+        }
+        Some((w, h))
+    }
+
+    /// Request a remote desktop resize using *only* the validated GPUI `CanvasMeasurement`.
+    pub(crate) fn request_measured_remote_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(rd) = self.tabs[tab_idx].remote_desktop_state.as_ref() else {
+            return;
+        };
+        if rd.protocol != RemoteDesktopProtocol::Rdp || rd.view_only || !rd.display_control_ready {
+            return;
+        }
+        let Some(measurement) = self
+            .rd_canvas_measurements
+            .get(&tab_id)
+            .filter(|m| m.tab_id == tab_id && m.layout_epoch == self.layout_epoch)
+        else {
+            return;
+        };
+        let Some((target_w, target_h)) = Self::compute_legal_rdp_resize(
+            f32::from(measurement.viewport.size.width),
+            f32::from(measurement.viewport.size.height),
+            rd.max_monitor_area,
+        ) else {
+            return;
+        };
+
+        let entry = self.rd_resize_state.entry(tab_id).or_default();
+        if entry.last_sent == Some((target_w, target_h)) {
+            return;
+        }
+        entry.desired = Some((target_w, target_h));
+        entry.last_sent = Some((target_w, target_h));
+        self.remote_desktop_request_resize(tab_idx, target_w, target_h, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_legal_rdp_resize_clamps_area_and_aligns_even_width() {
+        // Odd width 1281 -> aligned to even 1280
+        assert_eq!(
+            Shellumi::compute_legal_rdp_resize(1281.7, 720.9, None),
+            Some((1280, 720))
+        );
+        // Area cap exceeded (e.g. 3840x2160 > 2_073_600) -> scales down preserving aspect ratio + even width
+        let (w, h) = Shellumi::compute_legal_rdp_resize(3840.0, 2160.0, Some(2_073_600)).unwrap();
+        assert!(w * h <= 2_073_600);
+        assert_eq!(w % 2, 0);
+        // Zero / NaN rejected
+        assert_eq!(Shellumi::compute_legal_rdp_resize(0.0, 720.0, None), None);
+        assert_eq!(
+            Shellumi::compute_legal_rdp_resize(f32::NAN, 720.0, None),
+            None
+        );
     }
 }

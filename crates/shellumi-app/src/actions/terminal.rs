@@ -414,8 +414,34 @@ impl Shellumi {
                     .as_deref()
                     .and_then(|c| serde_json::from_str::<MoshConfig>(c).ok())
                     .unwrap_or_default();
-                let mosh_args =
-                    mosh_cfg.build_arguments(&host.destination, host.jump_host.as_deref());
+                let mut dest = host.destination.clone();
+                if dest.username().is_empty() {
+                    if let Some(ident) = host
+                        .identity_id
+                        .and_then(|id| self.identities.iter().find(|i| i.id == id))
+                    {
+                        if !ident.username.is_empty() {
+                            if let Ok(updated) =
+                                SshDestination::new(dest.host(), &ident.username, dest.port().get())
+                            {
+                                dest = updated;
+                            }
+                        }
+                    }
+                }
+                let mut mosh_args = mosh_cfg.build_arguments(&dest, host.jump_host.as_deref());
+                if let Some(ident) = host
+                    .identity_id
+                    .and_then(|id| self.identities.iter().find(|i| i.id == id))
+                {
+                    if let Some(ref key_path) = ident.key_path {
+                        if !key_path.trim().is_empty() {
+                            let ssh_flag =
+                                format!("ssh -p {} -i {}", dest.port().get(), key_path.trim());
+                            mosh_args.insert(0, format!("--ssh={ssh_flag}"));
+                        }
+                    }
+                }
                 let command = TerminalCommand::new("mosh").args(mosh_args);
                 self.start_session_with_startup(
                     host.name.clone(),

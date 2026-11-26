@@ -11,7 +11,8 @@ impl Render for Shellumi {
                 }
                 PendingWindowAction::CloseWindow => {
                     self.inspector_coordinator.close();
-                    cx.quit();
+                    self.approved_close_once = true;
+                    window.remove_window();
                 }
                 PendingWindowAction::QuitApp => {
                     cx.quit();
@@ -1398,18 +1399,18 @@ impl Render for Shellumi {
                             body.child(self.render_sftp_dual_pane(active_idx, sftp_state, cx)),
                         ))
                     } else if let Some(rd_state) = &tab.remote_desktop_state {
-                        let mut row = div().flex().flex_1().min_h_0();
+                        let mut row = div().flex().flex_1().min_h_0().min_w_0();
                         if self.sidebar_visible {
                             row = row.child(self.workspace_sidebar("Remote Desktop", cx));
                         }
                         let session_view =
                             self.render_remote_desktop_session(active_idx, rd_state, window, cx);
-                        if self.inspector_coordinator.is_open() {
-                            let inspector = self.render_unified_inspector(window, cx);
-                            root.child(row.child(body.child(session_view)).child(inspector))
-                        } else {
-                            root.child(row.child(body.child(session_view)))
-                        }
+                        let workspace = self.compose_workspace_with_inspector(
+                            body.child(session_view).into_any_element(),
+                            window,
+                            cx,
+                        );
+                        root.child(row.child(workspace))
                     } else {
                         let mut row = div().flex().flex_1().min_h_0();
                         if self.sidebar_visible {
@@ -1471,5 +1472,103 @@ impl Render for Shellumi {
             }
         }
         self.render_hosts_view(root, window, cx)
+    }
+}
+
+impl Shellumi {
+    /// Shared workspace + Unified Inspector composition helper.
+    /// Measures the inner workspace container via `gpui::canvas`, switches between
+    /// `Side` (split) and `FocusedContent` (inspector replaces primary with Back bar),
+    /// and guarantees at most one inspector per window.
+    pub(crate) fn compose_workspace_with_inspector(
+        &mut self,
+        primary: gpui::AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let layout_epoch = self.layout_epoch;
+        let view = cx.entity().downgrade();
+        let workspace_sensor = gpui::canvas(
+            move |bounds, _window, cx| {
+                let measured_w = f32::from(bounds.size.width);
+                if !measured_w.is_finite() || measured_w <= 0.0 {
+                    return;
+                }
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |app, cx| {
+                        if app.layout_epoch != layout_epoch {
+                            return;
+                        }
+                        let changed = app
+                            .measured_workspace_width
+                            .is_none_or(|prev| (prev - measured_w).abs() > 0.5);
+                        if changed {
+                            app.measured_workspace_width = Some(measured_w);
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+
+        let is_open = self.inspector_coordinator.is_open();
+        let geom = self.active_workspace_layout();
+
+        let mut container = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .child(workspace_sensor);
+
+        if is_open {
+            let inspector = self.render_unified_inspector(window, cx);
+            if geom.presentation == crate::ui::layout::InspectorPresentation::FocusedContent {
+                container = container.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id("workspace-focused-back-bar")
+                                .h(px(36.0))
+                                .px_4()
+                                .bg(rgb(MacTheme::SURFACE))
+                                .border_b_1()
+                                .border_color(rgb(MacTheme::BORDER))
+                                .flex()
+                                .items_center()
+                                .child(
+                                    crate::ui::components::AppButton::new(
+                                        "workspace-focused-back-btn",
+                                        "← Back",
+                                        crate::ui::components::ButtonVariant::Ghost,
+                                    )
+                                    .on_click(cx.listener(
+                                        |app, _, _, cx| {
+                                            app.inspector_back(cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(div().flex_1().min_h_0().w_full().child(inspector)),
+                );
+            } else {
+                container = container
+                    .child(div().flex_1().min_w_0().min_h_0().flex().child(primary))
+                    .child(inspector);
+            }
+        } else {
+            container = container.child(div().flex_1().min_w_0().min_h_0().flex().child(primary));
+        }
+
+        container
     }
 }

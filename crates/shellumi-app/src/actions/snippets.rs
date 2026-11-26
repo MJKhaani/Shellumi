@@ -58,8 +58,17 @@ impl Shellumi {
             .map(|v| {
                 let default_val = v.default_value.clone();
                 let initial_val = default_val.clone().unwrap_or_default();
-                let placeholder = default_val.as_deref().unwrap_or("Value required");
-                let input = cx.new(|cx| TextInput::new(cx, &initial_val, placeholder));
+                let input = if v.is_secret {
+                    let placeholder = if default_val.is_some() {
+                        "Default configured (enter to override)"
+                    } else {
+                        "Secret value required"
+                    };
+                    cx.new(|cx| TextInput::new(cx, &initial_val, placeholder).masked())
+                } else {
+                    let placeholder = default_val.as_deref().unwrap_or("Value required");
+                    cx.new(|cx| TextInput::new(cx, &initial_val, placeholder))
+                };
                 SnippetModalVariable {
                     name: v.name.clone(),
                     is_secret: v.is_secret,
@@ -92,7 +101,12 @@ impl Shellumi {
 
         let mut params = std::collections::HashMap::new();
         for var in &modal.variables {
-            let val = var.input.read(cx).value().trim().to_string();
+            let raw = var.input.read(cx).value();
+            let val = if var.is_secret {
+                raw.to_string()
+            } else {
+                raw.trim().to_string()
+            };
             if !val.is_empty() {
                 params.insert(var.name.clone(), val);
             }

@@ -81,6 +81,146 @@ pub struct ClipboardEvent {
     pub text: String,
 }
 
+/// Per-session pan offset for 100% (`ScaleMode::Original`) mode.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PanState {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl PanState {
+    /// Clamp pan offsets so oversized axes stay within `[0, frame - viewport]`
+    /// and axes that fit within the viewport reset to `0.0`.
+    pub fn clamped(self, viewport_size: (f64, f64), frame_size: (u32, u32)) -> Self {
+        let max_x = (frame_size.0 as f64 - viewport_size.0).max(0.0);
+        let max_y = (frame_size.1 as f64 - viewport_size.1).max(0.0);
+        Self {
+            x: if self.x.is_finite() {
+                self.x.clamp(0.0, max_x)
+            } else {
+                0.0
+            },
+            y: if self.y.is_finite() {
+                self.y.clamp(0.0, max_y)
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+/// Single authoritative transform used for both rendering the remote desktop image
+/// and mapping window-local pointer events to framebuffer coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasTransform {
+    pub viewport_origin: (f64, f64),
+    pub viewport_size: (f64, f64),
+    pub frame_size: (u32, u32),
+    /// Image top-left origin relative to the viewport's top-left corner.
+    pub image_origin: (f64, f64),
+    pub image_size: (f64, f64),
+    pub scale: (f64, f64),
+}
+
+impl CanvasTransform {
+    /// Compute the exact image rectangle and pointer transform.
+    /// Returns `None` if any dimension is zero or non-finite.
+    pub fn new(
+        viewport_origin: (f64, f64),
+        viewport_size: (f64, f64),
+        frame_size: (u32, u32),
+        mode: ScaleMode,
+        pan: (f64, f64),
+    ) -> Option<Self> {
+        let (ox, oy) = viewport_origin;
+        let (w, h) = viewport_size;
+        let (fw, fh) = frame_size;
+        if !ox.is_finite()
+            || !oy.is_finite()
+            || !w.is_finite()
+            || !h.is_finite()
+            || w <= 0.0
+            || h <= 0.0
+            || fw == 0
+            || fh == 0
+        {
+            return None;
+        }
+        let fw_f = fw as f64;
+        let fh_f = fh as f64;
+
+        let (scale, image_size, image_origin) = match mode {
+            ScaleMode::Fit => {
+                let s = (w / fw_f).min(h / fh_f);
+                let iw = fw_f * s;
+                let ih = fh_f * s;
+                let ix = (w - iw) / 2.0;
+                let iy = (h - ih) / 2.0;
+                ((s, s), (iw, ih), (ix, iy))
+            }
+            ScaleMode::Fill => {
+                let sx = w / fw_f;
+                let sy = h / fh_f;
+                ((sx, sy), (w, h), (0.0, 0.0))
+            }
+            ScaleMode::Original => {
+                let clamped = PanState { x: pan.0, y: pan.1 }.clamped((w, h), (fw, fh));
+                let ix = if fw_f <= w {
+                    (w - fw_f) / 2.0
+                } else {
+                    -clamped.x
+                };
+                let iy = if fh_f <= h {
+                    (h - fh_f) / 2.0
+                } else {
+                    -clamped.y
+                };
+                ((1.0, 1.0), (fw_f, fh_f), (ix, iy))
+            }
+        };
+
+        Some(Self {
+            viewport_origin,
+            viewport_size,
+            frame_size,
+            image_origin,
+            image_size,
+            scale,
+        })
+    }
+
+    /// Map a window-local logical pointer coordinate `(win_x, win_y)` to remote
+    /// framebuffer pixel coordinates `(u32, u32)`.
+    ///
+    /// Rejects points outside the viewport (`[0, W) x [0, H)`) or outside the
+    /// rendered image (`[Ix, Ix+Iw) x [Iy, Iy+Ih)`), never clamping letterbox clicks.
+    pub fn map_window_point_to_remote(&self, win_x: f64, win_y: f64) -> Option<(u32, u32)> {
+        if !win_x.is_finite() || !win_y.is_finite() {
+            return None;
+        }
+        let local_x = win_x - self.viewport_origin.0;
+        let local_y = win_y - self.viewport_origin.1;
+
+        let (w, h) = self.viewport_size;
+        if local_x < 0.0 || local_x >= w || local_y < 0.0 || local_y >= h {
+            return None;
+        }
+
+        let (ix, iy) = self.image_origin;
+        let (iw, ih) = self.image_size;
+        if local_x < ix || local_x >= ix + iw || local_y < iy || local_y >= iy + ih {
+            return None;
+        }
+
+        let rx = ((local_x - ix) / self.scale.0).floor() as i64;
+        let ry = ((local_y - iy) / self.scale.1).floor() as i64;
+        let max_x = self.frame_size.0.saturating_sub(1) as i64;
+        let max_y = self.frame_size.1.saturating_sub(1) as i64;
+
+        Some((rx.clamp(0, max_x) as u32, ry.clamp(0, max_y) as u32))
+    }
+}
+
 /// Translate viewport window pixel coordinates `(screen_x, screen_y)` into remote framebuffer
 /// coordinates `(u32, u32)` based on the selected scaling mode and container dimensions.
 ///
@@ -94,73 +234,14 @@ pub fn translate_coordinates(
     fb_height: u32,
     scale_mode: ScaleMode,
 ) -> Option<(u32, u32)> {
-    if viewport_width <= 0.0 || viewport_height <= 0.0 || fb_width == 0 || fb_height == 0 {
-        return None;
-    }
-
-    match scale_mode {
-        ScaleMode::Fit => {
-            let scale = (viewport_width / fb_width as f32).min(viewport_height / fb_height as f32);
-            let rendered_w = fb_width as f32 * scale;
-            let rendered_h = fb_height as f32 * scale;
-            let offset_x = (viewport_width - rendered_w) / 2.0;
-            let offset_y = (viewport_height - rendered_h) / 2.0;
-
-            // Check if coordinates lie inside the letterbox or pillarbox margins
-            if screen_x < offset_x
-                || screen_x >= offset_x + rendered_w
-                || screen_y < offset_y
-                || screen_y >= offset_y + rendered_h
-            {
-                return None;
-            }
-
-            let local_x = ((screen_x - offset_x) / scale).floor() as u32;
-            let local_y = ((screen_y - offset_y) / scale).floor() as u32;
-
-            Some((
-                local_x.min(fb_width.saturating_sub(1)),
-                local_y.min(fb_height.saturating_sub(1)),
-            ))
-        }
-        ScaleMode::Original => {
-            let offset_x = ((viewport_width - fb_width as f32) / 2.0).max(0.0);
-            let offset_y = ((viewport_height - fb_height as f32) / 2.0).max(0.0);
-
-            if screen_x < offset_x
-                || screen_x >= offset_x + fb_width as f32
-                || screen_y < offset_y
-                || screen_y >= offset_y + fb_height as f32
-            {
-                return None;
-            }
-
-            let local_x = (screen_x - offset_x).floor() as u32;
-            let local_y = (screen_y - offset_y).floor() as u32;
-
-            Some((
-                local_x.min(fb_width.saturating_sub(1)),
-                local_y.min(fb_height.saturating_sub(1)),
-            ))
-        }
-        ScaleMode::Fill => {
-            if screen_x < 0.0
-                || screen_x >= viewport_width
-                || screen_y < 0.0
-                || screen_y >= viewport_height
-            {
-                return None;
-            }
-
-            let scale_x = viewport_width / fb_width as f32;
-            let scale_y = viewport_height / fb_height as f32;
-
-            let local_x = ((screen_x / scale_x).floor() as u32).min(fb_width.saturating_sub(1));
-            let local_y = ((screen_y / scale_y).floor() as u32).min(fb_height.saturating_sub(1));
-
-            Some((local_x, local_y))
-        }
-    }
+    let tx = CanvasTransform::new(
+        (0.0, 0.0),
+        (viewport_width as f64, viewport_height as f64),
+        (fb_width, fb_height),
+        scale_mode,
+        (0.0, 0.0),
+    )?;
+    tx.map_window_point_to_remote(screen_x as f64, screen_y as f64)
 }
 
 #[cfg(test)]
@@ -218,5 +299,79 @@ mod tests {
         let fill_bottom_right =
             translate_coordinates(1199.0, 999.0, vp_w, vp_h, fb_w, fb_h, ScaleMode::Fill).unwrap();
         assert_eq!(fill_bottom_right, (799, 599));
+    }
+
+    #[test]
+    fn verifies_exact_canvas_transform_and_pan_fixtures() {
+        // 1. Fit: viewport origin (100,60), 800x800, frame 1920x1080
+        let tx_fit = CanvasTransform::new(
+            (100.0, 60.0),
+            (800.0, 800.0),
+            (1920, 1080),
+            ScaleMode::Fit,
+            (0.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(tx_fit.image_origin, (0.0, 175.0));
+        assert_eq!(tx_fit.image_size, (800.0, 450.0));
+        assert_eq!(
+            tx_fit.map_window_point_to_remote(500.0, 460.0),
+            Some((960, 540))
+        );
+        assert_eq!(tx_fit.map_window_point_to_remote(500.0, 100.0), None);
+        assert_eq!(
+            tx_fit.map_window_point_to_remote(100.0, 235.0),
+            Some((0, 0))
+        );
+        // Exclusive right/bottom edges rejected
+        assert_eq!(tx_fit.map_window_point_to_remote(900.0, 460.0), None);
+        assert_eq!(tx_fit.map_window_point_to_remote(500.0, 685.0), None);
+
+        // 2. Original: viewport 800x600, frame 1920x1080, pan (400,200)
+        let tx_orig_pan = CanvasTransform::new(
+            (0.0, 0.0),
+            (800.0, 600.0),
+            (1920, 1080),
+            ScaleMode::Original,
+            (400.0, 200.0),
+        )
+        .unwrap();
+        assert_eq!(
+            tx_orig_pan.map_window_point_to_remote(0.0, 0.0),
+            Some((400, 200))
+        );
+        assert_eq!(
+            tx_orig_pan.map_window_point_to_remote(799.0, 599.0),
+            Some((1199, 799))
+        );
+
+        // 3. Oversized width only: pan clamped on X, centered on Y
+        let tx_wide = CanvasTransform::new(
+            (0.0, 0.0),
+            (800.0, 900.0),
+            (1200, 600),
+            ScaleMode::Original,
+            (999.0, 999.0),
+        )
+        .unwrap();
+        assert_eq!(tx_wide.image_origin, (-400.0, 150.0));
+
+        // 4. Zero / NaN dimensions rejected
+        assert!(CanvasTransform::new(
+            (0.0, 0.0),
+            (0.0, 600.0),
+            (800, 600),
+            ScaleMode::Fit,
+            (0.0, 0.0)
+        )
+        .is_none());
+        assert!(CanvasTransform::new(
+            (0.0, 0.0),
+            (f64::NAN, 600.0),
+            (800, 600),
+            ScaleMode::Fit,
+            (0.0, 0.0)
+        )
+        .is_none());
     }
 }

@@ -567,6 +567,44 @@ impl VaultHostStore {
     }
 
     /// Only vault-scoped keychain references are accepted for new identities.
+    /// Atomically create an optional reusable identity and create/update a host in a single
+    /// SQLite transaction scoped to `self.0.host_vault_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_host_with_identity_tx(
+        &mut self,
+        host_id: Option<i64>,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+        existing_identity_id: Option<i64>,
+        new_identity: Option<&shellumi_core::NewIdentity>,
+        backend: &dyn shellumi_core::CredentialStore,
+    ) -> Result<(i64, Option<i64>), StorageError> {
+        if let Some(ident) = new_identity {
+            self.validate_identity_refs(ident, backend)?;
+        }
+        self.0
+            .save_host_with_identity_tx(
+                host_id,
+                name,
+                destination,
+                group_name,
+                tags,
+                jump_host,
+                startup_snippet_id,
+                protocol,
+                protocol_config,
+                existing_identity_id,
+                new_identity,
+            )
+            .await
+    }
+
     pub async fn create_identity(
         &mut self,
         identity: &shellumi_core::NewIdentity,
@@ -4117,23 +4155,173 @@ impl HostStore {
         Ok(rows != 0)
     }
 
+    /// Atomically create an optional reusable identity and create/update a host in a single
+    /// SQLite transaction scoped to `self.host_vault_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_host_with_identity_tx(
+        &mut self,
+        host_id: Option<i64>,
+        name: &str,
+        destination: &SshDestination,
+        group_name: Option<&str>,
+        tags: &[String],
+        jump_host: Option<&str>,
+        startup_snippet_id: Option<i64>,
+        protocol: &str,
+        protocol_config: Option<&str>,
+        existing_identity_id: Option<i64>,
+        new_identity: Option<&shellumi_core::NewIdentity>,
+    ) -> Result<(i64, Option<i64>), StorageError> {
+        let host_name = validated_name(name)?;
+        let group = validated_group(group_name)?;
+        let tags_serialized = validated_tags(tags)?;
+        let jump = validated_jump_host(jump_host)?;
+        let proto = if protocol.trim().is_empty() {
+            "ssh"
+        } else {
+            protocol.trim()
+        };
+
+        if let Some(id) = existing_identity_id {
+            if self.get_identity(id).await?.is_none() {
+                return Err(StorageError::InvalidIdentityReference);
+            }
+        }
+
+        if let Some(ident) = new_identity {
+            let _ = validated_name(&ident.name)?;
+            let ident_user = ident.username.trim();
+            if ident_user
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(StorageError::InvalidIdentity(
+                    shellumi_core::IdentityError::InvalidIdentityField(
+                        "username must not contain whitespace or control characters".to_string(),
+                    ),
+                ));
+            }
+        }
+
+        self.connection.execute("BEGIN IMMEDIATE", ()).await?;
+
+        let result: Result<(i64, Option<i64>), StorageError> = async {
+            let resolved_identity_id = if let Some(ident) = new_identity {
+                let ident_name = validated_name(&ident.name)?;
+                let ident_user = ident.username.trim();
+                let stored_user = if ident_user.is_empty() {
+                    "-"
+                } else {
+                    ident_user
+                };
+                let auth_method_json = serde_json::to_string(&ident.auth_method)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ident_tags_json = serde_json::to_string(&ident.tags)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                self.connection
+                    .execute(
+                        "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        (
+                            ident_name,
+                            stored_user,
+                            auth_method_json,
+                            ident.password_secret_ref.as_deref(),
+                            ident.key_path.as_deref(),
+                            ident.passphrase_secret_ref.as_deref(),
+                            ident.certificate_path.as_deref(),
+                            ident_tags_json,
+                            ident.comment.as_deref(),
+                            self.host_vault_id.as_str(),
+                        ),
+                    )
+                    .await?;
+                Some(self.connection.last_insert_rowid())
+            } else {
+                existing_identity_id
+            };
+
+            let saved_host_id = if let Some(id) = host_id {
+                let changed = self
+                    .connection
+                    .execute(
+                        "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10, identity_id = ?11 WHERE id = ?12 AND vault_id = ?13",
+                        (
+                            host_name,
+                            destination.host(),
+                            destination.username(),
+                            i64::from(destination.port().get()),
+                            group,
+                            tags_serialized,
+                            jump,
+                            startup_snippet_id,
+                            proto,
+                            protocol_config,
+                            resolved_identity_id,
+                            id,
+                            self.host_vault_id.as_str(),
+                        ),
+                    )
+                    .await?;
+                if changed == 0 {
+                    return Err(StorageError::ItemNotFound(format!("host {id}")));
+                }
+                id
+            } else {
+                self.connection
+                    .execute(
+                        "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        (
+                            host_name,
+                            destination.host(),
+                            destination.username(),
+                            i64::from(destination.port().get()),
+                            group,
+                            tags_serialized,
+                            jump,
+                            startup_snippet_id,
+                            proto,
+                            protocol_config,
+                            resolved_identity_id,
+                            self.host_vault_id.as_str(),
+                        ),
+                    )
+                    .await?;
+                self.connection.last_insert_rowid()
+            };
+
+            Ok((saved_host_id, resolved_identity_id))
+        }
+        .await;
+
+        match result {
+            Ok(pair) => {
+                self.connection.execute("COMMIT", ()).await?;
+                Ok(pair)
+            }
+            Err(err) => {
+                let _ = self.connection.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
     pub async fn create_identity(
         &mut self,
         identity: &shellumi_core::NewIdentity,
     ) -> Result<i64, StorageError> {
         let name = validated_name(&identity.name)?;
         let username = identity.username.trim();
-        if username.is_empty()
-            || username
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control())
+        if username
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
         {
             return Err(StorageError::InvalidIdentity(
                 shellumi_core::IdentityError::InvalidIdentityField(
-                    "username must not be empty or contain whitespace".to_string(),
+                    "username must not contain whitespace or control characters".to_string(),
                 ),
             ));
         }
+        let stored_user = if username.is_empty() { "-" } else { username };
         let auth_method_json = serde_json::to_string(&identity.auth_method)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         let tags_json = serde_json::to_string(&identity.tags)
@@ -4144,7 +4332,7 @@ impl HostStore {
                 "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     name,
-                    username,
+                    stored_user,
                     auth_method_json,
                     identity.password_secret_ref.as_deref(),
                     identity.key_path.as_deref(),
@@ -4214,14 +4402,13 @@ impl HostStore {
     ) -> Result<bool, StorageError> {
         let name = validated_name(&identity.name)?;
         let username = identity.username.trim();
-        if username.is_empty()
-            || username
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control())
+        if username
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
         {
             return Err(StorageError::InvalidIdentity(
                 shellumi_core::IdentityError::InvalidIdentityField(
-                    "username must not be empty or contain whitespace".to_string(),
+                    "username must not contain whitespace or control characters".to_string(),
                 ),
             ));
         }
@@ -12390,5 +12577,159 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(target.list().await.unwrap()[0].id, 42);
+    }
+
+    #[tokio::test]
+    async fn test_save_host_with_identity_tx_atomic_and_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("tx_vault.db");
+        let vid = shellumi_core::VaultId::new("vault-a").unwrap();
+        let mut store = HostStore::open(db_path.to_str().unwrap()).await.unwrap();
+        store.set_vault_id(vid.clone());
+
+        let dest1 = SshDestination::new("10.0.0.10", "ops", 22).unwrap();
+        let cred_store = shellumi_core::EphemeralCredentialStore::new();
+        let pw_ref = shellumi_core::store_secret_to_ref(
+            &cred_store,
+            shellumi_core::DEFAULT_KEYCHAIN_SERVICE,
+            "vault-a-ident-1",
+            " s3cr3t with spaces ",
+        )
+        .unwrap();
+
+        let new_ident = shellumi_core::NewIdentity {
+            name: "Ops Password".to_string(),
+            username: "ops".to_string(),
+            auth_method: shellumi_core::AuthMethod::Password,
+            password_secret_ref: Some(pw_ref.clone()),
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec!["prod".to_string()],
+            comment: None,
+        };
+
+        // 1. Atomic create of host + reusable identity
+        let (host1_id, ident_id) = store
+            .save_host_with_identity_tx(
+                None,
+                "Prod Web 1",
+                &dest1,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                None,
+                Some(&new_ident),
+            )
+            .await
+            .unwrap();
+        let ident_id = ident_id.expect("identity id must be returned");
+
+        // 2. Reuse the same identity on a second host
+        let dest2 = SshDestination::new("10.0.0.11", "ops", 22).unwrap();
+        let (host2_id, reused_id) = store
+            .save_host_with_identity_tx(
+                None,
+                "Prod Web 2",
+                &dest2,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                Some(ident_id),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reused_id, Some(ident_id));
+
+        // 3. Username-less VNC identity is allowed
+        let vnc_ident = shellumi_core::NewIdentity {
+            name: "VNC Shared".to_string(),
+            username: String::new(),
+            auth_method: shellumi_core::AuthMethod::Password,
+            password_secret_ref: Some(pw_ref),
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+        };
+        let vnc_dest = SshDestination::new("10.0.0.12", "vnc", 5900).unwrap();
+        let (_vnc_host_id, vnc_ident_id) = store
+            .save_host_with_identity_tx(
+                None,
+                "VNC Box",
+                &vnc_dest,
+                None,
+                &[],
+                None,
+                None,
+                "vnc",
+                None,
+                None,
+                Some(&vnc_ident),
+            )
+            .await
+            .unwrap();
+        assert!(vnc_ident_id.is_some());
+
+        // 4. Rollback on host failure: updating a nonexistent host_id must not commit the new identity
+        let rollback_ident = shellumi_core::NewIdentity {
+            name: "Should Rollback".to_string(),
+            username: "ghost".to_string(),
+            auth_method: shellumi_core::AuthMethod::Interactive,
+            password_secret_ref: None,
+            key_path: None,
+            passphrase_secret_ref: None,
+            certificate_path: None,
+            tags: vec![],
+            comment: None,
+        };
+        let err = store
+            .save_host_with_identity_tx(
+                Some(999_999),
+                "Missing Host",
+                &dest1,
+                None,
+                &[],
+                None,
+                None,
+                "ssh",
+                None,
+                None,
+                Some(&rollback_ident),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ItemNotFound(_)));
+        let identities_after = store.list_identities().await.unwrap();
+        assert!(
+            !identities_after.iter().any(|i| i.name == "Should Rollback"),
+            "rolled-back transaction must not leave orphaned identity"
+        );
+
+        // 5. Reopen persistence + secret whitespace preservation
+        drop(store);
+        let mut reopened = HostStore::open(db_path.to_str().unwrap()).await.unwrap();
+        reopened.set_vault_id(vid);
+        let hosts = reopened.list().await.unwrap();
+        assert!(hosts
+            .iter()
+            .any(|h| h.id == host1_id && h.identity_id == Some(ident_id)));
+        assert!(hosts
+            .iter()
+            .any(|h| h.id == host2_id && h.identity_id == Some(ident_id)));
+        let loaded_ident = reopened.get_identity(ident_id).await.unwrap().unwrap();
+        let resolved_pw = reopened
+            .resolve_identity_password(&loaded_ident, &cred_store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_pw.expose_secret(), " s3cr3t with spaces ");
     }
 }

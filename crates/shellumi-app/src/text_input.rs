@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
+    actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
@@ -31,6 +31,14 @@ actions!(
     ]
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextInputVariant {
+    /// Standard full-width framed field with theme-derived background, border, focus ring, and optional secret toggle.
+    Framed,
+    /// Borderless/backgroundless editor embedded inside a parent container (e.g. Quick Connect).
+    Embedded,
+}
+
 pub(crate) struct TextInput {
     focus_handle: Option<FocusHandle>,
     content: SharedString,
@@ -42,10 +50,31 @@ pub(crate) struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Display masking state (true = show `*`, false = reveal plaintext).
     masked: bool,
-    bare: bool,
+    /// Secret classification (true = password/passphrase/token; blocks copy/cut even when revealed).
+    is_secret: bool,
+    variant: TextInputVariant,
+    disabled: bool,
+    read_only: bool,
+    has_error: bool,
 }
 
+impl Drop for TextInput {
+    fn drop(&mut self) {
+        if self.is_secret {
+            // Note: GPUI's `SharedString` is an immutable `Arc<str>`/`&'static str`, so we cannot
+            // zeroize its backing allocation in place; we drop our reference and scrub mutable buffers.
+            self.content = SharedString::default();
+            if let Some((_, ref mut s)) = self.last_unmarked {
+                zeroize::Zeroize::zeroize(s);
+            }
+            self.last_unmarked = None;
+        }
+    }
+}
+
+#[allow(dead_code)]
 impl TextInput {
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
@@ -149,7 +178,7 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.masked {
+        if self.is_secret || self.masked {
             return;
         }
         if !self.selected_range.is_empty() {
@@ -159,7 +188,10 @@ impl TextInput {
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.masked {
+        if self.disabled || self.read_only {
+            return;
+        }
+        if self.is_secret || self.masked {
             self.replace_text_in_range(None, "", window, cx);
             return;
         }
@@ -199,9 +231,34 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        let mut index = line
-            .closest_index_for_x(position.x - bounds.left())
-            .min(self.content.len());
+        let display_idx = line.closest_index_for_x(position.x - bounds.left());
+        self.display_byte_to_content_byte(display_idx)
+    }
+
+    /// Map a UTF-8 byte offset in `self.content` to a byte offset in `masked_display_text()`.
+    pub(crate) fn content_byte_to_display_byte(&self, byte_idx: usize) -> usize {
+        let clamped = self.clamp_to_char_boundary(byte_idx.min(self.content.len()));
+        if !self.masked || self.content.is_empty() {
+            return clamped;
+        }
+        // Each character in `content` maps to a single 1-byte `*` in `masked_display_text()`.
+        self.content[..clamped].chars().count()
+    }
+
+    /// Map a byte offset in `masked_display_text()` back to a UTF-8 char-boundary byte offset in `self.content`.
+    pub(crate) fn display_byte_to_content_byte(&self, display_idx: usize) -> usize {
+        if !self.masked || self.content.is_empty() {
+            return self.clamp_to_char_boundary(display_idx.min(self.content.len()));
+        }
+        self.content
+            .char_indices()
+            .nth(display_idx)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(self.content.len())
+    }
+
+    fn clamp_to_char_boundary(&self, mut index: usize) -> usize {
+        index = index.min(self.content.len());
         while !self.content.is_char_boundary(index) {
             index = index.saturating_sub(1);
         }
@@ -401,6 +458,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.disabled || self.read_only {
+            return;
+        }
         let _ = self.handle_replace_text_in_range(range_utf16, new_text);
         cx.notify();
     }
@@ -413,6 +473,9 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.disabled || self.read_only {
+            return;
+        }
         self.handle_replace_and_mark_text_in_range(range_utf16, new_text, new_selected_range_utf16);
         cx.notify();
     }
@@ -447,8 +510,8 @@ impl EntityInputHandler for TextInput {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
 
-        assert_eq!(last_layout.text, self.content);
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let display_idx = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = self.display_byte_to_content_byte(display_idx);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -507,12 +570,17 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let display_selected_start = input.content_byte_to_display_byte(input.selected_range.start);
+        let display_selected_end = input.content_byte_to_display_byte(input.selected_range.end);
+        let selected_range = display_selected_start..display_selected_end;
+        let cursor = input.content_byte_to_display_byte(input.cursor_offset());
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0.58, 0.13, 0.60, 1.))
+            (
+                input.placeholder.clone(),
+                crate::theme::text_tertiary().into(),
+            )
         } else {
             (SharedString::from(input.masked_display_text()), style.color)
         };
@@ -526,13 +594,20 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+            let m_start = input
+                .content_byte_to_display_byte(marked_range.start)
+                .min(display_text.len());
+            let m_end = input
+                .content_byte_to_display_byte(marked_range.end)
+                .min(display_text.len())
+                .max(m_start);
             vec![
                 TextRun {
-                    len: marked_range.start,
+                    len: m_start,
                     ..run.clone()
                 },
                 TextRun {
-                    len: marked_range.end - marked_range.start,
+                    len: m_end - m_start,
                     underline: Some(UnderlineStyle {
                         color: Some(run.color),
                         thickness: px(1.0),
@@ -541,7 +616,7 @@ impl Element for TextElement {
                     ..run.clone()
                 },
                 TextRun {
-                    len: display_text.len() - marked_range.end,
+                    len: display_text.len().saturating_sub(m_end),
                     ..run
                 },
             ]
@@ -636,12 +711,20 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_handle = self.focus_handle(cx);
+        let is_focused = focus_handle.is_focused(window);
+
         let base = div()
             .flex()
+            .items_center()
             .key_context("TextInput")
-            .track_focus(&self.focus_handle(cx))
-            .cursor(CursorStyle::IBeam)
+            .track_focus(&focus_handle)
+            .cursor(if self.disabled {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::IBeam
+            })
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -662,28 +745,85 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move));
 
-        if self.bare {
-            base.text_color(rgb(0xf5f5f7))
+        if self.variant == TextInputVariant::Embedded {
+            base.text_color(crate::theme::text_primary())
                 .line_height(px(22.))
                 .text_size(px(13.))
                 .w_full()
                 .child(div().w_full().child(TextElement { input: cx.entity() }))
         } else {
-            base.bg(rgb(0x303034))
-                .text_color(rgb(0xf5f5f7))
+            let bg_color = if self.disabled {
+                crate::theme::surface()
+            } else {
+                crate::theme::input_bg()
+            };
+            let border_color = if self.has_error {
+                crate::theme::danger()
+            } else if is_focused {
+                crate::theme::accent_blue()
+            } else {
+                crate::theme::separator()
+            };
+            let text_color = if self.disabled {
+                crate::theme::text_secondary()
+            } else {
+                crate::theme::text_primary()
+            };
+
+            let mut row = base
+                .w_full()
+                .min_h(px(34.))
+                .px(px(8.))
+                .py(px(4.))
+                .gap_1p5()
+                .bg(bg_color)
+                .text_color(text_color)
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(0x46464a))
-                .line_height(px(24.))
-                .text_size(px(14.))
+                .border_color(border_color)
+                .line_height(px(22.))
+                .text_size(px(13.))
                 .child(
                     div()
-                        .h(px(24. + 4. * 2.))
-                        .w_full()
-                        .p(px(4.))
-                        .bg(rgb(0x303034))
+                        .flex_1()
+                        .min_w_0()
                         .child(TextElement { input: cx.entity() }),
-                )
+                );
+
+            if self.is_secret && !self.disabled {
+                let is_masked = self.masked;
+                let toggle_icon = if is_masked {
+                    crate::ui::icon::IconName::RoleViewer
+                } else {
+                    crate::ui::icon::IconName::ViewOnly
+                };
+                row = row.child(
+                    div()
+                        .id("secret-visibility-toggle")
+                        .flex_shrink_0()
+                        .w(px(24.))
+                        .h(px(24.))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(crate::theme::MacTheme::SURFACE_HOVER)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(|input, _, _, cx| {
+                            input.toggle_masked(cx);
+                        }))
+                        .child(
+                            crate::ui::icon::Icon::new(toggle_icon)
+                                .size(16.0)
+                                .active(!is_masked),
+                        ),
+                );
+            }
+
+            row
         }
     }
 }
@@ -696,6 +836,7 @@ impl Focusable for TextInput {
     }
 }
 
+#[allow(dead_code)]
 impl TextInput {
     pub(crate) fn new(cx: &mut Context<Self>, value: &str, placeholder: &str) -> Self {
         Self {
@@ -710,7 +851,11 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             masked: false,
-            bare: false,
+            is_secret: false,
+            variant: TextInputVariant::Framed,
+            disabled: false,
+            read_only: false,
+            has_error: false,
         }
     }
     #[cfg(test)]
@@ -727,16 +872,65 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             masked: false,
-            bare: false,
+            is_secret: false,
+            variant: TextInputVariant::Framed,
+            disabled: false,
+            read_only: false,
+            has_error: false,
         }
     }
     pub(crate) fn bare(mut self) -> Self {
-        self.bare = true;
+        self.variant = TextInputVariant::Embedded;
+        self
+    }
+    pub(crate) fn embedded(mut self) -> Self {
+        self.variant = TextInputVariant::Embedded;
         self
     }
     pub(crate) fn masked(mut self) -> Self {
         self.masked = true;
+        self.is_secret = true;
         self
+    }
+    pub(crate) fn is_secret(&self) -> bool {
+        self.is_secret
+    }
+    pub(crate) fn set_error(&mut self, has_error: bool, cx: &mut Context<Self>) {
+        if self.has_error != has_error {
+            self.has_error = has_error;
+            cx.notify();
+        }
+    }
+    pub(crate) fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        if self.disabled != disabled {
+            self.disabled = disabled;
+            cx.notify();
+        }
+    }
+    pub(crate) fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            cx.notify();
+        }
+    }
+    pub(crate) fn reset_reveal(&mut self, cx: &mut Context<Self>) {
+        if self.is_secret && !self.masked {
+            self.masked = true;
+            cx.notify();
+        }
+    }
+    pub(crate) fn clear_secret(&mut self, cx: &mut Context<Self>) {
+        self.content = SharedString::default();
+        self.selected_range = 0..0;
+        self.marked_range = None;
+        if let Some((_, ref mut s)) = self.last_unmarked {
+            zeroize::Zeroize::zeroize(s);
+        }
+        self.last_unmarked = None;
+        if self.is_secret {
+            self.masked = true;
+        }
+        cx.notify();
     }
     pub(crate) fn toggle_masked(&mut self, cx: &mut Context<Self>) {
         self.masked = !self.masked;
@@ -840,5 +1034,34 @@ mod tests {
         // Toggle mask
         input_fa.masked = false;
         assert_eq!(input_fa.masked_display_text(), "سلام");
+    }
+
+    #[test]
+    fn test_masked_unicode_caret_and_display_index_mapping() {
+        let mut input = TextInput::for_test("").masked();
+        // " aé🚀 " -> leading/trailing spaces + ASCII + 2-byte UTF-8 + 4-byte emoji
+        input.handle_replace_text_in_range(None, " aé🚀 ");
+        assert_eq!(input.value(), " aé🚀 ");
+        assert_eq!(input.masked_display_text(), "*****");
+        // Byte offsets in content: ' '(0..1), 'a'(1..2), 'é'(2..4), '🚀'(4..8), ' '(8..9)
+        assert_eq!(input.content_byte_to_display_byte(0), 0);
+        assert_eq!(input.content_byte_to_display_byte(1), 1);
+        assert_eq!(input.content_byte_to_display_byte(2), 2);
+        assert_eq!(input.content_byte_to_display_byte(4), 3);
+        assert_eq!(input.content_byte_to_display_byte(8), 4);
+        assert_eq!(input.content_byte_to_display_byte(9), 5);
+
+        // Reverse mapping from display '*' index back to UTF-8 content byte offsets
+        assert_eq!(input.display_byte_to_content_byte(0), 0);
+        assert_eq!(input.display_byte_to_content_byte(1), 1);
+        assert_eq!(input.display_byte_to_content_byte(2), 2);
+        assert_eq!(input.display_byte_to_content_byte(3), 4);
+        assert_eq!(input.display_byte_to_content_byte(4), 8);
+        assert_eq!(input.display_byte_to_content_byte(5), 9);
+
+        // Secret classification remains true even when unmasked
+        assert!(input.is_secret());
+        input.masked = false;
+        assert!(input.is_secret());
     }
 }

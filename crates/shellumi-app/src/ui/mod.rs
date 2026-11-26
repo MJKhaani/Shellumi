@@ -6,6 +6,7 @@ pub(crate) mod icon;
 pub(crate) use icon::{Icon, IconName};
 pub(crate) mod inspector;
 pub(crate) mod layout;
+pub(crate) mod window_chrome;
 
 mod batch_modal;
 mod command_palette;

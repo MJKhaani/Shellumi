@@ -707,7 +707,7 @@ impl Shellumi {
                     .p_6()
                     .child(
                         empty("Port forwarding", "Create and manage saved SSH tunnel rules.")
-                            .child(primary("open-tunnels-page", "Manage tunnels").on_click(cx.listener(|app, _, _, cx| app.open_tunnel_modal(cx)))),
+                            .child(primary("open-tunnels-page", "Manage tunnels").on_click(cx.listener(|app, _, window, cx| app.navigate_page("Port Forwarding", Some(window), cx)))),
                     );
                 div()
                     .flex_1()

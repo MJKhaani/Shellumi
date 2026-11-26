@@ -2,6 +2,7 @@
 use super::*;
 
 impl Shellumi {
+    #[allow(dead_code)]
     pub(crate) fn open_tunnel_modal(&mut self, cx: &mut Context<Self>) {
         let name_input = cx.new(|cx| TextInput::new(cx, "", "Tunnel Name (e.g. Postgres Dev)"));
         let bind_port_input = cx.new(|cx| TextInput::new(cx, "", "Bind Port (e.g. 5432)"));

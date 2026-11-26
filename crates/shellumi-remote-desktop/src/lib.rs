@@ -16,8 +16,8 @@ pub use framebuffer::{
     MAX_FRAMEBUFFER_DIMENSION,
 };
 pub use input::{
-    pointer_mask, translate_coordinates, ClipboardEvent, KeyEvent, KeyModifiers, MouseButton,
-    PointerEvent, ScaleMode, WheelEvent,
+    pointer_mask, translate_coordinates, CanvasTransform, ClipboardEvent, KeyEvent, KeyModifiers,
+    MouseButton, PanState, PointerEvent, ScaleMode, WheelEvent,
 };
 pub use metrics::{SessionMetrics, SessionMetricsSnapshot};
 pub use security::{format_fingerprint, CertificateValidationPolicy, SecurityWarning};

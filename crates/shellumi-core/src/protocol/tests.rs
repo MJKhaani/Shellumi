@@ -384,3 +384,47 @@ fn verifies_rdp_tpkt_and_negotiation() {
     let selected_proto = parse_rdp_negotiation_response(&rsp).unwrap();
     assert_eq!(selected_proto, 1);
 }
+
+#[test]
+fn verifies_protocol_capabilities_and_identity_compatibility() {
+    let ssh = ProtocolCapabilities::for_protocol(ConnectionProtocol::Ssh);
+    assert_eq!(ssh.default_port, Some(22));
+    assert!(ssh.allows_saved_identity);
+    assert!(ssh.supports_jump_host);
+    assert!(ssh.is_auth_method_compatible(&crate::AuthMethod::Password));
+    assert!(
+        ssh.is_auth_method_compatible(&crate::AuthMethod::PublicKey {
+            key_name: "id_ed25519".into(),
+        })
+    );
+    assert!(ssh.is_auth_method_compatible(&crate::AuthMethod::Agent));
+
+    let rdp = ProtocolCapabilities::for_protocol(ConnectionProtocol::Rdp);
+    assert_eq!(rdp.default_port, Some(3389));
+    assert!(rdp.supports_domain);
+    assert!(rdp.supports_display_options);
+    assert!(rdp.supports_tls_strict);
+    assert!(rdp.is_auth_method_compatible(&crate::AuthMethod::Password));
+    assert!(
+        !rdp.is_auth_method_compatible(&crate::AuthMethod::PublicKey {
+            key_name: "id_ed25519".into(),
+        })
+    );
+
+    let vnc = ProtocolCapabilities::for_protocol(ConnectionProtocol::Vnc);
+    assert_eq!(vnc.default_port, Some(5900));
+    assert!(vnc.allows_no_auth);
+    assert!(vnc.is_auth_method_compatible(&crate::AuthMethod::Password));
+    assert!(!vnc.is_auth_method_compatible(&crate::AuthMethod::Agent));
+
+    let serial = ProtocolCapabilities::for_protocol(ConnectionProtocol::Serial);
+    assert!(!serial.uses_network_host);
+    assert!(!serial.allows_saved_identity);
+    assert!(serial.supports_serial_options);
+    assert!(!serial.is_auth_method_compatible(&crate::AuthMethod::Password));
+
+    let local = ProtocolCapabilities::for_protocol(ConnectionProtocol::Local);
+    assert!(!local.uses_network_host);
+    assert!(!local.allows_saved_identity);
+    assert!(local.supports_startup_snippet);
+}

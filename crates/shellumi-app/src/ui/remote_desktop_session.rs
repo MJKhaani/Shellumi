@@ -496,54 +496,49 @@ impl Shellumi {
             }))
             .child("4K");
 
+        let tab_id = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.id)
+            .unwrap_or(tab_idx as u64);
+        let has_measured_viewport = self
+            .rd_canvas_measurements
+            .get(&tab_id)
+            .is_some_and(|m| m.tab_id == tab_id && m.layout_epoch == self.layout_epoch);
+
         let res_match_viewport = div()
-            .id(("rd-res-viewport", tab_idx))
+            .id(("rd-res-viewport", tab_id))
             .px_2()
             .py_1()
             .rounded_sm()
             .text_xs()
             .bg(rgb(MacTheme::SURFACE_ACTIVE))
-            .text_color(rgb(MacTheme::TEXT_PRIMARY))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
-            .on_click(cx.listener(move |app, _, window, cx| {
-                let (canvas_w, canvas_h) = if let Some(b) = app.rd_canvas_bounds.get(&tab_idx) {
-                    (
-                        (f32::from(b.size.width) as u32).max(640),
-                        (f32::from(b.size.height) as u32).max(480),
-                    )
+            .text_color(if has_measured_viewport {
+                rgb(MacTheme::TEXT_PRIMARY)
+            } else {
+                rgb(MacTheme::TEXT_TERTIARY)
+            })
+            .cursor(if has_measured_viewport {
+                gpui::CursorStyle::PointingHand
+            } else {
+                gpui::CursorStyle::Arrow
+            })
+            .hover(|s| {
+                if has_measured_viewport {
+                    s.bg(rgb(MacTheme::SURFACE_HOVER))
                 } else {
-                    let vp = window.viewport_size();
-                    let total_w = vp.width.to_f64() as f32;
-                    let total_h = vp.height.to_f64() as f32;
-                    let sidebar_w = if app.sidebar_visible {
-                        if app.sidebar_collapsed {
-                            56.0
-                        } else {
-                            crate::theme::MacTheme::SIDEBAR_WIDTH
-                        }
-                    } else {
-                        0.0
-                    };
-                    let inspector_open = app.inspector_coordinator.is_open();
-                    let geom = crate::ui::layout::calculate_layout(
-                        total_w,
-                        sidebar_w,
-                        inspector_open,
-                        None,
-                    );
-                    let topbar_h: f32 = 48.0;
-                    let toolbar_h: f32 = 36.0;
-                    (
-                        geom.primary_content_width.max(640.0) as u32,
-                        (total_h - topbar_h - toolbar_h).max(480.0) as u32,
-                    )
-                };
-                let w_even = canvas_w & !1;
-                app.remote_desktop_request_resize(tab_idx, w_even, canvas_h, cx);
+                    s
+                }
+            })
+            .on_click(cx.listener(move |app, _, _window, cx| {
+                app.request_measured_remote_resize(tab_id, cx);
             }))
             .child(crate::ui::icon::Icon::new(crate::ui::icon::IconName::DynamicResize).size(14.0))
-            .child("Match Viewport");
+            .child(if has_measured_viewport {
+                "Match Viewport"
+            } else {
+                "Waiting for layout…"
+            });
 
         let res_indicator = if state.display_control_ready {
             div()

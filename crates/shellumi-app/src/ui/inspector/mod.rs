@@ -178,9 +178,37 @@ impl Shellumi {
         cx.notify();
     }
 
+    /// Compute the authoritative workspace layout from measured GPUI workspace bounds.
+    /// Before the first layout measurement, conservatively uses `FocusedContent` when open.
+    pub(crate) fn active_workspace_layout(&self) -> crate::ui::layout::LayoutGeometry {
+        let is_open = self.inspector_coordinator.is_open();
+        if let Some(measured_w) = self.measured_workspace_width {
+            crate::ui::layout::calculate_workspace_layout(measured_w, is_open, None)
+        } else if is_open {
+            crate::ui::layout::LayoutGeometry {
+                presentation: crate::ui::layout::InspectorPresentation::FocusedContent,
+                inspector_width: crate::ui::layout::INSPECTOR_PREFERRED_WIDTH,
+                primary_content_width: 0.0,
+                available_workspace_width: crate::ui::layout::INSPECTOR_PREFERRED_WIDTH,
+            }
+        } else {
+            crate::ui::layout::LayoutGeometry {
+                presentation: crate::ui::layout::InspectorPresentation::Side,
+                inspector_width: 0.0,
+                primary_content_width: crate::ui::layout::MIN_PRIMARY_CONTENT_WIDTH,
+                available_workspace_width: crate::ui::layout::MIN_PRIMARY_CONTENT_WIDTH,
+            }
+        }
+    }
+
     /// Return active inspector width, or None when in FocusedContent mode (takes w_full).
     pub(crate) fn active_inspector_width(&self) -> Option<f32> {
-        self.current_inspector_width
+        let geom = self.active_workspace_layout();
+        if geom.presentation == crate::ui::layout::InspectorPresentation::FocusedContent {
+            None
+        } else {
+            Some(geom.inspector_width)
+        }
     }
 
     /// Render the unified inspector based on current active target and mode.
@@ -195,14 +223,7 @@ impl Shellumi {
             return div();
         };
 
-        let bounds = window.bounds();
-        let total_w = bounds.size.width.to_f64() as f32;
-        let sidebar_w = if self.sidebar_visible {
-            crate::ui::layout::DEFAULT_SIDEBAR_WIDTH
-        } else {
-            0.0
-        };
-        let geom = crate::ui::layout::calculate_layout(total_w, sidebar_w, true, None);
+        let geom = self.active_workspace_layout();
         self.current_inspector_width =
             if geom.presentation == crate::ui::layout::InspectorPresentation::FocusedContent {
                 None
@@ -471,8 +492,9 @@ impl Shellumi {
             }
             crate::ui::inspector::NavigationRequest::CloseWindow => {
                 self.inspector_coordinator.close();
-                if let Some(_win) = window {
-                    cx.quit();
+                if let Some(win) = window {
+                    self.approved_close_once = true;
+                    win.remove_window();
                 } else {
                     self.pending_window_action = Some(crate::PendingWindowAction::CloseWindow);
                     cx.notify();

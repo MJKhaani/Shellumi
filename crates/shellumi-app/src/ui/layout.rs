@@ -48,6 +48,21 @@ pub struct LayoutGeometry {
     pub available_workspace_width: f32,
 }
 
+/// Calculate workspace layout from an already-measured inner content width (excluding
+/// sidebar/navigation rails, so sidebar width is never subtracted twice).
+pub fn calculate_workspace_layout(
+    available_workspace_width: f32,
+    inspector_open: bool,
+    preferred_inspector_width: Option<f32>,
+) -> LayoutGeometry {
+    calculate_layout(
+        available_workspace_width,
+        0.0,
+        inspector_open,
+        preferred_inspector_width,
+    )
+}
+
 /// Calculate the layout geometry for a window given its available bounds.
 ///
 /// # Arguments
@@ -125,15 +140,25 @@ pub struct TopbarGeometry {
 /// Calculate responsive topbar dimensions, preventing tabs from squeezing out Quick Connect or right actions.
 pub fn calculate_topbar_geometry(
     window_width: f32,
-    _total_tabs: usize,
+    total_tabs: usize,
     has_quick_connect: bool,
 ) -> TopbarGeometry {
-    let traffic_width = 80.0;
+    calculate_topbar_geometry_with_chrome(window_width, total_tabs, has_quick_connect, 80.0)
+}
+
+/// Calculate responsive topbar dimensions using the actual measured window chrome width
+/// (e.g. macOS traffic lights vs native Windows/Linux vs client-side fallback controls).
+pub fn calculate_topbar_geometry_with_chrome(
+    window_width: f32,
+    _total_tabs: usize,
+    has_quick_connect: bool,
+    chrome_width: f32,
+) -> TopbarGeometry {
     let vault_width = 110.0;
     let right_actions_width = 80.0;
     let sftp_width = 85.0;
 
-    let fixed_overhead = traffic_width + vault_width + right_actions_width + sftp_width;
+    let fixed_overhead = chrome_width.max(0.0) + vault_width + right_actions_width + sftp_width;
     let available_middle = (window_width - fixed_overhead).max(0.0);
 
     if has_quick_connect {
@@ -270,5 +295,26 @@ mod tests {
         assert!(!geom.quick_connect_collapsed);
         assert!(geom.tab_strip_available_width > 600.0);
         assert!(geom.max_visible_tabs >= 5);
+    }
+
+    #[test]
+    fn test_workspace_layout_thresholds_880_and_960() {
+        let below = calculate_workspace_layout(879.0, true, None);
+        assert_eq!(below.presentation, InspectorPresentation::FocusedContent);
+        assert_eq!(below.primary_content_width, 0.0);
+
+        let at_880 = calculate_workspace_layout(880.0, true, None);
+        assert_eq!(at_880.presentation, InspectorPresentation::Side);
+        assert_eq!(at_880.inspector_width, 320.0);
+        assert_eq!(at_880.primary_content_width, 560.0);
+
+        let at_960 = calculate_workspace_layout(960.0, true, None);
+        assert_eq!(at_960.presentation, InspectorPresentation::Side);
+        assert_eq!(at_960.inspector_width, 400.0);
+        assert_eq!(at_960.primary_content_width, 560.0);
+
+        let mac_top = calculate_topbar_geometry_with_chrome(940.0, 10, true, 80.0);
+        let win_top = calculate_topbar_geometry_with_chrome(940.0, 10, true, 12.0);
+        assert!(win_top.tab_strip_available_width > mac_top.tab_strip_available_width);
     }
 }
