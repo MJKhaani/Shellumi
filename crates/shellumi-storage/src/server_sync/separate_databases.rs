@@ -88,7 +88,11 @@ impl Fixture {
                         id: connection.into(),
                         base_url: "https://fixture.invalid".into(),
                         auth_token: Some(format!("fixture-session-{index}")),
-                        server_instance_id: Some(fixture.server.to_string()),
+                        server_instance_id: Some(if index == 2 {
+                            fixture.server.to_string().to_uppercase()
+                        } else {
+                            fixture.server.to_string()
+                        }),
                         device_id: Some(fixture.old.to_string()),
                         ..Default::default()
                     },

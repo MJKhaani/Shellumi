@@ -390,21 +390,29 @@ impl VerifiedRemoteVaultBinding {
             base_url: Some(self.base_url.clone()),
             connection_id: self.server_connection_id.clone(),
             remote_vault_id: self.remote_vault_id,
-            server_instance_id: self
-                .server_instance_id
-                .clone()
-                .ok_or_else(|| enrollment_denied("Missing server instance identity"))?,
+            server_instance_id: self.verified_server_instance()?.to_string(),
         })
     }
 
     fn matches_scope(&self, scope: &EnrollmentScope) -> bool {
         scope.connection_id == self.server_connection_id
             && scope.remote_vault_id == self.remote_vault_id
-            && Some(scope.server_instance_id.as_str()) == self.server_instance_id.as_deref()
+            && self
+                .verified_server_instance()
+                .ok()
+                .is_some_and(|id| Uuid::parse_str(&scope.server_instance_id).ok() == Some(id))
             && scope
                 .base_url
                 .as_ref()
                 .is_none_or(|url| url == &self.base_url)
+    }
+
+    fn verified_server_instance(&self) -> Result<Uuid, StorageError> {
+        self.server_instance_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| enrollment_denied("Missing or invalid server instance identity"))
     }
 
     /// Verifies the authenticated account and its live membership in this bound vault.
@@ -432,12 +440,7 @@ impl VerifiedRemoteVaultBinding {
                 "Invalid vault scope, connection, or authenticated session",
             ));
         }
-        let expected_instance = self
-            .server_instance_id
-            .as_deref()
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .filter(|id| !id.is_nil())
-            .ok_or_else(|| enrollment_denied("Missing or invalid server instance identity"))?;
+        let expected_instance = self.verified_server_instance()?;
         if client
             .capabilities()
             .map_err(enrollment_network_error)?
@@ -1472,6 +1475,10 @@ impl HostStore {
         } else {
             self.verify_device_revocation(binding, member_id, old_device_id, client)
                 .await?;
+            registry
+                .unwrap_or(self)
+                .ensure_no_replacement_conflict(binding, old_device_id, &user.to_string())
+                .await?;
             let op = ReplacementOperation {
                 id: Uuid::new_v4().to_string(),
                 old_device: old_device_id,
@@ -1540,19 +1547,18 @@ impl HostStore {
         binding: &VerifiedRemoteVaultBinding,
         user: Uuid,
     ) -> Result<Vec<ReplacementOperation>, StorageError> {
-        let scope = binding.enrollment_scope()?;
+        let instance = binding.verified_server_instance()?;
         let mut rows = self
             .connection
             .query(
-                "SELECT operation_id, old_device_id, member_id, device_label, stage
+                "SELECT operation_id, old_device_id, member_id, device_label, stage, server_instance_id
              FROM device_replacements WHERE local_vault_id = ?1 AND remote_vault_id = ?2
-               AND connection_id = ?3 AND server_instance_id = ?4 AND account_id = ?5 AND base_url = ?6
+               AND connection_id = ?3 AND account_id = ?4 AND base_url = ?5
                AND stage NOT IN ('Completed', 'Canceled')",
                 (
                     binding.local_vault_id.as_str(),
-                    scope.remote_vault_id.to_string(),
-                    scope.connection_id.as_str(),
-                    scope.server_instance_id.as_str(),
+                    binding.remote_vault_id.to_string(),
+                    binding.server_connection_id.as_str(),
                     user.to_string(),
                     binding.base_url.as_str(),
                 ),
@@ -1560,6 +1566,11 @@ impl HostStore {
             .await?;
         let mut pending = Vec::new();
         while let Some(row) = rows.next().await? {
+            let recorded = Uuid::parse_str(&row.get::<String>(5)?)
+                .map_err(|_| enrollment_denied("Invalid server identity in replacement journal"))?;
+            if recorded != instance {
+                continue;
+            }
             pending.push(ReplacementOperation {
                 id: row.get(0)?,
                 old_device: Uuid::parse_str(&row.get::<String>(1)?)
@@ -1570,6 +1581,36 @@ impl HostStore {
             });
         }
         Ok(pending)
+    }
+
+    async fn ensure_no_replacement_conflict(
+        &self,
+        binding: &VerifiedRemoteVaultBinding,
+        device_id: Uuid,
+        account: &str,
+    ) -> Result<(), StorageError> {
+        let instance = binding.verified_server_instance()?;
+        let mut pending = self
+            .connection
+            .query(
+                "SELECT server_instance_id FROM device_replacements
+             WHERE (old_device_id = ?1 OR replacement_device_id = ?1
+                    OR (account_id = ?2 AND replacement_device_id IS NULL))
+               AND stage NOT IN ('Completed', 'Canceled')",
+                (device_id.to_string(), account),
+            )
+            .await?;
+        while let Some(row) = pending.next().await? {
+            let recorded = Uuid::parse_str(&row.get::<String>(0)?).map_err(|_| {
+                enrollment_denied("Invalid server identity in replacement reservation")
+            })?;
+            if recorded == instance {
+                return Err(enrollment_denied(
+                    "A replacement operation owns this device change",
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn change_replacement_stage(
@@ -1848,6 +1889,7 @@ impl HostStore {
             .and_then(desktop_registry_directory)
         {
             let connections = authoritative.list_vault_server_connections().await?;
+            let instance = binding.verified_server_instance()?;
             for (_, context) in authoritative.list_vault_contexts().await? {
                 let shellumi_core::VaultLocation::Remote { server, .. } = context.location() else {
                     continue;
@@ -1995,7 +2037,7 @@ impl HostStore {
         credentials: &dyn shellumi_core::CredentialStore,
     ) -> Result<(), StorageError> {
         self.verify_device_registry(binding).await?;
-        let scope = binding.enrollment_scope()?;
+        let expected_instance = binding.verified_server_instance()?;
         let old_device = Uuid::parse_str(old_id)
             .map_err(|_| enrollment_denied("Invalid old device identity"))?;
         let new_device = Uuid::parse_str(&replacement.device_id)
@@ -2027,7 +2069,7 @@ impl HostStore {
                     "A connection using this device has an unverified server identity",
                 ));
             }
-            if connection.server_instance_id.as_deref() != Some(scope.server_instance_id.as_str()) {
+            if instance != Some(expected_instance) {
                 continue;
             }
             affected_connections.insert(connection.id.as_str());
@@ -2045,8 +2087,11 @@ impl HostStore {
                 enrollment_denied("An affected connection is signed out or unavailable")
             })?;
             if connection.base_url.trim_end_matches('/') != client.base_url().trim_end_matches('/')
-                || connection.server_instance_id.as_deref()
-                    != Some(scope.server_instance_id.as_str())
+                || connection
+                    .server_instance_id
+                    .as_deref()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    != Some(expected_instance)
                 || (connection.id == binding.server_connection_id && token != session)
                 || (connection.device_id.as_deref() == Some(replacement.device_id.as_str())
                     && (connection.device_signing_key != replacement.signing_key_ref
@@ -2281,29 +2326,10 @@ impl HostStore {
         let member = self
             .verify_device_revocation(binding, member_id, device_id, client)
             .await?;
-        let scope = binding.enrollment_scope()?;
-        let mut pending = registry
+        registry
             .unwrap_or(self)
-            .connection
-            .query(
-                "SELECT 1 FROM device_replacements
-             WHERE server_instance_id = ?1
-               AND (old_device_id = ?2 OR replacement_device_id = ?2
-                    OR (account_id = ?3 AND replacement_device_id IS NULL))
-               AND stage NOT IN ('Completed', 'Canceled')",
-                (
-                    scope.server_instance_id,
-                    device_id.to_string(),
-                    member.user_id.as_str(),
-                ),
-            )
+            .ensure_no_replacement_conflict(binding, device_id, &member.user_id)
             .await?;
-        if pending.next().await?.is_some() {
-            return Err(enrollment_denied(
-                "A replacement operation owns this device change",
-            ));
-        }
-        drop(pending);
         let local_vault_id = &binding.local_vault_id;
         client
             .revoke_device(device_id)
@@ -3404,12 +3430,12 @@ impl HostStore {
             let attached = tx.execute(
                 "UPDATE vault_server_connections
                  SET device_id = ?1, device_signing_key = ?2, device_agreement_key = ?3, updated_at = ?4
-                 WHERE id = ?5 AND server_instance_id = ?6 AND base_url = ?7
+                 WHERE id = ?5 AND server_instance_id IS ?6 AND base_url = ?7
                  AND auth_token = ?10 AND device_id IS ?11
                  AND (?11 IS NOT NULL OR (device_signing_key IS NULL AND device_agreement_key IS NULL))
                  AND EXISTS (SELECT 1 FROM vault_contexts WHERE id = ?8 AND server_connection_id = ?5 AND server_vault_id = ?9)",
                 (device.device_id.as_str(), device.signing_key_ref.as_deref(), device.agreement_key_ref.as_deref(),
-                 current_timestamp(), binding.server_connection_id.as_str(), intent.scope.server_instance_id.as_str(),
+                 current_timestamp(), binding.server_connection_id.as_str(), binding.server_instance_id.as_deref(),
                  binding.base_url.as_str(), binding.local_vault_id.as_str(), binding.remote_vault_id.to_string(), auth_reference.as_str(), intent.previous_connection_device.as_deref()),
             ).await?;
             if attached != 1 {
