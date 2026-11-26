@@ -184,5 +184,14 @@ This table maps all existing editor, modal, and inspector surfaces in `crates/sh
   - Formatted cleanly with zero diffs under `cargo fmt --all -- --check`.
   - Total implementation adheres strictly to `AGENTS.md` and `docs/LOGGING.md`.
 
+### Phase 9: Post-CI Remediation Closure (2026-11-26)
+- **Implemented:**
+  - **Synchronized Host-to-Identity Associations:** Moved `SyncIdentityPayload` and `SyncHostPayload` serialization inside `save_host_with_identity_and_journal_tx_inner` (`crates/shellumi-storage/src/lib.rs`), added cross-device `identity_name` resolution in `server_sync.rs`, and wired `record_sync_mutation` into standalone `save_identity_with_journal_tx` / `delete_identity_with_journal_tx` (`actions/identities.rs`).
+  - **Atomic Async Connection Authorization:** Replaced split validate/finish checks with `ConnectionOpRegistry` (`Pending`/`Consumed`/`Canceled`/`Superseded`) and `authorize_and_consume_connection_op()` across SSH, SFTP, Mosh, Tunnels, RDP, and VNC (`connection.rs`, `actions/terminal.rs`, `actions/remote_desktop.rs`, `actions/hosts.rs`, `actions/vault_lock.rs`).
+  - **Single RD Resize Coordinator & Auto-Cancel:** Consolidated automatic and manual RDP display resizes under `RdAutoResizeState` with `PendingResizeRequest` / `ResizeOrigin::{Automatic, Manual}` and `auto_cancel_generation` (`main.rs`, `actions/remote_desktop.rs`).
+  - **Centralized Layout Invalidation:** Added `Shellumi::invalidate_layout()` wired to window geometry/scale changes, inspector visibility/presentation/width changes, sidebar collapse, tab/page switches, fullscreen, and RD disconnect/reconnect (`app_render.rs`, `actions/{hosts,terminal,remote_desktop}.rs`, `ui/inspector/mod.rs`, `ui/remote_desktop_session.rs`).
+  - **Mosh Askpass Error Propagation:** Extracted `build_mosh_terminal_command()` (`actions/terminal.rs`) to fail closed with an actionable error when `askpass::environment(&plan)` fails.
+  - **Unified Inspector Migration Closure:** Prevented `open_identity_inspector_mode` from opening legacy `identity_modal` in `View` mode and removed the legacy `render_identity_modal` overlay from `desktop.rs`; routine Identity/Team/Provider CRUD runs exclusively through `InspectorCoordinator` while preserving Ansible import, security challenges, confirmation dialogs, and the setup wizard.
+
 
 
