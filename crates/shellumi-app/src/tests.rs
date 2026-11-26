@@ -204,6 +204,8 @@ fn filters_hosts_by_name_group_and_tag() {
             protocol: "ssh".into(),
             protocol_config: None,
             identity_id: None,
+            auth_dependency_unresolved: false,
+            unresolved_identity_name: None,
         },
         SavedHost {
             id: 2,
@@ -216,6 +218,8 @@ fn filters_hosts_by_name_group_and_tag() {
             protocol: "ssh".into(),
             protocol_config: None,
             identity_id: None,
+            auth_dependency_unresolved: false,
+            unresolved_identity_name: None,
         },
         SavedHost {
             id: 3,
@@ -228,6 +232,8 @@ fn filters_hosts_by_name_group_and_tag() {
             protocol: "ssh".into(),
             protocol_config: None,
             identity_id: None,
+            auth_dependency_unresolved: false,
+            unresolved_identity_name: None,
         },
     ];
 
@@ -676,6 +682,8 @@ fn verifies_startup_snippet_variable_resolution() {
         protocol: "ssh".into(),
         protocol_config: None,
         identity_id: None,
+        auth_dependency_unresolved: false,
+        unresolved_identity_name: None,
     };
 
     let template = "echo 'Welcome {{host.user}} to {{host.name}} ({{host.hostname}}:{{host.port}}) [{{host.group}}] tags: {{host.tags}} id: {{host.id}}'";
@@ -883,6 +891,8 @@ fn verifies_remote_desktop_never_claims_fake_connected_state_on_launch() {
         protocol: "vnc".into(),
         protocol_config: None,
         identity_id: None,
+        auth_dependency_unresolved: false,
+        unresolved_identity_name: None,
     };
 
     let target = format!("{}:5900", host.destination.host());

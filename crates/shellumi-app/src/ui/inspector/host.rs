@@ -230,6 +230,16 @@ impl Shellumi {
             } else {
                 ("Authentication", "Interactive remote login".to_string())
             }
+        } else if host.auth_dependency_unresolved {
+            (
+                "Authentication",
+                format!(
+                    "Unresolved synchronized identity ({})",
+                    host.unresolved_identity_name
+                        .as_deref()
+                        .unwrap_or("pending sync")
+                ),
+            )
         } else if let Some(identity_id) = host.identity_id {
             let id_summary = self
                 .identities

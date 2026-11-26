@@ -3454,6 +3454,64 @@ impl HostStore {
     }
 }
 
+/// Resolve a synchronized identity association strictly by immutable `sync_id` or
+/// unambiguous unique legacy `identity_name` within the target vault.
+/// Foreign numeric `identity_id` values are never trusted or looked up.
+async fn resolve_synced_identity_assoc(
+    store: &HostStore,
+    vault_str: &str,
+    identity_sync_id: Option<&str>,
+    identity_name: Option<&str>,
+    has_legacy_numeric_id: bool,
+) -> Result<(Option<i64>, Option<String>, Option<String>, bool), StorageError> {
+    if let Some(sid) = identity_sync_id.filter(|s| !s.is_empty()) {
+        let mut rows = store
+            .connection
+            .query(
+                "SELECT id FROM identities WHERE sync_id = ?1 AND vault_id = ?2",
+                (sid, vault_str),
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            if let Ok(id) = row.get::<i64>(0) {
+                return Ok((Some(id), None, None, false));
+            }
+        }
+        return Ok((
+            None,
+            Some(sid.to_string()),
+            identity_name.map(ToString::to_string),
+            true,
+        ));
+    }
+
+    if let Some(iname) = identity_name.filter(|s| !s.is_empty()) {
+        let mut rows = store
+            .connection
+            .query(
+                "SELECT id FROM identities WHERE name = ?1 AND vault_id = ?2",
+                (iname, vault_str),
+            )
+            .await?;
+        if let Some(first) = rows.next().await? {
+            // Duplicate identity names are ambiguous: never pick an arbitrary match.
+            if rows.next().await?.is_none() {
+                if let Ok(id) = first.get::<i64>(0) {
+                    return Ok((Some(id), None, None, false));
+                }
+            }
+        }
+        return Ok((None, None, Some(iname.to_string()), true));
+    }
+
+    if has_legacy_numeric_id {
+        // Legacy payload with only a foreign numeric ID cannot be resolved safely.
+        return Ok((None, None, None, true));
+    }
+
+    Ok((None, None, None, false))
+}
+
 /// Applies an incoming sync change record (tombstone or encrypted envelope) to local tables.
 pub(crate) async fn apply_change_item(
     store: &mut HostStore,
@@ -3467,19 +3525,44 @@ pub(crate) async fn apply_change_item(
                 store
                     .connection
                     .execute(
-                        "DELETE FROM hosts WHERE name = ?1 AND vault_id = ?2",
+                        "DELETE FROM hosts WHERE (sync_id = ?1 OR name = ?1) AND vault_id = ?2",
                         (item.object_id.as_str(), vault_str),
                     )
                     .await?;
             }
             "identity" => {
-                store
+                // Find the target identity by immutable sync_id first, or unique legacy name.
+                let mut rows = store
                     .connection
-                    .execute(
-                        "DELETE FROM identities WHERE name = ?1 AND vault_id = ?2",
+                    .query(
+                        "SELECT id FROM identities WHERE sync_id = ?1 AND vault_id = ?2",
                         (item.object_id.as_str(), vault_str),
                     )
                     .await?;
+                let mut target_id = rows.next().await?.and_then(|r| r.get::<i64>(0).ok());
+                if target_id.is_none() {
+                    let mut name_rows = store
+                        .connection
+                        .query(
+                            "SELECT id FROM identities WHERE name = ?1 AND vault_id = ?2",
+                            (item.object_id.as_str(), vault_str),
+                        )
+                        .await?;
+                    if let Some(first) = name_rows.next().await? {
+                        if name_rows.next().await?.is_none() {
+                            target_id = first.get::<i64>(0).ok();
+                        }
+                    }
+                }
+                if let Some(id) = target_id {
+                    store
+                        .connection
+                        .execute(
+                            "DELETE FROM identities WHERE id = ?1 AND vault_id = ?2",
+                            (id, vault_str),
+                        )
+                        .await?;
+                }
             }
             "group" => {
                 store
@@ -3525,50 +3608,112 @@ pub(crate) async fn apply_change_item(
             "host" => {
                 if let Ok(payload) = decrypt_entity::<SyncHostPayload>(passphrase, env) {
                     let tags_str = payload.tags.join(",");
-                    let resolved_identity_id = if let Some(ref iname) = payload.identity_name {
-                        let mut rows = store
+                    let (
+                        resolved_identity_id,
+                        unresolved_identity_sync_id,
+                        unresolved_identity_name,
+                        auth_dependency_unresolved,
+                    ) = resolve_synced_identity_assoc(
+                        store,
+                        vault_str,
+                        payload.identity_sync_id.as_deref(),
+                        payload.identity_name.as_deref(),
+                        payload.identity_id.is_some(),
+                    )
+                    .await?;
+
+                    let host_sync_id = payload
+                        .sync_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(item.object_id.as_str());
+
+                    let mut existing_rows = store
+                        .connection
+                        .query(
+                            "SELECT id, protocol_config FROM hosts WHERE sync_id = ?1 AND vault_id = ?2",
+                            (host_sync_id, vault_str),
+                        )
+                        .await?;
+                    let mut existing = existing_rows.next().await?;
+                    if existing.is_none() {
+                        let mut by_name = store
                             .connection
                             .query(
-                                "SELECT id FROM identities WHERE name = ?1 AND vault_id = ?2",
-                                (iname.as_str(), vault_str),
+                                "SELECT id, protocol_config FROM hosts WHERE name = ?1 AND vault_id = ?2",
+                                (payload.name.as_str(), vault_str),
                             )
                             .await?;
-                        if let Some(row) = rows.next().await? {
-                            row.get::<i64>(0).ok().or(payload.identity_id)
-                        } else {
-                            payload.identity_id
-                        }
+                        existing = by_name.next().await?;
+                    }
+                    let (existing_id, local_protocol_config) = if let Some(row) = existing {
+                        (
+                            row.get::<i64>(0).ok(),
+                            row.get::<Option<String>>(1).ok().flatten(),
+                        )
                     } else {
-                        payload.identity_id
+                        (None, None)
                     };
-                    store
-                        .connection
-                        .execute(
-                            "DELETE FROM hosts WHERE name = ?1 AND vault_id = ?2",
-                            (payload.name.as_str(), vault_str),
-                        )
-                        .await?;
-                    store
-                        .connection
-                        .execute(
-                            "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id, vault_id)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                            (
-                                payload.name.as_str(),
-                                payload.hostname.as_str(),
-                                payload.username.as_str(),
-                                payload.port as i64,
-                                payload.group_name.as_deref(),
-                                tags_str.as_str(),
-                                payload.jump_host.as_deref(),
-                                payload.startup_snippet_id,
-                                payload.protocol.as_str(),
-                                payload.protocol_config.as_deref(),
-                                resolved_identity_id,
-                                vault_str,
-                            ),
-                        )
-                        .await?;
+
+                    let merged_protocol_config = crate::merge_synced_protocol_config(
+                        local_protocol_config.as_deref(),
+                        payload.portable_settings.as_ref(),
+                        payload.protocol_config.as_deref(),
+                    );
+
+                    if let Some(id) = existing_id {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE hosts SET name = ?1, hostname = ?2, username = ?3, port = ?4, group_name = ?5, tags = ?6, jump_host = ?7, startup_snippet_id = ?8, protocol = ?9, protocol_config = ?10, identity_id = ?11, sync_id = ?12, unresolved_identity_sync_id = ?13, unresolved_identity_name = ?14, auth_dependency_unresolved = ?15 WHERE id = ?16 AND vault_id = ?17",
+                                turso::params![
+                                    payload.name.as_str(),
+                                    payload.hostname.as_str(),
+                                    payload.username.as_str(),
+                                    payload.port as i64,
+                                    payload.group_name.as_deref(),
+                                    tags_str.as_str(),
+                                    payload.jump_host.as_deref(),
+                                    payload.startup_snippet_id,
+                                    payload.protocol.as_str(),
+                                    merged_protocol_config.as_deref(),
+                                    resolved_identity_id,
+                                    host_sync_id,
+                                    unresolved_identity_sync_id.as_deref(),
+                                    unresolved_identity_name.as_deref(),
+                                    if auth_dependency_unresolved { 1i64 } else { 0i64 },
+                                    id,
+                                    vault_str,
+                                ],
+                            )
+                            .await?;
+                    } else {
+                        store
+                            .connection
+                            .execute(
+                                "INSERT INTO hosts (name, hostname, username, port, group_name, tags, jump_host, startup_snippet_id, protocol, protocol_config, identity_id, vault_id, sync_id, unresolved_identity_sync_id, unresolved_identity_name, auth_dependency_unresolved)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                (
+                                    payload.name.as_str(),
+                                    payload.hostname.as_str(),
+                                    payload.username.as_str(),
+                                    payload.port as i64,
+                                    payload.group_name.as_deref(),
+                                    tags_str.as_str(),
+                                    payload.jump_host.as_deref(),
+                                    payload.startup_snippet_id,
+                                    payload.protocol.as_str(),
+                                    merged_protocol_config.as_deref(),
+                                    resolved_identity_id,
+                                    vault_str,
+                                    host_sync_id,
+                                    unresolved_identity_sync_id.as_deref(),
+                                    unresolved_identity_name.as_deref(),
+                                    if auth_dependency_unresolved { 1i64 } else { 0i64 },
+                                ),
+                            )
+                            .await?;
+                    }
                     return Ok(true);
                 }
             }
@@ -3577,55 +3722,192 @@ pub(crate) async fn apply_change_item(
                     let tags_json =
                         serde_json::to_string(&payload.tags).unwrap_or_else(|_| "[]".to_string());
                     let auth_method_str = payload.auth_method.as_str();
+                    let ident_sync_id = payload
+                        .sync_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(item.object_id.as_str());
+
+                    let mut existing_rows = store
+                        .connection
+                        .query(
+                            "SELECT id, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path FROM identities WHERE sync_id = ?1 AND vault_id = ?2",
+                            (ident_sync_id, vault_str),
+                        )
+                        .await?;
+                    let mut existing = existing_rows.next().await?;
+                    if existing.is_none() {
+                        let mut by_name = store
+                            .connection
+                            .query(
+                                "SELECT id, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path FROM identities WHERE name = ?1 AND vault_id = ?2 AND (sync_id IS NULL OR sync_id = ?3)",
+                                (payload.name.as_str(), vault_str, ident_sync_id),
+                            )
+                            .await?;
+                        if let Some(first) = by_name.next().await? {
+                            if by_name.next().await?.is_none() {
+                                existing = Some(first);
+                            }
+                        }
+                    }
+
+                    let saved_ident_id = if let Some(row) = existing {
+                        let id: i64 = row.get(0)?;
+                        let prev_auth: String = row.get(1).unwrap_or_default();
+                        let auth_compatible = prev_auth == auth_method_str;
+                        let local_pwd_ref: Option<String> = if auth_compatible {
+                            row.get(2).ok().flatten()
+                        } else {
+                            None
+                        };
+                        let local_key_path: Option<String> = if auth_compatible {
+                            row.get(3).ok().flatten()
+                        } else {
+                            None
+                        };
+                        let local_pass_ref: Option<String> = if auth_compatible {
+                            row.get(4).ok().flatten()
+                        } else {
+                            None
+                        };
+                        let local_cert_path: Option<String> = if auth_compatible {
+                            row.get(5).ok().flatten()
+                        } else {
+                            None
+                        };
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE identities SET name = ?1, username = ?2, auth_method = ?3, password_secret_ref = ?4, key_path = ?5, passphrase_secret_ref = ?6, certificate_path = ?7, tags = ?8, comment = ?9, sync_id = ?10, updated_at = CURRENT_TIMESTAMP WHERE id = ?11 AND vault_id = ?12",
+                                (
+                                    payload.name.as_str(),
+                                    payload.username.as_str(),
+                                    auth_method_str,
+                                    local_pwd_ref.as_deref(),
+                                    local_key_path.as_deref(),
+                                    local_pass_ref.as_deref(),
+                                    local_cert_path.as_deref(),
+                                    tags_json.as_str(),
+                                    payload.comment.as_deref(),
+                                    ident_sync_id,
+                                    id,
+                                    vault_str,
+                                ),
+                            )
+                            .await?;
+                        id
+                    } else {
+                        store
+                            .connection
+                            .execute(
+                                "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id, sync_id)
+                                 VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, ?4, ?5, ?6, ?7)",
+                                (
+                                    payload.name.as_str(),
+                                    payload.username.as_str(),
+                                    auth_method_str,
+                                    tags_json.as_str(),
+                                    payload.comment.as_deref(),
+                                    vault_str,
+                                    ident_sync_id,
+                                ),
+                            )
+                            .await?;
+                        store.connection.last_insert_rowid()
+                    };
+
+                    // Reconcile any hosts or groups waiting on this identity's immutable sync_id.
                     store
                         .connection
                         .execute(
-                            "DELETE FROM identities WHERE name = ?1 AND vault_id = ?2",
+                            "UPDATE hosts SET identity_id = ?1, unresolved_identity_sync_id = NULL, unresolved_identity_name = NULL, auth_dependency_unresolved = 0
+                             WHERE vault_id = ?2 AND auth_dependency_unresolved = 1 AND unresolved_identity_sync_id = ?3",
+                            (saved_ident_id, vault_str, ident_sync_id),
+                        )
+                        .await?;
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE groups SET identity_id = ?1, unresolved_identity_sync_id = NULL, unresolved_identity_name = NULL, auth_dependency_unresolved = 0
+                             WHERE vault_id = ?2 AND auth_dependency_unresolved = 1 AND unresolved_identity_sync_id = ?3",
+                            (saved_ident_id, vault_str, ident_sync_id),
+                        )
+                        .await?;
+
+                    // Reconcile legacy name-only unresolved dependencies ONLY if the name is unique in this vault.
+                    let mut count_rows = store
+                        .connection
+                        .query(
+                            "SELECT COUNT(*) FROM identities WHERE name = ?1 AND vault_id = ?2",
                             (payload.name.as_str(), vault_str),
                         )
                         .await?;
-                    store
-                        .connection
-                        .execute(
-                            "INSERT INTO identities (name, username, auth_method, password_secret_ref, key_path, passphrase_secret_ref, certificate_path, tags, comment, vault_id)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                            (
-                                payload.name.as_str(),
-                                payload.username.as_str(),
-                                auth_method_str,
-                                payload.password_secret_ref.as_deref(),
-                                payload.key_path.as_deref(),
-                                payload.passphrase_secret_ref.as_deref(),
-                                payload.certificate_path.as_deref(),
-                                tags_json.as_str(),
-                                payload.comment.as_deref(),
-                                vault_str,
-                            ),
-                        )
-                        .await?;
+                    let name_count: i64 = count_rows
+                        .next()
+                        .await?
+                        .and_then(|r| r.get(0).ok())
+                        .unwrap_or(0);
+                    if name_count == 1 {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE hosts SET identity_id = ?1, unresolved_identity_sync_id = NULL, unresolved_identity_name = NULL, auth_dependency_unresolved = 0
+                                 WHERE vault_id = ?2 AND auth_dependency_unresolved = 1 AND unresolved_identity_sync_id IS NULL AND unresolved_identity_name = ?3",
+                                (saved_ident_id, vault_str, payload.name.as_str()),
+                            )
+                            .await?;
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE groups SET identity_id = ?1, unresolved_identity_sync_id = NULL, unresolved_identity_name = NULL, auth_dependency_unresolved = 0
+                                 WHERE vault_id = ?2 AND auth_dependency_unresolved = 1 AND unresolved_identity_sync_id IS NULL AND unresolved_identity_name = ?3",
+                                (saved_ident_id, vault_str, payload.name.as_str()),
+                            )
+                            .await?;
+                    }
+
                     return Ok(true);
                 }
             }
             "group" => {
                 if let Ok(payload) = decrypt_entity::<SyncGroupPayload>(passphrase, env) {
                     let tags_str = payload.tags.join(",");
+                    let (
+                        resolved_identity_id,
+                        unresolved_identity_sync_id,
+                        unresolved_identity_name,
+                        auth_dependency_unresolved,
+                    ) = resolve_synced_identity_assoc(
+                        store,
+                        vault_str,
+                        payload.identity_sync_id.as_deref(),
+                        payload.identity_name.as_deref(),
+                        payload.identity_id.is_some(),
+                    )
+                    .await?;
                     store
                         .connection
                         .execute(
-                            "INSERT INTO groups (name, default_username, default_port, tags, identity_id, vault_id)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                            "INSERT INTO groups (name, default_username, default_port, tags, identity_id, vault_id, unresolved_identity_sync_id, unresolved_identity_name, auth_dependency_unresolved)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                              ON CONFLICT(name, vault_id) DO UPDATE SET
                                 default_username = excluded.default_username,
                                 default_port = excluded.default_port,
                                 tags = excluded.tags,
-                                identity_id = excluded.identity_id",
+                                identity_id = excluded.identity_id,
+                                unresolved_identity_sync_id = excluded.unresolved_identity_sync_id,
+                                unresolved_identity_name = excluded.unresolved_identity_name,
+                                auth_dependency_unresolved = excluded.auth_dependency_unresolved",
                             (
                                 payload.name.as_str(),
                                 payload.default_username.as_deref(),
                                 payload.default_port.map(|p| p as i64),
                                 tags_str.as_str(),
-                                payload.identity_id,
+                                resolved_identity_id,
                                 vault_str,
+                                unresolved_identity_sync_id.as_deref(),
+                                unresolved_identity_name.as_deref(),
+                                if auth_dependency_unresolved { 1i64 } else { 0i64 },
                             ),
                         )
                         .await?;
@@ -4284,6 +4566,7 @@ mod tests {
 
         // 2. Snapshot response
         let host = SyncHostPayload {
+            sync_id: None,
             name: "recovered-host".to_string(),
             hostname: "recovered.internal".to_string(),
             username: "root".to_string(),
@@ -4295,7 +4578,9 @@ mod tests {
             protocol: "ssh".to_string(),
             protocol_config: None,
             identity_id: None,
+            identity_sync_id: None,
             identity_name: None,
+            portable_settings: None,
         };
         let host_env = encrypt_entity(passphrase, "host", "recovered-host", &host).unwrap();
 
@@ -4388,6 +4673,7 @@ mod tests {
 
         // 1. Prepare remote incoming host in change feed
         let remote_host = SyncHostPayload {
+            sync_id: None,
             name: "remote-db-01".to_string(),
             hostname: "db.corp.internal".to_string(),
             username: "postgres".to_string(),
@@ -4399,7 +4685,9 @@ mod tests {
             protocol: "ssh".to_string(),
             protocol_config: None,
             identity_id: None,
+            identity_sync_id: None,
             identity_name: None,
+            portable_settings: None,
         };
         let host_env = encrypt_entity(passphrase, "host", "remote-db-01", &remote_host).unwrap();
 
@@ -4422,6 +4710,7 @@ mod tests {
 
         // 2. Queue local pending mutation
         let local_host = SyncHostPayload {
+            sync_id: None,
             name: "local-redis-01".to_string(),
             hostname: "redis.corp.internal".to_string(),
             username: "redis".to_string(),
@@ -4433,7 +4722,9 @@ mod tests {
             protocol: "ssh".to_string(),
             protocol_config: None,
             identity_id: None,
+            identity_sync_id: None,
             identity_name: None,
+            portable_settings: None,
         };
         store
             .record_pending_mutation(

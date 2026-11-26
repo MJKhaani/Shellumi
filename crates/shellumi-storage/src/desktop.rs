@@ -892,6 +892,15 @@ pub async fn resolve_protocol_auth(
     cred_store: &dyn shellumi_core::CredentialStore,
 ) -> Result<ResolvedProtocolAuth, String> {
     let proto = host.protocol();
+    if host.auth_dependency_unresolved {
+        return Err(format!(
+            "Host '{}' has an unresolved synchronized identity dependency ({}). Sync or assign an identity before connecting.",
+            host.name,
+            host.unresolved_identity_name
+                .as_deref()
+                .unwrap_or("pending")
+        ));
+    }
     let caps = shellumi_core::ProtocolCapabilities::for_protocol(proto);
     let group = if let Some(name) = &host.group_name {
         store.get_group(name).await.map_err(|e| e.to_string())?
@@ -1016,6 +1025,33 @@ pub async fn resolve_protocol_auth(
             identity: None,
             group,
         });
+    }
+
+    if cfg_map
+        .get("local_credentials_required")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+        && host_secret_ref.is_none()
+        && host_key_path.is_none()
+        && host_passphrase_ref.is_none()
+    {
+        return Err(format!(
+            "Device-local credentials are required for synchronized host '{}'. Open Host Settings to configure credentials on this device.",
+            host.name
+        ));
+    }
+
+    if let Some(ref g) = group {
+        if store
+            .is_group_auth_dependency_unresolved(&g.name)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!(
+                "Group '{}' has an unresolved synchronized identity dependency. Sync or assign an identity before connecting.",
+                g.name
+            ));
+        }
     }
 
     if let Some(group_identity_id) = group.as_ref().and_then(|g| g.identity_id) {
