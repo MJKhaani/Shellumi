@@ -2,36 +2,46 @@
 
 # Verification Status
 
-This page records the exact verified state of Shellumi as of the current documentation baseline.
+This page separates Shellumi's ten independent verification categories and records exact GitHub Actions run conclusions without conflating compilation or CI unit tests with package publication or interactive native acceptance.
 
-## Baseline
+## Verification Categories
 
-| Field | Value |
-| --- | --- |
-| **Baseline Commit** | `3123db229050a588e75cdc60147b7e39a5d0e13c` |
-| **CI Run** | GitHub Actions Run `45903344785` |
-| **Release Tag Baseline** | `v0.0.8-alpha` (Release workflow run `45911871766`) |
+1. **Source compilation** (`cargo check` / `cargo test` build)
+2. **Formatting** (`cargo fmt --all -- --check`)
+3. **Clippy** (`cargo clippy --workspace --all-targets -- -D warnings`)
+4. **Automated workspace tests** (`cargo test --workspace`)
+5. **Release binary compilation** (`cargo build --locked --release -p shellumi-app -p shellumi-cli`)
+6. **Package generation** (`.dmg`, `.deb`, `.zip`)
+7. **Release artifact publication** (GitHub Release upload + `SHA256SUMS.txt`)
+8. **Native application launch** (GUI launches without console window or fatal error)
+9. **Interactive native GUI acceptance** (OS keychain/Secret Service, DPI, clipboard, menus)
+10. **Live protocol acceptance** (external `sshd`, `xrdp`/Windows RDP, TigerVNC, `mosh-server`, Google Drive API, Shellumi Server)
 
-## Automated CI Matrix (Run `45903344785`)
+---
 
-| Job | Runner | Result | Duration |
-| --- | --- | --- | --- |
-| `Verify (macOS)` | `macos-latest` | **PASSED** | `20m27s` |
-| `Verify (Linux)` | `ubuntu-latest` | **PASSED** | `13m4s` |
-| `Verify (Windows)` | `windows-latest` | **PASSED** | `27m27s` |
+## Recorded GitHub Actions Runs
 
-Each CI job executes `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+| Workflow | Commit / Tag | Run ID & URL | Platforms | Conclusion | Notes |
+| --- | --- | --- | --- | --- | --- |
+| **CI** | `3123db229050a588e75cdc60147b7e39a5d0e13c` (`main`) | [`45903344785`](https://github.com/MJKhaani/Shellumi/actions/runs/45903344785) | macOS, Linux, Windows | **success** | Categories 1–4 passed across all 3 platforms (2026-11-26). |
+| **Release binaries and packages** | `3123db229050a588e75cdc60147b7e39a5d0e13c` (`v0.0.8-alpha`) | [`45911871766`](https://github.com/MJKhaani/Shellumi/actions/runs/45911871766) | Linux, Windows, macOS (`arm64`, `x86_64`) | **failure** | Failed in `Package macOS assets` (`x86_64`) with `hdiutil: create failed - Resource busy`; publish job skipped. |
+| **CI** | `19f02c8b148f40aae30107a461f63fda2e8f7b19` (`main`) | [`45914091300`](https://github.com/MJKhaani/Shellumi/actions/runs/45914091300) | macOS, Linux, Windows | **success** | Categories 1–4 passed (2026-11-26). |
+| **Verify Documentation** | `19f02c8b148f40aae30107a461f63fda2e8f7b19` (`main`) | [`45914091298`](https://github.com/MJKhaani/Shellumi/actions/runs/45914091298) | Ubuntu | **success** | `scripts/verify-docs.sh` passed (2026-11-26). |
+| **CI** | `7244263968ff4e24bac9bfbc6704cadbc10f4fec` (`main`) | [`45914800286`](https://github.com/MJKhaani/Shellumi/actions/runs/45914800286) | macOS, Linux, Windows | **in_progress** | Triggered 2026-11-27; not yet completed. |
+| **Release binaries and packages** | `7244263968ff4e24bac9bfbc6704cadbc10f4fec` (`v0.0.8-alpha`) | [`45914814451`](https://github.com/MJKhaani/Shellumi/actions/runs/45914814451) | Linux, Windows, macOS (`arm64`, `x86_64`) | **in_progress** | Re-triggered after `build-dmg.sh` retry fix; not yet completed. |
+
+**Latest Published GitHub Pre-Release:** `v0.0.7-alpha` ([GitHub Releases](https://github.com/MJKhaani/Shellumi/releases)). `v0.0.8-alpha` is **not** published until run `45914814451` completes successfully.
+
+---
 
 ## What CI Does NOT Prove (`NOT TESTED`)
 
-Automated CI proves compilation, formatting, zero-warning Clippy compliance, and headless unit/integration test passage across all 3 platforms. It does **not** verify:
-
-| Area | Status | Notes |
+| Area | Status | Issue ID / Notes |
 | --- | --- | --- |
-| Windows interactive desktop launch, tray/console suppression, `PasswordVault`, askpass | `NOT TESTED` | Compiles & passes unit tests; requires interactive Windows session. |
-| Linux interactive desktop launch (GNOME/KDE, X11/Wayland), `secret-tool` D-Bus prompt | `NOT TESTED` | Compiles & passes unit tests; requires interactive Linux desktop session. |
-| Live RDP server connection (`xrdp`, Windows RDP) | `NOT TESTED` | Deterministic/unit tests pass; live server handshake not run in CI. |
-| Live VNC server connection (TigerVNC, TightVNC, Apple Screen Sharing) | `NOT TESTED` | Mock RFB tests pass; live server session not run in CI. |
-| Live Mosh server connection | `NOT TESTED` | Capability scaffolding present; live `mosh-server` not run in CI. |
-| Live Google Drive v3 OAuth & sync | `NOT TESTED` | Protocol/state-machine tests pass; live Drive API not exercised in CI. |
-| Live Shellumi Server multi-device sync | `NOT TESTED` | Local SQLite/Turso replay tests pass; live server round-trip not run in CI. |
+| Windows interactive desktop launch, `PasswordVault`, askpass | `NOT TESTED` | [`PLAT-001`](../project/known-issues.md#platform-security--operational-gaps) |
+| Linux interactive desktop launch (GNOME/KDE, X11/Wayland), `secret-tool` | `NOT TESTED` | [`PLAT-002`](../project/known-issues.md#platform-security--operational-gaps) |
+| Live RDP server (`xrdp`, Windows RDP) | `NOT TESTED` | Deterministic/unit tests pass; [`RD-001`](../project/known-issues.md#rd-001--ambiguous-rdp-resize-timeouts-can-permit-overlapping-remote-negotiations) open |
+| Live VNC server (TigerVNC, TightVNC, Apple Screen Sharing) | `NOT TESTED` | Mock RFB tests pass |
+| Live Mosh server (`mosh-server`) | `NOT TESTED` | Scaffolding & CLI dispatch present |
+| Live Google Drive v3 OAuth & sync | `NOT TESTED` | Fixture tests pass; [`SYNC-006`](../project/known-issues.md#sync-006--google-drive-defaults-to-the-shared-installation-identifier-desktop-app) open |
+| Live Shellumi Server multi-device sync & collaboration | `NOT TESTED` | [`TEAM-001`](../project/known-issues.md#platform-security--operational-gaps), [`SYNC-001`](../project/known-issues.md#sync-001--schema-32-migration-generates-synchronization-identifiers-from-local-row-ids)..`005` |

@@ -1,16 +1,31 @@
-# <img src="../../resources/icon_pack/icons/48/regular/vaults.png" width="24" height="24" alt="Vaults"> Vaults
+# <img src="../../resources/icon_pack/icons/48/regular/vaults.png" width="24" height="24" alt="Vaults"> Vaults & Multi-Window Isolation
 
 [Docs Home](../README.md) / [User Guide](README.md) / Vaults
 
 ---
 
-Each Shellumi vault is stored in its own physically separate, AES-256-GCM encrypted SQLite database (`vaults/default.db` for the default local vault, `vaults/<vault-id>.db` for secondary and remote vaults) with its own 256-bit Data Encryption Key (DEK).
+Every host, group, identity, snippet, tunnel, workspace, and session recording in Shellumi lives inside an isolated vault backed by its own physical encrypted Turso database (`default.db` or `<vault-id>.db`) and independent 256-bit Data Encryption Key (DEK).
 
-## Key Operations
+## Local vs. Remote Vaults
 
-- **Create Secondary Vault:** Open **Vaults** from the sidebar or Vault Switcher, choose a name and master password, and save the generated recovery code.
-- **Switch or Open in New Window:** Switch vaults in the current window or open any vault in an independent concurrent window (`Cmd+Shift+N` / `Ctrl+Shift+N`). Each window isolates its own hosts, identities, sync cursors, and WebSocket subscriptions.
-- **Lock & Unlock:** Unlocking a vault requires your password, recovery code, or OS Keychain-stored DEK. Unlocking one vault never unlocks another.
-- **Password Rotation:** Change a vault's password in the Vault Inspector (entering current password and new password). Rotation preserves the DEK and re-wraps the manifest atomically via a crash-safe journal.
+- **Default Local Vault (`legacy-local`):** Created on first launch; stores your primary local inventory plus the encrypted **Discovery Directory** (`SyncVault.encrypted_directory`) listing other vaults' metadata (never their secrets or contents).
+- **Additional Local Vaults:** Separate offline databases (e.g., `homelab`, `client-a`) with optional opt-in Google Drive personal E2EE sync.
+- **Remote Vaults:** Bound to a specific self-hosted **Shellumi Server** deployment (`server_instance_id`, `server_vault_id`), keeping an independently encrypted local offline cache.
 
-See [Vault Architecture](../architecture/vault-architecture.md) and [Vault Isolation](../security/vault-isolation.md).
+## Multi-Window Vault Binding
+
+- Open any vault in an independent window using `Cmd+Shift+N` (macOS), the **Vault Switcher** dropdown (`🗗`), or the **Command Palette** (`vault:open-new-window`).
+- Each window displays its active vault badge (and server chip for remote vaults) in the top bar.
+- Switching vaults or closing one window never alters or terminates another window's sessions.
+- Cross-vault copying/moving requires explicit user confirmation so company credentials never mix silently.
+
+## Backup, Export, Rollback & CLI
+
+```bash
+shellumi-cli ~/vault.db vault status
+shellumi-cli ~/vault.db vault export backup.shlv --passphrase "<pass>"
+shellumi-cli ~/vault.db vault history
+shellumi-cli ~/vault.db vault rollback <snapshot-id> --passphrase "<pass>"
+```
+
+See [`SYNC-004`](../project/known-issues.md#sync-004--full-vault-exportimport-does-not-consistently-preserve-stable-object-associations) regarding full-vault export/import associations and [`SEC-001`](../project/known-issues.md#platform-security--operational-gaps) regarding CLI `--passphrase` visibility.

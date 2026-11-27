@@ -6,7 +6,7 @@
 
 **A free, open-source, local-first SSH client and remote infrastructure manager built in Rust with GPUI.**
 
-[![Release](https://img.shields.io/badge/release-v0.0.8--alpha-blue.svg)](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.8-alpha)
+[![Release](https://img.shields.io/badge/releases-github-blue.svg)](https://github.com/MJKhaani/Shellumi/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/MJKhaani/Shellumi/actions/workflows/ci.yml/badge.svg)](https://github.com/MJKhaani/Shellumi/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-2021%20%7C%20GPUI%200.2.2-orange.svg)](Cargo.toml)
@@ -110,7 +110,7 @@ See [Synchronization Overview](docs/synchronization/README.md) for details.
 
 ## Installation & Quick Start
 
-1. Download the latest release for your OS from [GitHub Releases](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.8-alpha) (macOS `.dmg`, Linux `.deb`, Windows `.zip`, or standalone `shellumi-app` / `shellumi-cli` binaries).
+1. Download the latest published release for your OS from [GitHub Releases](https://github.com/MJKhaani/Shellumi/releases) (macOS `.dmg`, Linux `.deb`, Windows `.zip`, or standalone `shellumi-app` / `shellumi-cli` binaries).
 2. Follow [Installation](docs/getting-started/installation.md) and [First Launch](docs/getting-started/first-launch.md) to initialize your encrypted default vault.
 3. Follow [Quick Start](docs/getting-started/quick-start.md) to add your first host and connect.
 

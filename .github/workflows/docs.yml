@@ -8,6 +8,7 @@ on:
       - 'docs/**'
       - 'resources/**'
       - 'scripts/verify-docs.sh'
+      - 'scripts/test-verify-docs.sh'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
@@ -15,13 +16,16 @@ on:
       - 'docs/**'
       - 'resources/**'
       - 'scripts/verify-docs.sh'
+      - 'scripts/test-verify-docs.sh'
       - '.github/workflows/docs.yml'
 
 jobs:
   verify-docs:
-    name: Verify Documentation Links & Structure
+    name: Verify Documentation Links, Assets & Validator Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Run documentation validator regression tests
+        run: ./scripts/test-verify-docs.sh
       - name: Run documentation verification script
         run: ./scripts/verify-docs.sh

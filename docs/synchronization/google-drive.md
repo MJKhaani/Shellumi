@@ -4,7 +4,20 @@
 
 ---
 
-Shellumi's optional Google Drive integration synchronizes personal vaults end-to-end encrypted inside the restricted `https://www.googleapis.com/auth/drive.appdata` folder. Google never receives plaintext records, DEKs, passwords, or device-local Keychain references.
+Shellumi's optional Google Drive integration synchronizes personal vaults end-to-end encrypted inside the restricted `https://www.googleapis.com/auth/drive.appdata` folder. Google never receives **plaintext** vault records, plaintext DEKs, or plaintext passwords.
+
+> [!IMPORTANT]
+> **Encryption vs. Device-Local Metadata (`SYNC-004`, `SYNC-005`):**
+> End-to-end encryption protects payload confidentiality against Google, but **does not mean device-local metadata has been stripped from every encrypted payload**. Specifically, the current full-vault export path (`export_vault`) serializes `protocol_config` inside the encrypted payload, which can include device-local `keychain://` credential references. See [Known Issues](../project/known-issues.md) for `SYNC-004`, `SYNC-005`, and `SYNC-006`.
+
+## Payload & Data Classification
+
+| Artifact / Mechanism | Plaintext Secrets | Encrypted Secret Material | Device-Local Credential Refs (`keychain://`) | Portable Auth Metadata |
+| --- | --- | --- | --- | --- |
+| **Google Drive Incremental / Snapshot Sync** | Never | Encrypted under vault DEK (`AES-256-GCM`) | May appear in serialized `protocol_config` if exported via full-vault path (`SYNC-004`) | Auth method, username, key/cert metadata |
+| **Shellumi Server Incremental Sync** | Never | Encrypted under vault DEK (`aes256gcm_dek_v1`) | Filtered/reconciled on `merge_synced_protocol_config` (`SYNC-005` cleanup pending) | `sync_id`, `identity_sync_id`, auth method |
+| **Full-Vault Export / Encrypted Backup** | Never | Encrypted with Argon2id + AES-256-GCM | Currently included inside encrypted `protocol_config` (`SYNC-004`) | Host/group/identity records |
+| **Google Drive Restoration** | Never | Decrypted locally with vault passphrase/DEK | Device-local refs from another machine will not resolve locally | Restores portable records; local keychain refs require re-binding |
 
 ```mermaid
 sequenceDiagram
@@ -31,10 +44,10 @@ sequenceDiagram
 
 ## Authenticated Revision Protocol & Cryptography
 
-- **AEAD Envelopes:** Published records are encrypted with AES-256-GCM under the vault DEK, with AAD bound to vault, entity type, and object ID.
-- **Authenticated `cloud_state` DAG (v1):** Independent `key` and `metadata` histories bind protocol version, vault ID, component name, generation, sorted parent IDs, and SHA-256 content hash with HMAC-SHA-256 under the vault DEK.
+- **AEAD Envelopes:** Published records are encrypted with `AES-256-GCM` under the vault DEK, with AAD bound to vault, entity type, and object ID.
+- **Authenticated `cloud_state` DAG (v1):** Independent `key` and `metadata` histories bind protocol version, vault ID, component name, generation, sorted parent IDs, and SHA-256 content hash with `HMAC-SHA-256` under the vault DEK.
 - **Create-Only Optimistic Concurrency:** Every update creates a brand-new immutable file via `files.generateIds`; existing cloud objects are never patched or overwritten. Lost acknowledgments are accepted only after exact read-back.
-- **Default Vault Isolation:** The default vault (`legacy-local`) synchronizes only encrypted directory discovery metadata (`SyncVault.encrypted_directory`), never local host credentials or secondary vault DEKs.
+- **Default Vault Isolation:** The default vault (`legacy-local`) synchronizes only encrypted directory discovery metadata (`SyncVault.encrypted_directory`), never secondary vault DEKs.
 
 ---
 
@@ -42,5 +55,5 @@ sequenceDiagram
 
 - **Password Rotation:** Re-wraps the DEK in `VaultManifest` and appends a signed node to `key` history; historical cloud snapshots remain readable by the DEK they were sealed under, so password rotation does not revoke previously disclosed DEKs or historic backups.
 - **No Automatic Cloud Pruning:** Immutable snapshots accumulate on Drive; no automatic pruning is implemented.
-- **Device ID Fallback:** When `SHELLUMI_DEVICE_ID` is unset, desktop Drive sync currently falls back to `"desktop-app"` (see [Object Identifiers](object-identifiers.md)).
+- **Device ID Fallback (`SYNC-006`):** When `SHELLUMI_DEVICE_ID` is unset, desktop Drive sync currently falls back to `"desktop-app"`.
 - **Verification Scope:** Automated tests verify create-only concurrency, HTTP 409 read-back, tampered DAG rejection, and second-device restoration against a controlled HTTP fixture; live Google Drive account acceptance remains separate (`NOT TESTED`).

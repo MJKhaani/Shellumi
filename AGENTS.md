@@ -73,15 +73,16 @@ For every implementation change, contributors and agents must:
 
 1. Identify all affected authoritative documents under [`docs/`](docs/README.md).
 2. Update documentation in the same change set as the implementation.
-3. Update user instructions in [`docs/user-guide/`](docs/user-guide/README.md) when workflows change.
-4. Update architecture documentation in [`docs/architecture/`](docs/architecture/README.md) when technical behavior changes.
-5. Update security documentation in [`docs/security/`](docs/security/README.md) when trust boundaries, cryptography, or credential handling change.
-6. Update reference documentation in [`docs/reference/`](docs/reference/README.md) when configuration, environment variables, shortcuts, schemas, or CLI commands change.
-7. Update the canonical [`docs/reference/feature-matrix.md`](docs/reference/feature-matrix.md).
-8. Update [`CHANGELOG.md`](CHANGELOG.md) where appropriate.
-9. Record actual verification results and distinguish unit/integration/CI checks from native runtime acceptance in [`docs/qa/`](docs/qa/README.md).
-10. Update [`docs/project/known-issues.md`](docs/project/known-issues.md) when new limitations are discovered or existing defects are resolved.
-11. Avoid creating redundant progress-report documents; track routine progress through Git history, [`CHANGELOG.md`](CHANGELOG.md), [`docs/project/roadmap.md`](docs/project/roadmap.md), and existing authoritative documentation.
+3. Preserve all original product requirements under [`docs/project/product-requirements.md`](docs/project/product-requirements.md) and [`docs/project/requirements/`](docs/project/requirements/README.md) using stable `REQ-*` identifiers and traceability to implementation evidence and acceptance criteria; never remove requirements without a documented supersession record.
+4. Accurately distinguish **Implemented**, **Partial**, **Experimental**, and **Planned** functionality, and strictly separate CI/packaging checks from native interactive and live-protocol acceptance (`NOT TESTED`).
+5. Update user instructions in [`docs/user-guide/`](docs/user-guide/README.md) when workflows change.
+6. Update architecture documentation in [`docs/architecture/`](docs/architecture/README.md) when technical behavior changes.
+7. Update security documentation in [`docs/security/`](docs/security/README.md) when trust boundaries, cryptography, or credential handling change.
+8. Update reference documentation in [`docs/reference/`](docs/reference/README.md) whenever CLI commands (`crates/shellumi-cli/src/main.rs`), environment variables, configuration, shortcuts, or schemas change.
+9. Update the canonical [`docs/reference/feature-matrix.md`](docs/reference/feature-matrix.md) and [`docs/project/known-issues.md`](docs/project/known-issues.md) when limitations or defects are discovered or resolved.
+10. Maintain valid relative links, case-exact icon paths, and compatibility relocation notices for any relocated authoritative documents.
+11. Run `./scripts/verify-docs.sh` and confirm all documentation checks pass before reporting completion.
+12. Update [`CHANGELOG.md`](CHANGELOG.md) where appropriate and avoid creating redundant progress-report documents; track routine progress through Git history, [`CHANGELOG.md`](CHANGELOG.md), [`docs/project/roadmap.md`](docs/project/roadmap.md), and existing authoritative documentation.
 
 Historical implementation reports belong in [`docs/archive/`](docs/archive/README.md) only when they provide significant engineering value.
 

@@ -28,9 +28,11 @@ flowchart LR
 
 ---
 
-## Single Resize Coordinator, Generations & Limitations
+## Single Resize Coordinator & Timeout Limitations (`RD-001`)
 
-`RdAutoResizeState` (`crates/shellumi-app/src/main.rs`) coordinates all `ResizeOrigin::{Automatic, Manual}` requests per `RemoteSessionKey { tab_id, connection_generation }`:
+`RdAutoResizeState` (`crates/shellumi-app/src/main.rs`) tracks **one local in-flight** `PendingResizeRequest` per `RemoteSessionKey { tab_id, connection_generation }`, but **cannot guarantee remote protocol-level serialization** across timeouts.
+
+### Current Implemented Behavior
 
 ```mermaid
 stateDiagram-v2
@@ -39,14 +41,27 @@ stateDiagram-v2
     Debouncing --> InFlight: take_ready_to_dispatch() [layout_gen == layout_epoch]
     Idle --> InFlight: Manual Match Viewport / Preset
     InFlight --> Idle: SessionEvent::RemoteResize confirms dimensions
-    InFlight --> Idle: SessionEvent::ResizeFailed / DisplayControlUnavailable / Timeout
+    InFlight --> Retrying: Local timeout / ResizeFailed (bounded max 2 retries; remote state unknown)
+    Retrying --> InFlight: Re-dispatch (may overlap unresolved remote resize)
+    InFlight --> Idle: Retries exhausted or DisplayControlUnavailable
 ```
 
-1. **Single In-Flight Negotiation:** At most one `PendingResizeRequest` may be `in_flight` at a time; manual requests arriving mid-flight queue in `desired` and never overwrite or run concurrently.
-2. **Layout-Generation Validation:** `Shellumi::invalidate_layout()` advances `layout_epoch`, clears `rd_canvas_measurements`, bumps `debounce_generation`, drops obsolete automatic requests, and flags `pending_manual_recalc` for manual Match Viewport recalculation once fresh geometry arrives. Every debounce, promotion, dispatch, retry, and timeout validates `req.layout_generation == self.layout_epoch`.
-3. **Automatic Cancellation Tokens:** Every automatic `PendingResizeRequest` captures `auto_cancel_generation`. Disabling automatic resizing increments `auto_cancel_generation` so canceled requests cannot retry or reactivate even if dynamic resizing is re-enabled before an old timeout or ack arrives.
-4. **Protocol Confirmation & Limitations:**
-   - `MS-RDPEDISP` / `ironrdp_displaycontrol` does **not** expose per-request resize rejection PDUs or request-ID correlation.
-   - `shellumi-rdp` emits `SessionEvent::ResizeFailed` when worker submission (`input_sender.send`) fails, and `apply_rd_session_event` treats only `SessionEvent::RemoteResize` (never arbitrary `FrameReady` ticks) as confirmation.
-   - Because the server does not return a request ID on `RemoteResize`, a timed-out request cannot be proven canceled remotely; recovery uses bounded retries (max 2) and conservative dimension matching.
-   - Live end-to-end resize acceptance against an external Windows RDP server remains `NOT TESTED`.
+1. **Local In-Flight Tracking:** At most one `PendingResizeRequest` is marked `in_flight` locally; manual requests arriving mid-flight queue in `desired` rather than dispatching concurrently from the UI.
+2. **No Per-Request Protocol Correlation:** `MS-RDPEDISP` / `ironrdp_displaycontrol` does **not** expose per-request acknowledgement correlation IDs or explicit resize-rejection PDUs.
+3. **Worker Submission Failure vs. Server Rejection:** `SessionEvent::ResizeFailed` indicates local worker channel/submission failure (`input_sender.send`), not an authoritative server rejection PDU.
+4. **Ambiguous Local Timeouts (`RD-001`):** A local timeout does **not** prove remote cancellation. Bounded retries (max 2) can overlap an unresolved server-side resize, and observed `RemoteResize` dimensions can be ambiguous when two requests targeted similar sizes.
+5. **Layout-Generation & Cancellation Guards:** `Shellumi::invalidate_layout()` advances `layout_epoch` and bumps `debounce_generation`, while disabling auto-resize increments `auto_cancel_generation` so stale retries are dropped locally.
+6. **Live Server Gap:** Live end-to-end resize acceptance against an external Windows RDP or `xrdp` server remains `NOT TESTED`.
+
+### Proposed Safe Recovery Architecture (Proposed)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> InFlight: Dispatch resize (record target WxH + timestamp)
+    InFlight --> Idle: RemoteResize matches target WxH
+    InFlight --> CooldownWait: Local timeout (do NOT retry immediately)
+    CooldownWait --> Idle: Late RemoteResize observed / cooldown elapsed -> re-evaluate viewport once
+```
+
+Under the proposed conservative recovery model (`RD-001`), an ambiguous timeout transitions to a `CooldownWait` state instead of issuing an overlapping retry, reconciling against the latest measured viewport only after the remote channel settles.

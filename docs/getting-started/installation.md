@@ -6,7 +6,7 @@
 
 ## Release Packages (Prebuilt)
 
-Download the latest release from [GitHub Releases](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.8-alpha):
+Download published pre-release binaries and packages from **[GitHub Releases](https://github.com/MJKhaani/Shellumi/releases)** (the latest published pre-release is `v0.0.7-alpha`; `v0.0.8-alpha` release packaging run [`45914814451`](https://github.com/MJKhaani/Shellumi/actions/runs/45914814451) is in progress after [`45911871766`](https://github.com/MJKhaani/Shellumi/actions/runs/45911871766) failed on macOS `x86_64` DMG creation).
 
 ### <img src="../../resources/icon_pack/icons/32/regular/os_macos.png" width="18" height="18" alt="macOS"> macOS
 
@@ -31,11 +31,21 @@ Download the latest release from [GitHub Releases](https://github.com/MJKhaani/S
 
 ## Verify Release Checksums
 
-Every release includes `SHA256SUMS.txt` covering all binaries and packages:
+Every published release includes `SHA256SUMS.txt` covering all binaries and packages:
 
-```sh
-sha256sum -c SHA256SUMS.txt --ignore-missing
-```
+- **Linux:**
+  ```sh
+  sha256sum -c SHA256SUMS.txt --ignore-missing
+  ```
+- **macOS:**
+  ```sh
+  shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+  ```
+- **Windows (PowerShell):**
+  ```powershell
+  Get-FileHash .\shellumi-0.0.7-alpha-windows-x86_64.zip -Algorithm SHA256
+  # Compare output against SHA256SUMS.txt
+  ```
 
 ---
 

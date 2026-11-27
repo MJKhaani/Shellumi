@@ -1,0 +1,42 @@
+name: Check External Documentation Links
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  external-links:
+    name: External Link Check (Advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check external HTTPS links with bounded timeouts
+        run: |
+          python3 - <<'PY'
+          import re
+          import urllib.request
+          from pathlib import Path
+
+          urls = set()
+          for p in [Path("README.md"), *Path("docs").rglob("*.md")]:
+              if "archive" in p.parts:
+                  continue
+              text = p.read_text(encoding="utf-8")
+              for u in re.findall(r'https://[^\s)>\"]+', text):
+                  urls.add(u.rstrip(".,;"))
+
+          failures = []
+          for u in sorted(urls):
+              req = urllib.request.Request(u, method="HEAD", headers={"User-Agent": "Shellumi-Docs-Check/1.0"})
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      if resp.status >= 400:
+                          failures.append((u, resp.status))
+              except Exception as exc:
+                  failures.append((u, str(exc)))
+
+          print(f"Checked {len(urls)} external URLs.")
+          for u, err in failures:
+              print(f"WARN: {u} -> {err}")
+          PY
