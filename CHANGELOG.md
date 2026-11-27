@@ -2,6 +2,12 @@
 
 ## 0.0.8-alpha
 
+### Remote desktop P0 safety work (partial)
+- Preserve runtime clipboard restrictions across RDP and VNC reconnects. Apply RDP clipboard policy before backend registration and retain view-only drive and microphone revocations across attempts.
+- Allocate recovery tickets in the coordinator, reject stale identities and unexpected input epochs, preserve queued commands on duplicate coordinator binding, and close a saturated transport rather than creating an untracked policy recovery epoch.
+- Recheck ordinary RDP input at IronRDP sender admission and request disconnect if a current recovery or view-only acknowledgement cannot be delivered.
+- Terminate an RDP attempt on input sender failure and prevent failed download creation from deleting an unowned collision. Remaining P0 safety and acceptance work is tracked in [remote desktop acceptance](docs/qa/remote-desktop-acceptance.md).
+
 ### Two-Server, Two-Client Integration Verification (Increment 8)
 - **Multi-Server & Multi-Client Full-Lifecycle Topology:**
   - Automated integration test suite validating end-to-end compatibility across two independent self-hosted servers (`Server Alpha` at `inst_alpha` and `Server Beta` at `inst_beta`) and two distinct clients (`Client 1 / Device 1 / Alice` on macOS and `Client 2 / Device 2 / Bob` on Linux).

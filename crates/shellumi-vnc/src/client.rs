@@ -50,6 +50,7 @@ pub async fn run_vnc_session(
     let policy = config.reconnect_policy;
     let mut attempt = 0;
     let mut view_only = config.view_only;
+    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
     let mut transport_epoch: u64 = 0;
 
     loop {
@@ -180,6 +181,7 @@ pub async fn run_vnc_session(
             &worker,
             &mut fb_attempt,
             &mut view_only,
+            &mut clipboard_policy,
             transport_epoch,
         )
         .await;
@@ -268,12 +270,14 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut view_only = config.view_only;
+    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
     run_vnc_session_with_stream_inner(
         stream,
         &config,
         &worker,
         &mut framebuffer,
         &mut view_only,
+        &mut clipboard_policy,
         1,
     )
     .await
@@ -285,6 +289,7 @@ async fn run_vnc_session_with_stream_inner<S>(
     worker: &SessionWorkerHandle,
     framebuffer: &mut Framebuffer,
     view_only: &mut bool,
+    clipboard_policy: &mut shellumi_remote_desktop::ClipboardPolicy,
     transport_epoch: u64,
 ) -> Result<(), VncClientError>
 where
@@ -406,7 +411,6 @@ where
     let mut tight_decoder = TightDecoder::new();
     let mut last_sent_clipboard: Option<String> = None;
     let mut last_received_clipboard: Option<String> = None;
-    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
     let mut ext_clipboard_utf8 = false;
     let mut peer_ext_max_bytes: usize = MAX_CLIPBOARD_BYTES;
     let mut local_clipboard_offer: Option<String> = None;
@@ -585,7 +589,7 @@ where
                             if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
                                 continue;
                             }
-                            clipboard_policy = policy;
+                            *clipboard_policy = policy;
                             if policy.mode == shellumi_remote_desktop::ClipboardSyncMode::Disabled || !policy.allow_send {
                                 local_clipboard_offer = None;
                                 last_sent_clipboard = None;

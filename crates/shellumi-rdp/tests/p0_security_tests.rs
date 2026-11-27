@@ -8,9 +8,144 @@ use ironrdp_cliprdr::pdu::{
 use shellumi_rdp::clipboard::{PrivateStaging, ShellumiCliprdrBackend};
 use shellumi_rdp::drive::DriveControlState;
 use shellumi_rdp::microphone::MicrophoneControlState;
-use shellumi_remote_desktop::SessionEvent;
+use shellumi_remote_desktop::{
+    create_session_channels, InputCapabilities, RemoteInput, RemoteInputController, SessionCommand,
+    SessionEvent, SessionIdentity,
+};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+#[test]
+fn actual_download_sizes_share_one_budget() {
+    let (sender, mut requests) = mpsc::unbounded_channel();
+    let (events, received) = async_channel::bounded(32);
+    let staging = PrivateStaging::create().unwrap();
+    let mut backend = ShellumiCliprdrBackend::new_with_staging(
+        Arc::new(Mutex::new(Some(sender))),
+        events,
+        Some(staging),
+    );
+    backend.on_remote_file_list(
+        &[
+            FileDescriptor::new("first").with_file_size(1),
+            FileDescriptor::new("second").with_file_size(1),
+        ],
+        None,
+    );
+    let mut next_stream = || match requests.try_recv().unwrap() {
+        RdpInputEvent::Clipboard(ClipboardMessage::SendFileContentsRequest(request)) => {
+            request.stream_id
+        }
+        other => panic!("expected file request, got {other:?}"),
+    };
+    backend.on_file_contents_response(FileContentsResponse::new_size_response(next_stream(), 1));
+    backend.on_file_contents_response(FileContentsResponse::new_data_response(
+        next_stream(),
+        vec![42],
+    ));
+    backend.on_file_contents_response(FileContentsResponse::new_size_response(
+        next_stream(),
+        shellumi_rdp::clipboard::MAX_TOTAL_TRANSFER_BYTES,
+    ));
+    assert!(requests.try_recv().is_err());
+    assert!(backend.inner.lock().unwrap().active_transfer_id.is_none());
+    let mut failures = 0;
+    while let Ok(event) = received.try_recv() {
+        match event {
+            SessionEvent::TransferFailed { reason, .. } => {
+                assert!(reason.contains("transfer budget"));
+                failures += 1;
+            }
+            SessionEvent::TransferCompleted { .. } | SessionEvent::ServerFilesReceived { .. } => {
+                panic!("over-budget job must not publish files");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(failures, 1);
+}
+
+#[test]
+fn popped_rdp_input_is_rejected_after_recovery_fence() {
+    let (ui, worker) = create_session_channels(16, 16);
+    let identity = SessionIdentity::new(1, 1, 1);
+    let epoch = ui.set_active_identity(identity);
+    let mut controller = RemoteInputController::new(1, false, InputCapabilities::default());
+    controller.reset_for_transport(1, 1);
+    controller.input_epoch = epoch;
+    let envelope = controller.wrap_envelope(RemoteInput::PointerMove { x: 10, y: 20 });
+    ui.try_send_command(SessionCommand::InputEnvelope(envelope))
+        .unwrap();
+    let Some(SessionCommand::InputEnvelope(popped)) = worker.try_recv_command().unwrap() else {
+        panic!("expected input");
+    };
+    let ticket = ui.request_recovery(identity, "test fence").unwrap();
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let events = shellumi_rdp::input::translate_remote_input(&popped.input);
+    assert!(worker
+        .submit_current_input(&popped, || sender
+            .send(RdpInputEvent::FastPath(events.into())))
+        .is_none());
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
+        worker.try_recv_command().unwrap(),
+        Some(SessionCommand::RecoveryBarrier(ticket.clone()))
+    );
+    assert!(controller.install_recovery(&ticket));
+    assert!(controller.ack_recovery(
+        &identity,
+        ticket.input_epoch,
+        ticket.barrier_id,
+        true,
+        "test"
+    ));
+    let fresh = controller.wrap_envelope(RemoteInput::PointerMove { x: 30, y: 40 });
+    let events = shellumi_rdp::input::translate_remote_input(&fresh.input);
+    assert!(worker
+        .submit_current_input(&fresh, || sender
+            .send(RdpInputEvent::FastPath(events.into())))
+        .unwrap()
+        .is_ok());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(RdpInputEvent::FastPath(_))
+    ));
+}
+
+#[test]
+fn c3_01_failed_exclusive_create_preserves_foreign_file() {
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel();
+    let (ev_tx, ev_rx) = async_channel::bounded(32);
+    let staging = PrivateStaging::create().unwrap();
+    let mut backend = ShellumiCliprdrBackend::new_with_staging(
+        Arc::new(Mutex::new(Some(in_tx))),
+        ev_tx,
+        Some(staging),
+    );
+    backend.on_remote_file_list(
+        &[FileDescriptor::new("collision.txt").with_file_size(4)],
+        None,
+    );
+    let RdpInputEvent::Clipboard(ClipboardMessage::SendFileContentsRequest(request)) =
+        in_rx.try_recv().unwrap()
+    else {
+        panic!("expected SIZE request");
+    };
+    let path = backend.inner.lock().unwrap().remote_files[0]
+        .local_path
+        .clone();
+    std::fs::write(&path, b"foreign sentinel").unwrap();
+    backend.on_file_contents_response(FileContentsResponse::new_size_response(
+        request.stream_id,
+        4,
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), b"foreign sentinel");
+    let mut failed = false;
+    while let Ok(event) = ev_rx.try_recv() {
+        failed |= matches!(event, SessionEvent::TransferFailed { .. });
+    }
+    assert!(failed);
+}
 
 #[test]
 fn p03_t01_t02_exclusive_transfer_dir_prevents_cross_transfer_or_foreign_deletion() {

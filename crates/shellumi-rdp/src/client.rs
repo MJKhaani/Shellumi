@@ -32,13 +32,17 @@ pub enum RdpError {
 
 /// Run an authentic RDP session using IronRDP client engine with automatic network reconnection.
 pub async fn run_rdp_session(
-    config: SessionConfig,
+    mut config: SessionConfig,
     worker: SessionWorkerHandle,
     mut framebuffer: Framebuffer,
 ) -> Result<(), RdpError> {
     let policy = config.reconnect_policy;
     let mut attempt = 0;
     let mut view_only = config.view_only;
+    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
+    if view_only {
+        revoke_redirection(&mut config);
+    }
     let mut transport_epoch: u64 = 0;
 
     loop {
@@ -50,10 +54,11 @@ pub async fn run_rdp_session(
             })
             .await;
         let (attempt_res, was_connected) = run_rdp_session_attempt(
-            &config,
+            &mut config,
             &worker,
             &mut framebuffer,
             &mut view_only,
+            &mut clipboard_policy,
             transport_epoch,
         )
         .await;
@@ -133,11 +138,18 @@ pub async fn run_rdp_session(
 
 /// Execute a single attempt of an RDP session.
 /// Returns `(Result<(), RdpError>, bool /* was_connected */)`.
+fn revoke_redirection(config: &mut SessionConfig) {
+    config.enable_microphone = false;
+    config.shared_folder = None;
+    tracing::debug!("Revoked microphone and drive permissions for future RDP attempts");
+}
+
 async fn run_rdp_session_attempt(
-    config: &SessionConfig,
+    config: &mut SessionConfig,
     worker: &SessionWorkerHandle,
     framebuffer: &mut Framebuffer,
     view_only: &mut bool,
+    clipboard_policy: &mut shellumi_remote_desktop::ClipboardPolicy,
     transport_epoch: u64,
 ) -> (Result<(), RdpError>, bool) {
     let _ = worker
@@ -166,6 +178,12 @@ async fn run_rdp_session_attempt(
         proxy.clone(),
         worker.event_sender(),
         staging,
+    );
+    let clipboard_enabled = !*view_only
+        && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled;
+    clipboard_backend.set_policy(
+        clipboard_enabled && clipboard_policy.allow_send,
+        clipboard_enabled && clipboard_policy.allow_receive,
     );
     let sound_control = crate::sound::ShellumiRdpsndControl::new(false, 100);
     let display_control = crate::display::DisplayControlState::new();
@@ -251,11 +269,7 @@ async fn run_rdp_session_attempt(
     let mut connected = false;
     let mut failure: Option<RdpError> = None;
     let mut ledger = shellumi_remote_desktop::SubmittedInputLedger::new();
-    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
     let mut worker_min_input_epoch: u64 = 0;
-    if *view_only {
-        clipboard_backend.set_policy(false, false);
-    }
 
     loop {
         worker.drain_legacy_events();
@@ -320,6 +334,13 @@ async fn run_rdp_session_attempt(
                                 continue;
                             }
                             if enabled && !*view_only {
+                                revoke_redirection(config);
+                                *view_only = true;
+                                microphone_control.revoke();
+                                clipboard_backend.set_policy(false, false);
+                                if let Some(ref dc) = drive_control {
+                                    dc.set_revoked(true);
+                                }
                                 let releases = ledger.drain_releases();
                                 let released_count = releases.len();
                                 for rel in releases {
@@ -343,11 +364,6 @@ async fn run_rdp_session_attempt(
                                         released_count,
                                         reason: "View-only enabled".into(),
                                     }).await;
-                                }
-                                microphone_control.revoke();
-                                clipboard_backend.set_policy(false, false);
-                                if let Some(ref dc) = drive_control {
-                                    dc.set_revoked(true);
                                 }
                             } else if !enabled {
                                 let clip_on = clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled;
@@ -386,11 +402,16 @@ async fn run_rdp_session_attempt(
                                     let events = translate_remote_input(&rel);
                                     if !events.is_empty() {
                                         if let Err(err) = input_sender.send(RdpInputEvent::FastPath(events.into())) {
+                                            let reason = format!("ReleaseAll input submission failed: {err}");
+                                            tracing::error!(%reason, "RDP input state is no longer reliable");
                                             let _ = worker.send_event(SessionEvent::InputError {
                                                 transport_epoch,
                                                 seq: env.seq,
-                                                reason: err.to_string(),
+                                                reason: reason.clone(),
                                             }).await;
+                                            let _ = input_sender.send(RdpInputEvent::Close);
+                                            let _ = stop_tx.send(());
+                                            return (Err(RdpError::Terminated(reason)), connected);
                                         }
                                     }
                                 }
@@ -409,14 +430,20 @@ async fn run_rdp_session_attempt(
                             if !*view_only || is_release {
                                 let events = translate_remote_input(&env.input);
                                 if !events.is_empty() {
-                                    match input_sender.send(RdpInputEvent::FastPath(events.into())) {
-                                        Ok(()) => ledger.record_submitted(&env.input),
-                                        Err(err) => {
+                                    match worker.submit_current_input(&env, || input_sender.send(RdpInputEvent::FastPath(events.into()))) {
+                                        None => continue,
+                                        Some(Ok(())) => ledger.record_submitted(&env.input),
+                                        Some(Err(err)) => {
+                                            let reason = format!("Input submission failed: {err}");
+                                            tracing::error!(%reason, "RDP input state is no longer reliable");
                                             let _ = worker.send_event(SessionEvent::InputError {
                                                 transport_epoch,
                                                 seq: env.seq,
-                                                reason: err.to_string(),
+                                                reason: reason.clone(),
                                             }).await;
+                                            let _ = input_sender.send(RdpInputEvent::Close);
+                                            let _ = stop_tx.send(());
+                                            return (Err(RdpError::Terminated(reason)), connected);
                                         }
                                     }
                                 }
@@ -557,7 +584,7 @@ async fn run_rdp_session_attempt(
                             if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
                                 continue;
                             }
-                            clipboard_policy = policy;
+                            *clipboard_policy = policy;
                             let enabled = policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled && !*view_only;
                             clipboard_backend.set_policy(
                                 enabled && policy.allow_send,
@@ -741,5 +768,25 @@ async fn run_rdp_session_attempt(
                 (Ok(()), true)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revoked_redirection_is_absent_from_reconnect_config() {
+        let mut session = SessionConfig::new(
+            "localhost",
+            3389,
+            shellumi_remote_desktop::RemoteProtocol::Rdp,
+        );
+        session.enable_microphone = true;
+        session.shared_folder = Some("shared".into());
+        revoke_redirection(&mut session);
+        let reconnect = RdpClientConfig::from_session_config(&session);
+        assert!(!reconnect.enable_microphone);
+        assert!(reconnect.shared_folder.is_none());
     }
 }

@@ -279,23 +279,33 @@ impl RemoteInputController {
         self.frame_size = None;
     }
 
-    /// Freeze interactive input immediately, advance `input_epoch`, clear local held state,
-    /// and return a `RecoveryBarrier` to latch on the session command channel.
-    pub fn begin_recovery(&mut self, reason: impl Into<String>) -> RecoveryBarrier {
-        self.input_epoch = self.input_epoch.saturating_add(1);
+    /// Install the exact ticket issued by the coordinator, freezing input until its acknowledgement.
+    pub fn install_recovery(&mut self, barrier: &RecoveryBarrier) -> bool {
+        if barrier.identity != self.identity() || barrier.input_epoch <= self.input_epoch {
+            return false;
+        }
+        self.input_epoch = barrier.input_epoch;
         self.recovery_frozen = true;
-        let barrier_id = self.input_epoch;
-        self.pending_barrier_id = Some(barrier_id);
+        self.pending_barrier_id = Some(barrier.barrier_id);
         self.held_buttons = 0;
         self.dragging_button = None;
         self.held_keys.clear();
         self.modifiers = KeyModifiers::default();
-        RecoveryBarrier {
-            identity: self.identity(),
-            input_epoch: self.input_epoch,
-            barrier_id,
+        true
+    }
+
+    /// Keep input blocked when a recovery ticket cannot be installed.
+    pub fn block_recovery(&mut self, reason: &str) {
+        self.recovery_frozen = true;
+        self.pending_barrier_id = None;
+        self.view_only = true;
+        self.policy_state = ViewOnlyPolicyState::SafeBlocked {
             reason: reason.into(),
-        }
+        };
+        self.held_buttons = 0;
+        self.dragging_button = None;
+        self.held_keys.clear();
+        self.modifiers = KeyModifiers::default();
     }
 
     /// Acknowledge a `RecoveryCompleted` or `RecoveryFailed` event from the worker.
@@ -977,9 +987,14 @@ mod tests {
         let mut ctrlr = RemoteInputController::new(1, false, InputCapabilities::default());
         ctrlr.connected = true;
         ctrlr.reset_for_transport(2, 3);
+        let (ui, _) = crate::events::create_session_channels(16, 16);
+        ctrlr.input_epoch = ui.set_active_identity(ctrlr.identity());
         let initial_epoch = ctrlr.input_epoch;
 
-        let barrier = ctrlr.begin_recovery("Queue saturation");
+        let barrier = ui
+            .request_recovery(ctrlr.identity(), "Queue saturation")
+            .unwrap();
+        assert!(ctrlr.install_recovery(&barrier));
         assert!(ctrlr.recovery_frozen);
         assert_eq!(ctrlr.input_epoch, initial_epoch + 1);
         assert_eq!(barrier.identity, SessionIdentity::new(1, 2, 3));
@@ -1025,7 +1040,10 @@ mod tests {
         assert!(!ctrlr.recovery_frozen);
 
         // Failed recovery locks fail-closed into SafeBlocked
-        let b2 = ctrlr.begin_recovery("Transport error");
+        let b2 = ui
+            .request_recovery(ctrlr.identity(), "Transport error")
+            .unwrap();
+        assert!(ctrlr.install_recovery(&b2));
         assert!(ctrlr.ack_recovery(
             &b2.identity,
             b2.input_epoch,

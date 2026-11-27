@@ -359,12 +359,16 @@ impl ShellumiCliprdrBackend {
         for f in &mut inner.remote_files {
             f.handle.take();
             if f.owned_by_transfer {
-                let _ = std::fs::remove_file(&f.local_path);
+                if let Err(error) = std::fs::remove_file(&f.local_path) {
+                    tracing::warn!(%error, "Failed to remove owned download file");
+                }
             }
         }
         inner.remote_files.clear();
         if let Some(dir) = inner.active_transfer_dir.take() {
-            let _ = std::fs::remove_dir(&dir);
+            if let Err(error) = std::fs::remove_dir(&dir) {
+                tracing::warn!(%error, "Failed to remove download directory");
+            }
         }
         Some(transfer_id)
     }
@@ -491,12 +495,28 @@ impl ShellumiCliprdrBackend {
     }
 
     /// Advance downloading of remote files or emit completion event when all files are downloaded.
-    fn advance_download_or_finish(&self) {
+    fn advance_download_or_finish(&self, transfer_id: u64) {
         let mut inner = self.inner.lock().unwrap();
+        if inner.active_transfer_id != Some(transfer_id) {
+            tracing::debug!(
+                transfer_id,
+                "Ignoring download advancement for a retired transfer"
+            );
+            return;
+        }
         let idx = inner.active_download_index;
         if let Some(f) = inner.remote_files.get_mut(idx) {
             if let Some(mut handle) = f.handle.take() {
-                let _ = handle.flush();
+                if let Err(error) = handle.flush() {
+                    tracing::error!(transfer_id, %error, "Could not flush downloaded file");
+                    drop(handle);
+                    drop(inner);
+                    self.fail_active_download(
+                        transfer_id,
+                        format!("Failed to flush staging file: {error}"),
+                    );
+                    return;
+                }
             }
         }
         inner.active_download_index += 1;
@@ -519,7 +539,7 @@ impl ShellumiCliprdrBackend {
         } else {
             let file_names: Vec<String> =
                 inner.remote_files.iter().map(|f| f.name.clone()).collect();
-            let transfer_id = inner.active_transfer_id.take().unwrap_or(0);
+            inner.active_transfer_id = None;
             let target_dir = inner
                 .active_transfer_dir
                 .take()
@@ -542,18 +562,19 @@ impl ShellumiCliprdrBackend {
         }
     }
 
-    fn fail_active_download(&self, reason: String) {
+    fn fail_active_download(&self, expected_id: u64, reason: String) {
         let mut inner = self.inner.lock().unwrap();
-        let transfer_id = inner.active_transfer_id.take().unwrap_or(0);
-        inner.active_download_stream_id = None;
-        inner.expected_response = None;
-        for f in &mut inner.remote_files {
-            f.handle.take();
-            if f.downloaded_bytes < f.size || f.local_path.exists() {
-                let _ = std::fs::remove_file(&f.local_path);
-            }
+        if inner.active_transfer_id != Some(expected_id) {
+            tracing::debug!(
+                expected_id,
+                "Ignoring download failure for a retired transfer"
+            );
+            return;
         }
-        inner.remote_files.clear();
+        let Some(transfer_id) = Self::abort_download_locked(&mut inner) else {
+            tracing::warn!("Ignoring download failure without an active transfer");
+            return;
+        };
         drop(inner);
 
         let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
@@ -812,10 +833,16 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             return;
         }
 
+        let Some(transfer_id) = inner.active_transfer_id else {
+            return;
+        };
         if response.is_error() {
             tracing::warn!(stream_id, "FileContentsResponse error received");
             drop(inner);
-            self.fail_active_download("Remote host returned file contents error".into());
+            self.fail_active_download(
+                transfer_id,
+                "Remote host returned file contents error".into(),
+            );
             return;
         }
 
@@ -828,24 +855,35 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             Some(e) => e,
             None => {
                 drop(inner);
-                self.fail_active_download("Unsolicited FileContentsResponse".into());
+                self.fail_active_download(transfer_id, "Unsolicited FileContentsResponse".into());
                 return;
             }
         };
 
         let data = response.data();
-        let transfer_id = inner.active_transfer_id.unwrap_or(0);
 
         match expected {
             ExpectedResponseKind::Size => {
                 let Ok(size) = response.data_as_size() else {
                     drop(inner);
-                    self.fail_active_download("Malformed SIZE response".into());
+                    self.fail_active_download(transfer_id, "Malformed SIZE response".into());
                     return;
                 };
-                if size > MAX_TOTAL_TRANSFER_BYTES {
+                // Earlier files have completed, so their sizes come from SIZE
+                // responses. The remaining descriptors are only estimates.
+                let actual_total = inner.remote_files[..current_idx]
+                    .iter()
+                    .try_fold(size, |total, file| total.checked_add(file.size));
+                if !matches!(actual_total, Some(total) if total <= MAX_TOTAL_TRANSFER_BYTES) {
+                    tracing::warn!(
+                        transfer_id,
+                        "Actual download size exceeds the transfer budget"
+                    );
                     drop(inner);
-                    self.fail_active_download("Remote file exceeds transfer size limit".into());
+                    self.fail_active_download(
+                        transfer_id,
+                        "Actual download size exceeds the transfer budget".into(),
+                    );
                     return;
                 }
                 inner.remote_files[current_idx].size = size;
@@ -865,7 +903,10 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                     }
                     Err(e) => {
                         drop(inner);
-                        self.fail_active_download(format!("Failed to create staging file: {e}"));
+                        self.fail_active_download(
+                            transfer_id,
+                            format!("Failed to create staging file: {e}"),
+                        );
                         return;
                     }
                 };
@@ -873,12 +914,15 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                 if size == 0 {
                     if let Err(e) = file.flush() {
                         drop(inner);
-                        self.fail_active_download(format!("Failed to flush zero-byte file: {e}"));
+                        self.fail_active_download(
+                            transfer_id,
+                            format!("Failed to flush zero-byte file: {e}"),
+                        );
                         return;
                     }
                     drop(file);
                     drop(inner);
-                    self.advance_download_or_finish();
+                    self.advance_download_or_finish(transfer_id);
                     return;
                 }
 
@@ -905,34 +949,49 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             } => {
                 if data.is_empty() {
                     drop(inner);
-                    self.fail_active_download("Unexpected empty RANGE response before EOF".into());
+                    self.fail_active_download(
+                        transfer_id,
+                        "Unexpected empty RANGE response before EOF".into(),
+                    );
                     return;
                 }
                 if data.len() > max_len as usize {
                     drop(inner);
-                    self.fail_active_download("Oversized RANGE response".into());
+                    self.fail_active_download(transfer_id, "Oversized RANGE response".into());
                     return;
                 }
                 let total_size = inner.remote_files[current_idx].size;
                 let Some(next_downloaded) = expected_offset.checked_add(data.len() as u64) else {
                     drop(inner);
-                    self.fail_active_download("Offset overflow in file transfer".into());
+                    self.fail_active_download(
+                        transfer_id,
+                        "Offset overflow in file transfer".into(),
+                    );
                     return;
                 };
                 if next_downloaded > total_size {
                     drop(inner);
-                    self.fail_active_download("Remote sent more bytes than advertised size".into());
+                    self.fail_active_download(
+                        transfer_id,
+                        "Remote sent more bytes than advertised size".into(),
+                    );
                     return;
                 }
 
                 let Some(handle) = inner.remote_files[current_idx].handle.as_mut() else {
                     drop(inner);
-                    self.fail_active_download("Missing open staging file handle".into());
+                    self.fail_active_download(
+                        transfer_id,
+                        "Missing open staging file handle".into(),
+                    );
                     return;
                 };
                 if let Err(e) = handle.write_all(data) {
                     drop(inner);
-                    self.fail_active_download(format!("Failed to write staging file: {e}"));
+                    self.fail_active_download(
+                        transfer_id,
+                        format!("Failed to write staging file: {e}"),
+                    );
                     return;
                 }
 
@@ -948,7 +1007,7 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
 
                 if next_downloaded >= total_size {
                     drop(inner);
-                    self.advance_download_or_finish();
+                    self.advance_download_or_finish(transfer_id);
                 } else {
                     let remaining = total_size - next_downloaded;
                     let next_chunk =

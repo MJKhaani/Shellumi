@@ -16,10 +16,14 @@ flowchart LR
 ```
 
 - **`shellumi-remote-desktop`:** Defines `RemoteInputController`, `RemoteInput`, `RemoteShortcut`, `SessionCommand`, `SessionEvent`, `FramebufferSnapshot`, `PanState`, `ReconnectPolicy`, and `SessionMetricsSnapshot`. Uses a bounded ordered coalescing command queue (coalescing adjacent `PointerMove` events without crossing critical button/key/wheel/shortcut barriers, plus out-of-band `Disconnect`) and a separate 1-slot `FrameReady` buffer so high-rate frames never starve control events.
+
+  The coordinator allocates identity-bound recovery tickets and latches them while purging older queued input; the controller installs the returned ticket and remains frozen until a matching acknowledgement. A saturated policy transition or undeliverable current recovery/view-only acknowledgement requests disconnect. Ordinary RDP input is checked under the coordinator lock at admission to IronRDP's nonblocking sender. This is partial protection: downstream queued PDUs, release paths, VNC submission, reliable control delivery, timeout handling, and full transport identity enforcement remain open as described in [remote desktop acceptance](../qa/remote-desktop-acceptance.md).
 - **`shellumi-vnc`:** Pure-Rust RFB 3.3/3.7/3.8 client with VncAuth DES challenge-response, ARD Diffie-Hellman auth, Raw/CopyRect/DesktopSize/Hextile/ZRLE/Tight decoders, decompression-bomb bounds, stateful held-button/wheel-pulse translation, typed shortcuts, Latin-1 `ClientCutText`/`ServerCutText` with bounded echo suppression, and runtime view-only enforcement.
 - **`shellumi-rdp`:** Embedded `IronRDP` client with strict TLS/SHA-256 TOFU pinning, CredSSP/NLA, `MS-RDPEDISP` dynamic display control, `CLIPRDR` clipboard/file streaming with explicit `ExpectedResponseKind` state machine and private `0700` staging directories, `RDPSND` (`cpal`) audio output, `RDPDR` explicit-consent local drive redirection (read-only by default, cross-platform `ShellumiFsRdpdrBackend` on Windows), and `MS-RDPEAI` (`cpal`) microphone input (default off, `OpenReply` reflects actual capture start).
 
 ---
+
+RDP applies the effective clipboard policy before registering the clipboard backend. Runtime clipboard policy survives reconnects. Starting in view-only mode or entering it revokes drive and microphone permissions for subsequent attempts within the same session.
 
 ## Measured Canvas Geometry & Input Mapping
 

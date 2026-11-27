@@ -131,7 +131,7 @@ pub enum SessionCommand {
 
 impl SessionCommand {
     /// Return the transport identity for transport-scoped commands, or `None` for
-    /// pre-transport lifecycle commands (`Connect`, `Disconnect`, `RecoveryBarrier`).
+    /// pre-transport lifecycle commands (`Connect`, `Disconnect`).
     pub const fn transport_identity(&self) -> Option<SessionIdentity> {
         match self {
             Self::Connect | Self::Disconnect => None,
@@ -302,6 +302,8 @@ struct CoordinatorState {
     min_valid_input_epoch: u64,
     queue: VecDeque<SessionCommand>,
     recovery_latch: Option<RecoveryBarrier>,
+    active_recovery: Option<RecoveryBarrier>,
+    active_view_only: Option<(SessionIdentity, u64)>,
     coalesced_moves: u64,
     high_water: usize,
 }
@@ -345,36 +347,70 @@ impl SessionUiHandle {
     /// return the authoritative `input_epoch` for this transport.
     pub fn set_active_identity(&self, identity: SessionIdentity) -> u64 {
         let mut st = self.cmd_inner.state.lock().unwrap();
+        if identity == st.active_identity && identity.is_transport_bound() {
+            return st.min_valid_input_epoch;
+        }
+        if !identity.is_transport_bound() {
+            tracing::warn!("Rejected unbound transport identity");
+            return st.min_valid_input_epoch;
+        }
         if st.active_identity.is_transport_bound() {
             st.min_valid_input_epoch = st.min_valid_input_epoch.saturating_add(1).max(1);
         }
         st.active_identity = identity;
         st.queue.clear();
         st.recovery_latch = None;
+        st.active_recovery = None;
+        st.active_view_only = None;
+        self.cmd_inner
+            .disconnect_requested
+            .store(false, Ordering::Release);
         st.min_valid_input_epoch
     }
 
-    /// Atomically advance the minimum valid input epoch, purge all queued interactive commands
-    /// from abandoned epochs, and latch a `RecoveryBarrier` so the worker drains submitted
-    /// held state before accepting any new-epoch input. Never fails even if `queue` is full.
-    pub fn trigger_recovery(&self, mut barrier: RecoveryBarrier) {
+    /// Allocate and latch the authoritative recovery ticket under the coordinator lock.
+    pub fn request_recovery(
+        &self,
+        identity: SessionIdentity,
+        reason: impl Into<String>,
+    ) -> Result<RecoveryBarrier, String> {
+        if self.cmd_inner.closed.load(Ordering::Acquire) {
+            return Err("Session worker has terminated".into());
+        }
+        let barrier;
         {
             let mut st = self.cmd_inner.state.lock().unwrap();
-            if st.active_identity.is_transport_bound() {
-                barrier.identity = st.active_identity;
+            if self.cmd_inner.disconnect_requested.load(Ordering::Acquire) {
+                return Err("Session disconnect is pending".into());
             }
-            if barrier.input_epoch > st.min_valid_input_epoch {
-                st.min_valid_input_epoch = barrier.input_epoch;
-            } else {
-                st.min_valid_input_epoch = st.min_valid_input_epoch.saturating_add(1);
-                barrier.input_epoch = st.min_valid_input_epoch;
+            if !identity.is_transport_bound() || identity != st.active_identity {
+                tracing::warn!("Rejected recovery for inactive transport identity");
+                return Err("RecoveryBarrier requires the active transport identity".into());
             }
+            let Some(next_epoch) = st.min_valid_input_epoch.checked_add(1) else {
+                self.cmd_inner
+                    .disconnect_requested
+                    .store(true, Ordering::Release);
+                drop(st);
+                let _ = self.cmd_inner.notify_tx.try_send(());
+                tracing::error!("Input recovery epoch exhausted; closing transport");
+                return Err("Input recovery epoch exhausted".into());
+            };
+            barrier = RecoveryBarrier {
+                identity,
+                input_epoch: next_epoch,
+                barrier_id: next_epoch,
+                reason: reason.into(),
+            };
+            st.min_valid_input_epoch = next_epoch;
             let min_epoch = st.min_valid_input_epoch;
             st.queue
                 .retain(|c| !is_stale_interactive_command(c, min_epoch));
-            st.recovery_latch = Some(barrier);
+            st.recovery_latch = Some(barrier.clone());
+            st.active_recovery = Some(barrier.clone());
         }
         let _ = self.cmd_inner.notify_tx.try_send(());
+        Ok(barrier)
     }
 
     /// Try to send a command without awaiting (non-blocking).
@@ -407,26 +443,27 @@ impl SessionUiHandle {
             return Ok(());
         }
 
-        if let SessionCommand::RecoveryBarrier(barrier) = cmd {
-            if !barrier.identity.is_transport_bound() {
-                return Err("RecoveryBarrier requires non-zero transport identity".into());
-            }
-            self.trigger_recovery(barrier);
-            return Ok(());
+        if matches!(cmd, SessionCommand::RecoveryBarrier(_)) {
+            return Err("Recovery barriers must be allocated by the coordinator".into());
         }
 
         let mut st = self.cmd_inner.state.lock().unwrap();
+        if self.cmd_inner.disconnect_requested.load(Ordering::Acquire) {
+            return Err("Session disconnect is pending".into());
+        }
         if let Some(cmd_id) = cmd.transport_identity() {
             if !cmd_id.is_transport_bound() {
                 return Err("Zero/default transport identity rejected".into());
             }
-            if st.active_identity.is_transport_bound() && cmd_id != st.active_identity {
+            if cmd_id != st.active_identity {
                 return Err("Stale transport identity rejected".into());
             }
         }
 
-        if is_stale_interactive_command(&cmd, st.min_valid_input_epoch) {
-            return Err("Stale input epoch rejected".into());
+        if let SessionCommand::InputEnvelope(env) = &cmd {
+            if env.input_epoch != st.min_valid_input_epoch {
+                return Err("Unexpected input epoch rejected".into());
+            }
         }
 
         let is_policy_barrier = matches!(
@@ -470,43 +507,31 @@ impl SessionUiHandle {
 
         if st.queue.len() >= self.cmd_inner.capacity {
             if is_policy_barrier {
-                // Policy barrier under full interactive queue: purge interactive commands,
-                // advance epoch under the same lock, and latch a RecoveryBarrier with the
-                // authoritative active_identity (or fail-closed disconnect if still full).
-                let next_epoch = st.min_valid_input_epoch.saturating_add(1);
-                st.min_valid_input_epoch = next_epoch;
-                st.queue
-                    .retain(|c| !is_stale_interactive_command(c, next_epoch));
-                if st.queue.len() < self.cmd_inner.capacity {
-                    let barrier_identity = st.active_identity;
-                    if st.recovery_latch.is_none() && barrier_identity.is_transport_bound() {
-                        st.recovery_latch = Some(RecoveryBarrier {
-                            identity: barrier_identity,
-                            input_epoch: next_epoch,
-                            barrier_id: next_epoch,
-                            reason: "Policy barrier under queue saturation".into(),
-                        });
-                    }
-                    st.queue.push_back(cmd);
-                    let len = st.queue.len();
-                    st.high_water = st.high_water.max(len);
-                    drop(st);
-                    let _ = self.cmd_inner.notify_tx.try_send(());
-                    return Ok(());
-                } else {
-                    self.cmd_inner
-                        .disconnect_requested
-                        .store(true, Ordering::Release);
-                    drop(st);
-                    let _ = self.cmd_inner.notify_tx.try_send(());
-                    return Err(
-                        "Policy barrier triggered emergency disconnect: queue saturated".into(),
-                    );
-                }
+                // No controller ticket exists for an implicit epoch change. Terminate
+                // instead of admitting a policy transition behind an untracked fence.
+                st.queue.clear();
+                st.recovery_latch = None;
+                self.cmd_inner
+                    .disconnect_requested
+                    .store(true, Ordering::Release);
+                drop(st);
+                let _ = self.cmd_inner.notify_tx.try_send(());
+                tracing::warn!("Policy transition rejected; saturated transport is closing");
+                return Err(
+                    "Policy barrier triggered emergency disconnect: queue saturated".into(),
+                );
             }
             return Err("Session command queue is full".into());
         }
 
+        if let SessionCommand::SetViewOnly {
+            identity,
+            transition_id,
+            ..
+        } = &cmd
+        {
+            st.active_view_only = Some((*identity, *transition_id));
+        }
         st.queue.push_back(cmd);
         let len = st.queue.len();
         st.high_water = st.high_water.max(len);
@@ -577,6 +602,26 @@ pub struct SessionWorkerHandle {
 }
 
 impl SessionWorkerHandle {
+    /// Authorize an input and enqueue it to a nonblocking downstream sender while
+    /// holding the coordinator lock. The closure must never perform socket I/O or await.
+    /// Its invocation is the submission linearization point relative to recovery fences.
+    pub fn submit_current_input<T>(
+        &self,
+        envelope: &InputEnvelope,
+        submit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.cmd_inner.state.lock().unwrap();
+        if self.cmd_inner.disconnect_requested.load(Ordering::Acquire)
+            || !envelope.identity().is_transport_bound()
+            || envelope.identity() != state.active_identity
+            || envelope.input_epoch != state.min_valid_input_epoch
+        {
+            tracing::debug!("Dropped input superseded before downstream admission");
+            return None;
+        }
+        Some(submit())
+    }
+
     /// Send an event from the protocol task to the UI.
     pub async fn send_event(&self, event: SessionEvent) -> Result<(), String> {
         self.try_send_event(event)
@@ -587,6 +632,7 @@ impl SessionWorkerHandle {
     /// starve critical control events (`StateChanged`, `Error`, `ServerClipboard`, etc.).
     pub fn try_send_event(&self, event: SessionEvent) -> Result<(), String> {
         if self.ev_inner.closed.load(Ordering::Acquire) {
+            self.fail_closed_on_undelivered_control(&event);
             return Err("UI receiver has disconnected".into());
         }
 
@@ -605,12 +651,101 @@ impl SessionWorkerHandle {
 
         let mut cq = self.ev_inner.control_queue.lock().unwrap();
         if cq.len() >= self.ev_inner.control_capacity {
+            drop(cq);
+            self.fail_closed_on_undelivered_control(&event);
             return Err("Session event queue is full".into());
         }
+        self.mark_control_delivered(&event);
         cq.push_back(event);
         drop(cq);
         let _ = self.ev_inner.notify_tx.try_send(());
         Ok(())
+    }
+
+    fn mark_control_delivered(&self, event: &SessionEvent) {
+        if !matches!(
+            event,
+            SessionEvent::RecoveryCompleted { .. }
+                | SessionEvent::RecoveryFailed { .. }
+                | SessionEvent::ViewOnlyChanged { .. }
+        ) {
+            return;
+        }
+        let mut state = self.cmd_inner.state.lock().unwrap();
+        match event {
+            SessionEvent::RecoveryCompleted {
+                identity,
+                input_epoch,
+                barrier_id,
+                ..
+            }
+            | SessionEvent::RecoveryFailed {
+                identity,
+                input_epoch,
+                barrier_id,
+                ..
+            } => {
+                if state.active_recovery.as_ref().is_some_and(|ticket| {
+                    ticket.identity == *identity
+                        && ticket.input_epoch == *input_epoch
+                        && ticket.barrier_id == *barrier_id
+                }) {
+                    state.active_recovery = None;
+                }
+            }
+            SessionEvent::ViewOnlyChanged {
+                identity,
+                transition_id,
+                ..
+            } if state.active_view_only == Some((*identity, *transition_id)) => {
+                state.active_view_only = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// If an identity-bound acknowledgement cannot be delivered, stop admitting work
+    /// for that transport. A retired producer must not disconnect a replacement.
+    fn fail_closed_on_undelivered_control(&self, event: &SessionEvent) {
+        let identity = match event {
+            SessionEvent::RecoveryCompleted { identity, .. }
+            | SessionEvent::RecoveryFailed { identity, .. }
+            | SessionEvent::ViewOnlyChanged { identity, .. } => *identity,
+            _ => return,
+        };
+        let mut state = self.cmd_inner.state.lock().unwrap();
+        let current = match event {
+            SessionEvent::RecoveryCompleted {
+                input_epoch,
+                barrier_id,
+                ..
+            }
+            | SessionEvent::RecoveryFailed {
+                input_epoch,
+                barrier_id,
+                ..
+            } => state.active_recovery.as_ref().is_some_and(|ticket| {
+                ticket.identity == identity
+                    && ticket.input_epoch == *input_epoch
+                    && ticket.barrier_id == *barrier_id
+            }),
+            SessionEvent::ViewOnlyChanged { transition_id, .. } => {
+                state.active_view_only == Some((identity, *transition_id))
+            }
+            _ => false,
+        };
+        if !identity.is_transport_bound() || state.active_identity != identity || !current {
+            tracing::warn!("Discarded undeliverable acknowledgement from retired transport");
+            return;
+        }
+        state.queue.clear();
+        state.recovery_latch = None;
+        self.cmd_inner
+            .disconnect_requested
+            .store(true, Ordering::Release);
+        drop(state);
+        let _ = self.cmd_inner.notify_tx.try_send(());
+        tracing::error!("Critical acknowledgement could not be delivered; closing transport");
     }
 
     /// Return a clone of a bridge sender for legacy backends; drains into `ev_inner` via `try_send_event`
@@ -642,11 +777,7 @@ impl SessionWorkerHandle {
 
     /// Try to receive the next pending command without blocking.
     pub fn try_recv_command(&self) -> Result<Option<SessionCommand>, String> {
-        if self
-            .cmd_inner
-            .disconnect_requested
-            .swap(false, Ordering::AcqRel)
-        {
+        if self.cmd_inner.disconnect_requested.load(Ordering::Acquire) {
             return Ok(Some(SessionCommand::Disconnect));
         }
         let mut st = self.cmd_inner.state.lock().unwrap();
@@ -699,6 +830,8 @@ pub fn create_session_channels(
             min_valid_input_epoch: 1,
             queue: VecDeque::with_capacity(command_cap.max(16)),
             recovery_latch: None,
+            active_recovery: None,
+            active_view_only: None,
             coalesced_moves: 0,
             high_water: 0,
         }),
@@ -951,6 +1084,7 @@ mod tests {
     fn non_coalescible_queue_saturation_purges_abandoned_presses_and_latches_recovery() {
         let (ui, worker) = create_session_channels(16, 16);
         let identity = SessionIdentity::new(1, 1, 1);
+        ui.set_active_identity(identity);
 
         // Fill all 16 slots with non-coalescible PhysicalKey presses in input_epoch 1
         for i in 0..16u16 {
@@ -999,12 +1133,7 @@ mod tests {
             .is_err());
 
         // Trigger latched recovery barrier for input_epoch 2 + SetViewOnly + Disconnect
-        ui.trigger_recovery(RecoveryBarrier {
-            identity,
-            input_epoch: 2,
-            barrier_id: 1,
-            reason: "Queue saturation".into(),
-        });
+        ui.request_recovery(identity, "Queue saturation").unwrap();
         ui.try_send_command(SessionCommand::SetViewOnly {
             identity,
             enabled: true,

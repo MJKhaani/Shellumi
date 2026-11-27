@@ -88,6 +88,14 @@ This document is the **canonical defect register** for Shellumi (baseline `72442
 - **Recommended Correction:** Generate and persist a random UUIDv4 installation identifier per installation on first launch.
 - **Verification Requirements:** Multi-device Drive sync test confirming distinct persisted installation IDs by default.
 
+### `RD-002` — Remote desktop P0 safety and acceptance remain incomplete
+- **Severity:** Critical
+- **Current Status:** Open
+- **Affected Operating Modes:** Remote Desktop (RDP and VNC)
+- **Affected Platforms:** macOS, Windows, Linux
+- **Details:** Recovery coordination and submission failures, download ownership and cleanup, upload revocation, initial policy, and session identity require further work and production-path verification. RDP download cleanup checks an ownership flag but does not verify that a pathname still identifies the original file. See [remote desktop acceptance](../qa/remote-desktop-acceptance.md) for the partial collision mitigation and acceptance limitations.
+- **Verification Requirements:** Complete the P0 regression evidence and platform/live acceptance; do not treat the existing Round 4 test names as full case coverage.
+
 ### `RD-001` — Ambiguous RDP resize timeouts can permit overlapping remote negotiations
 - **Severity:** Medium
 - **Current Status:** Open

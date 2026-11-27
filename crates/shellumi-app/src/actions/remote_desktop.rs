@@ -590,9 +590,24 @@ impl Shellumi {
                             shellumi_remote_desktop::SessionCommand::InputEnvelope(env),
                         ) {
                             if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
-                                let barrier =
-                                    ctrl.begin_recovery("View-only release admission failed");
-                                ui_handle.trigger_recovery(barrier);
+                                match ui_handle.request_recovery(
+                                    ctrl.identity(),
+                                    "View-only release admission failed",
+                                ) {
+                                    Ok(ticket) if ctrl.install_recovery(&ticket) => {}
+                                    Ok(_) => {
+                                        ctrl.block_recovery(
+                                            "Recovery ticket could not be installed",
+                                        );
+                                        tracing::error!(
+                                            "View-only recovery ticket could not be installed"
+                                        );
+                                    }
+                                    Err(error) => {
+                                        ctrl.block_recovery(&error);
+                                        tracing::warn!(%error, "View-only recovery rejected");
+                                    }
+                                }
                             }
                             rd.last_action_note =
                                 Some(format!("View-only release recovery triggered: {err}"));
@@ -978,10 +993,15 @@ impl Shellumi {
                                     transport_epoch,
                                 } => {
                                     if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
-                                        ctrl.reset_for_transport(rd.connection_generation, transport_epoch);
-                                        ctrl.view_only = rd.view_only;
-                                        if let Some(ui_handle) = &rd.ui_handle {
-                                            ctrl.input_epoch = ui_handle.set_active_identity(ctrl.identity());
+                                        let duplicate = ctrl.identity().transport_epoch == transport_epoch
+                                            && ctrl.identity().connection_generation == rd.connection_generation
+                                            && ctrl.identity().is_transport_bound();
+                                        if !duplicate {
+                                            ctrl.reset_for_transport(rd.connection_generation, transport_epoch);
+                                            ctrl.view_only = rd.view_only;
+                                            if let Some(ui_handle) = &rd.ui_handle {
+                                                ctrl.input_epoch = ui_handle.set_active_identity(ctrl.identity());
+                                            }
                                         }
                                     }
                                 }
@@ -1018,12 +1038,13 @@ impl Shellumi {
                                     reason,
                                 } => {
                                     if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
-                                        ctrl.ack_recovery(&identity, input_epoch, barrier_id, false, &reason);
+                                        if ctrl.ack_recovery(&identity, input_epoch, barrier_id, false, &reason) {
+                                            rd.view_only = true;
+                                            rd.last_action_note = Some(format!(
+                                                "Input recovery failed; session locked fail-closed: {reason}"
+                                            ));
+                                        }
                                     }
-                                    rd.view_only = true;
-                                    rd.last_action_note = Some(format!(
-                                        "Input recovery failed; session locked fail-closed: {reason}"
-                                    ));
                                 }
                                 shellumi_remote_desktop::SessionEvent::InputError {
                                     transport_epoch: _,
@@ -2397,8 +2418,19 @@ impl Shellumi {
                     if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
                         ctrl.counters.queue_full_errors += 1;
                         ctrl.counters.last_error_category = Some(err.clone());
-                        let barrier = ctrl.begin_recovery("Command queue admission failure");
-                        ui_handle.trigger_recovery(barrier);
+                        match ui_handle
+                            .request_recovery(ctrl.identity(), "Command queue admission failure")
+                        {
+                            Ok(ticket) if ctrl.install_recovery(&ticket) => {}
+                            Ok(_) => {
+                                ctrl.block_recovery("Recovery ticket could not be installed");
+                                tracing::error!("Input recovery ticket could not be installed");
+                            }
+                            Err(error) => {
+                                ctrl.block_recovery(&error);
+                                tracing::warn!(%error, "Input recovery rejected");
+                            }
+                        }
                     }
                     rd.last_action_note = Some(format!("Input recovery triggered: {err}"));
                     break;

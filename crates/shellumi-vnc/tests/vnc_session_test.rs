@@ -451,6 +451,8 @@ async fn test_vnc_session_runner_with_advanced_decoders_and_clipboard() {
 
     let (ui_handle, worker_handle) = create_session_channels(32, 64);
     let config = SessionConfig::new("127.0.0.1", 5900, RemoteProtocol::Vnc);
+    let identity = shellumi_remote_desktop::SessionIdentity::new(1, 1, 1);
+    ui_handle.set_active_identity(identity);
 
     let fb = Framebuffer::new(100, 100).unwrap();
 
@@ -476,7 +478,7 @@ async fn test_vnc_session_runner_with_advanced_decoders_and_clipboard() {
                 // Send client clipboard back
                 ui_handle
                     .try_send_command(SessionCommand::SendClipboard {
-                        identity: shellumi_remote_desktop::SessionIdentity::new(1, 1, 1),
+                        identity,
                         text: "Client clipboard test".into(),
                     })
                     .unwrap();
