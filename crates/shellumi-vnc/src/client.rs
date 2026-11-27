@@ -31,6 +31,9 @@ pub enum VncClientError {
     #[error("Network connection error: {0}")]
     Network(#[from] std::io::Error),
 
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+
     #[error("Connection timed out after {0:?}")]
     Timeout(Duration),
 }
@@ -367,6 +370,11 @@ where
     let mut tight_decoder = TightDecoder::new();
     let mut last_sent_clipboard: Option<String> = None;
     let mut last_received_clipboard: Option<String> = None;
+    let mut view_only = config.view_only;
+    let mut held_buttons: u8 = 0;
+    let mut last_pointer: (u16, u16) = (0, 0);
+    let mut scroll_acc_x: i32 = 0;
+    let mut scroll_acc_y: i32 = 0;
 
     // 10. Main RFB event loop
     loop {
@@ -375,28 +383,149 @@ where
             cmd_res = worker.recv_command() => {
                 match cmd_res {
                     Ok(cmd) => match cmd {
+                        SessionCommand::SetViewOnly { enabled, transition_id } => {
+                            if enabled && !view_only && held_buttons != 0 {
+                                held_buttons = 0;
+                                let packet = build_pointer_event(0, last_pointer.0, last_pointer.1);
+                                if let Err(err) = stream.write_all(&packet).await {
+                                    let err_msg = format!("VNC write failed: {err}");
+                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                    return Err(VncClientError::Network(err));
+                                }
+                                metrics.record_bytes_sent(packet.len() as u64);
+                            }
+                            view_only = enabled;
+                            let _ = worker.send_event(SessionEvent::ViewOnlyChanged { enabled, transition_id }).await;
+                        }
+                        SessionCommand::Input(input) => {
+                            let is_release = matches!(
+                                input,
+                                shellumi_remote_desktop::RemoteInput::ReleaseAll
+                                    | shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
+                                    | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
+                            );
+                            if !view_only || is_release {
+                                let bytes = translate_vnc_remote_input(
+                                    &input,
+                                    &mut held_buttons,
+                                    &mut last_pointer,
+                                    &mut scroll_acc_x,
+                                    &mut scroll_acc_y,
+                                    framebuffer.width(),
+                                    framebuffer.height(),
+                                );
+                                if !bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&bytes).await {
+                                        let err_msg = format!("VNC write failed: {err}");
+                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    metrics.record_bytes_sent(bytes.len() as u64);
+                                }
+                            }
+                        }
+                        SessionCommand::Shortcut(shortcut) => {
+                            if !view_only {
+                                let bytes = build_vnc_shortcut_packets(shortcut);
+                                if !bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&bytes).await {
+                                        let err_msg = format!("VNC write failed: {err}");
+                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    metrics.record_bytes_sent(bytes.len() as u64);
+                                }
+                            }
+                        }
                         SessionCommand::Pointer(p) => {
-                            let packet = build_pointer_event(p.button_mask, p.x as u16, p.y as u16);
-                            let _ = stream.write_all(&packet).await;
-                            metrics.record_bytes_sent(packet.len() as u64);
+                            if !view_only || !p.pressed {
+                                let x = (p.x.min(framebuffer.width().saturating_sub(1))).min(u16::MAX as u32) as u16;
+                                let y = (p.y.min(framebuffer.height().saturating_sub(1))).min(u16::MAX as u32) as u16;
+                                last_pointer = (x, y);
+                                if p.button_mask != 0 {
+                                    if p.pressed {
+                                        held_buttons |= p.button_mask;
+                                    } else {
+                                        held_buttons &= !p.button_mask;
+                                    }
+                                }
+                                let packet = build_pointer_event(held_buttons, x, y);
+                                if let Err(err) = stream.write_all(&packet).await {
+                                    let err_msg = format!("VNC write failed: {err}");
+                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                    return Err(VncClientError::Network(err));
+                                }
+                                metrics.record_bytes_sent(packet.len() as u64);
+                            }
+                        }
+                        SessionCommand::Wheel(w) => {
+                            if !view_only {
+                                let input = shellumi_remote_desktop::RemoteInput::Scroll {
+                                    x: w.x,
+                                    y: w.y,
+                                    horizontal: w.delta_x,
+                                    vertical: w.delta_y,
+                                };
+                                let bytes = translate_vnc_remote_input(
+                                    &input,
+                                    &mut held_buttons,
+                                    &mut last_pointer,
+                                    &mut scroll_acc_x,
+                                    &mut scroll_acc_y,
+                                    framebuffer.width(),
+                                    framebuffer.height(),
+                                );
+                                if !bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&bytes).await {
+                                        let err_msg = format!("VNC write failed: {err}");
+                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    metrics.record_bytes_sent(bytes.len() as u64);
+                                }
+                            }
                         }
                         SessionCommand::Key(k) => {
-                            let packet = build_key_event(k.pressed, k.keysym);
-                            let _ = stream.write_all(&packet).await;
-                            metrics.record_bytes_sent(packet.len() as u64);
+                            if !view_only || !k.pressed {
+                                let packet = build_key_event(k.pressed, k.keysym);
+                                if let Err(err) = stream.write_all(&packet).await {
+                                    let err_msg = format!("VNC write failed: {err}");
+                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                    return Err(VncClientError::Network(err));
+                                }
+                                metrics.record_bytes_sent(packet.len() as u64);
+                            }
+                        }
+                        SessionCommand::CtrlAltDel => {
+                            if !view_only {
+                                let bytes = build_vnc_shortcut_packets(shellumi_remote_desktop::RemoteShortcut::CtrlAltDel);
+                                if let Err(err) = stream.write_all(&bytes).await {
+                                    let err_msg = format!("VNC write failed: {err}");
+                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                    return Err(VncClientError::Network(err));
+                                }
+                                metrics.record_bytes_sent(bytes.len() as u64);
+                            }
                         }
                         SessionCommand::SendClipboard(text) => {
-                            // Bidirectional loop suppression: do not echo back identical server clipboard
-                            if last_received_clipboard.as_deref() != Some(&text) {
+                            if !view_only && last_received_clipboard.as_deref() != Some(&text) {
                                 last_sent_clipboard = Some(text.clone());
                                 let packet = build_client_cut_text(&text);
-                                let _ = stream.write_all(&packet).await;
+                                if let Err(err) = stream.write_all(&packet).await {
+                                    let err_msg = format!("VNC write failed: {err}");
+                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                    return Err(VncClientError::Network(err));
+                                }
                                 metrics.record_bytes_sent(packet.len() as u64);
                             }
                         }
                         SessionCommand::Refresh => {
                             let fbur = build_framebuffer_update_request(false, 0, 0, framebuffer.width() as u16, framebuffer.height() as u16);
-                            let _ = stream.write_all(&fbur).await;
+                            if let Err(err) = stream.write_all(&fbur).await {
+                                let err_msg = format!("VNC write failed: {err}");
+                                let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                return Err(VncClientError::Network(err));
+                            }
                             metrics.record_bytes_sent(fbur.len() as u64);
                         }
                         SessionCommand::Disconnect => {
@@ -509,30 +638,28 @@ where
                         metrics.record_bytes_received(7);
 
                         if len > MAX_CLIPBOARD_BYTES {
-                            // Defensive protection: discard oversized payload to prevent OOM
-                            let mut remaining = len;
-                            let mut discard_buf = [0u8; 4096];
-                            while remaining > 0 {
-                                let n = remaining.min(discard_buf.len());
-                                stream.read_exact(&mut discard_buf[..n]).await?;
-                                remaining -= n;
-                            }
-                            metrics.record_bytes_received(len as u64);
+                            return Err(VncClientError::Protocol(format!(
+                                "ServerCutText payload ({len} bytes) exceeds maximum limit ({MAX_CLIPBOARD_BYTES} bytes)"
+                            )));
                         } else {
                             let mut text_buf = vec![0u8; len];
                             stream.read_exact(&mut text_buf).await?;
                             metrics.record_bytes_received(len as u64);
 
-                            let text = String::from_utf8_lossy(&text_buf).into_owned();
-                            // Loop suppression: only propagate if not an echo of our own sent clipboard
-                            if last_sent_clipboard.as_deref() != Some(&text) {
+                            let text = crate::wire::decode_server_cut_text_latin1(&text_buf);
+                            // Bounded echo suppression: consume one matching echo, then allow future identical copies
+                            if last_sent_clipboard.as_deref() == Some(&text) {
+                                last_sent_clipboard = None;
+                            } else {
                                 last_received_clipboard = Some(text.clone());
                                 let _ = worker.send_event(SessionEvent::ServerClipboard(text)).await;
                             }
                         }
                     }
-                    _other => {
-                        // Unknown or unhandled server message
+                    other => {
+                        return Err(VncClientError::Protocol(format!(
+                            "Unsupported RFB server message type: {other}"
+                        )));
                     }
                 }
             }
@@ -543,4 +670,254 @@ where
         .send_event(SessionEvent::StateChanged(SessionState::Disconnected))
         .await;
     Ok(())
+}
+
+/// Translate a normalized `RemoteInput` into RFB wire packets, maintaining held-button
+/// bitmask and 120-unit wheel accumulators.
+pub fn translate_vnc_remote_input(
+    input: &shellumi_remote_desktop::RemoteInput,
+    held_buttons: &mut u8,
+    last_pointer: &mut (u16, u16),
+    scroll_acc_x: &mut i32,
+    scroll_acc_y: &mut i32,
+    fb_width: u32,
+    fb_height: u32,
+) -> Vec<u8> {
+    use shellumi_remote_desktop::RemoteInput;
+    let max_x = fb_width.saturating_sub(1).min(u16::MAX as u32) as u16;
+    let max_y = fb_height.saturating_sub(1).min(u16::MAX as u32) as u16;
+    let mut out = Vec::new();
+
+    match input {
+        RemoteInput::PointerMove { x, y } => {
+            let cx = (*x).min(max_x as u32) as u16;
+            let cy = (*y).min(max_y as u32) as u16;
+            *last_pointer = (cx, cy);
+            out.extend_from_slice(&build_pointer_event(*held_buttons, cx, cy));
+        }
+        RemoteInput::PointerButton { button, down, x, y } => {
+            let mask = button.bit_mask();
+            if mask == 0 {
+                return out;
+            }
+            if *down {
+                *held_buttons |= mask;
+            } else {
+                *held_buttons &= !mask;
+            }
+            let cx = (*x).min(max_x as u32) as u16;
+            let cy = (*y).min(max_y as u32) as u16;
+            *last_pointer = (cx, cy);
+            out.extend_from_slice(&build_pointer_event(*held_buttons, cx, cy));
+        }
+        RemoteInput::Scroll {
+            x,
+            y,
+            horizontal,
+            vertical,
+        } => {
+            let cx = (*x).min(max_x as u32) as u16;
+            let cy = (*y).min(max_y as u32) as u16;
+            *last_pointer = (cx, cy);
+
+            *scroll_acc_y += *vertical;
+            *scroll_acc_x += *horizontal;
+
+            // RFB wheel pulses: positive vertical = wheel up (bit 3 = 1<<3), negative = down (bit 4 = 1<<4).
+            let v_ticks = (*scroll_acc_y / 120).clamp(-16, 16);
+            *scroll_acc_y -= v_ticks * 120;
+            let v_bit = if v_ticks > 0 { 1u8 << 3 } else { 1u8 << 4 };
+            for _ in 0..v_ticks.abs() {
+                out.extend_from_slice(&build_pointer_event(*held_buttons | v_bit, cx, cy));
+                out.extend_from_slice(&build_pointer_event(*held_buttons, cx, cy));
+            }
+
+            // Horizontal wheel: positive = right (bit 6 = 1<<6), negative = left (bit 5 = 1<<5).
+            let h_ticks = (*scroll_acc_x / 120).clamp(-16, 16);
+            *scroll_acc_x -= h_ticks * 120;
+            let h_bit = if h_ticks > 0 { 1u8 << 6 } else { 1u8 << 5 };
+            for _ in 0..h_ticks.abs() {
+                out.extend_from_slice(&build_pointer_event(*held_buttons | h_bit, cx, cy));
+                out.extend_from_slice(&build_pointer_event(*held_buttons, cx, cy));
+            }
+        }
+        RemoteInput::PhysicalKey { key, down, .. } => {
+            if key.keysym != 0 {
+                out.extend_from_slice(&build_key_event(*down, key.keysym));
+            }
+        }
+        RemoteInput::CommittedText(text) => {
+            for ch in text.chars() {
+                let cp = ch as u32;
+                let keysym = if (0x0020..=0x007E).contains(&cp) || (0x00A0..=0x00FF).contains(&cp) {
+                    cp
+                } else {
+                    0x0100_0000 | cp
+                };
+                out.extend_from_slice(&build_key_event(true, keysym));
+                out.extend_from_slice(&build_key_event(false, keysym));
+            }
+        }
+        RemoteInput::Shortcut(shortcut) => {
+            out.extend_from_slice(&build_vnc_shortcut_packets(*shortcut));
+        }
+        RemoteInput::ReleaseAll => {
+            if *held_buttons != 0 {
+                *held_buttons = 0;
+                out.extend_from_slice(&build_pointer_event(0, last_pointer.0, last_pointer.1));
+            }
+        }
+    }
+    out
+}
+
+/// Build an ordered RFB `KeyEvent` sequence for a `RemoteShortcut`.
+pub fn build_vnc_shortcut_packets(shortcut: shellumi_remote_desktop::RemoteShortcut) -> Vec<u8> {
+    use shellumi_remote_desktop::RemoteShortcut;
+    const CTRL_L: u32 = 0xFFE3;
+    const ALT_L: u32 = 0xFFE9;
+    const SUPER_L: u32 = 0xFFEB;
+    const DELETE: u32 = 0xFFFF;
+    const TAB: u32 = 0xFF09;
+    const ESCAPE: u32 = 0xFF1B;
+
+    let mut out = Vec::new();
+    match shortcut {
+        RemoteShortcut::CtrlAltDel => {
+            for (down, sym) in [
+                (true, CTRL_L),
+                (true, ALT_L),
+                (true, DELETE),
+                (false, DELETE),
+                (false, ALT_L),
+                (false, CTRL_L),
+            ] {
+                out.extend_from_slice(&build_key_event(down, sym));
+            }
+        }
+        RemoteShortcut::AltTab => {
+            for (down, sym) in [(true, ALT_L), (true, TAB), (false, TAB), (false, ALT_L)] {
+                out.extend_from_slice(&build_key_event(down, sym));
+            }
+        }
+        RemoteShortcut::WinKey => {
+            out.extend_from_slice(&build_key_event(true, SUPER_L));
+            out.extend_from_slice(&build_key_event(false, SUPER_L));
+        }
+        RemoteShortcut::CtrlEscape => {
+            for (down, sym) in [
+                (true, CTRL_L),
+                (true, ESCAPE),
+                (false, ESCAPE),
+                (false, CTRL_L),
+            ] {
+                out.extend_from_slice(&build_key_event(down, sym));
+            }
+        }
+        RemoteShortcut::CtrlC => emit_vnc_ctrl_chord(&mut out, 0x0063),
+        RemoteShortcut::CtrlV => emit_vnc_ctrl_chord(&mut out, 0x0076),
+        RemoteShortcut::CtrlX => emit_vnc_ctrl_chord(&mut out, 0x0078),
+        RemoteShortcut::CtrlA => emit_vnc_ctrl_chord(&mut out, 0x0061),
+        RemoteShortcut::CtrlZ => emit_vnc_ctrl_chord(&mut out, 0x007A),
+    }
+    out
+}
+
+fn emit_vnc_ctrl_chord(out: &mut Vec<u8>, keysym: u32) {
+    const CTRL_L: u32 = 0xFFE3;
+    out.extend_from_slice(&build_key_event(true, CTRL_L));
+    out.extend_from_slice(&build_key_event(true, keysym));
+    out.extend_from_slice(&build_key_event(false, keysym));
+    out.extend_from_slice(&build_key_event(false, CTRL_L));
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use shellumi_remote_desktop::{MouseButton, RemoteInput, RemoteShortcut};
+
+    #[test]
+    fn vnc_pointer_maintains_held_buttons_and_wheel_pulses() {
+        let mut held = 0u8;
+        let mut last = (0, 0);
+        let mut sx = 0;
+        let mut sy = 0;
+
+        // Left down
+        let p1 = translate_vnc_remote_input(
+            &RemoteInput::PointerButton {
+                button: MouseButton::Left,
+                down: true,
+                x: 100,
+                y: 200,
+            },
+            &mut held,
+            &mut last,
+            &mut sx,
+            &mut sy,
+            1920,
+            1080,
+        );
+        assert_eq!(p1, build_pointer_event(1, 100, 200));
+
+        // Move while left held -> mask stays 1
+        let p2 = translate_vnc_remote_input(
+            &RemoteInput::PointerMove { x: 150, y: 250 },
+            &mut held,
+            &mut last,
+            &mut sx,
+            &mut sy,
+            1920,
+            1080,
+        );
+        assert_eq!(p2, build_pointer_event(1, 150, 250));
+
+        // Scroll up while left held -> pulses bit 3 (1 | 8 = 9), then restores 1
+        let p3 = translate_vnc_remote_input(
+            &RemoteInput::Scroll {
+                x: 150,
+                y: 250,
+                horizontal: 0,
+                vertical: 120,
+            },
+            &mut held,
+            &mut last,
+            &mut sx,
+            &mut sy,
+            1920,
+            1080,
+        );
+        assert_eq!(p3.len(), 12);
+        assert_eq!(&p3[..6], &build_pointer_event(9, 150, 250));
+        assert_eq!(&p3[6..12], &build_pointer_event(1, 150, 250));
+
+        // Left up -> mask becomes 0
+        let p4 = translate_vnc_remote_input(
+            &RemoteInput::PointerButton {
+                button: MouseButton::Left,
+                down: false,
+                x: 150,
+                y: 250,
+            },
+            &mut held,
+            &mut last,
+            &mut sx,
+            &mut sy,
+            1920,
+            1080,
+        );
+        assert_eq!(p4, build_pointer_event(0, 150, 250));
+    }
+
+    #[test]
+    fn vnc_ctrl_alt_del_emits_six_key_events() {
+        let bytes = build_vnc_shortcut_packets(RemoteShortcut::CtrlAltDel);
+        assert_eq!(bytes.len(), 48); // 6 * 8 bytes
+        assert_eq!(bytes[1], 1); // Ctrl down
+        assert_eq!(bytes[9], 1); // Alt down
+        assert_eq!(bytes[17], 1); // Del down
+        assert_eq!(bytes[25], 0); // Del up
+        assert_eq!(bytes[33], 0); // Alt up
+        assert_eq!(bytes[41], 0); // Ctrl up
+    }
 }

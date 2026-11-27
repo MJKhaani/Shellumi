@@ -209,6 +209,15 @@ impl Shellumi {
 
         self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);
+        self.rd_focus_handles.insert(tab_id, cx.focus_handle());
+        self.rd_input_controllers.insert(
+            tab_id,
+            shellumi_remote_desktop::RemoteInputController::new(
+                tab_id,
+                false,
+                shellumi_remote_desktop::InputCapabilities::default(),
+            ),
+        );
         window.focus(&self.focus);
         cx.notify();
 
@@ -385,10 +394,7 @@ impl Shellumi {
             audio_sample_rate: 44100,
             audio_channels: 2,
             audio_bytes_received: 0,
-            enable_microphone: match protocol {
-                RemoteDesktopProtocol::Vnc => false,
-                RemoteDesktopProtocol::Rdp => true,
-            },
+            enable_microphone: false,
             mic_muted: false,
             mic_volume: 100,
             mic_active: false,
@@ -424,10 +430,91 @@ impl Shellumi {
 
         self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);
+        self.rd_focus_handles.insert(tab_id, cx.focus_handle());
+        self.rd_input_controllers.insert(
+            tab_id,
+            shellumi_remote_desktop::RemoteInputController::new(
+                tab_id,
+                false,
+                shellumi_remote_desktop::InputCapabilities::default(),
+            ),
+        );
         window.focus(&self.focus);
         cx.notify();
     }
 
+    pub(crate) fn remote_desktop_send_shortcut(
+        &mut self,
+        tab_idx: usize,
+        shortcut: shellumi_remote_desktop::RemoteShortcut,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let Some(rd) = &mut tab.remote_desktop_state else {
+            return;
+        };
+        if rd.view_only {
+            rd.last_action_note = Some("View-only mode: shortcut blocked".into());
+            cx.notify();
+            return;
+        }
+        let ui_handle = rd.ui_handle.clone();
+        let proto = rd.protocol;
+        let is_connected = rd.status == RemoteDesktopStatus::Connected;
+
+        if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+            if let Err(reason) = ctrl.on_shortcut(shortcut) {
+                rd.last_action_note = Some(format!(
+                    "Shortcut {} rejected ({reason:?})",
+                    shortcut.label()
+                ));
+                cx.notify();
+                return;
+            }
+        }
+
+        if let Some(ui_handle) = ui_handle {
+            match ui_handle
+                .try_send_command(shellumi_remote_desktop::SessionCommand::Shortcut(shortcut))
+            {
+                Ok(()) => {
+                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                        ctrl.counters.enqueued += 1;
+                    }
+                    rd.last_action_note = Some(format!("Sent shortcut: {}", shortcut.label()));
+                    if is_connected {
+                        rd.status_message = Some(format!(
+                            "Shortcut {} queued for {}",
+                            shortcut.label(),
+                            match proto {
+                                RemoteDesktopProtocol::Vnc => "RFB",
+                                RemoteDesktopProtocol::Rdp => "RDP",
+                            }
+                        ));
+                    }
+                }
+                Err(err) => {
+                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                        ctrl.counters.queue_full_errors += 1;
+                        ctrl.counters.last_error_category = Some(err.clone());
+                    }
+                    rd.last_action_note =
+                        Some(format!("Failed to queue {}: {err}", shortcut.label()));
+                }
+            }
+        } else {
+            rd.last_action_note = Some(format!(
+                "Shortcut {} ignored (session not connected)",
+                shortcut.label()
+            ));
+        }
+        cx.notify();
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn remote_desktop_send_key(
         &mut self,
         tab_idx: usize,
@@ -435,53 +522,50 @@ impl Shellumi {
         keysym: u32,
         cx: &mut Context<Self>,
     ) {
+        let shortcut = match key_desc {
+            "Ctrl+Alt+Del" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlAltDel),
+            "Win/Super" => Some(shellumi_remote_desktop::RemoteShortcut::WinKey),
+            "Alt+Tab" => Some(shellumi_remote_desktop::RemoteShortcut::AltTab),
+            "Ctrl+Escape" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlEscape),
+            _ => None,
+        };
+        if let Some(sc) = shortcut {
+            self.remote_desktop_send_shortcut(tab_idx, sc, cx);
+            return;
+        }
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
-                // Real RFB key event serialization for client buffer
-                let _down_packet = build_rfb_key_event(true, keysym);
-                let _up_packet = build_rfb_key_event(false, keysym);
-
                 if let Some(ui_handle) = &rd.ui_handle {
-                    if key_desc == "Ctrl+Alt+Del" {
-                        let _ = ui_handle
-                            .try_send_command(shellumi_remote_desktop::SessionCommand::CtrlAltDel);
-                    } else {
-                        let _ = ui_handle.try_send_command(
-                            shellumi_remote_desktop::SessionCommand::Key(
-                                shellumi_remote_desktop::KeyEvent {
-                                    keysym,
-                                    scancode: 0,
-                                    pressed: true,
-                                    modifiers: shellumi_remote_desktop::KeyModifiers::default(),
-                                    text: None,
-                                },
-                            ),
-                        );
-                    }
-                }
-
-                if rd.status == RemoteDesktopStatus::Connected {
-                    rd.last_action_note = Some(format!("Sent keystroke: {key_desc}"));
-                    rd.status_message = Some(format!(
-                        "Keystroke {key_desc} transmitted over {}",
-                        match rd.protocol {
-                            RemoteDesktopProtocol::Vnc => "RFB",
-                            RemoteDesktopProtocol::Rdp => "RDP",
-                        }
-                    ));
-                } else {
-                    rd.last_action_note = Some(format!(
-                        "Keystroke {key_desc} buffered locally (not connected)"
-                    ));
-                    rd.status_message = Some(format!(
-                        "Keystroke {key_desc} received; live network transport in active development",
-                    ));
+                    let key = shellumi_remote_desktop::RemoteKey {
+                        keysym,
+                        scancode: 0,
+                        extended: false,
+                        is_modifier: false,
+                        key_name: key_desc.to_string(),
+                    };
+                    let _ =
+                        ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Input(
+                            shellumi_remote_desktop::RemoteInput::PhysicalKey {
+                                key: key.clone(),
+                                down: true,
+                                repeat: false,
+                            },
+                        ));
+                    let _ =
+                        ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Input(
+                            shellumi_remote_desktop::RemoteInput::PhysicalKey {
+                                key,
+                                down: false,
+                                repeat: false,
+                            },
+                        ));
                 }
                 cx.notify();
             }
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn remote_desktop_click_canvas(
         &mut self,
         tab_idx: usize,
@@ -566,9 +650,39 @@ impl Shellumi {
         cx: &mut Context<Self>,
     ) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let tab_id = tab.id;
             if let Some(rd) = &mut tab.remote_desktop_state {
-                rd.view_only = !rd.view_only;
-                rd.last_action_note = Some(if rd.view_only {
+                let next_enabled = !rd.view_only;
+                self.rd_view_only_transition_seq = self.rd_view_only_transition_seq.wrapping_add(1);
+                let transition_id = self.rd_view_only_transition_seq;
+
+                if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                    let releases = ctrl.set_view_only(next_enabled);
+                    if let Some(ui_handle) = &rd.ui_handle {
+                        for rel in releases {
+                            let _ = ui_handle.try_send_command(
+                                shellumi_remote_desktop::SessionCommand::Input(rel),
+                            );
+                        }
+                    }
+                }
+
+                if let Some(ui_handle) = &rd.ui_handle {
+                    if let Err(err) = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::SetViewOnly {
+                            enabled: next_enabled,
+                            transition_id,
+                        },
+                    ) {
+                        rd.last_action_note =
+                            Some(format!("Failed to update view-only policy: {err}"));
+                        cx.notify();
+                        return;
+                    }
+                }
+
+                rd.view_only = next_enabled;
+                rd.last_action_note = Some(if next_enabled {
                     "View-only mode activated".into()
                 } else {
                     "Interactive control enabled".into()
@@ -595,6 +709,16 @@ impl Shellumi {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             let tab_id = tab.id;
             if let Some(rd) = &mut tab.remote_desktop_state {
+                if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                    if let Some(ui_handle) = &rd.ui_handle {
+                        for rel in ctrl.release_all() {
+                            let _ = ui_handle.try_send_command(
+                                shellumi_remote_desktop::SessionCommand::Input(rel),
+                            );
+                        }
+                    }
+                    ctrl.connected = false;
+                }
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle
                         .try_send_command(shellumi_remote_desktop::SessionCommand::Disconnect);
@@ -694,8 +818,18 @@ impl Shellumi {
                 }
 
                 let (ui_handle, worker_handle) =
-                    shellumi_remote_desktop::create_session_channels(64, 256);
+                    shellumi_remote_desktop::create_session_channels(512, 256);
                 rd.ui_handle = Some(ui_handle.clone());
+                let ctrl = self.rd_input_controllers.entry(tab_id).or_insert_with(|| {
+                    shellumi_remote_desktop::RemoteInputController::new(
+                        tab_id,
+                        rd.view_only,
+                        shellumi_remote_desktop::InputCapabilities::default(),
+                    )
+                });
+                ctrl.reset_for_transport(rd.connection_generation, rd.connection_generation);
+                ctrl.view_only = rd.view_only;
+                ctrl.connected = false;
                 rd.status = RemoteDesktopStatus::Connecting;
                 rd.status_message = Some(format!(
                     "Connecting to {host}:{port} via {}…",
@@ -827,6 +961,9 @@ impl Shellumi {
                                         rd.status = RemoteDesktopStatus::Connected;
                                         rd.status_message =
                                             Some(format!("Connected to {proto_name} server"));
+                                        if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                            ctrl.connected = true;
+                                        }
                                         trigger_auto_resize = true;
                                     }
                                     shellumi_remote_desktop::SessionState::Reconnecting {
@@ -834,6 +971,10 @@ impl Shellumi {
                                         max_attempts,
                                         delay_ms,
                                     } => {
+                                        if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                            ctrl.release_all();
+                                            ctrl.connected = false;
+                                        }
                                         rd.status = RemoteDesktopStatus::Reconnecting {
                                             attempt,
                                             max_attempts,
@@ -846,6 +987,10 @@ impl Shellumi {
                                             Some(format!("Reconnecting ({attempt}/{max_attempts})"));
                                     }
                                     shellumi_remote_desktop::SessionState::Disconnected => {
+                                        if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                            ctrl.release_all();
+                                            ctrl.connected = false;
+                                        }
                                         if rd.status != RemoteDesktopStatus::Error
                                             && rd.error.is_none()
                                         {
@@ -856,12 +1001,25 @@ impl Shellumi {
                                         }
                                     }
                                     shellumi_remote_desktop::SessionState::Error(err) => {
+                                        if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                            ctrl.release_all();
+                                            ctrl.connected = false;
+                                        }
                                         rd.status = RemoteDesktopStatus::Error;
                                         rd.error = Some(err.clone());
                                         rd.status_message = Some(format!("Error: {err}"));
                                     }
                                     _ => {}
                                 },
+                                shellumi_remote_desktop::SessionEvent::ViewOnlyChanged {
+                                    enabled,
+                                    transition_id: _,
+                                } => {
+                                    rd.view_only = enabled;
+                                    if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                        ctrl.view_only = enabled;
+                                    }
+                                }
                                 shellumi_remote_desktop::SessionEvent::RemoteResize {
                                     width,
                                     height,
@@ -1744,6 +1902,462 @@ impl Shellumi {
     #[allow(dead_code)]
     pub(crate) fn request_measured_remote_resize(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         self.remote_desktop_match_viewport(tab_id, cx);
+    }
+
+    pub(crate) fn ensure_rd_focus_handle(
+        &mut self,
+        tab_id: u64,
+        cx: &mut Context<Self>,
+    ) -> FocusHandle {
+        self.rd_focus_handles
+            .entry(tab_id)
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
+    pub(crate) fn rd_canvas_transform_for_tab(
+        &self,
+        tab_id: u64,
+    ) -> Option<shellumi_remote_desktop::CanvasTransform> {
+        let tab = self.tabs.iter().find(|t| t.id == tab_id)?;
+        let rd = tab.remote_desktop_state.as_ref()?;
+        let m = self
+            .rd_canvas_measurements
+            .get(&tab_id)
+            .filter(|m| m.tab_id == tab_id && m.layout_epoch == self.layout_epoch)?;
+        let img = rd.render_image.as_ref()?;
+        let sz = img.size(0);
+        let fw = (sz.width.0.max(0) as u32).max(1);
+        let fh = (sz.height.0.max(0) as u32).max(1);
+        let mode = match rd.scale_mode {
+            RemoteDesktopScaleMode::Fit => shellumi_remote_desktop::ScaleMode::Fit,
+            RemoteDesktopScaleMode::Original => shellumi_remote_desktop::ScaleMode::Original,
+            RemoteDesktopScaleMode::Fill => shellumi_remote_desktop::ScaleMode::Fill,
+        };
+        let pan = self.rd_pan_state.get(&tab_id).copied().unwrap_or_default();
+        shellumi_remote_desktop::CanvasTransform::new(
+            (
+                f64::from(f32::from(m.viewport.origin.x)),
+                f64::from(f32::from(m.viewport.origin.y)),
+            ),
+            (
+                f64::from(f32::from(m.viewport.size.width)),
+                f64::from(f32::from(m.viewport.size.height)),
+            ),
+            (fw, fh),
+            mode,
+            (pan.x, pan.y),
+        )
+    }
+
+    fn dispatch_rd_inputs(
+        &mut self,
+        tab_id: u64,
+        inputs: Vec<shellumi_remote_desktop::RemoteInput>,
+    ) {
+        if inputs.is_empty() {
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(rd) = tab.remote_desktop_state.as_mut() else {
+            return;
+        };
+        let Some(ui_handle) = rd.ui_handle.as_ref() else {
+            return;
+        };
+        for input in inputs {
+            match ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Input(input))
+            {
+                Ok(()) => {
+                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                        ctrl.counters.enqueued += 1;
+                    }
+                }
+                Err(err) => {
+                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                        ctrl.counters.queue_full_errors += 1;
+                        ctrl.counters.last_error_category = Some(err.clone());
+                    }
+                    rd.last_action_note = Some(format!("Input dispatch error: {err}"));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_release_all_for_tab(&mut self, tab_id: u64) {
+        let releases = if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+            ctrl.focused = false;
+            ctrl.release_all()
+        } else {
+            Vec::new()
+        };
+        self.dispatch_rd_inputs(tab_id, releases);
+    }
+
+    pub(crate) fn remote_desktop_handle_mouse_down(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fh = self.ensure_rd_focus_handle(tab_id, cx);
+        window.focus(&fh);
+
+        let button = match gpui_button_to_domain(event.button) {
+            Some(b) => b,
+            None => return,
+        };
+        let tx = self.rd_canvas_transform_for_tab(tab_id);
+        let (win_x, win_y) = (event.position.x.to_f64(), event.position.y.to_f64());
+
+        let result = {
+            let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                return;
+            };
+            ctrl.on_pointer_down(button, win_x, win_y, tx.as_ref())
+        };
+        if let Ok(inputs) = result {
+            self.dispatch_rd_inputs(tab_id, inputs);
+        }
+    }
+
+    pub(crate) fn remote_desktop_handle_mouse_up(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::MouseUpEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        let button = match gpui_button_to_domain(event.button) {
+            Some(b) => b,
+            None => return,
+        };
+        let tx = self.rd_canvas_transform_for_tab(tab_id);
+        let (win_x, win_y) = (event.position.x.to_f64(), event.position.y.to_f64());
+
+        let result = {
+            let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                return;
+            };
+            ctrl.on_pointer_up(button, win_x, win_y, tx.as_ref())
+        };
+        if let Ok(inputs) = result {
+            self.dispatch_rd_inputs(tab_id, inputs);
+        }
+    }
+
+    pub(crate) fn remote_desktop_handle_mouse_move(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::MouseMoveEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        let tx = self.rd_canvas_transform_for_tab(tab_id);
+        let (win_x, win_y) = (event.position.x.to_f64(), event.position.y.to_f64());
+
+        let result = {
+            let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                return;
+            };
+            ctrl.on_pointer_move(win_x, win_y, tx.as_ref())
+        };
+        if let Ok(inputs) = result {
+            self.dispatch_rd_inputs(tab_id, inputs);
+        }
+    }
+
+    pub(crate) fn remote_desktop_handle_scroll_wheel(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::ScrollWheelEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        let tx = self.rd_canvas_transform_for_tab(tab_id);
+        let (win_x, win_y) = (event.position.x.to_f64(), event.position.y.to_f64());
+        let (dx, dy, is_pixels) = match event.delta {
+            gpui::ScrollDelta::Pixels(pt) => (pt.x.to_f64(), pt.y.to_f64(), true),
+            gpui::ScrollDelta::Lines(pt) => (f64::from(pt.x), f64::from(pt.y), false),
+        };
+
+        let result = {
+            let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                return;
+            };
+            ctrl.on_scroll(win_x, win_y, dx, dy, is_pixels, tx.as_ref())
+        };
+        if let Ok(inputs) = result {
+            self.dispatch_rd_inputs(tab_id, inputs);
+        }
+    }
+
+    pub(crate) fn remote_desktop_handle_key_down(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &event.keystroke;
+        // Explicit local escape-focus chord: Ctrl+Alt+Escape releases remote keyboard capture
+        if ks.key == "escape" && ks.modifiers.control && ks.modifiers.alt {
+            self.remote_desktop_release_all_for_tab(tab_id);
+            window.focus(&self.focus);
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                if let Some(rd) = &mut tab.remote_desktop_state {
+                    rd.last_action_note = Some("Released remote keyboard focus".into());
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        // macOS convenience mapping for Cmd+C/V/X/A/Z when enabled
+        if self.rd_keyboard_mapping
+            == shellumi_remote_desktop::KeyboardMappingMode::MacToWindowsLinux
+            && ks.modifiers.platform
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+        {
+            let shortcut = match ks.key.as_str() {
+                "c" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlC),
+                "v" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlV),
+                "x" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlX),
+                "a" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlA),
+                "z" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlZ),
+                _ => None,
+            };
+            if let Some(sc) = shortcut {
+                if let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) {
+                    self.remote_desktop_send_shortcut(tab_idx, sc, cx);
+                }
+                return;
+            }
+        }
+
+        if let Some(remote_key) = gpui_keystroke_to_remote_key(ks) {
+            let result = {
+                let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                    return;
+                };
+                ctrl.on_key_down(ks.key.clone(), remote_key, event.is_held)
+            };
+            if let Ok(inputs) = result {
+                self.dispatch_rd_inputs(tab_id, inputs);
+            }
+        } else if let Some(ch_str) = ks.key_char.as_deref().filter(|s| !s.is_empty()) {
+            let result = {
+                let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                    return;
+                };
+                ctrl.on_committed_text(ch_str)
+            };
+            if let Ok(inputs) = result {
+                self.dispatch_rd_inputs(tab_id, inputs);
+            }
+        }
+    }
+
+    pub(crate) fn remote_desktop_handle_key_up(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::KeyUpEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        let result = {
+            let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                return;
+            };
+            ctrl.on_key_up(&event.keystroke.key)
+        };
+        if let Ok(inputs) = result {
+            self.dispatch_rd_inputs(tab_id, inputs);
+        }
+    }
+
+    pub(crate) fn remote_desktop_handle_modifiers_changed(
+        &mut self,
+        tab_id: u64,
+        event: &gpui::ModifiersChangedEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        let new_mods = shellumi_remote_desktop::KeyModifiers {
+            shift: event.modifiers.shift,
+            ctrl: event.modifiers.control,
+            alt: event.modifiers.alt,
+            meta: event.modifiers.platform,
+        };
+        let mut inputs = Vec::new();
+        if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+            if !ctrl.connected || ctrl.view_only {
+                return;
+            }
+            let old = ctrl.modifiers;
+            ctrl.modifiers = new_mods;
+            for (was, is, id, keysym, scancode, extended) in [
+                (
+                    old.shift,
+                    new_mods.shift,
+                    "shift",
+                    0xFFE1u32,
+                    0x2Au16,
+                    false,
+                ),
+                (old.ctrl, new_mods.ctrl, "control", 0xFFE3, 0x1D, false),
+                (old.alt, new_mods.alt, "alt", 0xFFE9, 0x38, false),
+                (old.meta, new_mods.meta, "platform", 0xFFEB, 0x5B, true),
+            ] {
+                if was != is {
+                    let key = shellumi_remote_desktop::RemoteKey {
+                        keysym,
+                        scancode,
+                        extended,
+                        is_modifier: true,
+                        key_name: id.to_string(),
+                    };
+                    if is {
+                        if let Ok(ev) = ctrl.on_key_down(id, key, false) {
+                            inputs.extend(ev);
+                        }
+                    } else if let Ok(ev) = ctrl.on_key_up(id) {
+                        inputs.extend(ev);
+                    }
+                }
+            }
+        }
+        self.dispatch_rd_inputs(tab_id, inputs);
+    }
+}
+
+fn gpui_button_to_domain(
+    button: gpui::MouseButton,
+) -> Option<shellumi_remote_desktop::MouseButton> {
+    match button {
+        gpui::MouseButton::Left => Some(shellumi_remote_desktop::MouseButton::Left),
+        gpui::MouseButton::Middle => Some(shellumi_remote_desktop::MouseButton::Middle),
+        gpui::MouseButton::Right => Some(shellumi_remote_desktop::MouseButton::Right),
+        gpui::MouseButton::Navigate(gpui::NavigationDirection::Back) => {
+            Some(shellumi_remote_desktop::MouseButton::Button4)
+        }
+        gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward) => {
+            Some(shellumi_remote_desktop::MouseButton::Button5)
+        }
+    }
+}
+
+pub(crate) fn gpui_keystroke_to_remote_key(
+    ks: &gpui::Keystroke,
+) -> Option<shellumi_remote_desktop::RemoteKey> {
+    let name = ks.key.as_str();
+    let (keysym, scancode, extended, is_modifier) = match name {
+        "escape" => (0xFF1B, 0x01, false, false),
+        "backspace" => (0xFF08, 0x0E, false, false),
+        "tab" => (0xFF09, 0x0F, false, false),
+        "enter" | "return" => (0xFF0D, 0x1C, false, false),
+        "space" | " " => (0x0020, 0x39, false, false),
+        "left" => (0xFF51, 0x4B, true, false),
+        "up" => (0xFF52, 0x48, true, false),
+        "right" => (0xFF53, 0x4D, true, false),
+        "down" => (0xFF54, 0x50, true, false),
+        "home" => (0xFF50, 0x47, true, false),
+        "end" => (0xFF57, 0x4F, true, false),
+        "pageup" => (0xFF55, 0x49, true, false),
+        "pagedown" => (0xFF56, 0x51, true, false),
+        "insert" => (0xFF63, 0x52, true, false),
+        "delete" => (0xFFFF, 0x53, true, false),
+        "f1" => (0xFFBE, 0x3B, false, false),
+        "f2" => (0xFFBF, 0x3C, false, false),
+        "f3" => (0xFFC0, 0x3D, false, false),
+        "f4" => (0xFFC1, 0x3E, false, false),
+        "f5" => (0xFFC2, 0x3F, false, false),
+        "f6" => (0xFFC3, 0x40, false, false),
+        "f7" => (0xFFC4, 0x41, false, false),
+        "f8" => (0xFFC5, 0x42, false, false),
+        "f9" => (0xFFC6, 0x43, false, false),
+        "f10" => (0xFFC7, 0x44, false, false),
+        "f11" => (0xFFC8, 0x57, false, false),
+        "f12" => (0xFFC9, 0x58, false, false),
+        "shift" => (0xFFE1, 0x2A, false, true),
+        "control" | "ctrl" => (0xFFE3, 0x1D, false, true),
+        "alt" => (0xFFE9, 0x38, false, true),
+        "platform" | "cmd" | "super" | "win" => (0xFFEB, 0x5B, true, true),
+        _ => {
+            let ch = name.chars().next().filter(|_| name.chars().count() == 1)?;
+            let sc = ascii_char_to_scancode(ch);
+            let cp = ch as u32;
+            let keysym = if (0x0020..=0x007E).contains(&cp) || (0x00A0..=0x00FF).contains(&cp) {
+                cp
+            } else {
+                0x0100_0000 | cp
+            };
+            if sc != 0 || keysym != 0 {
+                (keysym, sc, false, false)
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(shellumi_remote_desktop::RemoteKey {
+        keysym,
+        scancode,
+        extended,
+        is_modifier,
+        key_name: name.to_string(),
+    })
+}
+
+fn ascii_char_to_scancode(ch: char) -> u16 {
+    match ch.to_ascii_lowercase() {
+        '1' | '!' => 0x02,
+        '2' | '@' => 0x03,
+        '3' | '#' => 0x04,
+        '4' | '$' => 0x05,
+        '5' | '%' => 0x06,
+        '6' | '^' => 0x07,
+        '7' | '&' => 0x08,
+        '8' | '*' => 0x09,
+        '9' | '(' => 0x0A,
+        '0' | ')' => 0x0B,
+        '-' | '_' => 0x0C,
+        '=' | '+' => 0x0D,
+        'q' => 0x10,
+        'w' => 0x11,
+        'e' => 0x12,
+        'r' => 0x13,
+        't' => 0x14,
+        'y' => 0x15,
+        'u' => 0x16,
+        'i' => 0x17,
+        'o' => 0x18,
+        'p' => 0x19,
+        '[' | '{' => 0x1A,
+        ']' | '}' => 0x1B,
+        'a' => 0x1E,
+        's' => 0x1F,
+        'd' => 0x20,
+        'f' => 0x21,
+        'g' => 0x22,
+        'h' => 0x23,
+        'j' => 0x24,
+        'k' => 0x25,
+        'l' => 0x26,
+        ';' | ':' => 0x27,
+        '\'' | '"' => 0x28,
+        '`' | '~' => 0x29,
+        '\\' | '|' => 0x2B,
+        'z' => 0x2C,
+        'x' => 0x2D,
+        'c' => 0x2E,
+        'v' => 0x2F,
+        'b' => 0x30,
+        'n' => 0x31,
+        'm' => 0x32,
+        ',' | '<' => 0x33,
+        '.' | '>' => 0x34,
+        '/' | '?' => 0x35,
+        ' ' => 0x39,
+        _ => 0,
     }
 }
 

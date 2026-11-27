@@ -709,9 +709,8 @@ impl DvcProcessor for ShellumiRdpeaiClient {
                 self.state.set_sample_rate(chosen_fmt.samples_per_sec);
                 self.state.set_channels(chosen_fmt.channels);
                 self.state.set_ready(true);
-                self.state.set_recording(true);
 
-                // Start native cpal audio capture
+                // Start native cpal audio capture BEFORE marking recording or replying S_OK
                 self.capture_handle = start_audio_capture(
                     self.state.clone(),
                     self.event_tx.clone(),
@@ -720,18 +719,35 @@ impl DvcProcessor for ShellumiRdpeaiClient {
                     chosen_fmt.channels,
                 );
 
+                let open_ok = self.capture_handle.is_some();
+                self.state.set_recording(open_ok);
                 let _ = self.event_tx.try_send(self.state.status_snapshot());
 
-                // Respond with OpenReply (S_OK = 0)
-                let reply = RdpeaiPdu::OpenReply(0);
+                let reply_code: u32 = if open_ok { 0 } else { 0x8000_4005 }; // S_OK or E_FAIL
+                let reply = RdpeaiPdu::OpenReply(reply_code);
                 Ok(vec![Box::new(reply)])
             }
             ServerRdpeaiMessage::FormatChange(new_format) => {
                 info!(new_format, "Server requested RDPEAI format change");
                 let idx = (new_format as usize).min(self.supported_formats.len() - 1);
                 let chosen_fmt = self.supported_formats[idx];
+                let was_recording = self.state.is_recording();
+                if let Some(handle) = self.capture_handle.take() {
+                    handle.stop();
+                }
                 self.state.set_sample_rate(chosen_fmt.samples_per_sec);
                 self.state.set_channels(chosen_fmt.channels);
+                if was_recording {
+                    self.capture_handle = start_audio_capture(
+                        self.state.clone(),
+                        self.event_tx.clone(),
+                        channel_id,
+                        chosen_fmt.samples_per_sec,
+                        chosen_fmt.channels,
+                    );
+                    self.state.set_recording(self.capture_handle.is_some());
+                }
+                let _ = self.event_tx.try_send(self.state.status_snapshot());
 
                 let reply = RdpeaiPdu::FormatChange(new_format);
                 Ok(vec![Box::new(reply)])

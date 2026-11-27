@@ -1,7 +1,7 @@
 //! Native GPUI remote desktop canvas renderer directly consuming shared framebuffer frames.
 
 use super::*;
-use gpui::{ClickEvent, ObjectFit, RenderImage};
+use gpui::{MouseButton, ObjectFit, RenderImage};
 use shellumi_remote_desktop::{CanvasTransform, FramebufferSnapshot, PanState, ScaleMode};
 use std::sync::Arc;
 
@@ -287,61 +287,73 @@ impl Shellumi {
                 .h_full()
                 .overflow_hidden()
                 .bg(rgb(0x0c0f14))
-                .cursor_pointer()
-                .on_click(cx.listener(move |app, event: &ClickEvent, _window, cx| {
-                    let Some(pos) = event.mouse_position() else {
-                        return;
-                    };
-                    let Some(cur_tab_idx) = app.tabs.iter().position(|t| t.id == tab_id) else {
-                        return;
-                    };
-                    let Some(cur_rd) = app.tabs[cur_tab_idx].remote_desktop_state.as_ref() else {
-                        return;
-                    };
-                    if cur_rd.view_only {
-                        return;
-                    }
-                    let Some(m) = app
-                        .rd_canvas_measurements
-                        .get(&tab_id)
-                        .filter(|m| m.tab_id == tab_id && m.layout_epoch == app.layout_epoch)
-                    else {
-                        // Never fall back to estimated geometry when measurement is missing or stale.
-                        return;
-                    };
-                    let Some(img) = cur_rd.render_image.as_ref() else {
-                        return;
-                    };
-                    let sz = img.size(0);
-                    let cur_fw = sz.width.0.max(0) as u32;
-                    let cur_fh = sz.height.0.max(0) as u32;
-                    let cur_mode = match cur_rd.scale_mode {
-                        RemoteDesktopScaleMode::Fit => ScaleMode::Fit,
-                        RemoteDesktopScaleMode::Original => ScaleMode::Original,
-                        RemoteDesktopScaleMode::Fill => ScaleMode::Fill,
-                    };
-                    let cur_pan = app.rd_pan_state.get(&tab_id).copied().unwrap_or_default();
-                    let Some(tx) = CanvasTransform::new(
-                        (
-                            f64::from(f32::from(m.viewport.origin.x)),
-                            f64::from(f32::from(m.viewport.origin.y)),
-                        ),
-                        (
-                            f64::from(f32::from(m.viewport.size.width)),
-                            f64::from(f32::from(m.viewport.size.height)),
-                        ),
-                        (cur_fw, cur_fh),
-                        cur_mode,
-                        (cur_pan.x, cur_pan.y),
-                    ) else {
-                        return;
-                    };
+                .key_context("RemoteDesktop");
 
-                    if let Some((remote_x, remote_y)) =
-                        tx.map_window_point_to_remote(pos.x.to_f64(), pos.y.to_f64())
-                    {
-                        app.remote_desktop_click_canvas(cur_tab_idx, remote_x, remote_y, cx);
-                    }
+            if let Some(fh) = self.rd_focus_handles.get(&tab_id) {
+                viewport_container = viewport_container.track_focus(fh);
+            }
+
+            viewport_container = viewport_container
+                .on_any_mouse_down(cx.listener(move |app, event, window, cx| {
+                    cx.stop_propagation();
+                    app.remote_desktop_handle_mouse_down(tab_id, event, window, cx);
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |app, event, _window, cx| {
+                        cx.stop_propagation();
+                        app.remote_desktop_handle_mouse_up(tab_id, event, cx);
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Right,
+                    cx.listener(move |app, event, _window, cx| {
+                        cx.stop_propagation();
+                        app.remote_desktop_handle_mouse_up(tab_id, event, cx);
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |app, event, _window, cx| {
+                        cx.stop_propagation();
+                        app.remote_desktop_handle_mouse_up(tab_id, event, cx);
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(move |app, event, _window, cx| {
+                        app.remote_desktop_handle_mouse_up(tab_id, event, cx);
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Right,
+                    cx.listener(move |app, event, _window, cx| {
+                        app.remote_desktop_handle_mouse_up(tab_id, event, cx);
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Middle,
+                    cx.listener(move |app, event, _window, cx| {
+                        app.remote_desktop_handle_mouse_up(tab_id, event, cx);
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |app, event, _window, cx| {
+                    app.remote_desktop_handle_mouse_move(tab_id, event, cx);
+                }))
+                .on_scroll_wheel(cx.listener(move |app, event, _window, cx| {
+                    cx.stop_propagation();
+                    app.remote_desktop_handle_scroll_wheel(tab_id, event, cx);
+                }))
+                .on_key_down(cx.listener(move |app, event, window, cx| {
+                    cx.stop_propagation();
+                    app.remote_desktop_handle_key_down(tab_id, event, window, cx);
+                }))
+                .on_key_up(cx.listener(move |app, event, _window, cx| {
+                    cx.stop_propagation();
+                    app.remote_desktop_handle_key_up(tab_id, event, cx);
+                }))
+                .on_modifiers_changed(cx.listener(move |app, event, _window, cx| {
+                    app.remote_desktop_handle_modifiers_changed(tab_id, event, cx);
                 }))
                 .child(bounds_sensor);
 

@@ -12,14 +12,16 @@ use std::sync::{Arc, Mutex};
 use ironrdp_core::impl_as_any;
 use ironrdp_pdu::PduResult;
 use ironrdp_rdpdr::pdu::efs::{
-    DeviceControlRequest, NtStatus, PrinterIoRequest, ServerDeviceAnnounceResponse,
-    ServerDriveIoRequest,
+    CreateDisposition, CreateOptions, DesiredAccess, DeviceControlRequest, DeviceCreateResponse,
+    DeviceIoResponse, DeviceWriteResponse, Information, NtStatus, PrinterIoRequest,
+    ServerDeviceAnnounceResponse, ServerDriveIoRequest,
 };
 use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
+use ironrdp_rdpdr::pdu::RdpdrPdu;
 use ironrdp_rdpdr::{Rdpdr, RdpdrBackend};
 use ironrdp_svc::SvcMessage;
 use shellumi_remote_desktop::SessionEvent;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Default device identifier for the primary redirected drive.
 pub const DEFAULT_DRIVE_DEVICE_ID: u32 = 1;
@@ -42,13 +44,14 @@ pub struct DriveControlState {
     drive_name: Arc<Mutex<String>>,
     local_path: Arc<Mutex<PathBuf>>,
     mounted: Arc<AtomicBool>,
+    read_only: Arc<AtomicBool>,
     bytes_read: Arc<AtomicU64>,
     bytes_written: Arc<AtomicU64>,
     operations_count: Arc<AtomicU64>,
 }
 
 impl DriveControlState {
-    /// Create a new `DriveControlState` for a designated local path.
+    /// Create a new `DriveControlState` for a designated local path (read-only by default).
     pub fn new(
         device_id: u32,
         drive_name: impl Into<String>,
@@ -59,10 +62,21 @@ impl DriveControlState {
             drive_name: Arc::new(Mutex::new(drive_name.into())),
             local_path: Arc::new(Mutex::new(local_path.into())),
             mounted: Arc::new(AtomicBool::new(false)),
+            read_only: Arc::new(AtomicBool::new(true)),
             bytes_read: Arc::new(AtomicU64::new(0)),
             bytes_written: Arc::new(AtomicU64::new(0)),
             operations_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Returns true if the redirected drive enforces read-only access.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Relaxed)
+    }
+
+    /// Set read-only enforcement on the redirected drive.
+    pub fn set_read_only(&self, read_only: bool) {
+        self.read_only.store(read_only, Ordering::Relaxed);
     }
 
     /// 32-bit device identifier.
@@ -238,6 +252,68 @@ impl RdpdrBackend for ShellumiRdpdrBackend {
 
         self.state.record_operation();
 
+        // Enforce strict path containment on Create requests
+        if let ServerDriveIoRequest::ServerCreateDriveRequest(ref create_req) = req {
+            if let Err(status) = validate_drive_relative_path(&self.active_path, &create_req.path) {
+                warn!(path = %create_req.path, "Blocked RDPDR path escape attempt");
+                return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                    DeviceCreateResponse {
+                        device_io_reply: DeviceIoResponse::new(
+                            create_req.device_io_request.clone(),
+                            status,
+                        ),
+                        file_id: 0,
+                        information: Information::empty(),
+                    },
+                ))]);
+            }
+
+            if self.state.is_read_only() && is_mutating_create(create_req) {
+                debug!(path = %create_req.path, "Denied mutating Create on read-only RDPDR share");
+                return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                    DeviceCreateResponse {
+                        device_io_reply: DeviceIoResponse::new(
+                            create_req.device_io_request.clone(),
+                            NtStatus::ACCESS_DENIED,
+                        ),
+                        file_id: 0,
+                        information: Information::empty(),
+                    },
+                ))]);
+            }
+        }
+
+        // Enforce read-only policy on Write and SetInformation
+        if self.state.is_read_only() {
+            match &req {
+                ServerDriveIoRequest::DeviceWriteRequest(w) => {
+                    return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceWriteResponse(
+                        DeviceWriteResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                w.device_io_request.clone(),
+                                NtStatus::ACCESS_DENIED,
+                            ),
+                            length: 0,
+                        },
+                    ))]);
+                }
+                ServerDriveIoRequest::ServerDriveSetInformationRequest(s) => {
+                    if let Ok(resp) =
+                        ironrdp_rdpdr::pdu::efs::ClientDriveSetInformationResponse::new(
+                            s,
+                            NtStatus::ACCESS_DENIED,
+                        )
+                    {
+                        return Ok(vec![SvcMessage::from(
+                            RdpdrPdu::ClientDriveSetInformationResponse(resp),
+                        )]);
+                    }
+                    return Ok(Vec::new());
+                }
+                _ => {}
+            }
+        }
+
         let mut read_requested_len = 0u64;
         match &req {
             ServerDriveIoRequest::DeviceWriteRequest(w) => {
@@ -329,7 +405,8 @@ pub fn create_rdpdr_channel(
         ));
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let native_backend: Box<dyn RdpdrBackend> = Box::new(ironrdp_rdpdr::NoopRdpdrBackend);
+    let native_backend: Box<dyn RdpdrBackend> =
+        Box::new(ShellumiFsRdpdrBackend::new(local_path.clone()));
 
     let shellumi_backend = ShellumiRdpdrBackend::new(native_backend, state, event_tx);
 
@@ -342,4 +419,343 @@ pub fn create_rdpdr_channel(
 
     Rdpdr::new(Box::new(shellumi_backend), "Shellumi".to_string())
         .with_drives(Some(vec![(dev_id, drive_name)]))
+}
+
+/// Validate that a server-supplied RDPDR path stays strictly inside `root`.
+/// Rejects `..`, drive/ADS `:`, NUL bytes, and symlink escapes.
+pub fn validate_drive_relative_path(root: &Path, rel: &str) -> Result<PathBuf, NtStatus> {
+    if rel.contains('\0') || rel.contains(':') {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    let normalized = rel.replace('\\', "/");
+    let mut candidate = root.to_path_buf();
+    for comp in normalized.split('/') {
+        if comp.is_empty() || comp == "." {
+            continue;
+        }
+        if comp == ".." {
+            return Err(NtStatus::ACCESS_DENIED);
+        }
+        candidate.push(comp);
+        if let Ok(meta) = std::fs::symlink_metadata(&candidate) {
+            if meta.file_type().is_symlink() {
+                return Err(NtStatus::ACCESS_DENIED);
+            }
+        }
+    }
+    if let (Ok(canon_root), Ok(canon_target)) = (root.canonicalize(), candidate.canonicalize()) {
+        if !canon_target.starts_with(&canon_root) {
+            return Err(NtStatus::ACCESS_DENIED);
+        }
+    }
+    Ok(candidate)
+}
+
+fn is_mutating_create(req: &ironrdp_rdpdr::pdu::efs::DeviceCreateRequest) -> bool {
+    let disp = req.create_disposition;
+    if disp == CreateDisposition::FILE_CREATE
+        || disp == CreateDisposition::FILE_SUPERSEDE
+        || disp == CreateDisposition::FILE_OVERWRITE
+        || disp == CreateDisposition::FILE_OVERWRITE_IF
+    {
+        return true;
+    }
+    if req
+        .create_options
+        .contains(CreateOptions::FILE_DELETE_ON_CLOSE)
+    {
+        return true;
+    }
+    let write_mask = DesiredAccess::FILE_WRITE_DATA_OR_FILE_ADD_FILE
+        | DesiredAccess::FILE_APPEND_DATA_OR_FILE_ADD_SUBDIRECTORY
+        | DesiredAccess::FILE_WRITE_EA
+        | DesiredAccess::FILE_DELETE_CHILD
+        | DesiredAccess::FILE_WRITE_ATTRIBUTES
+        | DesiredAccess::DELETE
+        | DesiredAccess::WRITE_DAC
+        | DesiredAccess::WRITE_OWNER
+        | DesiredAccess::GENERIC_ALL;
+    // Also check GENERIC_WRITE (0x4000_0000)
+    req.desired_access.intersects(write_mask) || (req.desired_access.bits() & 0x4000_0000) != 0
+}
+
+/// Cross-platform `std::fs`-backed RDPDR filesystem backend (used on Windows instead of `NoopRdpdrBackend`).
+#[derive(Debug)]
+pub struct ShellumiFsRdpdrBackend {
+    root: PathBuf,
+    next_file_id: u32,
+    files: std::collections::HashMap<u32, (PathBuf, Option<std::fs::File>)>,
+}
+
+impl ShellumiFsRdpdrBackend {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            next_file_id: 1,
+            files: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl_as_any!(ShellumiFsRdpdrBackend);
+
+impl RdpdrBackend for ShellumiFsRdpdrBackend {
+    fn handle_server_device_announce_response(
+        &mut self,
+        _pdu: ServerDeviceAnnounceResponse,
+    ) -> PduResult<()> {
+        Ok(())
+    }
+
+    fn handle_scard_call(
+        &mut self,
+        _req: DeviceControlRequest<ScardIoCtlCode>,
+        _call: ScardCall,
+    ) -> PduResult<()> {
+        Ok(())
+    }
+
+    fn handle_drive_io_request(&mut self, req: ServerDriveIoRequest) -> PduResult<Vec<SvcMessage>> {
+        use ironrdp_rdpdr::pdu::efs::*;
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        match req {
+            ServerDriveIoRequest::ServerCreateDriveRequest(c) => {
+                let target = match validate_drive_relative_path(&self.root, &c.path) {
+                    Ok(p) => p,
+                    Err(status) => {
+                        return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                            DeviceCreateResponse {
+                                device_io_reply: DeviceIoResponse::new(c.device_io_request, status),
+                                file_id: 0,
+                                information: Information::empty(),
+                            },
+                        ))]);
+                    }
+                };
+                if target.is_dir() {
+                    let fid = self.next_file_id;
+                    self.next_file_id = self.next_file_id.wrapping_add(1).max(1);
+                    self.files.insert(fid, (target, None));
+                    return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                        DeviceCreateResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                c.device_io_request,
+                                NtStatus::SUCCESS,
+                            ),
+                            file_id: fid,
+                            information: Information::FILE_OPENED,
+                        },
+                    ))]);
+                }
+                let mut opts = std::fs::OpenOptions::new();
+                opts.read(true);
+                if is_mutating_create(&c) {
+                    opts.write(true);
+                    if c.create_disposition == CreateDisposition::FILE_CREATE {
+                        opts.create_new(true);
+                    } else if c.create_disposition == CreateDisposition::FILE_OPEN_IF
+                        || c.create_disposition == CreateDisposition::FILE_OVERWRITE_IF
+                    {
+                        opts.create(true);
+                    }
+                }
+                match opts.open(&target) {
+                    Ok(f) => {
+                        let fid = self.next_file_id;
+                        self.next_file_id = self.next_file_id.wrapping_add(1).max(1);
+                        self.files.insert(fid, (target, Some(f)));
+                        Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                            DeviceCreateResponse {
+                                device_io_reply: DeviceIoResponse::new(
+                                    c.device_io_request,
+                                    NtStatus::SUCCESS,
+                                ),
+                                file_id: fid,
+                                information: Information::FILE_OPENED,
+                            },
+                        ))])
+                    }
+                    Err(_) => Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                        DeviceCreateResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                c.device_io_request,
+                                NtStatus::NO_SUCH_FILE,
+                            ),
+                            file_id: 0,
+                            information: Information::empty(),
+                        },
+                    ))]),
+                }
+            }
+            ServerDriveIoRequest::DeviceCloseRequest(c) => {
+                self.files.remove(&c.device_io_request.file_id);
+                Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCloseResponse(
+                    DeviceCloseResponse {
+                        device_io_response: DeviceIoResponse::new(
+                            c.device_io_request,
+                            NtStatus::SUCCESS,
+                        ),
+                    },
+                ))])
+            }
+            ServerDriveIoRequest::DeviceReadRequest(r) => {
+                let fid = r.device_io_request.file_id;
+                let Some((_, Some(file))) = self.files.get_mut(&fid) else {
+                    return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceReadResponse(
+                        DeviceReadResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                r.device_io_request,
+                                NtStatus::UNSUCCESSFUL,
+                            ),
+                            read_data: Vec::new(),
+                        },
+                    ))]);
+                };
+                if file.seek(SeekFrom::Start(r.offset)).is_err() {
+                    return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceReadResponse(
+                        DeviceReadResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                r.device_io_request,
+                                NtStatus::UNSUCCESSFUL,
+                            ),
+                            read_data: Vec::new(),
+                        },
+                    ))]);
+                }
+                let mut buf = vec![0u8; (r.length as usize).min(1024 * 1024)];
+                match file.read(&mut buf) {
+                    Ok(n) => {
+                        buf.truncate(n);
+                        Ok(vec![SvcMessage::from(RdpdrPdu::DeviceReadResponse(
+                            DeviceReadResponse {
+                                device_io_reply: DeviceIoResponse::new(
+                                    r.device_io_request,
+                                    NtStatus::SUCCESS,
+                                ),
+                                read_data: buf,
+                            },
+                        ))])
+                    }
+                    Err(_) => Ok(vec![SvcMessage::from(RdpdrPdu::DeviceReadResponse(
+                        DeviceReadResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                r.device_io_request,
+                                NtStatus::UNSUCCESSFUL,
+                            ),
+                            read_data: Vec::new(),
+                        },
+                    ))]),
+                }
+            }
+            ServerDriveIoRequest::DeviceWriteRequest(w) => {
+                let fid = w.device_io_request.file_id;
+                let Some((_, Some(file))) = self.files.get_mut(&fid) else {
+                    return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceWriteResponse(
+                        DeviceWriteResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                w.device_io_request,
+                                NtStatus::UNSUCCESSFUL,
+                            ),
+                            length: 0,
+                        },
+                    ))]);
+                };
+                if file.seek(SeekFrom::Start(w.offset)).is_err() {
+                    return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceWriteResponse(
+                        DeviceWriteResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                w.device_io_request,
+                                NtStatus::UNSUCCESSFUL,
+                            ),
+                            length: 0,
+                        },
+                    ))]);
+                }
+                match file.write(&w.write_data) {
+                    Ok(n) => Ok(vec![SvcMessage::from(RdpdrPdu::DeviceWriteResponse(
+                        DeviceWriteResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                w.device_io_request,
+                                NtStatus::SUCCESS,
+                            ),
+                            length: n as u32,
+                        },
+                    ))]),
+                    Err(_) => Ok(vec![SvcMessage::from(RdpdrPdu::DeviceWriteResponse(
+                        DeviceWriteResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                w.device_io_request,
+                                NtStatus::ACCESS_DENIED,
+                            ),
+                            length: 0,
+                        },
+                    ))]),
+                }
+            }
+            ServerDriveIoRequest::DeviceControlRequest(c) => Ok(vec![SvcMessage::from(
+                RdpdrPdu::DeviceControlResponse(DeviceControlResponse {
+                    device_io_reply: DeviceIoResponse::new(c.header, NtStatus::SUCCESS),
+                    output_buffer: None,
+                }),
+            )]),
+            ServerDriveIoRequest::ServerDriveQueryInformationRequest(q) => {
+                Ok(vec![SvcMessage::from(
+                    RdpdrPdu::ClientDriveQueryInformationResponse(
+                        ClientDriveQueryInformationResponse {
+                            device_io_response: DeviceIoResponse::new(
+                                q.device_io_request,
+                                NtStatus::NOT_SUPPORTED,
+                            ),
+                            buffer: None,
+                        },
+                    ),
+                )])
+            }
+            ServerDriveIoRequest::ServerDriveSetInformationRequest(s) => {
+                match ClientDriveSetInformationResponse::new(&s, NtStatus::NOT_SUPPORTED) {
+                    Ok(resp) => Ok(vec![SvcMessage::from(
+                        RdpdrPdu::ClientDriveSetInformationResponse(resp),
+                    )]),
+                    Err(_) => Ok(Vec::new()),
+                }
+            }
+            ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(q) => {
+                Ok(vec![SvcMessage::from(
+                    RdpdrPdu::ClientDriveQueryDirectoryResponse(
+                        ClientDriveQueryDirectoryResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                q.device_io_request,
+                                NtStatus::NO_MORE_FILES,
+                            ),
+                            buffer: None,
+                        },
+                    ),
+                )])
+            }
+            ServerDriveIoRequest::ServerDriveQueryVolumeInformationRequest(q) => {
+                Ok(vec![SvcMessage::from(
+                    RdpdrPdu::ClientDriveQueryVolumeInformationResponse(
+                        ClientDriveQueryVolumeInformationResponse {
+                            device_io_reply: DeviceIoResponse::new(
+                                q.device_io_request,
+                                NtStatus::NOT_SUPPORTED,
+                            ),
+                            buffer: None,
+                        },
+                    ),
+                )])
+            }
+            ServerDriveIoRequest::ServerDriveNotifyChangeDirectoryRequest(_)
+            | ServerDriveIoRequest::ServerDriveLockControlRequest(_) => Ok(Vec::new()),
+        }
+    }
+
+    fn handle_user_logged_on(&mut self, _rdpdr: &mut Rdpdr) -> PduResult<Vec<SvcMessage>> {
+        Ok(Vec::new())
+    }
+
+    fn handle_printer_io_request(&mut self, _req: PrinterIoRequest) -> PduResult<Vec<SvcMessage>> {
+        Ok(Vec::new())
+    }
 }

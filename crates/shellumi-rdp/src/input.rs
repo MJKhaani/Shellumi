@@ -3,10 +3,12 @@
 use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp_pdu::input::mouse::PointerFlags;
 use ironrdp_pdu::input::MousePdu;
-use shellumi_remote_desktop::input::{KeyEvent, PointerEvent, WheelEvent};
+use shellumi_remote_desktop::input::{
+    KeyEvent, MouseButton, PointerEvent, RemoteInput, RemoteShortcut, WheelEvent,
+};
 use smallvec::{smallvec, SmallVec};
 
-/// Translate a Shellumi `PointerEvent` into an RDP `FastPathInputEvent::MouseEvent`.
+/// Translate a legacy Shellumi `PointerEvent` into an RDP `FastPathInputEvent::MouseEvent`.
 pub fn translate_pointer_event(p: &PointerEvent) -> FastPathInputEvent {
     let mut flags = PointerFlags::empty();
 
@@ -14,13 +16,16 @@ pub fn translate_pointer_event(p: &PointerEvent) -> FastPathInputEvent {
         flags |= PointerFlags::MOVE;
     } else {
         if (p.button_mask & 1) != 0 {
-            flags |= PointerFlags::LEFT_BUTTON | PointerFlags::DOWN;
+            flags |= PointerFlags::LEFT_BUTTON;
         }
         if (p.button_mask & 2) != 0 {
-            flags |= PointerFlags::MIDDLE_BUTTON_OR_WHEEL | PointerFlags::DOWN;
+            flags |= PointerFlags::MIDDLE_BUTTON_OR_WHEEL;
         }
         if (p.button_mask & 4) != 0 {
-            flags |= PointerFlags::RIGHT_BUTTON | PointerFlags::DOWN;
+            flags |= PointerFlags::RIGHT_BUTTON;
+        }
+        if p.pressed {
+            flags |= PointerFlags::DOWN;
         }
     }
 
@@ -32,21 +37,191 @@ pub fn translate_pointer_event(p: &PointerEvent) -> FastPathInputEvent {
     })
 }
 
-/// Translate a Shellumi `WheelEvent` into an RDP `FastPathInputEvent::MouseEvent`.
+/// Translate a Shellumi `WheelEvent` into one or more RDP `FastPathInputEvent::MouseEvent`s.
+///
+/// `MousePdu::encode` encodes `number_of_wheel_rotation_units` as a 9-bit two's-complement
+/// signed integer in `[-256, 255]` and automatically sets `PointerFlags::WHEEL_NEGATIVE`
+/// when `number_of_wheel_rotation_units < 0`. Passing `.abs()` with `WHEEL_NEGATIVE` would
+/// corrupt the wire value.
 pub fn translate_wheel_event(w: &WheelEvent) -> FastPathInputEvent {
-    let mut flags = PointerFlags::VERTICAL_WHEEL;
-    let delta = w.delta_y.clamp(-120, 120) as i16;
-
-    if delta < 0 {
-        flags |= PointerFlags::WHEEL_NEGATIVE;
-    }
-
+    let delta = w.delta_y.clamp(-255, 255) as i16;
     FastPathInputEvent::MouseEvent(MousePdu {
-        flags,
-        number_of_wheel_rotation_units: delta.abs(),
+        flags: PointerFlags::VERTICAL_WHEEL,
+        number_of_wheel_rotation_units: delta,
         x_position: w.x.clamp(0, u16::MAX as u32) as u16,
         y_position: w.y.clamp(0, u16::MAX as u32) as u16,
     })
+}
+
+/// Split a signed scroll delta into valid 9-bit two's-complement chunks `[-255, 255]`.
+pub fn translate_scroll_events(
+    x: u32,
+    y: u32,
+    horizontal: i32,
+    vertical: i32,
+) -> Vec<FastPathInputEvent> {
+    let mut events = Vec::new();
+    let x_pos = x.clamp(0, u16::MAX as u32) as u16;
+    let y_pos = y.clamp(0, u16::MAX as u32) as u16;
+
+    for (axis_flag, mut remaining) in [
+        (PointerFlags::VERTICAL_WHEEL, vertical),
+        (PointerFlags::HORIZONTAL_WHEEL, horizontal),
+    ] {
+        while remaining != 0 {
+            let chunk = remaining.clamp(-255, 255) as i16;
+            remaining -= i32::from(chunk);
+            events.push(FastPathInputEvent::MouseEvent(MousePdu {
+                flags: axis_flag,
+                number_of_wheel_rotation_units: chunk,
+                x_position: x_pos,
+                y_position: y_pos,
+            }));
+        }
+    }
+    events
+}
+
+/// Translate a normalized `RemoteInput` into ordered RDP `FastPathInputEvent`s.
+pub fn translate_remote_input(input: &RemoteInput) -> Vec<FastPathInputEvent> {
+    match input {
+        RemoteInput::PointerMove { x, y } => vec![FastPathInputEvent::MouseEvent(MousePdu {
+            flags: PointerFlags::MOVE,
+            number_of_wheel_rotation_units: 0,
+            x_position: (*x).clamp(0, u16::MAX as u32) as u16,
+            y_position: (*y).clamp(0, u16::MAX as u32) as u16,
+        })],
+        RemoteInput::PointerButton { button, down, x, y } => {
+            let mut flags = match button {
+                MouseButton::Left => PointerFlags::LEFT_BUTTON,
+                MouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                MouseButton::Right => PointerFlags::RIGHT_BUTTON,
+                MouseButton::Button4 | MouseButton::Button5 => return Vec::new(),
+            };
+            if *down {
+                flags |= PointerFlags::DOWN;
+            }
+            vec![FastPathInputEvent::MouseEvent(MousePdu {
+                flags,
+                number_of_wheel_rotation_units: 0,
+                x_position: (*x).clamp(0, u16::MAX as u32) as u16,
+                y_position: (*y).clamp(0, u16::MAX as u32) as u16,
+            })]
+        }
+        RemoteInput::Scroll {
+            x,
+            y,
+            horizontal,
+            vertical,
+        } => translate_scroll_events(*x, *y, *horizontal, *vertical),
+        RemoteInput::PhysicalKey { key, down, .. } => {
+            let mut flags = if *down {
+                KeyboardFlags::empty()
+            } else {
+                KeyboardFlags::RELEASE
+            };
+            if key.scancode != 0 {
+                if key.extended {
+                    flags |= KeyboardFlags::EXTENDED;
+                }
+                vec![FastPathInputEvent::KeyboardEvent(flags, key.scancode as u8)]
+            } else if let Some((sc, ext)) = keysym_to_scancode(key.keysym) {
+                if ext {
+                    flags |= KeyboardFlags::EXTENDED;
+                }
+                vec![FastPathInputEvent::KeyboardEvent(flags, sc)]
+            } else if let Some(ch) = keysym_to_unicode_char(key.keysym) {
+                let mut buf = [0u16; 2];
+                ch.encode_utf16(&mut buf)
+                    .iter()
+                    .map(|&u| FastPathInputEvent::UnicodeKeyboardEvent(flags, u))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        RemoteInput::CommittedText(text) => {
+            let mut out = Vec::with_capacity(text.len() * 2);
+            for unit in text.encode_utf16() {
+                out.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                    KeyboardFlags::empty(),
+                    unit,
+                ));
+                out.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                    KeyboardFlags::RELEASE,
+                    unit,
+                ));
+            }
+            out
+        }
+        RemoteInput::Shortcut(shortcut) => build_shortcut_sequence(*shortcut)
+            .into_iter()
+            .flatten()
+            .collect(),
+        RemoteInput::ReleaseAll => Vec::new(),
+    }
+}
+
+fn keysym_to_unicode_char(keysym: u32) -> Option<char> {
+    if (0x0020..=0x007E).contains(&keysym) || (0x00A0..=0x00FF).contains(&keysym) {
+        char::from_u32(keysym)
+    } else if (0x0100_0000..=0x0110_FFFF).contains(&keysym) {
+        char::from_u32(keysym - 0x0100_0000)
+    } else {
+        None
+    }
+}
+
+/// Build an atomic FastPath sequence for any `RemoteShortcut`.
+pub fn build_shortcut_sequence(shortcut: RemoteShortcut) -> Vec<SmallVec<[FastPathInputEvent; 2]>> {
+    match shortcut {
+        RemoteShortcut::CtrlAltDel => build_ctrl_alt_del_sequence(),
+        RemoteShortcut::AltTab => vec![
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x38),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x0F),
+            ],
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x0F),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x38),
+            ],
+        ],
+        RemoteShortcut::WinKey => vec![smallvec![
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::EXTENDED, 0x5B),
+            FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::EXTENDED | KeyboardFlags::RELEASE,
+                0x5B
+            ),
+        ]],
+        RemoteShortcut::CtrlEscape => vec![
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x1D),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x01),
+            ],
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x01),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x1D),
+            ],
+        ],
+        RemoteShortcut::CtrlC => build_ctrl_chord(0x2E),
+        RemoteShortcut::CtrlV => build_ctrl_chord(0x2F),
+        RemoteShortcut::CtrlX => build_ctrl_chord(0x2D),
+        RemoteShortcut::CtrlA => build_ctrl_chord(0x1E),
+        RemoteShortcut::CtrlZ => build_ctrl_chord(0x2C),
+    }
+}
+
+fn build_ctrl_chord(scancode: u8) -> Vec<SmallVec<[FastPathInputEvent; 2]>> {
+    vec![
+        smallvec![
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x1D),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), scancode),
+        ],
+        smallvec![
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, scancode),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x1D),
+        ],
+    ]
 }
 
 /// Translate a Shellumi `KeyEvent` into an RDP `FastPathInputEvent`.
@@ -258,6 +433,46 @@ mod tests {
                 assert!(!flags.contains(KeyboardFlags::RELEASE));
             }
             _ => panic!("Expected KeyboardEvent"),
+        }
+    }
+
+    #[test]
+    fn verifies_remote_input_button_release_and_signed_wheel() {
+        use ironrdp_core::{decode, encode_vec};
+
+        // Release must NOT include PointerFlags::DOWN
+        let up = translate_remote_input(&RemoteInput::PointerButton {
+            button: MouseButton::Left,
+            down: false,
+            x: 100,
+            y: 200,
+        });
+        assert_eq!(up.len(), 1);
+        match &up[0] {
+            FastPathInputEvent::MouseEvent(pdu) => {
+                assert!(pdu.flags.contains(PointerFlags::LEFT_BUTTON));
+                assert!(!pdu.flags.contains(PointerFlags::DOWN));
+            }
+            _ => panic!("Expected MouseEvent"),
+        }
+
+        // Negative wheel must round-trip through MousePdu::encode/decode with exact signed value
+        let scroll = translate_remote_input(&RemoteInput::Scroll {
+            x: 50,
+            y: 60,
+            horizontal: -120,
+            vertical: -120,
+        });
+        assert_eq!(scroll.len(), 2);
+        for ev in &scroll {
+            if let FastPathInputEvent::MouseEvent(pdu) = ev {
+                let wire = encode_vec(pdu).unwrap();
+                let decoded: MousePdu = decode(wire.as_slice()).unwrap();
+                assert_eq!(decoded.number_of_wheel_rotation_units, -120);
+                assert!(decoded.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+            } else {
+                panic!("Expected MouseEvent");
+            }
         }
     }
 }

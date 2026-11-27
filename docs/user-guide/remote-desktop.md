@@ -22,14 +22,15 @@ Shellumi provides native Rust Remote Desktop engines—**IronRDP** (`shellumi-rd
   - **Password** (via Existing Identity, Save for This Host, or Ask on Connect).
   - **Initial Resolution** (e.g., `1920x1080`) & **Color Depth**.
   - **Strict TLS:** Enabled by default with SHA-256 TOFU certificate pinning.
-  - **View-Only Mode:** Blocks outgoing mouse/keyboard input when monitoring.
-  - **Peripheral Redirection (RDP-only):** Toggle **Audio (`RDPSND`)**, **Microphone (`MS-RDPEAI`)**, and **Shared Drives (`RDPDR`)**.
+  - **View-Only Mode:** Blocks outgoing mouse/keyboard/clipboard/file/microphone input at both UI and worker boundaries (releasing any held inputs on activation).
+  - **Peripheral Redirection (RDP-only):** **Audio (`RDPSND`)**, **Microphone (`MS-RDPEAI`, off by default)**, and **Shared Drives (`RDPDR`, disabled unless an explicit folder is authorized; read-only by default)**.
 
 ### RDP Session Toolbar & Controls
-The compact 40–48 px session toolbar provides:
+The compact session toolbar provides:
+- **Interactive Input & Focus:** Click the canvas to focus remote keyboard and pointer capture (hover, left/right/middle clicks, drag, vertical/horizontal scroll). Press `Ctrl+Alt+Escape` at any time to release remote keyboard capture back to Shellumi.
 - **Display Mode:** **Fit** (aspect-preserving scale), **Fill**, or **Actual Size** (1:1 pixel mapping with smooth panning), plus **Fullscreen**.
 - **Resolution & Dynamic Resizing (`MS-RDPEDISP`):** Toggle **Automatic Dynamic Resizing** (debounced on pane/window resize), trigger manual **Match Viewport**, or pick a **Fixed Resolution Preset**.
-- **Special Keys:** Send `Ctrl+Alt+Del` (SAS) directly from the toolbar.
+- **Special Keys:** Send `Ctrl+Alt+Del` (SAS), `Win/Super`, or `Alt+Tab` atomically from the toolbar.
 - **Clipboard (`CLIPRDR`):** Bidirectional UTF-8 text and streaming file copy/paste (with path-traversal sanitization).
 - **Audio / Mic / Drives:** Mute/volume controls, active microphone indicator, and sandboxed local folder shares (`\\tsclient\<Share>` on Windows, `thinclient_drives` on `xrdp`).
 - **Diagnostics Inspector:** Live measured FPS, RTT, throughput, and active channel status.

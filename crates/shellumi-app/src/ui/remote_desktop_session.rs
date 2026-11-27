@@ -91,10 +91,9 @@ impl Shellumi {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, _, cx| {
-                app.remote_desktop_send_key(
+                app.remote_desktop_send_shortcut(
                     tab_idx,
-                    "Ctrl+Alt+Del",
-                    rfb_constants::KEYSYM_DELETE,
+                    shellumi_remote_desktop::RemoteShortcut::CtrlAltDel,
                     cx,
                 );
             }))
@@ -115,10 +114,9 @@ impl Shellumi {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, _, cx| {
-                app.remote_desktop_send_key(
+                app.remote_desktop_send_shortcut(
                     tab_idx,
-                    "Win/Super",
-                    rfb_constants::KEYSYM_SUPER_L,
+                    shellumi_remote_desktop::RemoteShortcut::WinKey,
                     cx,
                 );
             }))
@@ -136,7 +134,11 @@ impl Shellumi {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
             .on_click(cx.listener(move |app, _, _, cx| {
-                app.remote_desktop_send_key(tab_idx, "Alt+Tab", rfb_constants::KEYSYM_TAB, cx);
+                app.remote_desktop_send_shortcut(
+                    tab_idx,
+                    shellumi_remote_desktop::RemoteShortcut::AltTab,
+                    cx,
+                );
             }))
             .child("Alt+Tab");
 
@@ -1062,31 +1064,46 @@ impl Shellumi {
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.stop_propagation();
                             }))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child("FILE & DRIVE REDIRECTION"),
-                            )
-                            .child(send_files_btn)
-                            .children(if !is_vnc { drive_btn } else { None })
-                            .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .child("AUDIO OUTPUT"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(mute_btn)
-                                    .child(volume_ctrl),
-                            )
+                            .children(if !is_vnc {
+                                Some(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2p5()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child("FILE & DRIVE REDIRECTION"),
+                                        )
+                                        .child(send_files_btn)
+                                        .children(drive_btn)
+                                        .child(div().h(px(1.0)).bg(rgb(MacTheme::SEPARATOR)))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                                .child("AUDIO OUTPUT"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(mute_btn)
+                                                .child(volume_ctrl),
+                                        ),
+                                )
+                            } else {
+                                Some(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                        .child("File transfer, drive sharing, and audio redirection are not supported over baseline VNC/RFB."),
+                                )
+                            })
                             .children(if !is_vnc && mic_mute_btn.is_some() {
                                 Some(
                                     div()

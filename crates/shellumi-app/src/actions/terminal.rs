@@ -365,12 +365,19 @@ impl Shellumi {
                     true
                 }
             });
+            self.remote_desktop_release_all_for_tab(id);
             self.rd_canvas_measurements.remove(&id);
             self.rd_pan_state.remove(&id);
             self.rd_resize_state.remove(&id);
+            self.rd_input_controllers.remove(&id);
+            self.rd_focus_handles.remove(&id);
             self.rd_credential_edit_gen.remove(&id);
             self.connection_ops.cancel_for_tab(id);
             if let Some(rd) = &mut self.tabs[pos].remote_desktop_state {
+                if let Some(ui_handle) = &rd.ui_handle {
+                    let _ = ui_handle
+                        .try_send_command(shellumi_remote_desktop::SessionCommand::Disconnect);
+                }
                 if let Some(pwd) = rd.password.as_mut() {
                     use zeroize::Zeroize;
                     pwd.zeroize();
@@ -406,6 +413,13 @@ impl Shellumi {
         {
             cx.notify();
             return;
+        }
+        if let Some(prev_idx) = self.active_tab_idx {
+            if prev_idx != idx.unwrap_or(usize::MAX) {
+                if let Some(prev_id) = self.tabs.get(prev_idx).map(|t| t.id) {
+                    self.remote_desktop_release_all_for_tab(prev_id);
+                }
+            }
         }
         self.page = None;
         self.active_tab_idx = idx;

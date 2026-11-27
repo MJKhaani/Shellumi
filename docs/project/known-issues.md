@@ -97,9 +97,9 @@ This document is the **canonical defect register** for Shellumi (baseline `72442
 - **User Impact:** Under slow or congested RDP links, an earlier resize and a retry can race, causing brief resolution oscillation or ambiguous dimension matching.
 - **Relevant Source Files:** `crates/shellumi-app/src/main.rs` (`RdAutoResizeState`), `crates/shellumi-rdp/src/lib.rs`
 - **Reproduction Scenario:** Trigger dynamic resize or Match Viewport over a high-latency RDP connection where `RemoteResize` arrives just after the local timeout expires.
-- **Existing Mitigation:** Single-in-flight coordinator, `layout_epoch` validation, `auto_cancel_generation` tokens, and max-2 bounded retries.
-- **Recommended Correction:** Implement conservative post-timeout recovery (suppressing overlapping retries until idle/stabilized) and verify against a live RDP server.
-- **Verification Requirements:** Delayed-response RDP resize simulation + live Windows/`xrdp` acceptance test (`NOT TESTED`).
+- **Existing Mitigation:** Single-in-flight coordinator, `layout_epoch` validation, `auto_cancel_generation` tokens, and conservative `settling_after_timeout` suppression (suppressing automatic retries after timeout until late confirmation, manual resize, or reconnect).
+- **Recommended Correction:** Verify conservative post-timeout recovery against a live RDP server under artificial latency.
+- **Verification Requirements:** Delayed-response RDP resize simulation (implemented) + live Windows/`xrdp` acceptance test (`NOT TESTED`).
 
 ---
 

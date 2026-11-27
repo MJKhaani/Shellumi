@@ -15,13 +15,114 @@ pub enum ScaleMode {
 }
 
 /// Standard mouse buttons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MouseButton {
     Left,
     Middle,
     Right,
     Button4,
     Button5,
+}
+
+impl MouseButton {
+    /// Return the RFB/domain bitmask bit for this button (0 for extended buttons not in baseline RFB).
+    pub fn bit_mask(self) -> u8 {
+        match self {
+            Self::Left => pointer_mask::BUTTON_LEFT,
+            Self::Middle => pointer_mask::BUTTON_MIDDLE,
+            Self::Right => pointer_mask::BUTTON_RIGHT,
+            Self::Button4 | Self::Button5 => 0,
+        }
+    }
+}
+
+/// Typed remote desktop shortcut sequences (never matched by UI label strings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteShortcut {
+    CtrlAltDel,
+    AltTab,
+    WinKey,
+    CtrlEscape,
+    CtrlC,
+    CtrlV,
+    CtrlX,
+    CtrlA,
+    CtrlZ,
+}
+
+impl RemoteShortcut {
+    /// Human-readable label for status messages and diagnostics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CtrlAltDel => "Ctrl+Alt+Del",
+            Self::AltTab => "Alt+Tab",
+            Self::WinKey => "Win/Super",
+            Self::CtrlEscape => "Ctrl+Escape",
+            Self::CtrlC => "Ctrl+C",
+            Self::CtrlV => "Ctrl+V",
+            Self::CtrlX => "Ctrl+X",
+            Self::CtrlA => "Ctrl+A",
+            Self::CtrlZ => "Ctrl+Z",
+        }
+    }
+}
+
+/// Keyboard mapping policy for macOS and cross-platform clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum KeyboardMappingMode {
+    /// Native physical modifier mapping (Command -> Super/Meta, Option -> Alt, Control -> Control).
+    #[default]
+    Native,
+    /// Convenience mapping on macOS where Cmd+C/V/X/A/Z map to Ctrl+C/V/X/A/Z for Windows/Linux targets.
+    MacToWindowsLinux,
+}
+
+/// Stable physical key identity captured at key-down so key-up releases the exact same key
+/// even if the keyboard layout or modifier state changes before release.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RemoteKey {
+    /// X11 keysym (used by VNC/RFB and as fallback).
+    pub keysym: u32,
+    /// PS/2 Set 1 scancode (used by RDP).
+    pub scancode: u16,
+    /// Whether the RDP extended flag (0xE0) applies.
+    pub extended: bool,
+    /// True if this key is a modifier key (Shift, Ctrl, Alt, Super/Meta).
+    pub is_modifier: bool,
+    /// Canonical key name for diagnostics (never logged for secret text).
+    pub key_name: String,
+}
+
+/// Semantic normalized remote input event.
+///
+/// Scroll units: `120` represents one standard wheel detent/notch (matching Windows `WHEEL_DELTA`).
+/// Coordinate space: remote framebuffer logical pixels `(0..fb_width, 0..fb_height)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteInput {
+    PointerMove {
+        x: u32,
+        y: u32,
+    },
+    PointerButton {
+        button: MouseButton,
+        down: bool,
+        x: u32,
+        y: u32,
+    },
+    Scroll {
+        x: u32,
+        y: u32,
+        horizontal: i32,
+        vertical: i32,
+    },
+    PhysicalKey {
+        key: RemoteKey,
+        down: bool,
+        repeat: bool,
+    },
+    CommittedText(String),
+    Shortcut(RemoteShortcut),
+    ReleaseAll,
 }
 
 /// Bitmask constants for mouse buttons (compatible with RFB 3.8 pointer events).

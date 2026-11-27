@@ -293,18 +293,28 @@ async fn test_remote_file_list_and_streaming_download() {
     let data_resp = FileContentsResponse::new_data_response(stream_id, chunk_payload.clone());
     backend.on_file_contents_response(data_resp);
 
-    // Verify file is saved to disk and event is emitted
-    let event = rx.try_recv().expect("Expected ServerFilesReceived event");
-    match event {
-        SessionEvent::ServerFilesReceived {
-            files,
-            target_dir: dir,
-        } => {
-            assert_eq!(files, vec!["remote_notes.txt".to_string()]);
-            assert_eq!(dir, temp_dir.to_string_lossy());
+    // Verify TransferStarted, TransferProgress, TransferCompleted, and ServerFilesReceived
+    let mut got_completed = false;
+    let mut got_files_received = false;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            SessionEvent::TransferCompleted { files, .. } => {
+                assert_eq!(files, vec!["remote_notes.txt".to_string()]);
+                got_completed = true;
+            }
+            SessionEvent::ServerFilesReceived {
+                files,
+                target_dir: dir,
+            } => {
+                assert_eq!(files, vec!["remote_notes.txt".to_string()]);
+                assert_eq!(dir, temp_dir.to_string_lossy());
+                got_files_received = true;
+            }
+            _ => {}
         }
-        other => panic!("Expected ServerFilesReceived, got {other:?}"),
     }
+    assert!(got_completed, "Expected TransferCompleted event");
+    assert!(got_files_received, "Expected ServerFilesReceived event");
 
     // Verify file content on disk
     let downloaded_path = temp_dir.join("remote_notes.txt");

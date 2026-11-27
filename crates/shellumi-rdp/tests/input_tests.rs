@@ -86,8 +86,12 @@ fn test_translate_wheel_vertical() {
     };
     if let FastPathInputEvent::MouseEvent(m) = translate_wheel_event(&w_down) {
         assert!(m.flags.contains(PointerFlags::VERTICAL_WHEEL));
-        assert!(m.flags.contains(PointerFlags::WHEEL_NEGATIVE));
-        assert_eq!(m.number_of_wheel_rotation_units, 60);
+        assert_eq!(m.number_of_wheel_rotation_units, -60);
+        // Verify wire encoding sets WHEEL_NEGATIVE and round-trips to -60
+        let wire = ironrdp_core::encode_vec(&m).unwrap();
+        let decoded: ironrdp_pdu::input::MousePdu = ironrdp_core::decode(wire.as_slice()).unwrap();
+        assert!(decoded.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+        assert_eq!(decoded.number_of_wheel_rotation_units, -60);
     } else {
         panic!("Expected MouseEvent");
     }

@@ -46,24 +46,24 @@ use session::{Session, SessionEvent};
 #[cfg(test)]
 use shellumi_core::ActiveTunnelStatus;
 use shellumi_core::{
-    build_rfb_key_event, build_rfb_pointer_event, build_ssh_tunnel_command,
-    check_dangerous_command, execute_cloud_vault_sync, format_duration_hms, generate_bash_hook,
-    generate_fish_hook, generate_zsh_hook, list_local_directory, rfb_constants, validate_jump_host,
-    AccessoryBarLayout, ActiveTunnelState, AnsibleInventoryEngine, AuditAction,
-    AutocompleteContext, AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary,
-    BatchHostStatus, BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner,
-    BenchmarkStatus, BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine,
-    CloudProviderConfig, CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView,
-    ConflictResolutionChoice, ConnectionProtocol, DiagnosticStatus, DiagnosticsReport,
-    DiagnosticsRunner, FileEntry, FileKind, ForwardingType, GoogleDriveSyncClient, HostExportItem,
-    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig,
-    MultiplayerSession, PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry,
-    PasswordPromptDetector, PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule,
-    RdpConfig, SerialConfig, SessionRecordingSummary, SessionRedactor, SftpClient,
-    SftpConnectOptions, SftpError, SharedVault, SharingAuditRecord, SshDestination,
-    SyncCycleResult, SystemHttpTransport, TeamMember, TeamRole, TelnetConfig, TransferDirection,
-    TransferQueue, TransferStatus, VirtualAccessoryBar, VirtualKey, VirtualKeyModifier, VncConfig,
-    WorkspaceLayout, WorkspaceSession, WorkspaceSessionKind,
+    build_rfb_pointer_event, build_ssh_tunnel_command, check_dangerous_command,
+    execute_cloud_vault_sync, format_duration_hms, generate_bash_hook, generate_fish_hook,
+    generate_zsh_hook, list_local_directory, rfb_constants, validate_jump_host, AccessoryBarLayout,
+    ActiveTunnelState, AnsibleInventoryEngine, AuditAction, AutocompleteContext,
+    AutocompleteEngine, BatchExecutionPlan, BatchExecutionSummary, BatchHostStatus,
+    BatchHostTarget, BatchPolicy, BatchRunner, BenchmarkReport, BenchmarkRunner, BenchmarkStatus,
+    BroadcastManager, BroadcastSafetyCheck, CastPlaybackEngine, CloudProviderConfig,
+    CloudProviderKind, CompletionItem, CompletionKind, ConflictItemView, ConflictResolutionChoice,
+    ConnectionProtocol, DiagnosticStatus, DiagnosticsReport, DiagnosticsRunner, FileEntry,
+    FileKind, ForwardingType, GoogleDriveSyncClient, HostExportItem, MobileLifecycleEvent,
+    MobileLifecycleManager, MobilePlatform, MobileSessionState, MoshConfig, MultiplayerSession,
+    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
+    PasswordPromptKind, PathUtils, PlaybackStatus, PortForwardRule, RdpConfig, SerialConfig,
+    SessionRecordingSummary, SessionRedactor, SftpClient, SftpConnectOptions, SftpError,
+    SharedVault, SharingAuditRecord, SshDestination, SyncCycleResult, SystemHttpTransport,
+    TeamMember, TeamRole, TelnetConfig, TransferDirection, TransferQueue, TransferStatus,
+    VirtualAccessoryBar, VirtualKey, VirtualKeyModifier, VncConfig, WorkspaceLayout,
+    WorkspaceSession, WorkspaceSessionKind,
 };
 #[cfg(test)]
 use shellumi_core::{
@@ -870,6 +870,11 @@ struct Shellumi {
     pub(crate) rd_canvas_measurements: std::collections::HashMap<u64, CanvasMeasurement>,
     pub(crate) rd_pan_state: std::collections::HashMap<u64, shellumi_remote_desktop::PanState>,
     pub(crate) rd_resize_state: std::collections::HashMap<u64, RdAutoResizeState>,
+    pub(crate) rd_input_controllers:
+        std::collections::HashMap<u64, shellumi_remote_desktop::RemoteInputController>,
+    pub(crate) rd_focus_handles: std::collections::HashMap<u64, FocusHandle>,
+    pub(crate) rd_view_only_transition_seq: u64,
+    pub(crate) rd_keyboard_mapping: shellumi_remote_desktop::KeyboardMappingMode,
     pub(crate) vault_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) tab_overflow_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
@@ -972,6 +977,7 @@ pub(crate) struct RdAutoResizeState {
     pub last_rejected: Option<(u32, u32)>,
     pub last_error: Option<String>,
     pub pending_manual_recalc: bool,
+    pub settling_after_timeout: bool,
 }
 
 impl RdAutoResizeState {
@@ -985,6 +991,7 @@ impl RdAutoResizeState {
         self.auto_cancel_generation = self.auto_cancel_generation.wrapping_add(1);
         self.last_error = None;
         self.pending_manual_recalc = false;
+        self.settling_after_timeout = false;
     }
 
     /// Invalidate geometry-dependent pending state when `layout_epoch` advances.
@@ -1027,6 +1034,9 @@ impl RdAutoResizeState {
         origin: ResizeOrigin,
     ) -> ResizeRequestOutcome {
         if origin == ResizeOrigin::Automatic {
+            if self.settling_after_timeout {
+                return ResizeRequestOutcome::Skipped;
+            }
             // Explicit manual requests take precedence over automatic resizes.
             if matches!(
                 self.desired,
@@ -1063,6 +1073,7 @@ impl RdAutoResizeState {
                 auto_cancel_gen: self.auto_cancel_generation,
             }
         } else {
+            self.settling_after_timeout = false;
             self.layout_generation = layout_generation;
             self.pending_manual_recalc = false;
             self.desired = Some(PendingResizeRequest {
@@ -1180,17 +1191,12 @@ impl RdAutoResizeState {
         {
             return None;
         }
-        if in_flight.retry_count < 2 {
-            self.next_request_id = self.next_request_id.wrapping_add(1);
-            let retried = PendingResizeRequest {
-                request_id: self.next_request_id,
-                retry_count: in_flight.retry_count + 1,
-                ..in_flight
-            };
-            self.in_flight = Some(retried);
-            return Some(retried);
-        }
-        self.last_error = Some("Display resize acknowledgement timed out".into());
+        self.in_flight = None;
+        self.settling_after_timeout = true;
+        self.last_error = Some(
+            "Display resize acknowledgement timed out; waiting for remote settle or manual resize"
+                .into(),
+        );
         None
     }
 
@@ -1201,6 +1207,7 @@ impl RdAutoResizeState {
         dynamic_resize_enabled: bool,
     ) -> Option<PendingResizeRequest> {
         self.last_confirmed = Some(size);
+        self.settling_after_timeout = false;
         if self.in_flight.map(|r| r.dimensions) == Some(size) {
             self.in_flight = None;
             self.last_error = None;
@@ -1863,6 +1870,10 @@ impl Shellumi {
             rd_canvas_measurements: std::collections::HashMap::new(),
             rd_pan_state: std::collections::HashMap::new(),
             rd_resize_state: std::collections::HashMap::new(),
+            rd_input_controllers: std::collections::HashMap::new(),
+            rd_focus_handles: std::collections::HashMap::new(),
+            rd_view_only_transition_seq: 0,
+            rd_keyboard_mapping: shellumi_remote_desktop::KeyboardMappingMode::default(),
             vault_trigger_bounds: None,
             tab_overflow_trigger_bounds: None,
             pending_rotation_recoveries: Vec::new(),

@@ -173,7 +173,7 @@ fn default_enable_audio() -> bool {
 }
 
 fn default_enable_microphone() -> bool {
-    true
+    false
 }
 
 /// Session parameters configured by the user before launching a connection.
@@ -249,7 +249,7 @@ impl SessionConfig {
             domain: None,
             tls_strict: true,
             enable_audio: true,
-            enable_microphone: true,
+            enable_microphone: false,
             shared_folder: None,
             reconnect_policy: ReconnectPolicy::default(),
         }

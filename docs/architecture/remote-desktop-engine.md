@@ -15,9 +15,9 @@ flowchart LR
     Worker -->|"32-bit RGBA FramebufferSnapshot"| Canvas["GPUI RenderImage Blit"]
 ```
 
-- **`shellumi-remote-desktop`:** Defines `SessionCommand`, `SessionEvent`, `FramebufferSnapshot`, `PanState`, `ReconnectPolicy`, and `SessionMetricsSnapshot`.
-- **`shellumi-vnc`:** Pure-Rust RFB 3.3/3.7/3.8 client with VncAuth DES challenge-response, Raw/CopyRect/DesktopSize/Hextile/ZRLE/Tight decoders, decompression-bomb bounds, and clipboard sync.
-- **`shellumi-rdp`:** Embedded `IronRDP` client with strict TLS/SHA-256 TOFU pinning, CredSSP/NLA, `MS-RDPEDISP` dynamic display control, `CLIPRDR` clipboard/file streaming, `RDPSND` (`cpal`) audio output, `RDPDR` local drive redirection, and `MS-RDPEAI` (`cpal`) microphone input.
+- **`shellumi-remote-desktop`:** Defines `RemoteInputController`, `RemoteInput`, `RemoteShortcut`, `SessionCommand`, `SessionEvent`, `FramebufferSnapshot`, `PanState`, `ReconnectPolicy`, and `SessionMetricsSnapshot`. Uses a bounded ordered coalescing command queue (coalescing adjacent `PointerMove` events without crossing critical button/key/wheel/shortcut barriers, plus out-of-band `Disconnect`) and a separate 1-slot `FrameReady` buffer so high-rate frames never starve control events.
+- **`shellumi-vnc`:** Pure-Rust RFB 3.3/3.7/3.8 client with VncAuth DES challenge-response, ARD Diffie-Hellman auth, Raw/CopyRect/DesktopSize/Hextile/ZRLE/Tight decoders, decompression-bomb bounds, stateful held-button/wheel-pulse translation, typed shortcuts, Latin-1 `ClientCutText`/`ServerCutText` with bounded echo suppression, and runtime view-only enforcement.
+- **`shellumi-rdp`:** Embedded `IronRDP` client with strict TLS/SHA-256 TOFU pinning, CredSSP/NLA, `MS-RDPEDISP` dynamic display control, `CLIPRDR` clipboard/file streaming with explicit `ExpectedResponseKind` state machine and private `0700` staging directories, `RDPSND` (`cpal`) audio output, `RDPDR` explicit-consent local drive redirection (read-only by default, cross-platform `ShellumiFsRdpdrBackend` on Windows), and `MS-RDPEAI` (`cpal`) microphone input (default off, `OpenReply` reflects actual capture start).
 
 ---
 
@@ -49,7 +49,7 @@ stateDiagram-v2
 1. **Local In-Flight Tracking:** At most one `PendingResizeRequest` is marked `in_flight` locally; manual requests arriving mid-flight queue in `desired` rather than dispatching concurrently from the UI.
 2. **No Per-Request Protocol Correlation:** `MS-RDPEDISP` / `ironrdp_displaycontrol` does **not** expose per-request acknowledgement correlation IDs or explicit resize-rejection PDUs.
 3. **Worker Submission Failure vs. Server Rejection:** `SessionEvent::ResizeFailed` indicates local worker channel/submission failure (`input_sender.send`), not an authoritative server rejection PDU.
-4. **Ambiguous Local Timeouts (`RD-001`):** A local timeout does **not** prove remote cancellation. Bounded retries (max 2) can overlap an unresolved server-side resize, and observed `RemoteResize` dimensions can be ambiguous when two requests targeted similar sizes.
+4. **Ambiguous Local Timeouts (`RD-001`):** A local timeout does **not** prove remote cancellation. `RdAutoResizeState` now transitions to `settling_after_timeout` instead of issuing overlapping automatic retries, resuming only after a late `RemoteResize` confirmation, an explicit manual resize, or reconnect.
 5. **Layout-Generation & Cancellation Guards:** `Shellumi::invalidate_layout()` advances `layout_epoch` and bumps `debounce_generation`, while disabling auto-resize increments `auto_cancel_generation` so stale retries are dropped locally.
 6. **Live Server Gap:** Live end-to-end resize acceptance against an external Windows RDP or `xrdp` server remains `NOT TESTED`.
 

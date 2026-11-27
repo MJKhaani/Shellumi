@@ -232,15 +232,31 @@ pub fn build_pointer_event(button_mask: u8, x: u16, y: u16) -> [u8; 6] {
     buf
 }
 
-/// Build a `ClientCutText` packet.
+/// Build a baseline RFB `ClientCutText` packet encoded in ISO-8859-1 (Latin-1) per RFC 6143.
+/// Characters outside `U+0000..=U+00FF` are replaced with `?`.
 pub fn build_client_cut_text(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
-    let mut buf = vec![0u8; 8 + bytes.len()];
+    let latin1: Vec<u8> = text
+        .chars()
+        .map(|ch| {
+            let cp = ch as u32;
+            if cp <= 0xFF {
+                cp as u8
+            } else {
+                b'?'
+            }
+        })
+        .collect();
+    let mut buf = vec![0u8; 8 + latin1.len()];
     buf[0] = client_msg::CLIENT_CUT_TEXT;
     // buf[1..4] padding
-    BigEndian::write_u32(&mut buf[4..8], bytes.len() as u32);
-    buf[8..].copy_from_slice(bytes);
+    BigEndian::write_u32(&mut buf[4..8], latin1.len() as u32);
+    buf[8..].copy_from_slice(&latin1);
     buf
+}
+
+/// Decode a baseline RFB `ServerCutText` payload from ISO-8859-1 (Latin-1) into a UTF-8 `String`.
+pub fn decode_server_cut_text_latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
 }
 
 /// Rectangle header inside a `FramebufferUpdate` message (12 bytes).
