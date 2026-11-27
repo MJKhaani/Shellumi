@@ -1,8 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { JSDOM } from "jsdom";
-import createDOMPurify from "dompurify";
-import mermaid from "mermaid";
 import { lint } from "markdownlint/promise";
 
 const rootDir = path.resolve(process.argv[2] || ".");
@@ -12,7 +10,7 @@ const lintConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const dom = new JSDOM("<!doctype html><html><body></body></html>");
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
-globalThis.DOMPurify = createDOMPurify(dom.window);
+const { default: mermaid } = await import("mermaid");
 mermaid.initialize({ startOnLoad: false });
 
 function collectMarkdown(dir, out = []) {

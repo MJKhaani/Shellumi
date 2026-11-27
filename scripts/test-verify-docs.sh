@@ -29,10 +29,6 @@ make_valid_repo() {
 [literal-broken-in-4-backticks](does-not-exist.md)
 ````
 
-~~~bash
-[literal-in-tilde](also-not-real.md)
-~~~
-
 ```mermaid
 flowchart LR
     A["Start"] --> B["End"]
@@ -50,6 +46,13 @@ stateDiagram-v2
     Idle --> Active: go
 ```
 EOF
+    cat > "$d/docs/tilde.md" <<'EOF'
+# Tilde Fence
+
+~~~bash
+[literal-in-tilde](also-not-real.md)
+~~~
+EOF
     cat > "$d/docs/README.md" <<'EOF'
 # Docs Home
 
@@ -57,9 +60,11 @@ EOF
 
 <a id="custom-id"></a>
 
-## Dup
+### Dup
 
-## Dup
+## Section Two
+
+### Dup
 
 ```markdown
 [literal-broken-in-code](does-not-exist.md)
