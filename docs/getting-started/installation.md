@@ -6,45 +6,47 @@
 
 ## Release Packages (Prebuilt)
 
-Download published pre-release binaries and packages from **[GitHub Releases](https://github.com/MJKhaani/Shellumi/releases)** (the latest published pre-release is `v0.0.7-alpha`; `v0.0.8-alpha` release packaging run [`45914814451`](https://github.com/MJKhaani/Shellumi/actions/runs/45914814451) is in progress after [`45911871766`](https://github.com/MJKhaani/Shellumi/actions/runs/45911871766) failed on macOS `x86_64` DMG creation).
+Download published pre-release binaries and packages from **[GitHub Releases](https://github.com/MJKhaani/Shellumi/releases)** (latest published pre-release: [`v0.0.8-alpha`](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.8-alpha), published November 27, 2026; note that pre-releases may not appear under GitHub's stable `/releases/latest` redirect).
 
 ### <img src="../../resources/icon_pack/icons/32/regular/os_macos.png" width="18" height="18" alt="macOS"> macOS
 
-- Download `Shellumi-<version>-macos-arm64.dmg` (Apple Silicon) or `Shellumi-<version>-macos-x86_64.dmg` (Intel).
+- Download `Shellumi-0.0.8-alpha-macos-arm64.dmg` (Apple Silicon) or `Shellumi-0.0.8-alpha-macos-x86_64.dmg` (Intel).
 - Open the `.dmg` and drag **Shellumi.app** into `/Applications`.
-- Optional CLI: download `shellumi-cli-macos-arm64` or `shellumi-cli-macos-x86_64`, mark it executable (`chmod +x`), and place it on your `PATH`.
+- Optional standalone binaries: `shellumi-app-macos-arm64`, `shellumi-app-macos-x86_64`, `shellumi-cli-macos-arm64`, or `shellumi-cli-macos-x86_64` (`chmod +x` before running).
 
 ### <img src="../../resources/icon_pack/icons/32/regular/os_linux.png" width="18" height="18" alt="Linux"> Linux
 
-- Download `shellumi_<version>_amd64.deb` and install:
+- Download `shellumi_0.0.8-alpha_amd64.deb` and install:
   ```sh
-  sudo apt install ./shellumi_<version>_amd64.deb
+  sudo apt install ./shellumi_0.0.8-alpha_amd64.deb
   ```
   The package installs `shellumi-app`, `shellumi-cli`, and the `shellumi.desktop` entry (`Terminal=false`).
+- Optional standalone binaries: `shellumi-app-linux-x86_64` and `shellumi-cli-linux-x86_64`.
 
 ### <img src="../../resources/icon_pack/icons/32/regular/os_windows.png" width="18" height="18" alt="Windows"> Windows
 
-- Download `shellumi-<version>-windows-x86_64.zip` and extract it to a folder of your choice.
+- Download `shellumi-0.0.8-alpha-windows-x86_64.zip` and extract it to a folder of your choice.
 - Run `shellumi-app.exe` (`WINDOWS_GUI` subsystem) for the desktop app, or `shellumi-cli.exe` (`WINDOWS_CUI` subsystem) from PowerShell/Windows Terminal.
+- Optional standalone binaries: `shellumi-app-windows-x86_64.exe` and `shellumi-cli-windows-x86_64.exe`.
 
 ---
 
 ## Verify Release Checksums
 
-Every published release includes `SHA256SUMS.txt` covering all binaries and packages:
+Every published release includes `SHA256SUMS.txt` (plus `shellumi-sbom-metadata.json` and `release-provenance.json`). To verify an individual downloaded asset against `SHA256SUMS.txt`:
 
-- **Linux:**
+- **Linux (`sha256sum`):**
   ```sh
-  sha256sum -c SHA256SUMS.txt --ignore-missing
+  grep 'shellumi_0.0.8-alpha_amd64.deb' SHA256SUMS.txt | sha256sum -c -
   ```
-- **macOS:**
+- **macOS (`shasum`):**
   ```sh
-  shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+  grep 'Shellumi-0.0.8-alpha-macos-arm64.dmg' SHA256SUMS.txt | shasum -a 256 -c -
   ```
-- **Windows (PowerShell):**
+- **Windows (PowerShell — `NOT TESTED` interactively here):**
   ```powershell
-  Get-FileHash .\shellumi-0.0.7-alpha-windows-x86_64.zip -Algorithm SHA256
-  # Compare output against SHA256SUMS.txt
+  Get-FileHash .\shellumi-0.0.8-alpha-windows-x86_64.zip -Algorithm SHA256
+  Select-String -Path .\SHA256SUMS.txt -Pattern 'shellumi-0.0.8-alpha-windows-x86_64.zip'
   ```
 
 ---

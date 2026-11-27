@@ -2,7 +2,7 @@
 
 # Verification Status
 
-This page separates Shellumi's ten independent verification categories and records exact GitHub Actions run conclusions without conflating compilation or CI unit tests with package publication or interactive native acceptance.
+This page separates Shellumi's ten independent verification categories and records exact GitHub Actions run conclusions without conflating compilation or CI unit tests with package publication, signing/notarization, or interactive native acceptance.
 
 ## Verification Categories
 
@@ -12,29 +12,31 @@ This page separates Shellumi's ten independent verification categories and recor
 4. **Automated workspace tests** (`cargo test --workspace`)
 5. **Release binary compilation** (`cargo build --locked --release -p shellumi-app -p shellumi-cli`)
 6. **Package generation** (`.dmg`, `.deb`, `.zip`)
-7. **Release artifact publication** (GitHub Release upload + `SHA256SUMS.txt`)
+7. **Release artifact publication** (GitHub Release upload + `SHA256SUMS.txt`, `shellumi-sbom-metadata.json`, `release-provenance.json`)
 8. **Native application launch** (GUI launches without console window or fatal error)
 9. **Interactive native GUI acceptance** (OS keychain/Secret Service, DPI, clipboard, menus)
 10. **Live protocol acceptance** (external `sshd`, `xrdp`/Windows RDP, TigerVNC, `mosh-server`, Google Drive API, Shellumi Server)
 
 ---
 
-## Recorded GitHub Actions Runs
+## Recorded GitHub Actions Runs (As of November 27, 2026)
 
 | Workflow | Commit / Tag | Run ID & URL | Platforms | Conclusion | Notes |
 | --- | --- | --- | --- | --- | --- |
 | **CI** | `3123db229050a588e75cdc60147b7e39a5d0e13c` (`main`) | [`45903344785`](https://github.com/MJKhaani/Shellumi/actions/runs/45903344785) | macOS, Linux, Windows | **success** | Categories 1–4 passed across all 3 platforms (2026-11-26). |
-| **Release binaries and packages** | `3123db229050a588e75cdc60147b7e39a5d0e13c` (`v0.0.8-alpha`) | [`45911871766`](https://github.com/MJKhaani/Shellumi/actions/runs/45911871766) | Linux, Windows, macOS (`arm64`, `x86_64`) | **failure** | Failed in `Package macOS assets` (`x86_64`) with `hdiutil: create failed - Resource busy`; publish job skipped. |
+| **Release binaries and packages** | `3123db229050a588e75cdc60147b7e39a5d0e13c` (`v0.0.8-alpha`) | [`45911871766`](https://github.com/MJKhaani/Shellumi/actions/runs/45911871766) | Linux, Windows, macOS (`arm64`, `x86_64`) | **failure** | Historical failure in `Package macOS assets` (`x86_64`) with `hdiutil: create failed - Resource busy`; superseded by `45914814451`. |
 | **CI** | `19f02c8b148f40aae30107a461f63fda2e8f7b19` (`main`) | [`45914091300`](https://github.com/MJKhaani/Shellumi/actions/runs/45914091300) | macOS, Linux, Windows | **success** | Categories 1–4 passed (2026-11-26). |
-| **Verify Documentation** | `19f02c8b148f40aae30107a461f63fda2e8f7b19` (`main`) | [`45914091298`](https://github.com/MJKhaani/Shellumi/actions/runs/45914091298) | Ubuntu | **success** | `scripts/verify-docs.sh` passed (2026-11-26). |
-| **CI** | `7244263968ff4e24bac9bfbc6704cadbc10f4fec` (`main`) | [`45914800286`](https://github.com/MJKhaani/Shellumi/actions/runs/45914800286) | macOS, Linux, Windows | **in_progress** | Triggered 2026-11-27; not yet completed. |
-| **Release binaries and packages** | `7244263968ff4e24bac9bfbc6704cadbc10f4fec` (`v0.0.8-alpha`) | [`45914814451`](https://github.com/MJKhaani/Shellumi/actions/runs/45914814451) | Linux, Windows, macOS (`arm64`, `x86_64`) | **in_progress** | Re-triggered after `build-dmg.sh` retry fix; not yet completed. |
+| **Verify Documentation** | `19f02c8b148f40aae30107a461f63fda2e8f7b19` (`main`) | [`45914091298`](https://github.com/MJKhaani/Shellumi/actions/runs/45914091298) | Ubuntu | **success** | Docs link/asset validation passed (2026-11-26). |
+| **CI** | `7244263968ff4e24bac9bfbc6704cadbc10f4fec` (`main`) | [`45914800286`](https://github.com/MJKhaani/Shellumi/actions/runs/45914800286) | macOS, Linux, Windows | **success** | Categories 1–4 passed after `build-dmg.sh` retry fix (2026-11-27). |
+| **Release binaries and packages** | `7244263968ff4e24bac9bfbc6704cadbc10f4fec` (`v0.0.8-alpha`) | [`45914814451`](https://github.com/MJKhaani/Shellumi/actions/runs/45914814451) | Linux, Windows, macOS (`arm64`, `x86_64`) | **success** | Categories 5–7 passed across all 4 targets + publish job; published [`v0.0.8-alpha`](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.8-alpha) at `2026-11-27T00:32:37Z`. |
+| **CI** | `89316fda83048f15e601652da9cf541e0f2c9545` (`main`) | [`45917337863`](https://github.com/MJKhaani/Shellumi/actions/runs/45917337863) | macOS, Linux, Windows | **success** | Categories 1–4 passed on docs remediation commit (2026-11-27). |
+| **Verify Documentation** | `89316fda83048f15e601652da9cf541e0f2c9545` (`main`) | [`45917337930`](https://github.com/MJKhaani/Shellumi/actions/runs/45917337930) | Ubuntu | **success** | 11 validator regression tests + 139 markdown checks passed (2026-11-27). |
 
-**Latest Published GitHub Pre-Release:** `v0.0.7-alpha` ([GitHub Releases](https://github.com/MJKhaani/Shellumi/releases)). `v0.0.8-alpha` is **not** published until run `45914814451` completes successfully.
+**Latest Published GitHub Pre-Release:** [`v0.0.8-alpha`](https://github.com/MJKhaani/Shellumi/releases/tag/v0.0.8-alpha) (source commit `7244263968ff4e24bac9bfbc6704cadbc10f4fec`, 15 uploaded assets including `SHA256SUMS.txt`, `shellumi-sbom-metadata.json`, and `release-provenance.json`). Release publication does **not** constitute Apple notarization, Windows Authenticode signing, native GUI acceptance, or live protocol verification.
 
 ---
 
-## What CI Does NOT Prove (`NOT TESTED`)
+## What CI & Release Publication Do NOT Prove (`NOT TESTED`)
 
 | Area | Status | Issue ID / Notes |
 | --- | --- | --- |

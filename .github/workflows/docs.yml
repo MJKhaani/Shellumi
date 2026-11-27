@@ -9,6 +9,7 @@ on:
       - 'resources/**'
       - 'scripts/verify-docs.sh'
       - 'scripts/test-verify-docs.sh'
+      - 'scripts/docs-tools/**'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
@@ -17,15 +18,24 @@ on:
       - 'resources/**'
       - 'scripts/verify-docs.sh'
       - 'scripts/test-verify-docs.sh'
+      - 'scripts/docs-tools/**'
       - '.github/workflows/docs.yml'
 
 jobs:
   verify-docs:
-    name: Verify Documentation Links, Assets & Validator Tests
+    name: Verify Documentation Links, Assets, Lint & Mermaid
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install pinned Python Markdown parser
+        run: python3 -m pip install --quiet markdown-it-py==3.0.0
+      - name: Install pinned Node docs toolchain (markdownlint + mermaid)
+        working-directory: scripts/docs-tools
+        run: npm install --no-audit --no-fund
       - name: Run documentation validator regression tests
         run: ./scripts/test-verify-docs.sh
-      - name: Run documentation verification script
+      - name: Run full documentation verification
         run: ./scripts/verify-docs.sh

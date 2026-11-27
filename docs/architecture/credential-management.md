@@ -13,8 +13,8 @@
 | **`MacOsKeychainStore`** | macOS | Native `security-framework` Keychain Services (`kSecClassGenericPassword`) |
 | **`WindowsCredentialManagerStore`** | Windows | Windows PowerShell helper invoking `Windows.Security.Credentials.PasswordVault` (`CREATE_NO_WINDOW`) |
 | **`LinuxSecretServiceStore`** | Linux | `secret-tool` (`org.freedesktop.secrets` D-Bus Secret Service) |
-| **`EncryptedFileCredentialStore`** | Cross-platform | Opt-in AES-256-GCM + PBKDF2-HMAC-SHA256 file store when `SHELLUMI_CREDENTIAL_STORE=encrypted-file` and `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE` (>= 12 chars) are set |
-| **`EphemeralCredentialStore`** | Tests only | In-memory store for automated unit/integration tests |
+| **`EncryptedFileCredentialStore`** | Cross-platform | Opt-in AES-256-GCM + PBKDF2-HMAC-SHA256 fallback file (`SHELLUMI_VAULT_PATH`, default `Shellumi/credentials.enc`) paired with the native backend (`DaemonWithFallbackStore`) when `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE` (>= 12 chars) is set |
+| **`EphemeralCredentialStore`** | Tests / `SHELLUMI_CREDENTIAL_STORE=ephemeral` | Non-durable in-memory store (also fallback on unsupported OSes) |
 
 ## Vault Ownership & Credential Journal
 

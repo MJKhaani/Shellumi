@@ -6,7 +6,7 @@
 
 Shellumi's synchronization layer spans `shellumi-core::{sync, server}` and `shellumi-storage::{lib, server_sync}`:
 
-- **Local Outbox (`vault_mutations`):** Host, identity, group, snippet, tunnel, and workspace writes in remote vaults append mutations inside the same SQLite transaction as the local row update.
+- **Local Outbox (`vault_mutations`):** `HostStore` writes `vault_mutations` records inside the same SQLite transaction for **host** and **identity** mutations (`save_host_with_identity_and_journal_tx_inner`, `delete_host_with_journal_tx`, `delete_identity_with_journal_tx`). Other entities (groups, snippets, tunnels, workspaces) do not all share this transactional `vault_mutations` outbox write path.
 - **Google Drive Engine:** Uses `GoogleDriveSyncClient` over `SystemHttpTransport` (`curl` stdin transport) with immutable create-only snapshots (`files.generateIds` + read-back verification) and an HMAC-SHA-256 authenticated `cloud_state` DAG.
 - **Shellumi Server Engine:** Uses `ServerSyncClient` with Ed25519-signed Compare-And-Swap (CAS) mutation commits, cursor-paginated delta feeds, HTTP 410 snapshot recovery, and per-vault WebSocket notifications (`/api/v1/events/ws`).
 - **Portable Auth Boundary:** `SyncHostPayload` carries allowlisted `PortableProtocolSettings` and strips device-local credential references/paths (`host_secret_ref`, `host_passphrase_ref`, `host_key_path`) on incremental sync. See [Object Identifiers](../synchronization/object-identifiers.md).

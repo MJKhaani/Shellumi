@@ -6,31 +6,33 @@ Recovered from §2, §7 (security config), §8, §9, §10, §11, §12, §13, §1
 
 ## UI/UX & Settings (`REQ-UI-*`, `REQ-SET-*`)
 
-| ID | Requirement | Status | Evidence / Notes |
-| --- | --- | --- | --- |
-| `REQ-UI-001` | Original Shellumi visual language with custom icon pack, light/dark/system themes, high-contrast, responsive panels, empty/error states. | **Implemented** | `resources/icon_pack/`, `design-system.md`. |
-| `REQ-UI-002` | Unified Right-Hand Inspector (`InspectorCoordinator`) for routine CRUD with guarded dirty transitions and responsive side/focused modes. | **Implemented** | `acceptance-matrix.md` (`INS-001`..`020`, `LAY-001`..`004`). |
-| `REQ-UI-003` | 14 primary navigation screens (Hosts, Workspaces, Terminal, SFTP, Snippets, Keychain, Port Forwarding, Known Hosts, Session Logs, Vaults, Team Collaboration, Integrations, Google Drive Sync, Settings). | **Implemented** | `shellumi-app` main navigation. |
-| `REQ-UI-004` | Global Command Palette (`PaletteRegistry`) for hosts, connections, workspaces, snippets, SFTP, tunnels, actions, screens, shortcuts. | **Implemented** | `PaletteRegistry`, CLI `palette search`. |
-| `REQ-UI-005` | Accessibility: keyboard-only navigation, focus indicators, scalable UI, clear errors, screen-reader support where GPUI `0.2.2` permits. | **Partial** | Keyboard navigation & contrast implemented; GPUI `0.2.2` screen-reader APIs limited (`accessibility.md`). |
-| `REQ-SET-001` | Categorized preferences (General, Appearance, Terminal, Connections, Files, Security, Synchronization, Advanced). | **Implemented** | `settings.md`. |
-| `REQ-SET-002` | Optional update checks without forced automatic updates; launch-at-login & localization. | **Planned** | Not yet implemented. |
+| ID | Requirement | Status | Verification Level | Source Evidence | Acceptance Criterion |
+| --- | --- | --- | --- | --- | --- |
+| `REQ-UI-001` | Original Shellumi visual language, custom icon pack, light/dark/system/high-contrast themes, responsive panels. | **Implemented** | GPUI + Visual (macOS) | `resources/icon_pack/`, `design-system.md` | macOS visual baseline verified; Win/Linux native chrome `NOT TESTED`. |
+| `REQ-UI-002` | Unified Right-Hand Inspector (`InspectorCoordinator`) with guarded dirty transitions and Side/FocusedContent modes. | **Implemented** | Unit + GPUI tested | `acceptance-matrix.md` (`INS-001`..`020`, `LAY-001`..`004`) | All 20 Inspector & 4 Layout automated assertions pass. |
+| `REQ-UI-003a` | Primary navigation rail screens (`Hosts`, `Keychain`, `Port Forwarding`, `Snippets`, `Known Hosts`, `Session Logs`, `Settings`). | **Implemented** | GPUI + Source-inspected | `nav_items` in `main.rs:2244-2251`, `app_render.rs` | Rail items & Settings route registered and reachable. |
+| `REQ-UI-003b` | Secondary workspace/tool screens (`Overview`, `Workspaces`, `SFTP Files`, `Vaults`, `Integrations`). | **Implemented** | GPUI + Source-inspected | `app_render.rs:153-175`, `desktop.rs:1285-1306` | Registered `app.page` routes & keyboard shortcuts (`GoTo*`). |
+| `REQ-UI-003c` | Team Collaboration and Google Drive Sync surfaces (within Vaults/Settings/Sync views rather than separate rail items). | **Partial** | Integration tested (fixtures) | `actions/{sync,server_sync}.rs` | Accessed via Vaults/Settings; live external server/Drive `NOT TESTED`. |
+| `REQ-UI-004` | Global Command Palette (`PaletteRegistry`) for hosts, connections, workspaces, snippets, SFTP, tunnels, actions, screens, shortcuts. | **Implemented** | Unit + CLI tested | `PaletteRegistry`, CLI `palette search` | Palette search & action dispatch tested. |
+| `REQ-UI-005` | Accessibility: keyboard navigation, focus indicators, scalable UI, screen-reader support where GPUI `0.2.2` permits. | **Partial** | Unit + Source-inspected | `accessibility.md` | Keyboard & contrast implemented; GPUI `0.2.2` lacks full OS screen-reader tree. |
+| `REQ-SET-001` | Core persisted preferences (`terminal_font_size`, `ui_font_size`, `scrollback_lines`, `show_hidden_files`, `startup_overview`). | **Implemented** | Unit tested (`Preferences`) | `shellumi-storage/src/desktop.rs:9-45` | Validation & JSON persistence (`*.preferences.json`) tested. |
+| `REQ-SET-002` | Localization, launch-at-login, and optional update checks without forced updates. | **Planned** | — | — | Preserved requirements; not yet implemented. |
 
 ## Architecture, Security & Performance (`REQ-ARCH-*`, `REQ-SEC-*`, `REQ-PERF-*`)
 
-| ID | Requirement | Status | Evidence / Notes |
-| --- | --- | --- | --- |
-| `REQ-ARCH-001`..`004` | Local-first offline operation, Rust + GPUI `0.2.2` only, strict UI/protocol/storage decoupling, MIT license, zero telemetry. | **Implemented** | 8-crate Cargo workspace (consolidated from 25 suggested crates in `3123db2`). |
-| `REQ-ARCH-005` | Embedded transactional SQLite/Turso database with schema versioning, atomic migrations, referential integrity, and crash-safe recovery. | **Implemented** | `shellumi-storage`, schema 32, `MigrationEngine`. |
-| `REQ-SEC-001`..`004` | `Argon2id` + `AES-256-GCM` encryption, threat model, log redaction (`Redacted<T>`), idle lock, secure temp files, `cargo audit`. | **Implemented** (crypto/redaction/model); **Partial** (idle lock/biometrics) | `docs/security/README.md`, `threat-model.md`. |
-| `REQ-PERF-001` | Low memory, low input latency, fast scrolling, minimal redraws, predictable resource usage under large output. | **Partial** | GPUI virtualized rendering + `bench` suite; external comparative benchmarks pending. |
+| ID | Requirement | Status | Verification Level | Source Evidence | Acceptance Criterion |
+| --- | --- | --- | --- | --- | --- |
+| `REQ-ARCH-001`..`004` | Local-first offline operation, Rust + GPUI `0.2.2` only, strict UI/protocol/storage decoupling, MIT license, zero telemetry. | **Implemented** | CI verified (macOS/Linux/Windows) | 8-crate Cargo workspace (`Cargo.toml`) | Workspace structure consolidated from 25 suggested crates to 8 (**Superseded** layout). |
+| `REQ-ARCH-005` | Embedded transactional SQLite/Turso database with schema versioning, atomic migrations, and crash-safe recovery. | **Implemented** | Unit + Integration tested | `shellumi-storage`, `SCHEMA_VERSION = 32`, `MigrationEngine` | Migration, reopen, future-version rejection, and crash-recovery tests pass. |
+| `REQ-SEC-001`..`004` | `Argon2id` + `AES-256-GCM` encryption, threat model, log redaction (`Redacted<T>`), secure temp files, `cargo audit`. | **Implemented** (crypto/redaction); **Partial** (idle lock/biometrics) | Unit + Integration tested | `docs/security/README.md`, `threat-model.md` | Encryption, wrong-key rejection, and redaction tests pass. |
+| `REQ-PERF-001` | Low memory, low input latency, fast scrolling, minimal redraws under large output. | **Partial** | Unit + CLI `bench` | `shellumi-core::BenchmarkRunner`, CLI `bench` | Internal `bench` framework exists; comparative external benchmarks **Planned**. |
 
 ## Cross-Platform, Packaging & QA (`REQ-PLAT-*`, `REQ-QA-*`)
 
-| ID | Requirement | Status | Evidence / Notes |
-| --- | --- | --- | --- |
-| `REQ-PLAT-001` | macOS (Apple Silicon & Intel): `.app`/`.dmg`, native PTY, Keychain, native menu bar, code-signing/notarization docs. | **Implemented** (Apple Silicon dev); **Partial** (DMG CI retry added, signing/notarization manual) | `build-dmg.sh`, `MacOsKeychainStore`. |
-| `REQ-PLAT-002` | Windows (10/11): ConPTY, Credential Manager (`PasswordVault`), system theme, high-DPI, no stray console window (`windows_subsystem = "windows"`). | **Partial** | Compiles & passes CI unit tests; interactive Windows runtime `NOT TESTED`. |
-| `REQ-PLAT-003` | Linux (X11/Wayland): `.deb` / AppImage, Secret Service (`secret-tool`), `Terminal=false` desktop entry, GNOME/KDE compatibility. | **Partial** | Compiles & `.deb` builds in CI; interactive Linux desktop `NOT TESTED`. |
-| `REQ-PLAT-004` | Mobile (iOS/Android): keep `shellumi-core` UI-independent and FFI-ready without compromising desktop GPUI. | **Implemented** (core isolation & FFI bridge); **Planned** (native mobile apps) | `shellumi-core/src/mobile.rs`, `ffi.rs`, `mobile-feasibility.md`. |
-| `REQ-QA-001`..`004` | Layered unit/integration/security/CI tests across macOS/Linux/Windows, honest `NOT TESTED` tracking, no mock disguises. | **Implemented** (CI); **Partial** (live protocol & Win/Linux native) | `docs/qa/verification-status.md`. |
+| ID | Requirement | Status | Verification Level | Source Evidence | Acceptance Criterion |
+| --- | --- | --- | --- | --- | --- |
+| `REQ-PLAT-001` | macOS (`arm64`, `x86_64`): `.app`/`.dmg`, native PTY, Keychain, native menus, signing/notarization docs. | **Implemented** (dev/CI); **Partial** (signing/notarization) | CI + Release `45914814451` | `packaging/macos/build-dmg.sh`, `MacOsKeychainStore` | `.dmg` & binaries published in `v0.0.8-alpha`; Apple notarization manual. |
+| `REQ-PLAT-002` | Windows (`x86_64`): ConPTY, `PasswordVault`, `windows_subsystem = "windows"`, `CREATE_NO_WINDOW`. | **Implemented** (code); **NOT TESTED** (interactive) | CI + Release `45914814451` | `main.rs`, `credential.rs`, `askpass.rs` | Compiles & `.zip`/`.exe` published; interactive Windows runtime [`PLAT-001`](../known-issues.md#platform-security--operational-gaps) `NOT TESTED`. |
+| `REQ-PLAT-003` | Linux (`x86_64`): `.deb`, `secret-tool`, `Terminal=false` desktop entry, X11/Wayland. | **Implemented** (code); **NOT TESTED** (interactive) | CI + Release `45914814451` | `packaging/linux/build-deb.sh`, `shellumi.desktop` | `.deb` & binaries published; interactive Linux desktop [`PLAT-002`](../known-issues.md#platform-security--operational-gaps) `NOT TESTED`. |
+| `REQ-PLAT-004` | Mobile (iOS/Android): keep `shellumi-core` UI-independent and FFI-ready without compromising desktop GPUI. | **Implemented** (core isolation); **Planned** (mobile apps) | Unit tested (`ffi.rs`, `mobile.rs`) | `shellumi-core/src/{mobile,ffi}.rs` | FFI & mobile lifecycle models tested; native SwiftUI/Compose apps **Planned**. |
+| `REQ-QA-001`..`004` | Layered unit/integration/security/CI tests across macOS/Linux/Windows, honest `NOT TESTED` tracking, no mock disguises. | **Implemented** (CI); **Partial** (live protocol & Win/Linux native) | CI `45917337863` + Docs `45917337930` | `docs/qa/verification-status.md` | 3-platform CI & release packaging verified; interactive/live gaps tracked honestly. |

@@ -51,10 +51,10 @@ When editing a host or identity that already has a stored secret:
   - **macOS:** Keychain (`MacOsKeychainStore`) — verified on macOS.
   - **Windows:** Credential Manager (`PasswordVault`) — `NOT TESTED` interactively (`PLAT-001`).
   - **Linux:** Secret Service (`secret-tool` / D-Bus) — `NOT TESTED` interactively (`PLAT-002`).
-  - **Encrypted File Fallback:** `EncryptedFileCredentialStore` (`SHELLUMI_CREDENTIAL_STORE=file` + `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE`).
+  - **Encrypted File Fallback (`DaemonWithFallbackStore`):** When `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE` (at least 12 characters) is set alongside an absolute `SHELLUMI_VAULT_PATH` (default `<base>/Shellumi/credentials.enc`), Shellumi pairs the native backend with `EncryptedFileCredentialStore`. (Note: `SHELLUMI_CREDENTIAL_STORE=ephemeral` selects a non-durable in-memory store.)
 - Incremental server sync strips device-local secret refs (`host_secret_ref`, `host_passphrase_ref`, `host_key_path`) so secrets never leak unencrypted across devices. On a new device, re-bind local credentials or use a host-assigned secret stored in your encrypted vault where configured. See [`SYNC-003`](../project/known-issues.md#sync-003--identity-deletion-can-unintentionally-change-effective-authentication) and [`SYNC-005`](../project/known-issues.md#sync-005--incoming-synchronization-bypasses-journaled-cleanup-of-incompatible-credentials).
 
 ## Troubleshooting
 
-- **Linux `secret-tool` Missing or No D-Bus Keyring:** Install `libsecret-tools` (`secret-tool`) and ensure GNOME Keyring or KWallet Secret Service is unlocked, or set `SHELLUMI_CREDENTIAL_STORE=file` with `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE`.
+- **Linux `secret-tool` Missing or No D-Bus Keyring:** Install `libsecret-tools` (`secret-tool`) and ensure GNOME Keyring or KWallet Secret Service is unlocked, or set `SHELLUMI_CREDENTIAL_VAULT_PASSPHRASE` (>= 12 chars) to enable the `EncryptedFileCredentialStore` fallback at `SHELLUMI_VAULT_PATH` (default `~/.local/share/Shellumi/credentials.enc`).
 - **CLI Status Check:** Run `shellumi-cli keychain status --json` or `shellumi-cli doctor` to inspect active credential-store availability.

@@ -23,3 +23,6 @@ pinned/
 
 # Visual design gallery
 /gpui_macos_dark_gallery/
+
+# Docs validation Node dependencies
+scripts/docs-tools/node_modules/

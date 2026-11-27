@@ -27,8 +27,13 @@ Isolated loopback `sshd` tests are marked `#[ignore]` in the default suite. See 
 
 ## Documentation Verification
 
-Run the local documentation verifier before committing doc changes:
+Run the local documentation regression tests and full validator before committing doc changes:
 
 ```sh
+./scripts/test-verify-docs.sh
 ./scripts/verify-docs.sh
 ```
+
+- **Local Offline Engine:** Uses `python3` with `markdown-it-py==3.0.0`, `html.parser`, exact-case/symlink checks, table/heading linting, Mermaid grammar checks, and `SHELLUMI_*` env-var drift detection.
+- **Full CI Engine (`.github/workflows/docs.yml`):** Additionally installs pinned Node packages in `scripts/docs-tools/` (`markdownlint@0.38.0` + `mermaid@11.6.0` with `jsdom`) and runs `scripts/docs-tools/lint-and-mermaid.mjs`.
+- **Scoped Exceptions:** Narrowly scoped HTML allowances live in `scripts/docs-tools/.markdownlint.json`; archive replacement links are validated in the `Historical Archive Record` header block.
