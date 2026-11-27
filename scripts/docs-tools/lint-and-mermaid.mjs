@@ -10,6 +10,9 @@ const lintConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const dom = new JSDOM("<!doctype html><html><body></body></html>");
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
+globalThis.Element = dom.window.Element;
+globalThis.HTMLElement = dom.window.HTMLElement;
+globalThis.SVGElement = dom.window.SVGElement;
 const { default: mermaid } = await import("mermaid");
 mermaid.initialize({ startOnLoad: false });
 

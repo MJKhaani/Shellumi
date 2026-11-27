@@ -10,9 +10,9 @@ Shellumi's remote desktop subsystem is composed of three UI-independent protocol
 
 ```mermaid
 flowchart LR
-    UI["GPUI Canvas & Session Toolbar"] -->|SessionCommand (async_channel)| Worker["Tokio Protocol Worker (RDP / VNC)"]
-    Worker -->|SessionEvent (RemoteResize, FrameReady, ResizeFailed, DisplayControlCaps)| UI
-    Worker -->|32-bit RGBA FramebufferSnapshot| Canvas["GPUI RenderImage Blit"]
+    UI["GPUI Canvas & Session Toolbar"] -->|"SessionCommand (async_channel)"| Worker["Tokio Protocol Worker (RDP / VNC)"]
+    Worker -->|"SessionEvent (RemoteResize, FrameReady, ResizeFailed, DisplayControlCaps)"| UI
+    Worker -->|"32-bit RGBA FramebufferSnapshot"| Canvas["GPUI RenderImage Blit"]
 ```
 
 - **`shellumi-remote-desktop`:** Defines `SessionCommand`, `SessionEvent`, `FramebufferSnapshot`, `PanState`, `ReconnectPolicy`, and `SessionMetricsSnapshot`.
@@ -37,12 +37,12 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Debouncing: Automatic layout change (captures layout_gen + auto_cancel_gen)
-    Debouncing --> InFlight: take_ready_to_dispatch() [layout_gen == layout_epoch]
-    Idle --> InFlight: Manual Match Viewport / Preset
-    InFlight --> Idle: SessionEvent::RemoteResize confirms dimensions
-    InFlight --> Retrying: Local timeout / ResizeFailed (bounded max 2 retries; remote state unknown)
-    Retrying --> InFlight: Re-dispatch (may overlap unresolved remote resize)
+    Idle --> Debouncing: Automatic layout change
+    Debouncing --> InFlight: take_ready_to_dispatch when layout_gen matches layout_epoch
+    Idle --> InFlight: Manual Match Viewport or Preset
+    InFlight --> Idle: RemoteResize confirms dimensions
+    InFlight --> Retrying: Local timeout or ResizeFailed with max 2 retries
+    Retrying --> InFlight: Re-dispatch may overlap unresolved remote resize
     InFlight --> Idle: Retries exhausted or DisplayControlUnavailable
 ```
 
