@@ -1899,6 +1899,110 @@ impl Shellumi {
             }
         };
 
+        let transfer_inspector = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|t| self.rd_transfers.get(&t.id))
+            .and_then(|jobs| jobs.last())
+            .map(|job| {
+                let dir_label = match job.direction {
+                    shellumi_remote_desktop::TransferDirection::Upload => "Upload",
+                    shellumi_remote_desktop::TransferDirection::Download => "Download",
+                };
+                let (phase_label, phase_color) = match job.phase {
+                    crate::RdTransferPhase::Transferring => {
+                        ("Transferring", rgb(MacTheme::ACCENT_BLUE))
+                    }
+                    crate::RdTransferPhase::Completed => ("Completed", rgb(0x3dd68c)),
+                    crate::RdTransferPhase::Failed => ("Failed", rgb(0xeb5757)),
+                    crate::RdTransferPhase::Cancelled => ("Cancelled", rgb(0xf2c94c)),
+                };
+                let tid = job.transfer_id;
+                let is_active = job.phase == crate::RdTransferPhase::Transferring;
+                let can_copy = job.phase == crate::RdTransferPhase::Completed
+                    && job.direction == shellumi_remote_desktop::TransferDirection::Download
+                    && job.target_dir.is_some();
+
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .bg(rgb(MacTheme::SIDEBAR_BG))
+                    .border_t_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(phase_color)
+                                    .child(format!("{dir_label} · {phase_label}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child(format!(
+                                        "{} file(s) · {} / {} bytes",
+                                        job.file_count, job.bytes_transferred, job.total_bytes
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .children(if is_active {
+                                Some(
+                                    div()
+                                        .id(("rd-transfer-cancel", tab_idx))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(rgb(0x4a2020))
+                                        .text_xs()
+                                        .text_color(rgb(0xffffff))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.remote_desktop_cancel_transfer(tab_idx, tid, cx);
+                                        }))
+                                        .child("Cancel"),
+                                )
+                            } else {
+                                None
+                            })
+                            .children(if can_copy {
+                                Some(
+                                    div()
+                                        .id(("rd-transfer-copy", tab_idx))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(rgb(MacTheme::SURFACE_ACTIVE))
+                                        .text_xs()
+                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.remote_desktop_copy_transfer_to_clipboard(
+                                                tab_idx, tid, cx,
+                                            );
+                                        }))
+                                        .child("Copy Files"),
+                                )
+                            } else {
+                                None
+                            }),
+                    )
+            });
+
         let content_container = div()
             .flex_1()
             .min_h_0()
@@ -1917,5 +2021,6 @@ impl Shellumi {
             .bg(rgb(MacTheme::CONTENT_BG))
             .child(toolbar)
             .child(content_container)
+            .children(transfer_inspector)
     }
 }

@@ -48,6 +48,7 @@ pub enum RemoteShortcut {
     CtrlX,
     CtrlA,
     CtrlZ,
+    CtrlShiftZ,
 }
 
 impl RemoteShortcut {
@@ -63,6 +64,7 @@ impl RemoteShortcut {
             Self::CtrlX => "Ctrl+X",
             Self::CtrlA => "Ctrl+A",
             Self::CtrlZ => "Ctrl+Z",
+            Self::CtrlShiftZ => "Ctrl+Shift+Z",
         }
     }
 }
@@ -125,15 +127,62 @@ pub enum RemoteInput {
     ReleaseAll,
 }
 
+/// Immutable transport identity for every transport-affecting command and event.
+///
+/// `connection_generation` and `transport_epoch` must both be non-zero for any
+/// active transport operation; `0` is never treated as a wildcard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct SessionIdentity {
+    pub tab_id: u64,
+    pub connection_generation: u64,
+    pub transport_epoch: u64,
+}
+
+impl SessionIdentity {
+    pub const fn new(tab_id: u64, connection_generation: u64, transport_epoch: u64) -> Self {
+        Self {
+            tab_id,
+            connection_generation,
+            transport_epoch,
+        }
+    }
+
+    /// Returns true if both `connection_generation` and `transport_epoch` are non-zero.
+    pub const fn is_transport_bound(&self) -> bool {
+        self.connection_generation > 0 && self.transport_epoch > 0
+    }
+
+    /// Strict identity match: never treats `0` as a wildcard.
+    pub const fn matches_transport(&self, active: &Self) -> bool {
+        self.is_transport_bound()
+            && self.tab_id == active.tab_id
+            && self.connection_generation == active.connection_generation
+            && self.transport_epoch == active.transport_epoch
+    }
+}
+
 /// Epoch-tagged input envelope ensuring every input command is bound to an immutable
-/// session tab, connection generation, transport epoch, and monotonic sequence.
+/// session tab, connection generation, transport epoch, input epoch, policy revision,
+/// and monotonic sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputEnvelope {
     pub tab_id: u64,
     pub connection_generation: u64,
     pub transport_epoch: u64,
+    pub input_epoch: u64,
+    pub policy_revision: u64,
     pub seq: u64,
     pub input: RemoteInput,
+}
+
+impl InputEnvelope {
+    pub const fn identity(&self) -> SessionIdentity {
+        SessionIdentity::new(
+            self.tab_id,
+            self.connection_generation,
+            self.transport_epoch,
+        )
+    }
 }
 
 /// Bitmask constants for mouse buttons (compatible with RFB 3.8 pointer events).

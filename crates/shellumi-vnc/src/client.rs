@@ -408,7 +408,10 @@ where
     let mut last_received_clipboard: Option<String> = None;
     let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
     let mut ext_clipboard_utf8 = false;
+    let mut peer_ext_max_bytes: usize = MAX_CLIPBOARD_BYTES;
+    let mut local_clipboard_offer: Option<String> = None;
     let mut ledger = shellumi_remote_desktop::SubmittedInputLedger::new();
+    let mut worker_min_input_epoch: u64 = 0;
     let mut held_buttons: u8 = 0;
     let mut last_pointer: (u16, u16) = (0, 0);
     let mut scroll_acc_x: i32 = 0;
@@ -421,8 +424,53 @@ where
             cmd_res = worker.recv_command() => {
                 match cmd_res {
                     Ok(cmd) => match cmd {
+                        SessionCommand::RecoveryBarrier(barrier) => {
+                            if barrier.identity.transport_epoch != 0
+                                && barrier.identity.transport_epoch != transport_epoch
+                            {
+                                continue;
+                            }
+                            worker_min_input_epoch = worker_min_input_epoch.max(barrier.input_epoch);
+                            let releases = ledger.drain_releases();
+                            let released_count = releases.len();
+                            let mut release_bytes = Vec::new();
+                            for rel in &releases {
+                                release_bytes.extend_from_slice(&translate_vnc_remote_input(
+                                    rel,
+                                    &mut held_buttons,
+                                    &mut last_pointer,
+                                    &mut scroll_acc_x,
+                                    &mut scroll_acc_y,
+                                    framebuffer.width(),
+                                    framebuffer.height(),
+                                ));
+                            }
+                            if !release_bytes.is_empty() {
+                                if let Err(err) = stream.write_all(&release_bytes).await {
+                                    let reason = format!("VNC recovery write failed: {err}");
+                                    let _ = worker.send_event(SessionEvent::RecoveryFailed {
+                                        identity: barrier.identity,
+                                        input_epoch: barrier.input_epoch,
+                                        barrier_id: barrier.barrier_id,
+                                        reason: reason.clone(),
+                                    }).await;
+                                    let _ = worker.send_event(SessionEvent::Error(reason)).await;
+                                    return Err(VncClientError::Network(err));
+                                }
+                                metrics.record_bytes_sent(release_bytes.len() as u64);
+                            }
+                            let _ = worker.send_event(SessionEvent::RecoveryCompleted {
+                                identity: barrier.identity,
+                                input_epoch: barrier.input_epoch,
+                                barrier_id: barrier.barrier_id,
+                                released_count,
+                                reason: barrier.reason,
+                            }).await;
+                        }
                         SessionCommand::SetViewOnly { enabled, transition_id } => {
                             if enabled && !*view_only {
+                                last_sent_clipboard = None;
+                                last_received_clipboard = None;
                                 let releases = ledger.drain_releases();
                                 let released_count = releases.len();
                                 let mut release_bytes = Vec::new();
@@ -457,7 +505,10 @@ where
                             let _ = worker.send_event(SessionEvent::ViewOnlyChanged { enabled, transition_id }).await;
                         }
                         SessionCommand::InputEnvelope(env) => {
-                            if env.transport_epoch != 0 && env.transport_epoch != transport_epoch {
+                            if env.transport_epoch == 0
+                                || env.transport_epoch != transport_epoch
+                                || env.input_epoch < worker_min_input_epoch
+                            {
                                 continue;
                             }
                             if matches!(env.input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
@@ -671,6 +722,16 @@ where
                                 continue;
                             }
                             last_sent_clipboard = Some(text.clone());
+                            local_clipboard_offer = Some(text.clone());
+                            if ext_clipboard_utf8 && text.len() > peer_ext_max_bytes {
+                                let _ = worker
+                                    .send_event(SessionEvent::Error(format!(
+                                        "Clipboard text ({} bytes) exceeds peer extended clipboard limit ({peer_ext_max_bytes} bytes)",
+                                        text.len()
+                                    )))
+                                    .await;
+                                continue;
+                            }
                             let packet = if ext_clipboard_utf8 {
                                 match crate::wire::build_extended_clipboard_provide_utf8(&text) {
                                     Ok(p) => p,
@@ -846,12 +907,42 @@ where
 
                             let flags = u32::from_be_bytes([ext_buf[0], ext_buf[1], ext_buf[2], ext_buf[3]]);
                             let action = flags & 0xFF00_0000;
+                            let send_allowed = !*view_only
+                                && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled
+                                && clipboard_policy.allow_send;
                             if action == crate::wire::ext_clipboard::ACTION_CAPS {
+                                if ext_buf.len() >= 8 {
+                                    let advertised_max = u32::from_be_bytes([ext_buf[4], ext_buf[5], ext_buf[6], ext_buf[7]]) as usize;
+                                    if advertised_max > 0 {
+                                        peer_ext_max_bytes = advertised_max.min(MAX_CLIPBOARD_BYTES);
+                                    }
+                                }
                                 if (flags & crate::wire::ext_clipboard::FORMAT_UTF8) != 0 {
                                     ext_clipboard_utf8 = true;
                                     let caps_pkt = crate::wire::build_extended_clipboard_caps(MAX_CLIPBOARD_BYTES as u32);
                                     stream.write_all(&caps_pkt).await?;
                                     metrics.record_bytes_sent(caps_pkt.len() as u64);
+                                }
+                            } else if action == crate::wire::ext_clipboard::ACTION_PEEK {
+                                let notify_flags = if send_allowed && local_clipboard_offer.is_some() {
+                                    crate::wire::ext_clipboard::ACTION_NOTIFY
+                                        | crate::wire::ext_clipboard::FORMAT_UTF8
+                                } else {
+                                    crate::wire::ext_clipboard::ACTION_NOTIFY
+                                };
+                                let pkt = crate::wire::build_extended_clipboard_request(notify_flags);
+                                stream.write_all(&pkt).await?;
+                                metrics.record_bytes_sent(pkt.len() as u64);
+                            } else if action == crate::wire::ext_clipboard::ACTION_REQUEST {
+                                if send_allowed && (flags & crate::wire::ext_clipboard::FORMAT_UTF8) != 0 {
+                                    if let Some(ref offer) = local_clipboard_offer {
+                                        if offer.len() <= peer_ext_max_bytes {
+                                            if let Ok(provide_pkt) = crate::wire::build_extended_clipboard_provide_utf8(offer) {
+                                                stream.write_all(&provide_pkt).await?;
+                                                metrics.record_bytes_sent(provide_pkt.len() as u64);
+                                            }
+                                        }
+                                    }
                                 }
                             } else if action == crate::wire::ext_clipboard::ACTION_NOTIFY {
                                 if receive_allowed && (flags & crate::wire::ext_clipboard::FORMAT_UTF8) != 0 {
@@ -1062,6 +1153,16 @@ pub fn build_vnc_shortcut_packets(shortcut: shellumi_remote_desktop::RemoteShort
         RemoteShortcut::CtrlX => emit_vnc_ctrl_chord(&mut out, 0x0078),
         RemoteShortcut::CtrlA => emit_vnc_ctrl_chord(&mut out, 0x0061),
         RemoteShortcut::CtrlZ => emit_vnc_ctrl_chord(&mut out, 0x007A),
+        RemoteShortcut::CtrlShiftZ => {
+            const CTRL_L: u32 = 0xFFE3;
+            const SHIFT_L: u32 = 0xFFE1;
+            out.extend_from_slice(&build_key_event(true, CTRL_L));
+            out.extend_from_slice(&build_key_event(true, SHIFT_L));
+            out.extend_from_slice(&build_key_event(true, 0x007A));
+            out.extend_from_slice(&build_key_event(false, 0x007A));
+            out.extend_from_slice(&build_key_event(false, SHIFT_L));
+            out.extend_from_slice(&build_key_event(false, CTRL_L));
+        }
     }
     out
 }

@@ -208,6 +208,20 @@ pub fn build_shortcut_sequence(shortcut: RemoteShortcut) -> Vec<SmallVec<[FastPa
         RemoteShortcut::CtrlX => build_ctrl_chord(0x2D),
         RemoteShortcut::CtrlA => build_ctrl_chord(0x1E),
         RemoteShortcut::CtrlZ => build_ctrl_chord(0x2C),
+        RemoteShortcut::CtrlShiftZ => vec![
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x1D),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x2A),
+            ],
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x2C),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x2C),
+            ],
+            smallvec![
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x2A),
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x1D),
+            ],
+        ],
     }
 }
 

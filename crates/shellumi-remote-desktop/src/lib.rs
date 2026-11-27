@@ -14,8 +14,8 @@ pub use controller::{
     SubmittedInputLedger, ViewOnlyPolicyState,
 };
 pub use events::{
-    create_session_channels, ClipboardPolicy, ClipboardSyncMode, SessionCommand, SessionEvent,
-    SessionUiHandle, SessionWorkerHandle, TransferDirection,
+    create_session_channels, ClipboardPolicy, ClipboardSyncMode, RecoveryBarrier, SessionCommand,
+    SessionEvent, SessionUiHandle, SessionWorkerHandle, TransferDirection,
 };
 pub use framebuffer::{
     DirtyRegion, Framebuffer, FramebufferError, FramebufferSnapshot, Rect,
@@ -24,7 +24,7 @@ pub use framebuffer::{
 pub use input::{
     pointer_mask, translate_coordinates, CanvasTransform, ClipboardEvent, InputEnvelope, KeyEvent,
     KeyModifiers, KeyboardMappingMode, MouseButton, PanState, PointerEvent, RemoteInput, RemoteKey,
-    RemoteShortcut, ScaleMode, WheelEvent,
+    RemoteShortcut, ScaleMode, SessionIdentity, WheelEvent,
 };
 pub use metrics::{SessionMetrics, SessionMetricsSnapshot};
 pub use security::{format_fingerprint, CertificateValidationPolicy, SecurityWarning};

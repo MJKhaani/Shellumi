@@ -159,12 +159,77 @@ impl CliprdrInner {
     }
 }
 
+/// Immutable validated private staging directory for RDP clipboard file transfers.
+#[derive(Clone, Debug)]
+pub struct PrivateStaging {
+    root: PathBuf,
+    root_str: String,
+}
+
+impl PrivateStaging {
+    /// Create a fresh, exclusive, `0700`-protected private staging directory.
+    pub fn create() -> std::io::Result<Self> {
+        let dir = create_private_staging_dir()?;
+        let meta = std::fs::symlink_metadata(&dir)?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Staging root must be a non-symlink directory",
+            ));
+        }
+        let root_str = dir.to_string_lossy().to_string();
+        Ok(Self {
+            root: dir,
+            root_str,
+        })
+    }
+
+    /// Validate an explicit staging directory path (rejects empty, relative, or symlink roots).
+    pub fn from_validated_dir(path: PathBuf) -> std::io::Result<Self> {
+        if path.as_os_str().is_empty() || !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Staging path must be non-empty and absolute",
+            ));
+        }
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Staging root must be a non-symlink directory",
+            ));
+        }
+        let root_str = path.to_string_lossy().to_string();
+        Ok(Self {
+            root: path,
+            root_str,
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.root_str
+    }
+}
+
 /// Thread-safe cross-platform CLIPRDR backend for Shellumi.
 #[derive(Clone, Debug)]
 pub struct ShellumiCliprdrBackend {
     pub inner: Arc<Mutex<CliprdrInner>>,
     pub proxy: Arc<Mutex<Option<mpsc::UnboundedSender<RdpInputEvent>>>>,
     pub worker_tx: async_channel::Sender<SessionEvent>,
+    pub staging: Option<PrivateStaging>,
     pub temp_dir: String,
 }
 
@@ -179,39 +244,101 @@ impl AsAny for ShellumiCliprdrBackend {
 }
 
 impl ShellumiCliprdrBackend {
-    /// Create a new clipboard backend instance.
+    /// Create a new clipboard backend instance from a validated `PrivateStaging` (or `None` to disable file receive).
+    pub fn new_with_staging(
+        proxy: Arc<Mutex<Option<mpsc::UnboundedSender<RdpInputEvent>>>>,
+        worker_tx: async_channel::Sender<SessionEvent>,
+        staging: Option<PrivateStaging>,
+    ) -> Self {
+        let temp_dir = staging
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        let mut inner = CliprdrInner::new();
+        if staging.is_none() {
+            inner.allow_receive = true; // text receive remains independent; file receive checks staging.is_some()
+        }
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+            proxy,
+            worker_tx,
+            staging,
+            temp_dir,
+        }
+    }
+
+    /// Create a new clipboard backend instance (fail-closed if `temp_dir` is empty/invalid).
     pub fn new(
         proxy: Arc<Mutex<Option<mpsc::UnboundedSender<RdpInputEvent>>>>,
         worker_tx: async_channel::Sender<SessionEvent>,
         temp_dir: impl Into<String>,
     ) -> Self {
-        let temp_dir_str = temp_dir.into();
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        let _ = builder.create(&temp_dir_str);
+        let raw = temp_dir.into();
+        let staging = PrivateStaging::from_validated_dir(PathBuf::from(raw)).ok();
+        Self::new_with_staging(proxy, worker_tx, staging)
+    }
 
-        Self {
-            inner: Arc::new(Mutex::new(CliprdrInner::new())),
-            proxy,
-            worker_tx,
-            temp_dir: temp_dir_str,
-        }
+    /// Returns true if immutable private staging is initialized for file receive.
+    pub fn has_private_staging(&self) -> bool {
+        self.staging.is_some()
     }
 
     /// Update clipboard direction permissions at runtime (e.g. view-only or user policy).
     pub fn set_policy(&self, allow_send: bool, allow_receive: bool) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.allow_send = allow_send;
-        inner.allow_receive = allow_receive;
-        if !allow_send {
-            inner.local_text = None;
-            inner.staged_files.clear();
+        let cancelled_transfer_id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.allow_send = allow_send;
+            inner.allow_receive = allow_receive;
+            if !allow_send {
+                inner.local_text = None;
+                inner.staged_files.clear();
+            }
+            if !allow_receive {
+                Self::abort_download_locked(&mut inner)
+            } else {
+                None
+            }
+        };
+        if let Some(transfer_id) = cancelled_transfer_id {
+            let _ = self.worker_tx.try_send(SessionEvent::TransferCancelled {
+                transfer_id,
+                direction: TransferDirection::Download,
+            });
         }
+    }
+
+    /// Cancel an active transfer by ID (returns true if matched and cancelled).
+    pub fn cancel_transfer(&self, transfer_id: u64) -> bool {
+        let cancelled = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.active_transfer_id == Some(transfer_id) {
+                Self::abort_download_locked(&mut inner)
+            } else {
+                None
+            }
+        };
+        if let Some(id) = cancelled {
+            let _ = self.worker_tx.try_send(SessionEvent::TransferCancelled {
+                transfer_id: id,
+                direction: TransferDirection::Download,
+            });
+            return true;
+        }
+        false
+    }
+
+    fn abort_download_locked(inner: &mut CliprdrInner) -> Option<u64> {
+        let transfer_id = inner.active_transfer_id.take()?;
+        inner.active_download_stream_id = None;
+        inner.expected_response = None;
+        for f in &mut inner.remote_files {
+            f.handle.take();
+            if f.downloaded_bytes < f.size || f.local_path.exists() {
+                let _ = std::fs::remove_file(&f.local_path);
+            }
+        }
+        inner.remote_files.clear();
+        Some(transfer_id)
     }
 
     /// Dispatch a clipboard message back to IronRDP runner.
@@ -357,11 +484,14 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
     }
 
     fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
-        ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES
-            | ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED
-            | ClipboardGeneralCapabilityFlags::FILECLIP_NO_FILE_PATHS
-            | ClipboardGeneralCapabilityFlags::CAN_LOCK_CLIPDATA
-            | ClipboardGeneralCapabilityFlags::HUGE_FILE_SUPPORT_ENABLED
+        let mut flags = ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES;
+        if self.staging.is_some() {
+            flags |= ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED
+                | ClipboardGeneralCapabilityFlags::FILECLIP_NO_FILE_PATHS
+                | ClipboardGeneralCapabilityFlags::CAN_LOCK_CLIPDATA
+                | ClipboardGeneralCapabilityFlags::HUGE_FILE_SUPPORT_ENABLED;
+        }
+        flags
     }
 
     fn on_ready(&mut self) {
@@ -568,6 +698,17 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
         let stream_id = response.stream_id();
         let mut inner = self.inner.lock().unwrap();
 
+        if !inner.allow_receive || self.staging.is_none() {
+            if let Some(tid) = Self::abort_download_locked(&mut inner) {
+                drop(inner);
+                let _ = self.worker_tx.try_send(SessionEvent::TransferCancelled {
+                    transfer_id: tid,
+                    direction: TransferDirection::Download,
+                });
+            }
+            return;
+        }
+
         if inner.active_download_stream_id != Some(stream_id) {
             return;
         }
@@ -746,18 +887,17 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
         if !self.inner.lock().unwrap().allow_receive {
             return;
         }
-
-        let target_dir = PathBuf::from(&self.temp_dir);
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if builder.create(&target_dir).is_err() {
+        let Some(staging) = self.staging.as_ref() else {
+            let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+            let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
+                transfer_id,
+                direction: TransferDirection::Download,
+                reason: "File receive disabled: private staging directory unavailable".into(),
+            });
             return;
-        }
+        };
+
+        let target_dir = staging.path().to_path_buf();
 
         let mut seen_names: HashSet<String> = HashSet::new();
         let mut remote_files = Vec::new();
@@ -778,12 +918,16 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                 }
             };
 
-            let mut candidate = base_name.clone();
-            let mut suffix = 1usize;
-            while !seen_names.insert(candidate.to_ascii_lowercase()) {
-                candidate = format!("{base_name}_{suffix}");
-                suffix += 1;
+            if !seen_names.insert(base_name.to_ascii_lowercase()) {
+                let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+                let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
+                    transfer_id,
+                    direction: TransferDirection::Download,
+                    reason: format!("Duplicate or case-colliding remote filename: {base_name}"),
+                });
+                return;
             }
+            let candidate = base_name;
 
             let advertised_size = fd.file_size.unwrap_or(0);
             total_advertised = total_advertised.saturating_add(advertised_size);

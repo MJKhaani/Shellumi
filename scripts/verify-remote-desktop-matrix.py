@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Validate the canonical remote desktop acceptance matrix CSV (F17)."""
+"""Validate the canonical remote desktop acceptance matrix CSV (F17 / R3-16)."""
 
+from __future__ import annotations
+
+import argparse
 import csv
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -105,6 +110,26 @@ def validate_csv(path: Path) -> list[str]:
     return validate_rows(header, rows)
 
 
+def evaluate_release_gate(rows: list[dict[str, str]], head_sha: str | None) -> list[str]:
+    gate_errors: list[str] = []
+    non_pass = [r for r in rows if r["status"].strip() in {"BLOCKED", "FAIL", "NOT RUN"}]
+    if non_pass:
+        counts: dict[str, int] = {}
+        for r in non_pass:
+            st = r["status"].strip()
+            counts[st] = counts.get(st, 0) + 1
+        gate_errors.append(
+            f"Release gate NOT READY: {len(non_pass)} applicable rows not PASS ({counts})"
+        )
+    if head_sha:
+        stale = [r for r in rows if r["source_sha"].strip() != head_sha]
+        if stale:
+            gate_errors.append(
+                f"Release gate NOT READY: {len(stale)} rows do not match current HEAD {head_sha}"
+            )
+    return gate_errors
+
+
 def run_self_tests() -> None:
     # Negative test: HEAD placeholder, ranged test_id, combined layer, missing PASS evidence
     bad_rows = [
@@ -135,24 +160,70 @@ def run_self_tests() -> None:
     assert any("evidence_ref" in e for e in errs)
     assert any("Missing catalog test IDs" in e for e in errs)
 
+    # Release gate must reject BLOCKED rows even when schema is valid
+    gate_errs = evaluate_release_gate(
+        [{"source_sha": "a" * 40, "status": "BLOCKED"}], "a" * 40
+    )
+    assert gate_errs, "Release gate must fail when BLOCKED rows exist"
+
+
+def current_head_sha() -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        return out if SHA_RE.match(out) else None
+    except Exception:
+        return None
+
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate Shellumi Remote Desktop QA matrix")
+    parser.add_argument("csv_path", nargs="?", default="docs/qa/remote-desktop-matrix.csv")
+    parser.add_argument("--validate", action="store_true", help="Run structural/schema validation")
+    parser.add_argument("--release-gate", action="store_true", help="Enforce release-ready gate")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
+    args = parser.parse_args()
+
     run_self_tests()
-    csv_path = Path("docs/qa/remote-desktop-matrix.csv")
-    if len(sys.argv) > 1:
-        csv_path = Path(sys.argv[1])
+    csv_path = Path(args.csv_path)
     errors = validate_csv(csv_path)
     if errors:
         for e in errors[:25]:
             print(f"ERROR: {e}", file=sys.stderr)
         print(f"Total validation errors: {len(errors)}", file=sys.stderr)
         return 1
+
     with csv_path.open(newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
-    print(f"Matrix validation PASSED ({len(rows)} rows): {counts}")
+
+    gate_errors = evaluate_release_gate(rows, current_head_sha())
+    release_ready = len(gate_errors) == 0
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_valid": True,
+                    "release_ready": release_ready,
+                    "total_rows": len(rows),
+                    "counts": counts,
+                    "gate_errors": gate_errors,
+                },
+                indent=2,
+            )
+        )
+    else:
+        gate_label = "RELEASE READY" if release_ready else "NOT READY"
+        print(f"Matrix validation PASSED ({len(rows)} rows, gate={gate_label}): {counts}")
+
+    if args.release_gate and not release_ready:
+        for ge in gate_errors:
+            print(f"GATE FAILURE: {ge}", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -877,6 +877,9 @@ struct Shellumi {
     pub(crate) rd_focus_handles: std::collections::HashMap<u64, FocusHandle>,
     pub(crate) rd_view_only_transition_seq: u64,
     pub(crate) rd_keyboard_mapping: shellumi_remote_desktop::KeyboardMappingMode,
+    pub(crate) rd_transfers: std::collections::HashMap<u64, Vec<RdTransferJob>>,
+    pub(crate) rd_clipboard_brokers:
+        std::collections::HashMap<u64, crate::native_clipboard::NativeClipboardBroker>,
     pub(crate) vault_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) tab_overflow_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(crate) pending_rotation_recoveries: Vec<vault_rotation::PendingRotationRecovery>,
@@ -1346,6 +1349,27 @@ struct RemoteDesktopState {
     drive_bytes_read: u64,
     drive_bytes_written: u64,
     drive_operations_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RdTransferPhase {
+    Transferring,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RdTransferJob {
+    pub(crate) transfer_id: u64,
+    pub(crate) direction: shellumi_remote_desktop::TransferDirection,
+    pub(crate) phase: RdTransferPhase,
+    pub(crate) file_count: usize,
+    pub(crate) files: Vec<String>,
+    pub(crate) target_dir: Option<String>,
+    pub(crate) bytes_transferred: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) error: Option<String>,
 }
 
 impl Drop for RemoteDesktopState {
@@ -1876,6 +1900,8 @@ impl Shellumi {
             rd_focus_handles: std::collections::HashMap::new(),
             rd_view_only_transition_seq: 0,
             rd_keyboard_mapping: shellumi_remote_desktop::KeyboardMappingMode::default(),
+            rd_transfers: std::collections::HashMap::new(),
+            rd_clipboard_brokers: std::collections::HashMap::new(),
             vault_trigger_bounds: None,
             tab_overflow_trigger_bounds: None,
             pending_rotation_recoveries: Vec::new(),

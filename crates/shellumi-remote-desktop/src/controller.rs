@@ -1,8 +1,9 @@
 //! Per-session remote desktop input controller, state tracker, and diagnostics counters.
 
+use crate::events::RecoveryBarrier;
 use crate::input::{
     CanvasTransform, InputEnvelope, KeyModifiers, MouseButton, RemoteInput, RemoteKey,
-    RemoteShortcut,
+    RemoteShortcut, SessionIdentity,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -193,6 +194,10 @@ pub struct RemoteInputController {
     pub tab_id: u64,
     pub connection_generation: u64,
     pub transport_epoch: u64,
+    pub input_epoch: u64,
+    pub policy_revision: u64,
+    pub recovery_frozen: bool,
+    pub pending_barrier_id: Option<u64>,
     pub connected: bool,
     pub focused: bool,
     pub view_only: bool,
@@ -221,6 +226,10 @@ impl RemoteInputController {
             tab_id,
             connection_generation: 0,
             transport_epoch: 0,
+            input_epoch: 1,
+            policy_revision: 0,
+            recovery_frozen: false,
+            pending_barrier_id: None,
             connected: false,
             focused: false,
             view_only,
@@ -244,10 +253,22 @@ impl RemoteInputController {
         }
     }
 
+    /// Return the current immutable session transport identity.
+    pub const fn identity(&self) -> SessionIdentity {
+        SessionIdentity::new(
+            self.tab_id,
+            self.connection_generation,
+            self.transport_epoch,
+        )
+    }
+
     /// Reset all held state and geometry for a new connection generation or transport epoch.
     pub fn reset_for_transport(&mut self, generation: u64, transport_epoch: u64) {
         self.connection_generation = generation;
         self.transport_epoch = transport_epoch;
+        self.input_epoch = self.input_epoch.saturating_add(1).max(1);
+        self.recovery_frozen = false;
+        self.pending_barrier_id = None;
         self.held_buttons = 0;
         self.dragging_button = None;
         self.last_pointer = None;
@@ -256,6 +277,57 @@ impl RemoteInputController {
         self.scroll_acc_x = 0.0;
         self.scroll_acc_y = 0.0;
         self.frame_size = None;
+    }
+
+    /// Freeze interactive input immediately, advance `input_epoch`, clear local held state,
+    /// and return a `RecoveryBarrier` to latch on the session command channel.
+    pub fn begin_recovery(&mut self, reason: impl Into<String>) -> RecoveryBarrier {
+        self.input_epoch = self.input_epoch.saturating_add(1);
+        self.recovery_frozen = true;
+        let barrier_id = self.input_epoch;
+        self.pending_barrier_id = Some(barrier_id);
+        self.held_buttons = 0;
+        self.dragging_button = None;
+        self.held_keys.clear();
+        self.modifiers = KeyModifiers::default();
+        RecoveryBarrier {
+            identity: self.identity(),
+            input_epoch: self.input_epoch,
+            barrier_id,
+            reason: reason.into(),
+        }
+    }
+
+    /// Acknowledge a `RecoveryCompleted` or `RecoveryFailed` event from the worker.
+    /// Rejects stale identity/epoch/barrier IDs; only unfreezes on matching success.
+    pub fn ack_recovery(
+        &mut self,
+        identity: &SessionIdentity,
+        input_epoch: u64,
+        barrier_id: u64,
+        success: bool,
+        reason: &str,
+    ) -> bool {
+        if identity.tab_id != self.tab_id
+            || identity.connection_generation != self.connection_generation
+            || identity.transport_epoch != self.transport_epoch
+        {
+            return false;
+        }
+        if input_epoch != self.input_epoch || self.pending_barrier_id != Some(barrier_id) {
+            return false;
+        }
+        self.pending_barrier_id = None;
+        if success {
+            self.recovery_frozen = false;
+        } else {
+            self.recovery_frozen = true;
+            self.view_only = true;
+            self.policy_state = ViewOnlyPolicyState::SafeBlocked {
+                reason: reason.to_string(),
+            };
+        }
+        true
     }
 
     /// Update geometry snapshot validity.
@@ -269,7 +341,7 @@ impl RemoteInputController {
             self.counters.rejected_disconnected += 1;
             return Err(InputRejectReason::Disconnected);
         }
-        if self.view_only {
+        if self.view_only || self.recovery_frozen {
             self.counters.rejected_view_only += 1;
             return Err(InputRejectReason::ViewOnly);
         }
@@ -607,6 +679,7 @@ impl RemoteInputController {
         enabled: bool,
         transition_id: u64,
     ) -> Vec<RemoteInput> {
+        self.policy_revision = transition_id;
         if enabled {
             let releases = if self.connected {
                 self.release_all()
@@ -662,6 +735,8 @@ impl RemoteInputController {
             tab_id: self.tab_id,
             connection_generation: self.connection_generation,
             transport_epoch: self.transport_epoch,
+            input_epoch: self.input_epoch,
+            policy_revision: self.policy_revision,
             seq: self.command_seq,
             input,
         }
@@ -895,5 +970,74 @@ mod tests {
         assert!(ctrlr.view_only);
         assert!(ctrlr.ack_view_only_transition(false, 7)); // matching ack unlocks
         assert!(!ctrlr.view_only);
+    }
+
+    #[test]
+    fn recovery_barrier_freezes_input_and_rejects_stale_acks() {
+        let mut ctrlr = RemoteInputController::new(1, false, InputCapabilities::default());
+        ctrlr.connected = true;
+        ctrlr.reset_for_transport(2, 3);
+        let initial_epoch = ctrlr.input_epoch;
+
+        let barrier = ctrlr.begin_recovery("Queue saturation");
+        assert!(ctrlr.recovery_frozen);
+        assert_eq!(ctrlr.input_epoch, initial_epoch + 1);
+        assert_eq!(barrier.identity, SessionIdentity::new(1, 2, 3));
+
+        // Input must be rejected while frozen
+        assert_eq!(
+            ctrlr.on_pointer_move(10.0, 10.0, None),
+            Err(InputRejectReason::ViewOnly)
+        );
+
+        // Stale ack (wrong transport epoch, wrong input epoch, or wrong barrier ID) must be rejected
+        assert!(!ctrlr.ack_recovery(
+            &SessionIdentity::new(1, 2, 2),
+            barrier.input_epoch,
+            barrier.barrier_id,
+            true,
+            "stale"
+        ));
+        assert!(!ctrlr.ack_recovery(
+            &barrier.identity,
+            initial_epoch,
+            barrier.barrier_id,
+            true,
+            "stale"
+        ));
+        assert!(!ctrlr.ack_recovery(
+            &barrier.identity,
+            barrier.input_epoch,
+            barrier.barrier_id + 99,
+            true,
+            "stale"
+        ));
+        assert!(ctrlr.recovery_frozen);
+
+        // Matching success ack unfreezes
+        assert!(ctrlr.ack_recovery(
+            &barrier.identity,
+            barrier.input_epoch,
+            barrier.barrier_id,
+            true,
+            "ok"
+        ));
+        assert!(!ctrlr.recovery_frozen);
+
+        // Failed recovery locks fail-closed into SafeBlocked
+        let b2 = ctrlr.begin_recovery("Transport error");
+        assert!(ctrlr.ack_recovery(
+            &b2.identity,
+            b2.input_epoch,
+            b2.barrier_id,
+            false,
+            "write failed"
+        ));
+        assert!(ctrlr.recovery_frozen);
+        assert!(ctrlr.view_only);
+        assert!(matches!(
+            ctrlr.policy_state,
+            ViewOnlyPolicyState::SafeBlocked { .. }
+        ));
     }
 }

@@ -993,6 +993,9 @@ impl Shellumi {
                                             Some(format!("Reconnecting ({attempt}/{max_attempts})"));
                                     }
                                     shellumi_remote_desktop::SessionState::Disconnected => {
+                                        if let Some(broker) = app.rd_clipboard_brokers.get_mut(&session_key.tab_id) {
+                                            broker.reset();
+                                        }
                                         if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
                                             ctrl.release_all();
                                             ctrl.connected = false;
@@ -1056,6 +1059,35 @@ impl Shellumi {
                                         ));
                                     }
                                 }
+                                shellumi_remote_desktop::SessionEvent::RecoveryCompleted {
+                                    identity,
+                                    input_epoch,
+                                    barrier_id,
+                                    released_count,
+                                    reason,
+                                } => {
+                                    if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                        if ctrl.ack_recovery(&identity, input_epoch, barrier_id, true, &reason) {
+                                            rd.last_action_note = Some(format!(
+                                                "Input recovery completed ({released_count} released: {reason})"
+                                            ));
+                                        }
+                                    }
+                                }
+                                shellumi_remote_desktop::SessionEvent::RecoveryFailed {
+                                    identity,
+                                    input_epoch,
+                                    barrier_id,
+                                    reason,
+                                } => {
+                                    if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                        ctrl.ack_recovery(&identity, input_epoch, barrier_id, false, &reason);
+                                    }
+                                    rd.view_only = true;
+                                    rd.last_action_note = Some(format!(
+                                        "Input recovery failed; session locked fail-closed: {reason}"
+                                    ));
+                                }
                                 shellumi_remote_desktop::SessionEvent::InputError {
                                     transport_epoch: _,
                                     seq: _,
@@ -1096,7 +1128,12 @@ impl Shellumi {
                                 shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
                                     rd.clipboard_text = Some(text.clone());
                                     if is_active_tab && !rd.view_only {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                                        let pb_change = crate::native_clipboard::pasteboard_change_count();
+                                        app.rd_clipboard_brokers
+                                            .entry(session_key.tab_id)
+                                            .or_default()
+                                            .record_remote_write(pb_change, &text);
                                         rd.last_action_note = Some(
                                             "Remote clipboard text received and copied to local clipboard"
                                                 .into(),
@@ -1109,7 +1146,7 @@ impl Shellumi {
                                     }
                                 }
                                 shellumi_remote_desktop::SessionEvent::TransferStarted {
-                                    transfer_id: _,
+                                    transfer_id,
                                     direction,
                                     file_count,
                                     total_bytes,
@@ -1117,9 +1154,24 @@ impl Shellumi {
                                     rd.last_action_note = Some(format!(
                                         "{direction:?} started: {file_count} file(s), {total_bytes} bytes"
                                     ));
+                                    let jobs = app.rd_transfers.entry(session_key.tab_id).or_default();
+                                    jobs.push(crate::RdTransferJob {
+                                        transfer_id,
+                                        direction,
+                                        phase: crate::RdTransferPhase::Transferring,
+                                        file_count,
+                                        files: Vec::new(),
+                                        target_dir: None,
+                                        bytes_transferred: 0,
+                                        total_bytes,
+                                        error: None,
+                                    });
+                                    if jobs.len() > 10 {
+                                        jobs.remove(0);
+                                    }
                                 }
                                 shellumi_remote_desktop::SessionEvent::TransferProgress {
-                                    transfer_id: _,
+                                    transfer_id,
                                     file_index: _,
                                     file_name,
                                     bytes_transferred,
@@ -1128,43 +1180,78 @@ impl Shellumi {
                                     rd.last_action_note = Some(format!(
                                         "Transferring {file_name}: {bytes_transferred}/{file_total_bytes} bytes"
                                     ));
+                                    if let Some(jobs) = app.rd_transfers.get_mut(&session_key.tab_id) {
+                                        if let Some(job) = jobs.iter_mut().find(|j| j.transfer_id == transfer_id) {
+                                            job.bytes_transferred = bytes_transferred;
+                                        }
+                                    }
                                 }
                                 shellumi_remote_desktop::SessionEvent::TransferCompleted {
-                                    transfer_id: _,
+                                    transfer_id,
                                     direction,
                                     files,
                                     target_dir,
                                 } => {
+                                    if let Some(jobs) = app.rd_transfers.get_mut(&session_key.tab_id) {
+                                        if let Some(job) = jobs.iter_mut().find(|j| j.transfer_id == transfer_id) {
+                                            job.phase = crate::RdTransferPhase::Completed;
+                                            job.files = files.clone();
+                                            job.target_dir = target_dir.clone();
+                                            job.bytes_transferred = job.total_bytes;
+                                        }
+                                    }
                                     if direction == shellumi_remote_desktop::TransferDirection::Download
                                         && is_active_tab
                                         && !rd.view_only
                                     {
+                                        let mut clip_note = format!(
+                                            "{direction:?} completed: {} file(s)",
+                                            files.len()
+                                        );
                                         if let Some(ref dir) = target_dir {
                                             let full_paths: Vec<std::path::PathBuf> = files
                                                 .iter()
                                                 .map(|f| std::path::Path::new(dir).join(f))
                                                 .collect();
-                                            let _ = crate::native_clipboard::write_clipboard_files(&full_paths);
+                                            if let Err(err) = crate::native_clipboard::write_clipboard_files(&full_paths) {
+                                                clip_note = format!(
+                                                    "{direction:?} completed ({} file(s)); native clipboard publish skipped: {err}",
+                                                    files.len()
+                                                );
+                                            }
                                         }
+                                        rd.last_action_note = Some(clip_note);
+                                    } else {
+                                        rd.last_action_note = Some(format!(
+                                            "{direction:?} completed: {} file(s)",
+                                            files.len()
+                                        ));
                                     }
-                                    rd.last_action_note = Some(format!(
-                                        "{direction:?} completed: {} file(s)",
-                                        files.len()
-                                    ));
                                 }
                                 shellumi_remote_desktop::SessionEvent::TransferFailed {
-                                    transfer_id: _,
+                                    transfer_id,
                                     direction,
                                     reason,
                                 } => {
+                                    if let Some(jobs) = app.rd_transfers.get_mut(&session_key.tab_id) {
+                                        if let Some(job) = jobs.iter_mut().find(|j| j.transfer_id == transfer_id) {
+                                            job.phase = crate::RdTransferPhase::Failed;
+                                            job.error = Some(reason.clone());
+                                        }
+                                    }
                                     rd.last_action_note = Some(format!(
                                         "{direction:?} failed: {reason}"
                                     ));
                                 }
                                 shellumi_remote_desktop::SessionEvent::TransferCancelled {
-                                    transfer_id: _,
+                                    transfer_id,
                                     direction,
                                 } => {
+                                    if let Some(jobs) = app.rd_transfers.get_mut(&session_key.tab_id) {
+                                        if let Some(job) = jobs.iter_mut().find(|j| j.transfer_id == transfer_id) {
+                                            job.phase = crate::RdTransferPhase::Cancelled;
+                                        }
+                                    }
                                     rd.last_action_note = Some(format!("{direction:?} cancelled"));
                                 }
                                 shellumi_remote_desktop::SessionEvent::ServerFilesReceived {
@@ -1360,20 +1447,47 @@ impl Shellumi {
 
                 // Never fall back to cached remote text when local clipboard has no text
                 let local_text = cx.read_from_clipboard().and_then(|item| item.text());
+                let tab_id = tab.id;
                 match local_text {
                     Some(text) => {
-                        if let Some(ui_handle) = &rd.ui_handle {
-                            match ui_handle.try_send_command(
-                                shellumi_remote_desktop::SessionCommand::SendClipboard(text),
-                            ) {
-                                Ok(()) => {
+                        let pb_change = crate::native_clipboard::pasteboard_change_count();
+                        let should_send = self
+                            .rd_clipboard_brokers
+                            .entry(tab_id)
+                            .or_default()
+                            .should_send_local_text(pb_change, &text);
+                        if !should_send {
+                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                                if let Some(rd) = &mut tab.remote_desktop_state {
                                     rd.last_action_note = Some(
-                                        "Local clipboard text queued for remote session".into(),
+                                        "Clipboard unchanged since remote write (echo suppressed)"
+                                            .into(),
                                     );
                                 }
-                                Err(e) => {
-                                    rd.last_action_note =
-                                        Some(format!("Failed to queue clipboard text: {e}"));
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            if let Some(rd) = &mut tab.remote_desktop_state {
+                                if let Some(ui_handle) = &rd.ui_handle {
+                                    match ui_handle.try_send_command(
+                                        shellumi_remote_desktop::SessionCommand::SendClipboard(
+                                            text,
+                                        ),
+                                    ) {
+                                        Ok(()) => {
+                                            rd.last_action_note = Some(
+                                                "Local clipboard text queued for remote session"
+                                                    .into(),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            rd.last_action_note = Some(format!(
+                                                "Failed to queue clipboard text: {e}"
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1386,6 +1500,86 @@ impl Shellumi {
                 cx.notify();
             }
         }
+    }
+
+    /// Ordered paste transaction: sync local clipboard offer (if session/policy permits)
+    /// into the worker command FIFO *before* atomically queuing `Ctrl+V`.
+    pub(crate) fn remote_desktop_paste_transaction(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return;
+        };
+        let _pb_change = crate::native_clipboard::pasteboard_change_count();
+        self.remote_desktop_sync_clipboard(tab_idx, cx);
+        self.remote_desktop_send_shortcut(
+            tab_idx,
+            shellumi_remote_desktop::RemoteShortcut::CtrlV,
+            cx,
+        );
+    }
+
+    pub(crate) fn remote_desktop_cancel_transfer(
+        &mut self,
+        tab_idx: usize,
+        transfer_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                if let Some(ui_handle) = &rd.ui_handle {
+                    match ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::CancelTransfer(transfer_id),
+                    ) {
+                        Ok(()) => {
+                            rd.last_action_note = Some(format!(
+                                "Cancellation requested for transfer #{transfer_id}"
+                            ));
+                        }
+                        Err(e) => {
+                            rd.last_action_note =
+                                Some(format!("Failed to cancel transfer #{transfer_id}: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remote_desktop_copy_transfer_to_clipboard(
+        &mut self,
+        tab_idx: usize,
+        transfer_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let paths = self
+            .rd_transfers
+            .get(&tab_id)
+            .and_then(|jobs| jobs.iter().find(|j| j.transfer_id == transfer_id))
+            .and_then(|job| {
+                job.target_dir.as_ref().map(|dir| {
+                    job.files
+                        .iter()
+                        .map(|f| std::path::Path::new(dir).join(f))
+                        .collect::<Vec<_>>()
+                })
+            });
+        let Some(paths) = paths else {
+            return;
+        };
+        let res = crate::native_clipboard::write_clipboard_files(&paths);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                rd.last_action_note = Some(match res {
+                    Ok(()) => format!("Copied {} downloaded file(s) to OS clipboard", paths.len()),
+                    Err(e) => format!("Failed to copy files to OS clipboard: {e}"),
+                });
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn remote_desktop_send_files(
@@ -2157,8 +2351,11 @@ impl Shellumi {
                     if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
                         ctrl.counters.queue_full_errors += 1;
                         ctrl.counters.last_error_category = Some(err.clone());
+                        let barrier = ctrl.begin_recovery("Command queue admission failure");
+                        ui_handle.trigger_recovery(barrier);
                     }
-                    rd.last_action_note = Some(format!("Input dispatch error: {err}"));
+                    rd.last_action_note = Some(format!("Input recovery triggered: {err}"));
+                    break;
                 }
             }
         }
@@ -2291,27 +2488,36 @@ impl Shellumi {
             return;
         }
 
-        // macOS convenience mapping for Cmd+C/V/X/A/Z when enabled
+        // macOS convenience mapping for Cmd+C/V/X/A/Z and Shift+Cmd+Z when enabled
         if self.rd_keyboard_mapping
             == shellumi_remote_desktop::KeyboardMappingMode::MacToWindowsLinux
             && ks.modifiers.platform
             && !ks.modifiers.control
             && !ks.modifiers.alt
         {
-            let shortcut = match ks.key.as_str() {
-                "c" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlC),
-                "v" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlV),
-                "x" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlX),
-                "a" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlA),
-                "z" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlZ),
+            let shortcut = match (ks.key.as_str(), ks.modifiers.shift) {
+                ("c", false) => Some(shellumi_remote_desktop::RemoteShortcut::CtrlC),
+                ("v", false) => Some(shellumi_remote_desktop::RemoteShortcut::CtrlV),
+                ("x", false) => Some(shellumi_remote_desktop::RemoteShortcut::CtrlX),
+                ("a", false) => Some(shellumi_remote_desktop::RemoteShortcut::CtrlA),
+                ("z", false) => Some(shellumi_remote_desktop::RemoteShortcut::CtrlZ),
+                ("z", true) => Some(shellumi_remote_desktop::RemoteShortcut::CtrlShiftZ),
                 _ => None,
             };
             if let Some(sc) = shortcut {
+                // Temporarily release Super if it was already forwarded so remote OS
+                // receives a clean Ctrl+* chord without Win+Ctrl+*.
+                let release_super = self
+                    .rd_input_controllers
+                    .get_mut(&tab_id)
+                    .and_then(|c| c.on_key_up("platform").ok())
+                    .unwrap_or_default();
+                if !release_super.is_empty() {
+                    self.dispatch_rd_inputs(tab_id, release_super);
+                }
                 if sc == shellumi_remote_desktop::RemoteShortcut::CtrlV {
-                    self.remote_desktop_sync_clipboard(
-                        self.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0),
-                        cx,
-                    );
+                    self.remote_desktop_paste_transaction(tab_id, cx);
+                    return;
                 }
                 if let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) {
                     self.remote_desktop_send_shortcut(tab_idx, sc, cx);
@@ -2337,6 +2543,12 @@ impl Shellumi {
                     }
                 }
             }
+        }
+
+        // Native Ctrl+V paste transaction (respecting ClipboardPolicy)
+        if ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform && ks.key == "v" {
+            self.remote_desktop_paste_transaction(tab_id, cx);
+            return;
         }
 
         // Separate IME/composed text from physical shortcut keys
@@ -2510,9 +2722,34 @@ pub(crate) fn gpui_keystroke_to_remote_key(
         "f11" => (0xFFC8, 0x57, false, false),
         "f12" => (0xFFC9, 0x58, false, false),
         "shift" => (0xFFE1, 0x2A, false, true),
+        "rshift" | "rightshift" => (0xFFE2, 0x36, false, true),
         "control" | "ctrl" => (0xFFE3, 0x1D, false, true),
+        "rcontrol" | "rightcontrol" => (0xFFE4, 0x1D, true, true),
         "alt" => (0xFFE9, 0x38, false, true),
+        "ralt" | "rightalt" => (0xFFEA, 0x38, true, true),
         "platform" | "cmd" | "super" | "win" => (0xFFEB, 0x5B, true, true),
+        "rplatform" | "rightsuper" => (0xFFEC, 0x5C, true, true),
+        "capslock" => (0xFFE5, 0x3A, false, false),
+        "numlock" => (0xFF7F, 0x45, false, false),
+        "scrolllock" => (0xFF14, 0x46, false, false),
+        "printscreen" => (0xFF61, 0x37, true, false),
+        "pause" => (0xFF13, 0x45, false, false),
+        "kp_0" => (0xFFB0, 0x52, false, false),
+        "kp_1" => (0xFFB1, 0x4F, false, false),
+        "kp_2" => (0xFFB2, 0x50, false, false),
+        "kp_3" => (0xFFB3, 0x51, false, false),
+        "kp_4" => (0xFFB4, 0x4B, false, false),
+        "kp_5" => (0xFFB5, 0x4C, false, false),
+        "kp_6" => (0xFFB6, 0x4D, false, false),
+        "kp_7" => (0xFFB7, 0x47, false, false),
+        "kp_8" => (0xFFB8, 0x48, false, false),
+        "kp_9" => (0xFFB9, 0x49, false, false),
+        "kp_decimal" => (0xFFAE, 0x53, false, false),
+        "kp_divide" => (0xFFAF, 0x35, true, false),
+        "kp_multiply" => (0xFFAA, 0x37, false, false),
+        "kp_subtract" => (0xFFAD, 0x4A, false, false),
+        "kp_add" => (0xFFAB, 0x4E, false, false),
+        "kp_enter" => (0xFF8D, 0x1C, true, false),
         _ => {
             let ch = name.chars().next().filter(|_| name.chars().count() == 1)?;
             let sc = ascii_char_to_scancode(ch);

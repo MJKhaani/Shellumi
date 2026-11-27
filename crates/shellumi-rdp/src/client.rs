@@ -160,21 +160,18 @@ async fn run_rdp_session_attempt(
 
     let rdp_config = RdpClientConfig::from_session_config(config);
     let proxy = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let (temp_dir, staging_ok) = match crate::clipboard::create_private_staging_dir() {
-        Ok(dir) => (dir.to_string_lossy().to_string(), true),
+    let staging = match crate::clipboard::PrivateStaging::create() {
+        Ok(dir) => Some(dir),
         Err(err) => {
-            tracing::error!(error = %err, "Failed to create private RDP staging directory; file transfers disabled");
-            (String::new(), false)
+            tracing::error!(error = %err, "Failed to create private RDP staging directory; file receive disabled");
+            None
         }
     };
-    let clipboard_backend = crate::clipboard::ShellumiCliprdrBackend::new(
+    let clipboard_backend = crate::clipboard::ShellumiCliprdrBackend::new_with_staging(
         proxy.clone(),
         worker.event_sender(),
-        temp_dir,
+        staging,
     );
-    if !staging_ok {
-        clipboard_backend.set_policy(true, false);
-    }
     let sound_control = crate::sound::ShellumiRdpsndControl::new(false, 100);
     let display_control = crate::display::DisplayControlState::new();
     let microphone_control = crate::microphone::MicrophoneControlState::new(false, 100);
@@ -260,6 +257,7 @@ async fn run_rdp_session_attempt(
     let mut failure: Option<RdpError> = None;
     let mut ledger = shellumi_remote_desktop::SubmittedInputLedger::new();
     let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
+    let mut worker_min_input_epoch: u64 = 0;
     if *view_only {
         clipboard_backend.set_policy(false, false);
     }
@@ -271,6 +269,53 @@ async fn run_rdp_session_attempt(
             cmd_res = worker.recv_command() => {
                 match cmd_res {
                     Ok(cmd) => match cmd {
+                        SessionCommand::RecoveryBarrier(barrier) => {
+                            if barrier.identity.transport_epoch != 0
+                                && barrier.identity.transport_epoch != transport_epoch
+                            {
+                                continue;
+                            }
+                            worker_min_input_epoch = worker_min_input_epoch.max(barrier.input_epoch);
+                            let releases = ledger.drain_releases();
+                            let released_count = releases.len();
+                            let mut failed_reason: Option<String> = None;
+                            for rel in releases {
+                                let events = translate_remote_input(&rel);
+                                if !events.is_empty() {
+                                    if let Err(err) = input_sender.send(RdpInputEvent::FastPath(events.into())) {
+                                        failed_reason = Some(err.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(reason) = failed_reason {
+                                let _ = worker
+                                    .send_event(SessionEvent::RecoveryFailed {
+                                        identity: barrier.identity,
+                                        input_epoch: barrier.input_epoch,
+                                        barrier_id: barrier.barrier_id,
+                                        reason: reason.clone(),
+                                    })
+                                    .await;
+                                let _ = input_sender.send(RdpInputEvent::Close);
+                                let _ = stop_tx.send(());
+                                return (
+                                    Err(RdpError::Terminated(format!(
+                                        "Input recovery barrier failed: {reason}"
+                                    ))),
+                                    connected,
+                                );
+                            }
+                            let _ = worker
+                                .send_event(SessionEvent::RecoveryCompleted {
+                                    identity: barrier.identity,
+                                    input_epoch: barrier.input_epoch,
+                                    barrier_id: barrier.barrier_id,
+                                    released_count,
+                                    reason: barrier.reason,
+                                })
+                                .await;
+                        }
                         SessionCommand::SetViewOnly { enabled, transition_id } => {
                             if enabled && !*view_only {
                                 let releases = ledger.drain_releases();
@@ -290,6 +335,9 @@ async fn run_rdp_session_attempt(
                                 }
                                 microphone_control.set_recording(false);
                                 clipboard_backend.set_policy(false, false);
+                                if let Some(ref dc) = drive_control {
+                                    dc.set_revoked(true);
+                                }
                             } else if !enabled {
                                 let clip_on = clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled;
                                 clipboard_backend.set_policy(
@@ -306,10 +354,15 @@ async fn run_rdp_session_attempt(
                                 .await;
                         }
                         SessionCommand::InputEnvelope(env) => {
-                            if env.transport_epoch != 0 && env.transport_epoch != transport_epoch {
+                            if env.transport_epoch == 0
+                                || env.transport_epoch != transport_epoch
+                                || env.input_epoch < worker_min_input_epoch
+                            {
                                 tracing::debug!(
                                     expected_epoch = transport_epoch,
                                     got_epoch = env.transport_epoch,
+                                    got_input_epoch = env.input_epoch,
+                                    min_input_epoch = worker_min_input_epoch,
                                     "Dropped stale RDP input envelope"
                                 );
                                 continue;
@@ -562,6 +615,9 @@ async fn run_rdp_session_attempt(
                                 enabled && policy.allow_send,
                                 enabled && policy.allow_receive,
                             );
+                        }
+                        SessionCommand::CancelTransfer(transfer_id) => {
+                            let _ = clipboard_backend.cancel_transfer(transfer_id);
                         }
                         SessionCommand::Disconnect => {
                             for rel in ledger.drain_releases() {

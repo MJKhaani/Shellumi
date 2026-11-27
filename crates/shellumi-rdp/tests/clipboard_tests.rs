@@ -347,3 +347,24 @@ fn test_to_ironrdp_config_with_backend_integration() {
         "Config with CLIPRDR backend must build cleanly"
     );
 }
+
+#[test]
+fn test_private_staging_fail_closed_and_cancel_transfer() {
+    let proxy = Arc::new(Mutex::new(None));
+    let (tx, rx) = async_channel::bounded(16);
+
+    // Empty/relative staging path must fail closed: staging = None, file caps omitted
+    let mut backend = ShellumiCliprdrBackend::new(proxy, tx, "");
+    assert!(!backend.has_private_staging());
+    let caps = backend.client_capabilities();
+    assert!(!caps.contains(ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED));
+
+    // Even if policy enables receive, file list without staging must emit TransferFailed
+    backend.set_policy(true, true);
+    backend.on_remote_file_list(
+        &[FileDescriptor::new("secret.txt").with_file_size(12)],
+        None,
+    );
+    let ev = rx.try_recv().expect("expected TransferFailed");
+    assert!(matches!(ev, SessionEvent::TransferFailed { .. }));
+}

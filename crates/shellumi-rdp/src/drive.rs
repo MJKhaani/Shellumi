@@ -921,10 +921,10 @@ impl RdpdrBackend for ShellumiFsRdpdrBackend {
             ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(q) => {
                 let fid = q.device_io_request.file_id;
                 if q.initial_query > 0 {
-                    let clean_rel = q.path.trim_end_matches('*');
-                    let dir_path = if clean_rel.is_empty() {
+                    let (rel_dir, pattern) = split_dir_and_pattern(&q.path);
+                    let dir_path = if rel_dir.is_empty() {
                         self.root.clone()
-                    } else if let Ok(p) = validate_drive_relative_path(&self.root, clean_rel) {
+                    } else if let Ok(p) = validate_drive_relative_path(&self.root, rel_dir) {
                         p
                     } else {
                         return Ok(vec![SvcMessage::from(
@@ -939,22 +939,37 @@ impl RdpdrBackend for ShellumiFsRdpdrBackend {
                             ),
                         )]);
                     };
+                    let rd = match std::fs::read_dir(&dir_path) {
+                        Ok(rd) => rd,
+                        Err(_) => {
+                            return Ok(vec![SvcMessage::from(
+                                RdpdrPdu::ClientDriveQueryDirectoryResponse(
+                                    ClientDriveQueryDirectoryResponse {
+                                        device_io_reply: DeviceIoResponse::new(
+                                            q.device_io_request,
+                                            NtStatus::ACCESS_DENIED,
+                                        ),
+                                        buffer: None,
+                                    },
+                                ),
+                            )]);
+                        }
+                    };
                     let mut entries = Vec::new();
-                    if let Ok(rd) = std::fs::read_dir(&dir_path) {
-                        for entry in rd.flatten() {
-                            entries.push(entry.path());
+                    for entry in rd.flatten().take(10_000) {
+                        if entry.file_type().is_ok_and(|ft| !ft.is_symlink()) {
+                            let name = entry.file_name();
+                            let name_str = name.to_string_lossy();
+                            if wildcard_matches(pattern, &name_str) {
+                                entries.push(entry.path());
+                            }
                         }
                     }
+                    entries.reverse();
                     self.dir_iters.insert(fid, entries);
                 }
 
-                let next_entry = self.dir_iters.get_mut(&fid).and_then(|v| {
-                    if v.is_empty() {
-                        None
-                    } else {
-                        Some(v.remove(0))
-                    }
-                });
+                let next_entry = self.dir_iters.get_mut(&fid).and_then(Vec::pop);
 
                 if let Some(entry_path) = next_entry {
                     let meta = std::fs::metadata(&entry_path).ok();
@@ -1022,5 +1037,64 @@ impl RdpdrBackend for ShellumiFsRdpdrBackend {
 
     fn handle_printer_io_request(&mut self, _req: PrinterIoRequest) -> PduResult<Vec<SvcMessage>> {
         Ok(Vec::new())
+    }
+}
+
+fn split_dir_and_pattern(raw_path: &str) -> (&str, &str) {
+    let trimmed = raw_path.trim_matches('\\').trim_matches('/');
+    if trimmed.is_empty() {
+        return ("", "*");
+    }
+    if let Some((dir, pat)) = trimmed.rsplit_once(['\\', '/']) {
+        (dir, if pat.is_empty() { "*" } else { pat })
+    } else if trimmed.contains('*') || trimmed.contains('?') {
+        ("", trimmed)
+    } else {
+        (trimmed, "*")
+    }
+}
+
+/// Case-insensitive RDP wildcard matcher supporting `*` and `?`.
+pub fn wildcard_matches(pattern: &str, name: &str) -> bool {
+    if pattern == "*" || pattern == "*.*" || pattern.is_empty() {
+        return true;
+    }
+    let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
+    let s: Vec<char> = name.to_ascii_lowercase().chars().collect();
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star_pi, mut star_si) = (None, 0usize);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_matches_patterns() {
+        assert!(wildcard_matches("*.txt", "Notes.TXT"));
+        assert!(!wildcard_matches("*.txt", "Notes.md"));
+        assert!(wildcard_matches("report_??.csv", "report_01.csv"));
+        assert!(!wildcard_matches("report_??.csv", "report_1.csv"));
+        assert!(wildcard_matches("*", "anything"));
     }
 }

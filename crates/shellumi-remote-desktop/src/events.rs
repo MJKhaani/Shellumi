@@ -2,7 +2,7 @@
 
 use crate::framebuffer::{FramebufferSnapshot, Rect};
 use crate::input::{
-    InputEnvelope, KeyEvent, PointerEvent, RemoteInput, RemoteShortcut, WheelEvent,
+    InputEnvelope, KeyEvent, PointerEvent, RemoteInput, RemoteShortcut, SessionIdentity, WheelEvent,
 };
 use crate::metrics::SessionMetricsSnapshot;
 use crate::security::SecurityWarning;
@@ -47,6 +47,15 @@ impl Default for ClipboardPolicy {
     }
 }
 
+/// Latched recovery barrier executed by the worker before any new-epoch input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryBarrier {
+    pub identity: SessionIdentity,
+    pub input_epoch: u64,
+    pub barrier_id: u64,
+    pub reason: String,
+}
+
 /// Commands sent from the UI / main thread to the protocol background worker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionCommand {
@@ -54,6 +63,8 @@ pub enum SessionCommand {
     Connect,
     /// Gracefully terminate connection (delivered out-of-band even under queue pressure).
     Disconnect,
+    /// Latched recovery barrier (delivered via independent latch after purging stale-epoch input).
+    RecoveryBarrier(RecoveryBarrier),
     /// Normalized semantic remote input event (preferred over legacy Pointer/Wheel/Key).
     Input(RemoteInput),
     /// Epoch-tagged normalized input envelope.
@@ -115,6 +126,21 @@ pub enum SessionEvent {
     InputRecovery {
         transport_epoch: u64,
         released_count: usize,
+        reason: String,
+    },
+    /// Worker completed a latched recovery barrier and drained submitted held state.
+    RecoveryCompleted {
+        identity: SessionIdentity,
+        input_epoch: u64,
+        barrier_id: u64,
+        released_count: usize,
+        reason: String,
+    },
+    /// Worker failed to complete a latched recovery barrier (transport must terminate).
+    RecoveryFailed {
+        identity: SessionIdentity,
+        input_epoch: u64,
+        barrier_id: u64,
         reason: String,
     },
     /// Worker failed to submit an input event to the transport.
@@ -226,7 +252,8 @@ pub enum SessionEvent {
 #[derive(Debug)]
 struct CommandQueueInner {
     queue: Mutex<VecDeque<SessionCommand>>,
-    priority_queue: Mutex<VecDeque<SessionCommand>>,
+    recovery_latch: Mutex<Option<RecoveryBarrier>>,
+    min_valid_input_epoch: AtomicU64,
     capacity: usize,
     closed: AtomicBool,
     disconnect_requested: AtomicBool,
@@ -260,11 +287,31 @@ impl SessionUiHandle {
         self.try_send_command(cmd)
     }
 
+    /// Atomically advance the minimum valid input epoch, purge all queued interactive commands
+    /// from abandoned epochs, and latch a `RecoveryBarrier` so the worker drains submitted
+    /// held state before accepting any new-epoch input. Never fails even if `queue` is full.
+    pub fn trigger_recovery(&self, barrier: RecoveryBarrier) {
+        self.cmd_inner
+            .min_valid_input_epoch
+            .fetch_max(barrier.input_epoch, Ordering::AcqRel);
+        {
+            let mut q = self.cmd_inner.queue.lock().unwrap();
+            let min_epoch = barrier.input_epoch;
+            q.retain(|c| !is_stale_interactive_command(c, min_epoch));
+        }
+        {
+            let mut latch = self.cmd_inner.recovery_latch.lock().unwrap();
+            *latch = Some(barrier);
+        }
+        let _ = self.cmd_inner.notify_tx.try_send(());
+    }
+
     /// Try to send a command without awaiting (non-blocking).
     ///
     /// - `Disconnect` is delivered out-of-band and cannot be blocked by a full queue.
-    /// - Adjacent `Input(RemoteInput::PointerMove)` commands are coalesced in place
-    ///   without crossing critical input or control barriers.
+    /// - Adjacent compatible `PointerMove` commands are coalesced in place without
+    ///   crossing critical input or policy barriers.
+    /// - No priority queue overtaking: all admitted commands remain strictly FIFO.
     pub fn try_send_command(&self, cmd: SessionCommand) -> Result<(), String> {
         if self.cmd_inner.closed.load(Ordering::Acquire) {
             return Err("Session worker has terminated".into());
@@ -287,14 +334,21 @@ impl SessionUiHandle {
             return Ok(());
         }
 
-        let is_priority_release_or_policy = matches!(
+        if let SessionCommand::RecoveryBarrier(barrier) = cmd {
+            self.trigger_recovery(barrier);
+            return Ok(());
+        }
+
+        let min_epoch = self.cmd_inner.min_valid_input_epoch.load(Ordering::Acquire);
+        if is_stale_interactive_command(&cmd, min_epoch) {
+            return Err("Stale input epoch rejected".into());
+        }
+
+        let is_policy_barrier = matches!(
             cmd,
             SessionCommand::SetViewOnly { .. }
-                | SessionCommand::Input(RemoteInput::ReleaseAll)
-                | SessionCommand::InputEnvelope(InputEnvelope {
-                    input: RemoteInput::ReleaseAll,
-                    ..
-                })
+                | SessionCommand::SetClipboardPolicy(_)
+                | SessionCommand::ConfigureDrivePolicy { .. }
         );
 
         let mut q = self.cmd_inner.queue.lock().unwrap();
@@ -318,6 +372,8 @@ impl SessionUiHandle {
                 if let RemoteInput::PointerMove { x, y } = env.input {
                     if let Some(SessionCommand::InputEnvelope(prev)) = q.back_mut() {
                         if prev.transport_epoch == env.transport_epoch
+                            && prev.input_epoch == env.input_epoch
+                            && prev.policy_revision == env.policy_revision
                             && matches!(prev.input, RemoteInput::PointerMove { .. })
                         {
                             prev.input = RemoteInput::PointerMove { x, y };
@@ -335,7 +391,7 @@ impl SessionUiHandle {
         }
 
         if q.len() >= self.cmd_inner.capacity {
-            // Evict only safely coalescible PointerMove commands if a critical command arrives
+            // Evict only safely coalescible PointerMove commands if a non-move command arrives
             q.retain(|c| {
                 !matches!(
                     c,
@@ -349,12 +405,30 @@ impl SessionUiHandle {
         }
 
         if q.len() >= self.cmd_inner.capacity {
-            drop(q);
-            if is_priority_release_or_policy {
-                let mut pq = self.cmd_inner.priority_queue.lock().unwrap();
-                if pq.len() < 64 {
-                    pq.push_back(cmd);
-                    drop(pq);
+            if is_policy_barrier {
+                // Policy barrier under full interactive queue: purge interactive commands,
+                // advance epoch, and latch a recovery barrier so no old press can follow policy.
+                let next_epoch = self
+                    .cmd_inner
+                    .min_valid_input_epoch
+                    .fetch_add(1, Ordering::AcqRel)
+                    + 1;
+                q.retain(|c| !is_stale_interactive_command(c, next_epoch));
+                if q.len() < self.cmd_inner.capacity {
+                    let mut latch = self.cmd_inner.recovery_latch.lock().unwrap();
+                    if latch.is_none() {
+                        *latch = Some(RecoveryBarrier {
+                            identity: SessionIdentity::default(),
+                            input_epoch: next_epoch,
+                            barrier_id: next_epoch,
+                            reason: "Policy barrier under queue saturation".into(),
+                        });
+                    }
+                    q.push_back(cmd);
+                    let len = q.len();
+                    self.cmd_inner.high_water.fetch_max(len, Ordering::Relaxed);
+                    drop(latch);
+                    drop(q);
                     let _ = self.cmd_inner.notify_tx.try_send(());
                     return Ok(());
                 }
@@ -507,9 +581,9 @@ impl SessionWorkerHandle {
             return Ok(Some(SessionCommand::Disconnect));
         }
         {
-            let mut pq = self.cmd_inner.priority_queue.lock().unwrap();
-            if let Some(cmd) = pq.pop_front() {
-                return Ok(Some(cmd));
+            let mut latch = self.cmd_inner.recovery_latch.lock().unwrap();
+            if let Some(barrier) = latch.take() {
+                return Ok(Some(SessionCommand::RecoveryBarrier(barrier)));
             }
         }
         let mut q = self.cmd_inner.queue.lock().unwrap();
@@ -530,6 +604,18 @@ impl SessionWorkerHandle {
     }
 }
 
+fn is_stale_interactive_command(cmd: &SessionCommand, min_valid_input_epoch: u64) -> bool {
+    match cmd {
+        SessionCommand::InputEnvelope(env) => env.input_epoch < min_valid_input_epoch,
+        SessionCommand::Input(_)
+        | SessionCommand::Shortcut(_)
+        | SessionCommand::Pointer(_)
+        | SessionCommand::Wheel(_)
+        | SessionCommand::Key(_) => min_valid_input_epoch > 0,
+        _ => false,
+    }
+}
+
 /// Create a paired UI handle and Worker handle with bounded queue capacity.
 pub fn create_session_channels(
     command_cap: usize,
@@ -541,7 +627,8 @@ pub fn create_session_channels(
 
     let cmd_inner = Arc::new(CommandQueueInner {
         queue: Mutex::new(VecDeque::with_capacity(command_cap.max(16))),
-        priority_queue: Mutex::new(VecDeque::with_capacity(16)),
+        recovery_latch: Mutex::new(None),
+        min_valid_input_epoch: AtomicU64::new(0),
         capacity: command_cap.max(16),
         closed: AtomicBool::new(false),
         disconnect_requested: AtomicBool::new(false),
@@ -737,42 +824,63 @@ mod tests {
     }
 
     #[test]
-    fn non_coalescible_queue_saturation_never_drops_release_view_only_or_disconnect() {
+    fn non_coalescible_queue_saturation_purges_abandoned_presses_and_latches_recovery() {
         let (ui, worker) = create_session_channels(16, 16);
+        let identity = SessionIdentity::new(1, 1, 1);
 
-        // Fill all 16 slots with non-coalescible PhysicalKey presses
+        // Fill all 16 slots with non-coalescible PhysicalKey presses in input_epoch 1
         for i in 0..16u16 {
-            ui.try_send_command(SessionCommand::Input(RemoteInput::PhysicalKey {
-                key: crate::input::RemoteKey {
-                    keysym: 0x0061 + i as u32,
-                    scancode: 0x1E + i,
-                    extended: false,
-                    is_modifier: false,
-                    key_name: format!("k{i}"),
+            ui.try_send_command(SessionCommand::InputEnvelope(InputEnvelope {
+                tab_id: 1,
+                connection_generation: 1,
+                transport_epoch: 1,
+                input_epoch: 1,
+                policy_revision: 0,
+                seq: i as u64 + 1,
+                input: RemoteInput::PhysicalKey {
+                    key: crate::input::RemoteKey {
+                        keysym: 0x0061 + i as u32,
+                        scancode: 0x1E + i,
+                        extended: false,
+                        is_modifier: false,
+                        key_name: format!("k{i}"),
+                    },
+                    down: true,
+                    repeat: false,
                 },
-                down: true,
-                repeat: false,
             }))
             .unwrap();
         }
         // 17th ordinary key press must be rejected cleanly
         assert!(ui
-            .try_send_command(SessionCommand::Input(RemoteInput::PhysicalKey {
-                key: crate::input::RemoteKey {
-                    keysym: 0x007A,
-                    scancode: 0x2C,
-                    extended: false,
-                    is_modifier: false,
-                    key_name: "z".into(),
+            .try_send_command(SessionCommand::InputEnvelope(InputEnvelope {
+                tab_id: 1,
+                connection_generation: 1,
+                transport_epoch: 1,
+                input_epoch: 1,
+                policy_revision: 0,
+                seq: 17,
+                input: RemoteInput::PhysicalKey {
+                    key: crate::input::RemoteKey {
+                        keysym: 0x007A,
+                        scancode: 0x2C,
+                        extended: false,
+                        is_modifier: false,
+                        key_name: "z".into(),
+                    },
+                    down: true,
+                    repeat: false,
                 },
-                down: true,
-                repeat: false,
             }))
             .is_err());
 
-        // Critical ReleaseAll, SetViewOnly, and Disconnect must STILL be admitted
-        ui.try_send_command(SessionCommand::Input(RemoteInput::ReleaseAll))
-            .unwrap();
+        // Trigger latched recovery barrier for input_epoch 2 + SetViewOnly + Disconnect
+        ui.trigger_recovery(RecoveryBarrier {
+            identity,
+            input_epoch: 2,
+            barrier_id: 1,
+            reason: "Queue saturation".into(),
+        });
         ui.try_send_command(SessionCommand::SetViewOnly {
             enabled: true,
             transition_id: 42,
@@ -780,22 +888,38 @@ mod tests {
         .unwrap();
         ui.try_send_command(SessionCommand::Disconnect).unwrap();
 
-        // Disconnect is not starved by the 16 full slots
-        assert_eq!(
-            worker.try_recv_command().unwrap(),
-            Some(SessionCommand::Disconnect)
-        );
-        // Priority ReleaseAll and SetViewOnly are delivered next
-        assert_eq!(
-            worker.try_recv_command().unwrap(),
-            Some(SessionCommand::Input(RemoteInput::ReleaseAll))
-        );
-        assert_eq!(
-            worker.try_recv_command().unwrap(),
-            Some(SessionCommand::SetViewOnly {
+        // Any stale input_epoch 1 command must be rejected immediately
+        assert!(ui
+            .try_send_command(SessionCommand::InputEnvelope(InputEnvelope {
+                tab_id: 1,
+                connection_generation: 1,
+                transport_epoch: 1,
+                input_epoch: 1,
+                policy_revision: 0,
+                seq: 18,
+                input: RemoteInput::PointerMove { x: 5, y: 5 },
+            }))
+            .is_err());
+
+        // Worker receives RecoveryBarrier, SetViewOnly, Disconnect, and ZERO abandoned epoch-1 presses
+        let mut seen = Vec::new();
+        while let Some(cmd) = worker.try_recv_command().unwrap() {
+            assert!(
+                !matches!(cmd, SessionCommand::InputEnvelope(_)),
+                "abandoned epoch-1 press must never follow recovery barrier"
+            );
+            seen.push(cmd);
+        }
+        assert!(seen
+            .iter()
+            .any(|c| matches!(c, SessionCommand::RecoveryBarrier(b) if b.input_epoch == 2)));
+        assert!(seen.iter().any(|c| matches!(
+            c,
+            SessionCommand::SetViewOnly {
                 enabled: true,
                 transition_id: 42
-            })
-        );
+            }
+        )));
+        assert!(seen.iter().any(|c| matches!(c, SessionCommand::Disconnect)));
     }
 }
