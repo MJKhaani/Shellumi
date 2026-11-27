@@ -45,10 +45,28 @@ echo "==> Application bundle created at ${APP_BUNDLE}"
 
 if command -v hdiutil >/dev/null 2>&1; then
     echo "==> Generating disk image (${DMG_NAME})..."
-    hdiutil create -volname "Shellumi" \
-        -srcfolder "${APP_BUNDLE}" \
-        -ov -format UDZO \
-        "${OUTPUT_DIR}/${DMG_NAME}"
+    # Retry hdiutil create on transient "Resource busy" errors caused by macOS
+    # Spotlight indexing or diskarbitrationd on CI runners.
+    created=false
+    for attempt in 1 2 3 4 5; do
+        rm -f "${OUTPUT_DIR}/${DMG_NAME}"
+        if [ -d "/Volumes/Shellumi" ]; then
+            hdiutil detach "/Volumes/Shellumi" -force >/dev/null 2>&1 || true
+        fi
+        if hdiutil create -volname "Shellumi" \
+            -srcfolder "${APP_BUNDLE}" \
+            -ov -format UDZO \
+            "${OUTPUT_DIR}/${DMG_NAME}"; then
+            created=true
+            break
+        fi
+        echo "==> hdiutil create failed (attempt ${attempt}/5), retrying in 3s..."
+        sleep 3
+    done
+    if [ "${created}" != "true" ]; then
+        echo "Error: hdiutil create failed after 5 attempts." >&2
+        exit 1
+    fi
     echo "==> Successfully created ${OUTPUT_DIR}/${DMG_NAME}"
 else
     echo "==> hdiutil not found, packaging as ZIP archive..."
