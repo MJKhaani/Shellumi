@@ -1,17 +1,12 @@
 //! High-level asynchronous RDP client session driver powered by IronRDP.
 
 use crate::config::RdpClientConfig;
-use crate::input::{
-    build_shortcut_sequence, translate_key_event, translate_pointer_event, translate_remote_input,
-    translate_wheel_event,
-};
+use crate::input::translate_remote_input;
 use ironrdp_client::rdp::{RdpClient, RdpInputEvent, RdpOutputEvent};
-use shellumi_remote_desktop::input::RemoteShortcut;
 use shellumi_remote_desktop::{
     Framebuffer, Rect, SessionCommand, SessionConfig, SessionEvent, SessionMetrics, SessionState,
     SessionWorkerHandle,
 };
-use smallvec::smallvec;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -316,14 +311,30 @@ async fn run_rdp_session_attempt(
                                 })
                                 .await;
                         }
-                        SessionCommand::SetViewOnly { enabled, transition_id } => {
+                        SessionCommand::SetViewOnly {
+                            identity,
+                            enabled,
+                            transition_id,
+                        } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             if enabled && !*view_only {
                                 let releases = ledger.drain_releases();
                                 let released_count = releases.len();
                                 for rel in releases {
                                     let events = translate_remote_input(&rel);
                                     if !events.is_empty() {
-                                        let _ = input_sender.send(RdpInputEvent::FastPath(events.into()));
+                                        if let Err(err) = input_sender.send(RdpInputEvent::FastPath(events.into())) {
+                                            let reason = format!("View-only release submission failed: {err}");
+                                            let _ = worker.send_event(SessionEvent::Error(reason)).await;
+                                            let _ = input_sender.send(RdpInputEvent::Close);
+                                            let _ = stop_tx.send(());
+                                            return (
+                                                Err(RdpError::Terminated("View-only release submission failed".into())),
+                                                connected,
+                                            );
+                                        }
                                     }
                                 }
                                 if released_count > 0 {
@@ -333,7 +344,7 @@ async fn run_rdp_session_attempt(
                                         reason: "View-only enabled".into(),
                                     }).await;
                                 }
-                                microphone_control.set_recording(false);
+                                microphone_control.revoke();
                                 clipboard_backend.set_policy(false, false);
                                 if let Some(ref dc) = drive_control {
                                     dc.set_revoked(true);
@@ -348,6 +359,7 @@ async fn run_rdp_session_attempt(
                             *view_only = enabled;
                             let _ = worker
                                 .send_event(SessionEvent::ViewOnlyChanged {
+                                    identity,
                                     enabled,
                                     transition_id,
                                 })
@@ -410,107 +422,74 @@ async fn run_rdp_session_attempt(
                                 }
                             }
                         }
-                        SessionCommand::Input(input) => {
-                            if matches!(input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
-                                let releases = ledger.drain_releases();
-                                for rel in releases {
-                                    let events = translate_remote_input(&rel);
-                                    if !events.is_empty() {
-                                        let _ = input_sender.send(RdpInputEvent::FastPath(events.into()));
-                                    }
-                                }
+                        SessionCommand::SendClipboard { identity, text } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
                                 continue;
                             }
-                            let is_release = matches!(
-                                input,
-                                shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
-                                    | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
-                            );
-                            if !*view_only || is_release {
-                                let events = translate_remote_input(&input);
-                                if !events.is_empty() {
-                                    match input_sender.send(RdpInputEvent::FastPath(events.into())) {
-                                        Ok(()) => ledger.record_submitted(&input),
-                                        Err(err) => tracing::warn!(error = %err, "Failed to submit RDP FastPath input"),
-                                    }
-                                }
-                            }
-                        }
-                        SessionCommand::Shortcut(shortcut) => {
-                            if !*view_only {
-                                for chunk in build_shortcut_sequence(shortcut) {
-                                    if let Err(err) = input_sender.send(RdpInputEvent::FastPath(chunk.into_iter().collect())) {
-                                        tracing::warn!(error = %err, "Failed to submit RDP shortcut");
-                                    }
-                                }
-                            }
-                        }
-                        SessionCommand::Pointer(p) => {
-                            if !*view_only || !p.pressed {
-                                let event = translate_pointer_event(&p);
-                                if let Err(err) = input_sender.send(RdpInputEvent::FastPath(smallvec![event])) {
-                                    tracing::warn!(error = %err, "Failed to submit RDP pointer event");
-                                }
-                            }
-                        }
-                        SessionCommand::Wheel(w) => {
-                            if !*view_only {
-                                let event = translate_wheel_event(&w);
-                                if let Err(err) = input_sender.send(RdpInputEvent::FastPath(smallvec![event])) {
-                                    tracing::warn!(error = %err, "Failed to submit RDP wheel event");
-                                }
-                            }
-                        }
-                        SessionCommand::Key(k) => {
-                            if !*view_only || !k.pressed {
-                                let event = translate_key_event(&k);
-                                if let Err(err) = input_sender.send(RdpInputEvent::FastPath(smallvec![event])) {
-                                    tracing::warn!(error = %err, "Failed to submit RDP key event");
-                                }
-                            }
-                        }
-                        SessionCommand::CtrlAltDel => {
-                            if !*view_only {
-                                for chunk in build_shortcut_sequence(RemoteShortcut::CtrlAltDel) {
-                                    if let Err(err) = input_sender.send(RdpInputEvent::FastPath(chunk.into_iter().collect())) {
-                                        tracing::warn!(error = %err, "Failed to submit RDP Ctrl+Alt+Del");
-                                    }
-                                }
-                            }
-                        }
-                        SessionCommand::SendClipboard(text) => {
-                            if !*view_only {
+                            let send_allowed = !*view_only
+                                && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled
+                                && clipboard_policy.allow_send;
+                            if send_allowed {
                                 clipboard_backend.set_local_text(text);
                             }
                         }
-                        SessionCommand::SendFiles(paths) => {
-                            if !*view_only {
+                        SessionCommand::SendFiles { identity, paths } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
+                            let send_allowed = !*view_only
+                                && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled
+                                && clipboard_policy.allow_send;
+                            if send_allowed {
                                 if let Err(e) = clipboard_backend.stage_files(&paths) {
                                     tracing::warn!("Failed to stage files for RDP transfer: {e}");
                                 }
                             }
                         }
-                        SessionCommand::SetAudioMute(muted) => {
+                        SessionCommand::SetAudioMute { identity, muted } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             sound_control.set_muted(muted);
                             let _ = worker
                                 .send_event(sound_control.current_status_snapshot())
                                 .await;
                         }
-                        SessionCommand::SetAudioVolume(volume) => {
+                        SessionCommand::SetAudioVolume { identity, volume } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             sound_control.set_volume(volume);
                             let _ = worker
                                 .send_event(sound_control.current_status_snapshot())
                                 .await;
                         }
-                        SessionCommand::SetMicrophoneMute(muted) => {
-                            microphone_control.set_muted(muted);
+                        SessionCommand::SetMicrophoneMute { identity, muted } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
+                            if !*view_only {
+                                microphone_control.set_muted(muted);
+                            }
                             let _ = worker.send_event(microphone_control.status_snapshot()).await;
                         }
-                        SessionCommand::SetMicrophoneVolume(volume) => {
-                            microphone_control.set_volume(volume);
+                        SessionCommand::SetMicrophoneVolume { identity, volume } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
+                            if !*view_only {
+                                microphone_control.set_volume(volume);
+                            }
                             let _ = worker.send_event(microphone_control.status_snapshot()).await;
                         }
-                        SessionCommand::RequestResize { width, height } => {
+                        SessionCommand::RequestResize {
+                            identity,
+                            width,
+                            height,
+                        } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             let (adj_w, adj_h) = crate::display::adjust_display_size(width, height);
                             tracing::debug!(
                                 width,
@@ -540,51 +519,17 @@ async fn run_rdp_session_attempt(
                                     .await;
                             }
                         }
-                        SessionCommand::ConfigureDrive(opt_path) => {
-                            if let Some(ref dc) = drive_control {
-                                match opt_path {
-                                    Some(target_path) => {
-                                        let d_name = crate::drive::derive_drive_name(&target_path);
-                                        dc.update_folder(d_name.clone(), target_path.clone());
-                                        let _ = worker
-                                            .send_event(SessionEvent::DriveStatus {
-                                                drive_name: d_name,
-                                                local_path: target_path.to_string_lossy().to_string(),
-                                                mounted: dc.is_mounted() && !dc.is_revoked(),
-                                                bytes_read: dc.bytes_read(),
-                                                bytes_written: dc.bytes_written(),
-                                                operations_count: dc.operations_count(),
-                                            })
-                                            .await;
-                                    }
-                                    None => {
-                                        dc.set_revoked(true);
-                                        let _ = worker
-                                            .send_event(SessionEvent::DriveStatus {
-                                                drive_name: dc.drive_name(),
-                                                local_path: String::new(),
-                                                mounted: false,
-                                                bytes_read: dc.bytes_read(),
-                                                bytes_written: dc.bytes_written(),
-                                                operations_count: dc.operations_count(),
-                                            })
-                                            .await;
-                                    }
-                                }
-                            } else {
-                                let _ = worker
-                                    .send_event(SessionEvent::DriveStatus {
-                                        drive_name: String::new(),
-                                        local_path: String::new(),
-                                        mounted: false,
-                                        bytes_read: 0,
-                                        bytes_written: 0,
-                                        operations_count: 0,
-                                    })
-                                    .await;
+                        SessionCommand::ConfigureDrivePolicy {
+                            identity,
+                            path,
+                            read_only,
+                        } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
                             }
-                        }
-                        SessionCommand::ConfigureDrivePolicy { path, read_only } => {
+                            if *view_only {
+                                continue;
+                            }
                             if let Some(ref dc) = drive_control {
                                 dc.set_read_only(read_only);
                                 match path {
@@ -608,7 +553,10 @@ async fn run_rdp_session_attempt(
                                     .await;
                             }
                         }
-                        SessionCommand::SetClipboardPolicy(policy) => {
+                        SessionCommand::SetClipboardPolicy { identity, policy } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             clipboard_policy = policy;
                             let enabled = policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled && !*view_only;
                             clipboard_backend.set_policy(
@@ -616,7 +564,13 @@ async fn run_rdp_session_attempt(
                                 enabled && policy.allow_receive,
                             );
                         }
-                        SessionCommand::CancelTransfer(transfer_id) => {
+                        SessionCommand::CancelTransfer {
+                            identity,
+                            transfer_id,
+                        } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             let _ = clipboard_backend.cancel_transfer(transfer_id);
                         }
                         SessionCommand::Disconnect => {

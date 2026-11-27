@@ -43,10 +43,11 @@ fn test_display_control_state_and_event_channel() {
 
     // Verify SessionCommand::RequestResize can be constructed and passed
     let cmd = SessionCommand::RequestResize {
+        identity: shellumi_remote_desktop::SessionIdentity::new(1, 1, 1),
         width: 1920,
         height: 1080,
     };
-    if let SessionCommand::RequestResize { width, height } = cmd {
+    if let SessionCommand::RequestResize { width, height, .. } = cmd {
         let (adj_w, adj_h) = adjust_display_size(width, height);
         assert_eq!((adj_w, adj_h), (1920, 1080));
     } else {

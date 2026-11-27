@@ -461,30 +461,45 @@ impl Shellumi {
             cx.notify();
             return;
         }
-        let ui_handle = rd.ui_handle.clone();
+        if rd.ui_handle.is_none() {
+            rd.last_action_note = Some(format!(
+                "Shortcut {} ignored (session not connected)",
+                shortcut.label()
+            ));
+            cx.notify();
+            return;
+        }
         let proto = rd.protocol;
         let is_connected = rd.status == RemoteDesktopStatus::Connected;
 
-        if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
-            if let Err(reason) = ctrl.on_shortcut(shortcut) {
-                rd.last_action_note = Some(format!(
-                    "Shortcut {} rejected ({reason:?})",
-                    shortcut.label()
-                ));
-                cx.notify();
-                return;
-            }
-        }
-
-        if let Some(ui_handle) = ui_handle {
-            match ui_handle
-                .try_send_command(shellumi_remote_desktop::SessionCommand::Shortcut(shortcut))
-            {
-                Ok(()) => {
-                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
-                        ctrl.counters.enqueued += 1;
+        let inputs = match self.rd_input_controllers.get_mut(&tab_id) {
+            Some(ctrl) => match ctrl.on_shortcut(shortcut) {
+                Ok(inputs) => inputs,
+                Err(reason) => {
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        if let Some(rd) = &mut tab.remote_desktop_state {
+                            rd.last_action_note = Some(format!(
+                                "Shortcut {} rejected ({reason:?})",
+                                shortcut.label()
+                            ));
+                        }
                     }
-                    rd.last_action_note = Some(format!("Sent shortcut: {}", shortcut.label()));
+                    cx.notify();
+                    return;
+                }
+            },
+            None => return,
+        };
+
+        self.dispatch_rd_inputs(tab_id, inputs);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if let Some(rd) = &mut tab.remote_desktop_state {
+                if !self
+                    .rd_input_controllers
+                    .get(&tab_id)
+                    .is_some_and(|c| c.recovery_frozen)
+                {
+                    rd.last_action_note = Some(format!("Queued shortcut: {}", shortcut.label()));
                     if is_connected {
                         rd.status_message = Some(format!(
                             "Shortcut {} queued for {}",
@@ -496,117 +511,9 @@ impl Shellumi {
                         ));
                     }
                 }
-                Err(err) => {
-                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
-                        ctrl.counters.queue_full_errors += 1;
-                        ctrl.counters.last_error_category = Some(err.clone());
-                    }
-                    rd.last_action_note =
-                        Some(format!("Failed to queue {}: {err}", shortcut.label()));
-                }
             }
-        } else {
-            rd.last_action_note = Some(format!(
-                "Shortcut {} ignored (session not connected)",
-                shortcut.label()
-            ));
         }
         cx.notify();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn remote_desktop_send_key(
-        &mut self,
-        tab_idx: usize,
-        key_desc: &'static str,
-        keysym: u32,
-        cx: &mut Context<Self>,
-    ) {
-        let shortcut = match key_desc {
-            "Ctrl+Alt+Del" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlAltDel),
-            "Win/Super" => Some(shellumi_remote_desktop::RemoteShortcut::WinKey),
-            "Alt+Tab" => Some(shellumi_remote_desktop::RemoteShortcut::AltTab),
-            "Ctrl+Escape" => Some(shellumi_remote_desktop::RemoteShortcut::CtrlEscape),
-            _ => None,
-        };
-        if let Some(sc) = shortcut {
-            self.remote_desktop_send_shortcut(tab_idx, sc, cx);
-            return;
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            if let Some(rd) = &mut tab.remote_desktop_state {
-                if let Some(ui_handle) = &rd.ui_handle {
-                    let key = shellumi_remote_desktop::RemoteKey {
-                        keysym,
-                        scancode: 0,
-                        extended: false,
-                        is_modifier: false,
-                        key_name: key_desc.to_string(),
-                    };
-                    let _ =
-                        ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Input(
-                            shellumi_remote_desktop::RemoteInput::PhysicalKey {
-                                key: key.clone(),
-                                down: true,
-                                repeat: false,
-                            },
-                        ));
-                    let _ =
-                        ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Input(
-                            shellumi_remote_desktop::RemoteInput::PhysicalKey {
-                                key,
-                                down: false,
-                                repeat: false,
-                            },
-                        ));
-                }
-                cx.notify();
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn remote_desktop_click_canvas(
-        &mut self,
-        tab_idx: usize,
-        x: u32,
-        y: u32,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            if let Some(rd) = &mut tab.remote_desktop_state {
-                if rd.view_only {
-                    rd.last_action_note = Some("View-only mode: user input blocked".into());
-                    cx.notify();
-                    return;
-                }
-                // Real RFB pointer event serialization
-                let _click_packet =
-                    build_rfb_pointer_event(rfb_constants::BUTTON_LEFT, x as u16, y as u16);
-
-                if let Some(ui_handle) = &rd.ui_handle {
-                    let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::Pointer(
-                            shellumi_remote_desktop::PointerEvent {
-                                x,
-                                y,
-                                button_mask: shellumi_remote_desktop::pointer_mask::BUTTON_LEFT,
-                                pressed: true,
-                            },
-                        ),
-                    );
-                }
-
-                if rd.status == RemoteDesktopStatus::Connected {
-                    rd.last_action_note = Some(format!("Mouse click at ({x}, {y})"));
-                } else {
-                    rd.last_action_note = Some(format!(
-                        "Pointer click at ({x}, {y}) (session not connected)"
-                    ));
-                }
-                cx.notify();
-            }
-        }
     }
 
     #[allow(dead_code)]
@@ -656,22 +563,45 @@ impl Shellumi {
                 self.rd_view_only_transition_seq = self.rd_view_only_transition_seq.wrapping_add(1);
                 let transition_id = self.rd_view_only_transition_seq;
 
-                let envelopes: Vec<_> =
+                let (identity, envelopes): (shellumi_remote_desktop::SessionIdentity, Vec<_>) =
                     if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                        let id = ctrl.identity();
                         let rels = ctrl.begin_view_only_transition(next_enabled, transition_id);
-                        rels.into_iter().map(|r| ctrl.wrap_envelope(r)).collect()
+                        (
+                            id,
+                            rels.into_iter().map(|r| ctrl.wrap_envelope(r)).collect(),
+                        )
                     } else {
-                        Vec::new()
+                        (
+                            shellumi_remote_desktop::SessionIdentity::default(),
+                            Vec::new(),
+                        )
                     };
 
                 if let Some(ui_handle) = &rd.ui_handle {
+                    if !identity.is_transport_bound() {
+                        rd.last_action_note =
+                            Some("View-only transition ignored: transport not active".into());
+                        cx.notify();
+                        return;
+                    }
                     for env in envelopes {
-                        let _ = ui_handle.try_send_command(
+                        if let Err(err) = ui_handle.try_send_command(
                             shellumi_remote_desktop::SessionCommand::InputEnvelope(env),
-                        );
+                        ) {
+                            if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                                let barrier =
+                                    ctrl.begin_recovery("View-only release admission failed");
+                                ui_handle.trigger_recovery(barrier);
+                            }
+                            rd.last_action_note =
+                                Some(format!("View-only release recovery triggered: {err}"));
+                            break;
+                        }
                     }
                     if let Err(err) = ui_handle.try_send_command(
                         shellumi_remote_desktop::SessionCommand::SetViewOnly {
+                            identity,
                             enabled: next_enabled,
                             transition_id,
                         },
@@ -685,7 +615,7 @@ impl Shellumi {
 
                 if next_enabled {
                     rd.view_only = true;
-                    rd.last_action_note = Some("View-only mode activated".into());
+                    rd.last_action_note = Some("Enabling view-only mode…".into());
                 } else {
                     rd.last_action_note = Some("Requesting interactive control…".into());
                 }
@@ -713,9 +643,11 @@ impl Shellumi {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
                     if let Some(ui_handle) = &rd.ui_handle {
-                        for rel in ctrl.release_all() {
+                        let rels = ctrl.release_all();
+                        for rel in rels {
+                            let env = ctrl.wrap_envelope(rel);
                             let _ = ui_handle.try_send_command(
-                                shellumi_remote_desktop::SessionCommand::Input(rel),
+                                shellumi_remote_desktop::SessionCommand::InputEnvelope(env),
                             );
                         }
                     }
@@ -1021,14 +953,16 @@ impl Shellumi {
                                     _ => {}
                                 },
                                 shellumi_remote_desktop::SessionEvent::ViewOnlyChanged {
+                                    identity,
                                     enabled,
                                     transition_id,
                                 } => {
                                     let accepted = app
                                         .rd_input_controllers
                                         .get_mut(&session_key.tab_id)
-                                        .is_none_or(|ctrl| {
-                                            ctrl.ack_view_only_transition(enabled, transition_id)
+                                        .is_some_and(|ctrl| {
+                                            identity.matches_transport(&ctrl.identity())
+                                                && ctrl.ack_view_only_transition(enabled, transition_id)
                                         });
                                     if accepted {
                                         rd.view_only = enabled;
@@ -1046,6 +980,9 @@ impl Shellumi {
                                     if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
                                         ctrl.reset_for_transport(rd.connection_generation, transport_epoch);
                                         ctrl.view_only = rd.view_only;
+                                        if let Some(ui_handle) = &rd.ui_handle {
+                                            ctrl.input_epoch = ui_handle.set_active_identity(ctrl.identity());
+                                        }
                                     }
                                 }
                                 shellumi_remote_desktop::SessionEvent::InputRecovery {
@@ -1421,13 +1358,22 @@ impl Shellumi {
                 }
 
                 // Prefer native file references if present on the OS clipboard (RDP only)
+                let tab_id = tab.id;
+                let identity = self
+                    .rd_input_controllers
+                    .get(&tab_id)
+                    .map(|c| c.identity())
+                    .unwrap_or_default();
                 if rd.protocol == RemoteDesktopProtocol::Rdp {
                     let native_files = crate::native_clipboard::read_clipboard_files();
                     if !native_files.is_empty() {
                         let count = native_files.len();
                         if let Some(ui_handle) = &rd.ui_handle {
                             match ui_handle.try_send_command(
-                                shellumi_remote_desktop::SessionCommand::SendFiles(native_files),
+                                shellumi_remote_desktop::SessionCommand::SendFiles {
+                                    identity,
+                                    paths: native_files,
+                                },
                             ) {
                                 Ok(()) => {
                                     rd.last_action_note = Some(format!(
@@ -1447,7 +1393,6 @@ impl Shellumi {
 
                 // Never fall back to cached remote text when local clipboard has no text
                 let local_text = cx.read_from_clipboard().and_then(|item| item.text());
-                let tab_id = tab.id;
                 match local_text {
                     Some(text) => {
                         let pb_change = crate::native_clipboard::pasteboard_change_count();
@@ -1472,9 +1417,10 @@ impl Shellumi {
                             if let Some(rd) = &mut tab.remote_desktop_state {
                                 if let Some(ui_handle) = &rd.ui_handle {
                                     match ui_handle.try_send_command(
-                                        shellumi_remote_desktop::SessionCommand::SendClipboard(
+                                        shellumi_remote_desktop::SessionCommand::SendClipboard {
+                                            identity,
                                             text,
-                                        ),
+                                        },
                                     ) {
                                         Ok(()) => {
                                             rd.last_action_note = Some(
@@ -1523,11 +1469,22 @@ impl Shellumi {
         transfer_id: u64,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 if let Some(ui_handle) = &rd.ui_handle {
                     match ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::CancelTransfer(transfer_id),
+                        shellumi_remote_desktop::SessionCommand::CancelTransfer {
+                            identity,
+                            transfer_id,
+                        },
                     ) {
                         Ok(()) => {
                             rd.last_action_note = Some(format!(
@@ -1588,13 +1545,21 @@ impl Shellumi {
         paths: Vec<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 if let Some(ui_handle) = &rd.ui_handle {
                     let count = paths.len();
-                    if let Err(e) = ui_handle
-                        .try_send_command(shellumi_remote_desktop::SessionCommand::SendFiles(paths))
-                    {
+                    if let Err(e) = ui_handle.try_send_command(
+                        shellumi_remote_desktop::SessionCommand::SendFiles { identity, paths },
+                    ) {
                         rd.last_action_note = Some(format!("Failed to stage files: {e}"));
                     } else {
                         rd.last_action_note =
@@ -1616,6 +1581,14 @@ impl Shellumi {
         let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
             return;
         };
+        let captured_identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
+        if !captured_identity.is_transport_bound() {
+            return;
+        }
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -1627,6 +1600,14 @@ impl Shellumi {
             if let Ok(Ok(Some(paths))) = rx.await {
                 if !paths.is_empty() {
                     let _ = this.update(cx, |app, cx| {
+                        let current_identity = app
+                            .rd_input_controllers
+                            .get(&tab_id)
+                            .map(|c| c.identity())
+                            .unwrap_or_default();
+                        if current_identity != captured_identity {
+                            return;
+                        }
                         if let Some(current_idx) = app.tabs.iter().position(|t| t.id == tab_id) {
                             app.remote_desktop_send_files(current_idx, paths, cx);
                         }
@@ -1638,13 +1619,24 @@ impl Shellumi {
     }
 
     pub(crate) fn remote_desktop_toggle_mute(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 let new_muted = !rd.audio_muted;
                 rd.audio_muted = new_muted;
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::SetAudioMute(new_muted),
+                        shellumi_remote_desktop::SessionCommand::SetAudioMute {
+                            identity,
+                            muted: new_muted,
+                        },
                     );
                 }
                 rd.last_action_note = Some(if new_muted {
@@ -1663,13 +1655,24 @@ impl Shellumi {
         volume: u16,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 let vol = volume.min(100);
                 rd.audio_volume = vol;
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::SetAudioVolume(vol),
+                        shellumi_remote_desktop::SessionCommand::SetAudioVolume {
+                            identity,
+                            volume: vol,
+                        },
                     );
                 }
                 rd.last_action_note = Some(format!("Volume set to {vol}%"));
@@ -1683,13 +1686,24 @@ impl Shellumi {
         tab_idx: usize,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 let new_muted = !rd.mic_muted;
                 rd.mic_muted = new_muted;
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::SetMicrophoneMute(new_muted),
+                        shellumi_remote_desktop::SessionCommand::SetMicrophoneMute {
+                            identity,
+                            muted: new_muted,
+                        },
                     );
                 }
                 rd.last_action_note = Some(if new_muted {
@@ -1708,13 +1722,24 @@ impl Shellumi {
         volume: u16,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 let vol = volume.min(200);
                 rd.mic_volume = vol;
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::SetMicrophoneVolume(vol),
+                        shellumi_remote_desktop::SessionCommand::SetMicrophoneVolume {
+                            identity,
+                            volume: vol,
+                        },
                     );
                 }
                 rd.last_action_note = Some(format!("Microphone gain set to {vol}%"));
@@ -1790,6 +1815,14 @@ impl Shellumi {
         height: u32,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return Err("Remote desktop tab no longer exists".into());
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return Err("Remote desktop tab no longer exists".into());
         };
@@ -1799,6 +1832,7 @@ impl Shellumi {
         if let Some(ui_handle) = &rd.ui_handle {
             ui_handle
                 .try_send_command(shellumi_remote_desktop::SessionCommand::RequestResize {
+                    identity,
                     width,
                     height,
                 })
@@ -1819,6 +1853,14 @@ impl Shellumi {
         folder_path: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        let identity = self
+            .rd_input_controllers
+            .get(&tab_id)
+            .map(|c| c.identity())
+            .unwrap_or_default();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
                 let drive_name = folder_path
@@ -1835,7 +1877,11 @@ impl Shellumi {
 
                 if let Some(ui_handle) = &rd.ui_handle {
                     let _ = ui_handle.try_send_command(
-                        shellumi_remote_desktop::SessionCommand::ConfigureDrive(Some(folder_path)),
+                        shellumi_remote_desktop::SessionCommand::ConfigureDrivePolicy {
+                            identity,
+                            path: Some(folder_path),
+                            read_only: true,
+                        },
                     );
                 }
                 cx.notify();
@@ -3032,12 +3078,13 @@ mod tests {
         let req1 = state.take_ready_to_dispatch(1, true).unwrap();
         cmd_tx
             .try_send(shellumi_remote_desktop::SessionCommand::RequestResize {
+                identity: shellumi_remote_desktop::SessionIdentity::new(1, 1, 1),
                 width: req1.dimensions.0,
                 height: req1.dimensions.1,
             })
             .unwrap();
         match cmd_rx.try_recv().unwrap() {
-            shellumi_remote_desktop::SessionCommand::RequestResize { width, height } => {
+            shellumi_remote_desktop::SessionCommand::RequestResize { width, height, .. } => {
                 assert_eq!((width, height), (1600, 900));
             }
             other => panic!("unexpected command: {other:?}"),

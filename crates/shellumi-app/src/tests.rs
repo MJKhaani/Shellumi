@@ -1089,32 +1089,40 @@ fn verifies_framebuffer_snapshot_application_and_canvas_binding() {
 #[test]
 fn verifies_remote_desktop_clipboard_sync_and_file_transfer_commands() {
     let (ui_handle, worker_handle) = shellumi_remote_desktop::create_session_channels(16, 16);
+    let id = shellumi_remote_desktop::SessionIdentity::new(1, 1, 1);
+    ui_handle.set_active_identity(id);
 
     // Verify SendClipboard command plumbing
     ui_handle
-        .try_send_command(shellumi_remote_desktop::SessionCommand::SendClipboard(
-            "Test clipboard contents".into(),
-        ))
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SendClipboard {
+            identity: id,
+            text: "Test clipboard contents".into(),
+        })
         .unwrap();
     let cmd = worker_handle.try_recv_command().unwrap();
     assert_eq!(
         cmd,
-        Some(shellumi_remote_desktop::SessionCommand::SendClipboard(
-            "Test clipboard contents".into()
-        ))
+        Some(shellumi_remote_desktop::SessionCommand::SendClipboard {
+            identity: id,
+            text: "Test clipboard contents".into(),
+        })
     );
 
     // Verify SendFiles command plumbing
     let files = vec![std::path::PathBuf::from("/tmp/sample.txt")];
     ui_handle
-        .try_send_command(shellumi_remote_desktop::SessionCommand::SendFiles(
-            files.clone(),
-        ))
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SendFiles {
+            identity: id,
+            paths: files.clone(),
+        })
         .unwrap();
     let cmd = worker_handle.try_recv_command().unwrap();
     assert_eq!(
         cmd,
-        Some(shellumi_remote_desktop::SessionCommand::SendFiles(files))
+        Some(shellumi_remote_desktop::SessionCommand::SendFiles {
+            identity: id,
+            paths: files,
+        })
     );
 
     // Verify ServerFilesReceived event plumbing
@@ -1137,25 +1145,39 @@ fn verifies_remote_desktop_clipboard_sync_and_file_transfer_commands() {
 #[test]
 fn verifies_remote_desktop_audio_redirection_commands_and_telemetry() {
     let (ui_handle, worker_handle) = shellumi_remote_desktop::create_session_channels(32, 64);
+    let id = shellumi_remote_desktop::SessionIdentity::new(1, 1, 1);
+    ui_handle.set_active_identity(id);
 
     // Verify SetAudioMute command plumbing
     ui_handle
-        .try_send_command(shellumi_remote_desktop::SessionCommand::SetAudioMute(true))
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SetAudioMute {
+            identity: id,
+            muted: true,
+        })
         .unwrap();
     let cmd = worker_handle.try_recv_command().unwrap();
     assert_eq!(
         cmd,
-        Some(shellumi_remote_desktop::SessionCommand::SetAudioMute(true))
+        Some(shellumi_remote_desktop::SessionCommand::SetAudioMute {
+            identity: id,
+            muted: true,
+        })
     );
 
     // Verify SetAudioVolume command plumbing
     ui_handle
-        .try_send_command(shellumi_remote_desktop::SessionCommand::SetAudioVolume(75))
+        .try_send_command(shellumi_remote_desktop::SessionCommand::SetAudioVolume {
+            identity: id,
+            volume: 75,
+        })
         .unwrap();
     let cmd = worker_handle.try_recv_command().unwrap();
     assert_eq!(
         cmd,
-        Some(shellumi_remote_desktop::SessionCommand::SetAudioVolume(75))
+        Some(shellumi_remote_desktop::SessionCommand::SetAudioVolume {
+            identity: id,
+            volume: 75,
+        })
     );
 
     // Verify AudioStatus event plumbing and fields
@@ -1986,10 +2008,11 @@ fn verifies_remote_desktop_display_control_state_and_resizing() {
 
     // Verify SessionCommand::RequestResize construction
     let cmd = SessionCommand::RequestResize {
+        identity: shellumi_remote_desktop::SessionIdentity::new(1, 1, 1),
         width: 3840,
         height: 2160,
     };
-    if let SessionCommand::RequestResize { width, height } = cmd {
+    if let SessionCommand::RequestResize { width, height, .. } = cmd {
         assert_eq!(width, 3840);
         assert_eq!(height, 2160);
     } else {
@@ -2118,9 +2141,16 @@ fn test_remote_desktop_drive_redirection_state_and_events() {
         Some("Shared drive \"Downloads\" mounted (/Users/test/Downloads)".into())
     );
 
-    // Verify SessionCommand::ConfigureDrive
-    let cmd = SessionCommand::ConfigureDrive(Some(std::path::PathBuf::from("/Users/test/Shared")));
-    if let SessionCommand::ConfigureDrive(Some(path)) = cmd {
+    // Verify SessionCommand::ConfigureDrivePolicy
+    let cmd = SessionCommand::ConfigureDrivePolicy {
+        identity: shellumi_remote_desktop::SessionIdentity::new(1, 1, 1),
+        path: Some(std::path::PathBuf::from("/Users/test/Shared")),
+        read_only: true,
+    };
+    if let SessionCommand::ConfigureDrivePolicy {
+        path: Some(path), ..
+    } = cmd
+    {
         assert_eq!(path, std::path::PathBuf::from("/Users/test/Shared"));
     } else {
         panic!("Expected ConfigureDrive command");
@@ -2251,16 +2281,23 @@ fn test_remote_desktop_microphone_redirection_state_and_events() {
     assert_eq!(rd.mic_volume, 120);
 
     // 4. Verify SessionCommand variants for microphone control
-    let mute_cmd = SessionCommand::SetMicrophoneMute(true);
-    if let SessionCommand::SetMicrophoneMute(muted) = mute_cmd {
+    let id = shellumi_remote_desktop::SessionIdentity::new(1, 1, 1);
+    let mute_cmd = SessionCommand::SetMicrophoneMute {
+        identity: id,
+        muted: true,
+    };
+    if let SessionCommand::SetMicrophoneMute { muted, .. } = mute_cmd {
         assert!(muted);
     } else {
         panic!("Expected SetMicrophoneMute command");
     }
 
-    let vol_cmd = SessionCommand::SetMicrophoneVolume(120);
-    if let SessionCommand::SetMicrophoneVolume(vol) = vol_cmd {
-        assert_eq!(vol, 120);
+    let vol_cmd = SessionCommand::SetMicrophoneVolume {
+        identity: id,
+        volume: 120,
+    };
+    if let SessionCommand::SetMicrophoneVolume { volume, .. } = vol_cmd {
+        assert_eq!(volume, 120);
     } else {
         panic!("Expected SetMicrophoneVolume command");
     }

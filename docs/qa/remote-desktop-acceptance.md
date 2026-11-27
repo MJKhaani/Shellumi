@@ -38,6 +38,17 @@
 | RD-A19 | Truthful diagnostics (no RGBA bytes counted as network traffic) | Implemented (L1 PASS) | `crates/shellumi-rdp/src/client.rs` |
 | RD-A20 | VNC Latin-1 `ClientCutText`/`ServerCutText`, bounded echo suppression, protocol error handling | Implemented (L1/L2 PASS; L4 BLOCKED) | `crates/shellumi-vnc/src/wire.rs`, `crates/shellumi-vnc/src/client.rs` |
 
+## Round 4 P0 Closure Status (P0-01–P0-06)
+
+| ID | Scope | Status | Verification |
+| --- | --- | --- | --- |
+| P0-01 | Eliminate legacy input bypasses & fix post-recovery shortcuts | **Implemented** | L1 `p01_t01_shortcut_envelope_accepted_after_recovery` **PASS**; L3/L4/L5 **BLOCKED** |
+| P0-02 | Single authoritative recovery coordinator & ordered barriers | **Implemented** | L1 `p02_t01_t02_t03_single_coordinator_ordered_barriers_and_reverse_acks` **PASS**; L4/L5 **BLOCKED** |
+| P0-03 | Exclusive per-transfer download staging & ownership-bound cleanup | **Implemented** | L1 `p03_t01_t02_exclusive_transfer_dir_prevents_cross_transfer_or_foreign_deletion` **PASS**; L4 **BLOCKED** |
+| P0-04 | Immutable upload snapshot authorization & revocation gate | **Implemented** | L1 `p04_t01_t05_t06_immutable_upload_snapshot_and_policy_revocation` **PASS**; L4 **BLOCKED** |
+| P0-05 | Atomic effective policy for view-only, clipboard, drive & microphone | **Implemented** | L1 `p05_t04_t09_t10_atomic_revocation_of_drive_and_microphone` **PASS**; L4/L5 **BLOCKED** |
+| P0-06 | End-to-end session/transport identity & stale work isolation | **Implemented** | L1 `p06_t01_t02_t03_t04_strict_identity_isolation_and_zero_rejection` **PASS**; L4/L5 **BLOCKED** |
+
 ## Matrix Summary
 
 See [remote-desktop-matrix.csv](remote-desktop-matrix.csv) for machine-readable cell status.

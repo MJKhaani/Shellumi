@@ -271,6 +271,7 @@ pub struct MicrophoneControlState {
     channel_id: Arc<AtomicU32>,
     ready: Arc<AtomicBool>,
     recording: Arc<AtomicBool>,
+    revoked: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     volume: Arc<AtomicU16>, // 0..=100 input volume/gain
     bytes_sent: Arc<AtomicU64>,
@@ -278,6 +279,7 @@ pub struct MicrophoneControlState {
     sample_rate: Arc<AtomicU32>,
     channels: Arc<AtomicU16>,
     input_sender: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<RdpInputEvent>>>>,
+    active_stop_signal: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>,
 }
 
 impl Default for MicrophoneControlState {
@@ -293,6 +295,7 @@ impl MicrophoneControlState {
             channel_id: Arc::new(AtomicU32::new(0)),
             ready: Arc::new(AtomicBool::new(false)),
             recording: Arc::new(AtomicBool::new(false)),
+            revoked: Arc::new(AtomicBool::new(false)),
             muted: Arc::new(AtomicBool::new(muted)),
             volume: Arc::new(AtomicU16::new(volume.min(100))),
             bytes_sent: Arc::new(AtomicU64::new(0)),
@@ -300,6 +303,7 @@ impl MicrophoneControlState {
             sample_rate: Arc::new(AtomicU32::new(44100)),
             channels: Arc::new(AtomicU16::new(2)),
             input_sender: Arc::new(std::sync::Mutex::new(None)),
+            active_stop_signal: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -364,9 +368,37 @@ impl MicrophoneControlState {
         self.recording.load(Ordering::Relaxed)
     }
 
-    /// Set recording state.
+    /// Set recording state; disabling signals any active native capture stream to stop immediately.
     pub fn set_recording(&self, recording: bool) {
-        self.recording.store(recording, Ordering::Relaxed);
+        self.recording.store(recording, Ordering::Release);
+        if !recording {
+            self.signal_stop_active_capture();
+        }
+    }
+
+    /// Revoke microphone capture permission and stop any active native capture stream.
+    pub fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+        self.recording.store(false, Ordering::Release);
+        self.signal_stop_active_capture();
+    }
+
+    pub fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+    }
+
+    pub fn register_stop_signal(&self, sig: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.active_stop_signal.lock() {
+            *guard = Some(sig);
+        }
+    }
+
+    fn signal_stop_active_capture(&self) {
+        if let Ok(mut guard) = self.active_stop_signal.lock() {
+            if let Some(sig) = guard.take() {
+                sig.store(true, Ordering::Release);
+            }
+        }
     }
 
     /// Check if microphone capture is currently muted.
@@ -532,7 +564,10 @@ pub fn start_audio_capture(
     let stream_result = device.build_input_stream(
         &config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            if stop_signal_clone.load(Ordering::Relaxed) {
+            if stop_signal_clone.load(Ordering::Acquire)
+                || !control_clone.is_recording()
+                || control_clone.is_revoked()
+            {
                 return;
             }
 
@@ -706,6 +741,13 @@ impl DvcProcessor for ShellumiRdpeaiClient {
                     "Remote server opened audio input channel; activating microphone recording"
                 );
 
+                if self.state.is_revoked() {
+                    self.capture_handle = None;
+                    self.state.set_recording(false);
+                    let _ = self.event_tx.try_send(self.state.status_snapshot());
+                    return Ok(vec![Box::new(RdpeaiPdu::OpenReply(0x8000_4005))]);
+                }
+
                 self.state.set_sample_rate(chosen_fmt.samples_per_sec);
                 self.state.set_channels(chosen_fmt.channels);
                 self.state.set_ready(true);
@@ -718,6 +760,9 @@ impl DvcProcessor for ShellumiRdpeaiClient {
                     chosen_fmt.samples_per_sec,
                     chosen_fmt.channels,
                 );
+                if let Some(ref handle) = self.capture_handle {
+                    self.state.register_stop_signal(handle.stop_signal.clone());
+                }
 
                 let open_ok = self.capture_handle.is_some();
                 self.state.set_recording(open_ok);

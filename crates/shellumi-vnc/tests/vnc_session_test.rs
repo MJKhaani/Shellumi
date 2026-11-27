@@ -475,9 +475,10 @@ async fn test_vnc_session_runner_with_advanced_decoders_and_clipboard() {
 
                 // Send client clipboard back
                 ui_handle
-                    .try_send_command(SessionCommand::SendClipboard(
-                        "Client clipboard test".into(),
-                    ))
+                    .try_send_command(SessionCommand::SendClipboard {
+                        identity: shellumi_remote_desktop::SessionIdentity::new(1, 1, 1),
+                        text: "Client clipboard test".into(),
+                    })
                     .unwrap();
 
                 // Stop session

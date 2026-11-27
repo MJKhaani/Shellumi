@@ -113,6 +113,7 @@ pub struct RemoteFile {
     pub downloaded_bytes: u64,
     pub local_path: PathBuf,
     pub handle: Option<std::fs::File>,
+    pub owned_by_transfer: bool,
 }
 
 /// Internal state for Shellumi CLIPRDR backend.
@@ -122,6 +123,7 @@ pub struct CliprdrInner {
     pub staged_files: Vec<StagedFile>,
     pub remote_files: Vec<RemoteFile>,
     pub active_transfer_id: Option<u64>,
+    pub active_transfer_dir: Option<PathBuf>,
     pub active_download_stream_id: Option<u32>,
     pub expected_response: Option<ExpectedResponseKind>,
     pub active_download_index: usize,
@@ -140,6 +142,7 @@ impl CliprdrInner {
             staged_files: Vec::new(),
             remote_files: Vec::new(),
             active_transfer_id: None,
+            active_transfer_dir: None,
             active_download_stream_id: None,
             expected_response: None,
             active_download_index: 0,
@@ -220,6 +223,28 @@ impl PrivateStaging {
 
     pub fn as_str(&self) -> &str {
         &self.root_str
+    }
+
+    /// Allocate an exclusively created, `0700`-protected per-transfer subdirectory
+    /// inside this validated session root.
+    pub fn create_transfer_dir(&self, transfer_id: u64) -> std::io::Result<PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = self
+            .root
+            .join(format!("xfer-{transfer_id}-{seq}-{nanos:x}"));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&dir)?;
+        Ok(dir)
     }
 }
 
@@ -333,11 +358,14 @@ impl ShellumiCliprdrBackend {
         inner.expected_response = None;
         for f in &mut inner.remote_files {
             f.handle.take();
-            if f.downloaded_bytes < f.size || f.local_path.exists() {
+            if f.owned_by_transfer {
                 let _ = std::fs::remove_file(&f.local_path);
             }
         }
         inner.remote_files.clear();
+        if let Some(dir) = inner.active_transfer_dir.take() {
+            let _ = std::fs::remove_dir(&dir);
+        }
         Some(transfer_id)
     }
 
@@ -348,10 +376,13 @@ impl ShellumiCliprdrBackend {
         }
     }
 
-    /// Stage text to copy from host to remote machine.
+    /// Stage text to copy from host to remote machine (enforces `allow_send` policy).
     pub fn set_local_text(&self, text: String) {
         {
             let mut inner = self.inner.lock().unwrap();
+            if !inner.allow_send {
+                return;
+            }
             inner.local_text = Some(text);
         }
         self.send_message(ClipboardMessage::SendInitiateCopy(vec![
@@ -364,43 +395,94 @@ impl ShellumiCliprdrBackend {
         self.inner.lock().unwrap().local_text.clone()
     }
 
-    /// Stage files on the host to transfer to the remote Windows machine.
+    /// Stage files on the host into an immutable private snapshot directory for transfer.
     pub fn stage_files(&self, paths: &[PathBuf]) -> Result<Vec<FileDescriptor>, String> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if !inner.allow_send {
+                return Err("Clipboard send is disabled by policy".into());
+            }
+        }
+        let staging = self
+            .staging
+            .as_ref()
+            .ok_or_else(|| "Private staging unavailable for file snapshot".to_string())?;
+
+        let offer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+        let offer_dir = staging
+            .create_transfer_dir(offer_id)
+            .map_err(|e| format!("Failed to create private upload snapshot directory: {e}"))?;
+
         let mut descriptors = Vec::new();
         let mut staged = Vec::new();
+        let mut seen_names: HashSet<String> = HashSet::new();
+        let mut total_bytes: u64 = 0;
 
         for path in paths {
-            if !path.is_file() {
-                continue;
+            let sym_meta = std::fs::symlink_metadata(path)
+                .map_err(|e| format!("Failed to inspect {}: {e}", path.display()))?;
+            if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_file() {
+                let _ = std::fs::remove_dir_all(&offer_dir);
+                return Err(format!(
+                    "Selected path is not an authorized regular file: {}",
+                    path.display()
+                ));
             }
-            let metadata = std::fs::metadata(path)
-                .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
-            let file_size = metadata.len();
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-                .to_string();
+            let raw_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let file_name = sanitize_remote_filename(raw_name)?;
+            if !seen_names.insert(file_name.to_ascii_lowercase()) {
+                let _ = std::fs::remove_dir_all(&offer_dir);
+                return Err(format!("Duplicate or case-colliding filename: {file_name}"));
+            }
+
+            let mut src = std::fs::File::open(path)
+                .map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+            let snapshot_path = offer_dir.join(&file_name);
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut dst = opts
+                .open(&snapshot_path)
+                .map_err(|e| format!("Failed to create immutable snapshot: {e}"))?;
+            let copied = std::io::copy(&mut src, &mut dst)
+                .map_err(|e| format!("Failed to copy immutable snapshot: {e}"))?;
+            dst.flush()
+                .map_err(|e| format!("Failed to flush immutable snapshot: {e}"))?;
+
+            total_bytes = total_bytes.saturating_add(copied);
+            if total_bytes > MAX_TOTAL_TRANSFER_BYTES {
+                let _ = std::fs::remove_dir_all(&offer_dir);
+                return Err("Selected files exceed upload transfer quota".into());
+            }
 
             let desc = FileDescriptor::new(file_name.clone())
-                .with_file_size(file_size)
+                .with_file_size(copied)
                 .with_attributes(ClipboardFileAttributes::NORMAL);
 
             descriptors.push(desc.clone());
             staged.push(StagedFile {
-                path: path.clone(),
+                path: snapshot_path,
                 name: file_name,
-                size: file_size,
+                size: copied,
                 descriptor: desc,
             });
         }
 
         if descriptors.is_empty() {
+            let _ = std::fs::remove_dir_all(&offer_dir);
             return Err("No valid files to stage".into());
         }
 
         {
             let mut inner = self.inner.lock().unwrap();
+            if !inner.allow_send {
+                let _ = std::fs::remove_dir_all(&offer_dir);
+                return Err("Clipboard send revoked during staging".into());
+            }
             inner.staged_files = staged;
         }
 
@@ -438,7 +520,11 @@ impl ShellumiCliprdrBackend {
             let file_names: Vec<String> =
                 inner.remote_files.iter().map(|f| f.name.clone()).collect();
             let transfer_id = inner.active_transfer_id.take().unwrap_or(0);
-            let target_dir = self.temp_dir.clone();
+            let target_dir = inner
+                .active_transfer_dir
+                .take()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.temp_dir.clone());
             inner.active_download_stream_id = None;
             inner.expected_response = None;
             drop(inner);
@@ -562,19 +648,23 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
         if request.format == ClipboardFormatId::CF_UNICODETEXT {
             let inner = self.inner.lock().unwrap();
-            if let Some(text) = inner.local_text.as_ref() {
-                self.send_message(ClipboardMessage::SendFormatData(
-                    OwnedFormatDataResponse::new_unicode_string(text),
-                ));
-                return;
+            if inner.allow_send {
+                if let Some(text) = inner.local_text.as_ref() {
+                    self.send_message(ClipboardMessage::SendFormatData(
+                        OwnedFormatDataResponse::new_unicode_string(text),
+                    ));
+                    return;
+                }
             }
         } else if request.format == ClipboardFormatId::CF_TEXT {
             let inner = self.inner.lock().unwrap();
-            if let Some(text) = inner.local_text.as_ref() {
-                self.send_message(ClipboardMessage::SendFormatData(
-                    OwnedFormatDataResponse::new_string(text),
-                ));
-                return;
+            if inner.allow_send {
+                if let Some(text) = inner.local_text.as_ref() {
+                    self.send_message(ClipboardMessage::SendFormatData(
+                        OwnedFormatDataResponse::new_string(text),
+                    ));
+                    return;
+                }
             }
         }
 
@@ -651,7 +741,10 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                 ));
                 return;
             }
-            let capped_len = request.requested_size.min(MAX_FILE_CHUNK_SIZE) as usize;
+            let remaining = file_size.saturating_sub(request.position);
+            let capped_len = (u64::from(request.requested_size))
+                .min(u64::from(MAX_FILE_CHUNK_SIZE))
+                .min(remaining) as usize;
             let mut file = match std::fs::File::open(&file_path) {
                 Ok(f) => f,
                 Err(e) => {
@@ -674,6 +767,12 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             let mut buffer = vec![0u8; capped_len];
             match file.read(&mut buffer) {
                 Ok(read_bytes) => {
+                    if !self.inner.lock().unwrap().allow_send {
+                        self.send_message(ClipboardMessage::SendFileContentsResponse(
+                            FileContentsResponse::new_error(request.stream_id),
+                        ));
+                        return;
+                    }
                     buffer.truncate(read_bytes);
                     self.send_message(ClipboardMessage::SendFileContentsResponse(
                         FileContentsResponse::new_data_response(request.stream_id, buffer),
@@ -760,7 +859,10 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                     opts.mode(0o600);
                 }
                 let mut file = match opts.open(&local_path) {
-                    Ok(f) => f,
+                    Ok(f) => {
+                        inner.remote_files[current_idx].owned_by_transfer = true;
+                        f
+                    }
                     Err(e) => {
                         drop(inner);
                         self.fail_active_download(format!("Failed to create staging file: {e}"));
@@ -897,7 +999,18 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             return;
         };
 
-        let target_dir = staging.path().to_path_buf();
+        let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+        let transfer_dir = match staging.create_transfer_dir(transfer_id) {
+            Ok(d) => d,
+            Err(err) => {
+                let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
+                    transfer_id,
+                    direction: TransferDirection::Download,
+                    reason: format!("Failed to create exclusive transfer directory: {err}"),
+                });
+                return;
+            }
+        };
 
         let mut seen_names: HashSet<String> = HashSet::new();
         let mut remote_files = Vec::new();
@@ -908,7 +1021,7 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                 Ok(n) => n,
                 Err(reason) => {
                     tracing::warn!(reason = %reason, "Rejected unsafe remote filename");
-                    let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let _ = std::fs::remove_dir(&transfer_dir);
                     let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
                         transfer_id,
                         direction: TransferDirection::Download,
@@ -919,7 +1032,7 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             };
 
             if !seen_names.insert(base_name.to_ascii_lowercase()) {
-                let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+                let _ = std::fs::remove_dir(&transfer_dir);
                 let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
                     transfer_id,
                     direction: TransferDirection::Download,
@@ -932,7 +1045,7 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
             let advertised_size = fd.file_size.unwrap_or(0);
             total_advertised = total_advertised.saturating_add(advertised_size);
             if total_advertised > MAX_TOTAL_TRANSFER_BYTES {
-                let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+                let _ = std::fs::remove_dir(&transfer_dir);
                 let _ = self.worker_tx.try_send(SessionEvent::TransferFailed {
                     transfer_id,
                     direction: TransferDirection::Download,
@@ -941,7 +1054,7 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                 return;
             }
 
-            let local_path = target_dir.join(&candidate);
+            let local_path = transfer_dir.join(&candidate);
             remote_files.push(RemoteFile {
                 index: idx,
                 name: candidate,
@@ -949,20 +1062,33 @@ impl CliprdrBackend for ShellumiCliprdrBackend {
                 downloaded_bytes: 0,
                 local_path,
                 handle: None,
+                owned_by_transfer: false,
             });
         }
 
-        let transfer_id = TRANSFER_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+        let prev_cancelled = {
+            let mut inner = self.inner.lock().unwrap();
+            let prev = Self::abort_download_locked(&mut inner);
+            inner.remote_files = remote_files;
+            inner.active_transfer_id = Some(transfer_id);
+            inner.active_transfer_dir = Some(transfer_dir);
+            prev
+        };
+        if let Some(prev_id) = prev_cancelled {
+            let _ = self.worker_tx.try_send(SessionEvent::TransferCancelled {
+                transfer_id: prev_id,
+                direction: TransferDirection::Download,
+            });
+        }
+
         let _ = self.worker_tx.try_send(SessionEvent::TransferStarted {
             transfer_id,
             direction: TransferDirection::Download,
-            file_count: remote_files.len(),
+            file_count: files.len(),
             total_bytes: total_advertised,
         });
 
         let mut inner = self.inner.lock().unwrap();
-        inner.remote_files = remote_files;
-        inner.active_transfer_id = Some(transfer_id);
         inner.active_lock_id = clip_data_id;
         inner.active_download_index = 0;
 

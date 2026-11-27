@@ -295,7 +295,7 @@ async fn test_remote_file_list_and_streaming_download() {
 
     // Verify TransferStarted, TransferProgress, TransferCompleted, and ServerFilesReceived
     let mut got_completed = false;
-    let mut got_files_received = false;
+    let mut received_dir: Option<std::path::PathBuf> = None;
     while let Ok(ev) = rx.try_recv() {
         match ev {
             SessionEvent::TransferCompleted { files, .. } => {
@@ -307,17 +307,19 @@ async fn test_remote_file_list_and_streaming_download() {
                 target_dir: dir,
             } => {
                 assert_eq!(files, vec!["remote_notes.txt".to_string()]);
-                assert_eq!(dir, temp_dir.to_string_lossy());
-                got_files_received = true;
+                let dir_path = std::path::PathBuf::from(&dir);
+                assert!(dir_path.starts_with(&temp_dir));
+                assert_ne!(dir_path, temp_dir);
+                received_dir = Some(dir_path);
             }
             _ => {}
         }
     }
     assert!(got_completed, "Expected TransferCompleted event");
-    assert!(got_files_received, "Expected ServerFilesReceived event");
+    let received_dir = received_dir.expect("Expected ServerFilesReceived event");
 
-    // Verify file content on disk
-    let downloaded_path = temp_dir.join("remote_notes.txt");
+    // Verify file content on disk inside exclusive transfer directory
+    let downloaded_path = received_dir.join("remote_notes.txt");
     assert!(downloaded_path.exists());
     let contents = std::fs::read(&downloaded_path).unwrap();
     assert_eq!(contents, chunk_payload);

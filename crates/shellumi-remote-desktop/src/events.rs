@@ -1,16 +1,14 @@
 //! Bidirectional channel communication between UI and protocol worker tasks.
 
 use crate::framebuffer::{FramebufferSnapshot, Rect};
-use crate::input::{
-    InputEnvelope, KeyEvent, PointerEvent, RemoteInput, RemoteShortcut, SessionIdentity, WheelEvent,
-};
+use crate::input::{InputEnvelope, RemoteInput, SessionIdentity};
 use crate::metrics::SessionMetricsSnapshot;
 use crate::security::SecurityWarning;
 use crate::session::SessionState;
 use async_channel::{bounded, Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Direction of a remote desktop file transfer.
@@ -57,57 +55,102 @@ pub struct RecoveryBarrier {
 }
 
 /// Commands sent from the UI / main thread to the protocol background worker.
+///
+/// Every transport-affecting command carries a mandatory non-zero `SessionIdentity`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionCommand {
-    /// Initiate connection to the remote endpoint.
+    /// Initiate connection to the remote endpoint (pre-transport lifecycle).
     Connect,
     /// Gracefully terminate connection (delivered out-of-band even under queue pressure).
     Disconnect,
     /// Latched recovery barrier (delivered via independent latch after purging stale-epoch input).
     RecoveryBarrier(RecoveryBarrier),
-    /// Normalized semantic remote input event (preferred over legacy Pointer/Wheel/Key).
-    Input(RemoteInput),
-    /// Epoch-tagged normalized input envelope.
+    /// Epoch-tagged normalized input envelope (the sole live input path).
     InputEnvelope(InputEnvelope),
     /// Runtime view-only policy transition with monotonic transition ID.
-    SetViewOnly { enabled: bool, transition_id: u64 },
-    /// Typed atomic shortcut sequence.
-    Shortcut(RemoteShortcut),
-    /// Legacy mouse pointer motion or button event.
-    Pointer(PointerEvent),
-    /// Legacy scroll wheel event.
-    Wheel(WheelEvent),
-    /// Legacy keyboard key event.
-    Key(KeyEvent),
+    SetViewOnly {
+        identity: SessionIdentity,
+        enabled: bool,
+        transition_id: u64,
+    },
     /// Send local clipboard text to the remote host.
-    SendClipboard(String),
+    SendClipboard {
+        identity: SessionIdentity,
+        text: String,
+    },
     /// Send local files to the remote host via clipboard file transfer.
-    SendFiles(Vec<std::path::PathBuf>),
+    SendFiles {
+        identity: SessionIdentity,
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Request desktop resize (if protocol extension supported).
-    RequestResize { width: u32, height: u32 },
+    RequestResize {
+        identity: SessionIdentity,
+        width: u32,
+        height: u32,
+    },
     /// Request a full framebuffer refresh.
-    Refresh,
-    /// Send Secure Attention Sequence (Ctrl+Alt+Del).
-    CtrlAltDel,
+    Refresh { identity: SessionIdentity },
     /// Mute or unmute remote desktop audio output.
-    SetAudioMute(bool),
+    SetAudioMute {
+        identity: SessionIdentity,
+        muted: bool,
+    },
     /// Set remote desktop audio volume (0 - 100 percentage).
-    SetAudioVolume(u16),
-    /// Configure or change shared drive folder path.
-    ConfigureDrive(Option<std::path::PathBuf>),
+    SetAudioVolume {
+        identity: SessionIdentity,
+        volume: u16,
+    },
     /// Configure shared drive path and explicit read-only policy.
     ConfigureDrivePolicy {
+        identity: SessionIdentity,
         path: Option<std::path::PathBuf>,
         read_only: bool,
     },
     /// Update runtime clipboard policy.
-    SetClipboardPolicy(ClipboardPolicy),
+    SetClipboardPolicy {
+        identity: SessionIdentity,
+        policy: ClipboardPolicy,
+    },
     /// Cancel an active file transfer by ID.
-    CancelTransfer(u64),
+    CancelTransfer {
+        identity: SessionIdentity,
+        transfer_id: u64,
+    },
     /// Mute or unmute remote desktop microphone capture.
-    SetMicrophoneMute(bool),
+    SetMicrophoneMute {
+        identity: SessionIdentity,
+        muted: bool,
+    },
     /// Set remote desktop microphone capture volume/gain (0 - 100 percentage).
-    SetMicrophoneVolume(u16),
+    SetMicrophoneVolume {
+        identity: SessionIdentity,
+        volume: u16,
+    },
+}
+
+impl SessionCommand {
+    /// Return the transport identity for transport-scoped commands, or `None` for
+    /// pre-transport lifecycle commands (`Connect`, `Disconnect`, `RecoveryBarrier`).
+    pub const fn transport_identity(&self) -> Option<SessionIdentity> {
+        match self {
+            Self::Connect | Self::Disconnect => None,
+            Self::RecoveryBarrier(b) => Some(b.identity),
+            Self::InputEnvelope(env) => Some(env.identity()),
+            Self::SetViewOnly { identity, .. }
+            | Self::SendClipboard { identity, .. }
+            | Self::SendFiles { identity, .. }
+            | Self::RequestResize { identity, .. }
+            | Self::Refresh { identity }
+            | Self::SetAudioMute { identity, .. }
+            | Self::SetAudioVolume { identity, .. }
+            | Self::ConfigureDrivePolicy { identity, .. }
+            | Self::SetClipboardPolicy { identity, .. }
+            | Self::CancelTransfer { identity, .. }
+            | Self::SetMicrophoneMute { identity, .. }
+            | Self::SetMicrophoneVolume { identity, .. } => Some(*identity),
+        }
+    }
 }
 
 /// Events emitted by the protocol background worker to the UI / main thread.
@@ -116,7 +159,11 @@ pub enum SessionEvent {
     /// Session connection state changed.
     StateChanged(SessionState),
     /// Worker acknowledged a runtime view-only transition.
-    ViewOnlyChanged { enabled: bool, transition_id: u64 },
+    ViewOnlyChanged {
+        identity: SessionIdentity,
+        enabled: bool,
+        transition_id: u64,
+    },
     /// Worker started a new transport epoch.
     TransportEpochChanged {
         connection_generation: u64,
@@ -250,15 +297,21 @@ pub enum SessionEvent {
 }
 
 #[derive(Debug)]
+struct CoordinatorState {
+    active_identity: SessionIdentity,
+    min_valid_input_epoch: u64,
+    queue: VecDeque<SessionCommand>,
+    recovery_latch: Option<RecoveryBarrier>,
+    coalesced_moves: u64,
+    high_water: usize,
+}
+
+#[derive(Debug)]
 struct CommandQueueInner {
-    queue: Mutex<VecDeque<SessionCommand>>,
-    recovery_latch: Mutex<Option<RecoveryBarrier>>,
-    min_valid_input_epoch: AtomicU64,
+    state: Mutex<CoordinatorState>,
     capacity: usize,
     closed: AtomicBool,
     disconnect_requested: AtomicBool,
-    coalesced_moves: AtomicU64,
-    high_water: AtomicUsize,
     notify_tx: Sender<()>,
 }
 
@@ -287,21 +340,39 @@ impl SessionUiHandle {
         self.try_send_command(cmd)
     }
 
+    /// Bind the coordinator to a new live transport identity, clear any stale
+    /// queued commands or pending recovery barriers from prior transports, and
+    /// return the authoritative `input_epoch` for this transport.
+    pub fn set_active_identity(&self, identity: SessionIdentity) -> u64 {
+        let mut st = self.cmd_inner.state.lock().unwrap();
+        if st.active_identity.is_transport_bound() {
+            st.min_valid_input_epoch = st.min_valid_input_epoch.saturating_add(1).max(1);
+        }
+        st.active_identity = identity;
+        st.queue.clear();
+        st.recovery_latch = None;
+        st.min_valid_input_epoch
+    }
+
     /// Atomically advance the minimum valid input epoch, purge all queued interactive commands
     /// from abandoned epochs, and latch a `RecoveryBarrier` so the worker drains submitted
     /// held state before accepting any new-epoch input. Never fails even if `queue` is full.
-    pub fn trigger_recovery(&self, barrier: RecoveryBarrier) {
-        self.cmd_inner
-            .min_valid_input_epoch
-            .fetch_max(barrier.input_epoch, Ordering::AcqRel);
+    pub fn trigger_recovery(&self, mut barrier: RecoveryBarrier) {
         {
-            let mut q = self.cmd_inner.queue.lock().unwrap();
-            let min_epoch = barrier.input_epoch;
-            q.retain(|c| !is_stale_interactive_command(c, min_epoch));
-        }
-        {
-            let mut latch = self.cmd_inner.recovery_latch.lock().unwrap();
-            *latch = Some(barrier);
+            let mut st = self.cmd_inner.state.lock().unwrap();
+            if st.active_identity.is_transport_bound() {
+                barrier.identity = st.active_identity;
+            }
+            if barrier.input_epoch > st.min_valid_input_epoch {
+                st.min_valid_input_epoch = barrier.input_epoch;
+            } else {
+                st.min_valid_input_epoch = st.min_valid_input_epoch.saturating_add(1);
+                barrier.input_epoch = st.min_valid_input_epoch;
+            }
+            let min_epoch = st.min_valid_input_epoch;
+            st.queue
+                .retain(|c| !is_stale_interactive_command(c, min_epoch));
+            st.recovery_latch = Some(barrier);
         }
         let _ = self.cmd_inner.notify_tx.try_send(());
     }
@@ -309,6 +380,8 @@ impl SessionUiHandle {
     /// Try to send a command without awaiting (non-blocking).
     ///
     /// - `Disconnect` is delivered out-of-band and cannot be blocked by a full queue.
+    /// - Every transport-affecting command must carry a non-zero `SessionIdentity` matching
+    ///   the coordinator's active transport identity (zero is never a wildcard).
     /// - Adjacent compatible `PointerMove` commands are coalesced in place without
     ///   crossing critical input or policy barriers.
     /// - No priority queue overtaking: all admitted commands remain strictly FIFO.
@@ -318,138 +391,134 @@ impl SessionUiHandle {
         }
 
         if matches!(cmd, SessionCommand::Disconnect) {
-            let mut q = self.cmd_inner.queue.lock().unwrap();
-            if q.len() < self.cmd_inner.capacity {
-                q.push_back(cmd);
-                let len = q.len();
-                self.cmd_inner.high_water.fetch_max(len, Ordering::Relaxed);
+            let mut st = self.cmd_inner.state.lock().unwrap();
+            if st.queue.len() < self.cmd_inner.capacity {
+                st.queue.push_back(cmd);
+                let len = st.queue.len();
+                st.high_water = st.high_water.max(len);
             } else {
                 // Queue is full: deliver Disconnect out-of-band so it is never starved
                 self.cmd_inner
                     .disconnect_requested
                     .store(true, Ordering::Release);
             }
-            drop(q);
+            drop(st);
             let _ = self.cmd_inner.notify_tx.try_send(());
             return Ok(());
         }
 
         if let SessionCommand::RecoveryBarrier(barrier) = cmd {
+            if !barrier.identity.is_transport_bound() {
+                return Err("RecoveryBarrier requires non-zero transport identity".into());
+            }
             self.trigger_recovery(barrier);
             return Ok(());
         }
 
-        let min_epoch = self.cmd_inner.min_valid_input_epoch.load(Ordering::Acquire);
-        if is_stale_interactive_command(&cmd, min_epoch) {
+        let mut st = self.cmd_inner.state.lock().unwrap();
+        if let Some(cmd_id) = cmd.transport_identity() {
+            if !cmd_id.is_transport_bound() {
+                return Err("Zero/default transport identity rejected".into());
+            }
+            if st.active_identity.is_transport_bound() && cmd_id != st.active_identity {
+                return Err("Stale transport identity rejected".into());
+            }
+        }
+
+        if is_stale_interactive_command(&cmd, st.min_valid_input_epoch) {
             return Err("Stale input epoch rejected".into());
         }
 
         let is_policy_barrier = matches!(
             cmd,
             SessionCommand::SetViewOnly { .. }
-                | SessionCommand::SetClipboardPolicy(_)
+                | SessionCommand::SetClipboardPolicy { .. }
                 | SessionCommand::ConfigureDrivePolicy { .. }
         );
 
-        let mut q = self.cmd_inner.queue.lock().unwrap();
-        match &cmd {
-            SessionCommand::Input(RemoteInput::PointerMove { x, y }) => {
-                if let Some(SessionCommand::Input(RemoteInput::PointerMove {
-                    x: prev_x,
-                    y: prev_y,
-                })) = q.back_mut()
-                {
-                    *prev_x = *x;
-                    *prev_y = *y;
-                    self.cmd_inner
-                        .coalesced_moves
-                        .fetch_add(1, Ordering::Relaxed);
-                    let _ = self.cmd_inner.notify_tx.try_send(());
-                    return Ok(());
-                }
-            }
-            SessionCommand::InputEnvelope(env) => {
-                if let RemoteInput::PointerMove { x, y } = env.input {
-                    if let Some(SessionCommand::InputEnvelope(prev)) = q.back_mut() {
-                        if prev.transport_epoch == env.transport_epoch
-                            && prev.input_epoch == env.input_epoch
-                            && prev.policy_revision == env.policy_revision
-                            && matches!(prev.input, RemoteInput::PointerMove { .. })
-                        {
-                            prev.input = RemoteInput::PointerMove { x, y };
-                            prev.seq = env.seq;
-                            self.cmd_inner
-                                .coalesced_moves
-                                .fetch_add(1, Ordering::Relaxed);
-                            let _ = self.cmd_inner.notify_tx.try_send(());
-                            return Ok(());
-                        }
+        if let SessionCommand::InputEnvelope(env) = &cmd {
+            if let RemoteInput::PointerMove { x, y } = env.input {
+                if let Some(SessionCommand::InputEnvelope(prev)) = st.queue.back_mut() {
+                    if prev.transport_epoch == env.transport_epoch
+                        && prev.input_epoch == env.input_epoch
+                        && prev.policy_revision == env.policy_revision
+                        && matches!(prev.input, RemoteInput::PointerMove { .. })
+                    {
+                        prev.input = RemoteInput::PointerMove { x, y };
+                        prev.seq = env.seq;
+                        st.coalesced_moves += 1;
+                        drop(st);
+                        let _ = self.cmd_inner.notify_tx.try_send(());
+                        return Ok(());
                     }
                 }
             }
-            _ => {}
         }
 
-        if q.len() >= self.cmd_inner.capacity {
+        if st.queue.len() >= self.cmd_inner.capacity {
             // Evict only safely coalescible PointerMove commands if a non-move command arrives
-            q.retain(|c| {
+            st.queue.retain(|c| {
                 !matches!(
                     c,
-                    SessionCommand::Input(RemoteInput::PointerMove { .. })
-                        | SessionCommand::InputEnvelope(InputEnvelope {
-                            input: RemoteInput::PointerMove { .. },
-                            ..
-                        })
+                    SessionCommand::InputEnvelope(InputEnvelope {
+                        input: RemoteInput::PointerMove { .. },
+                        ..
+                    })
                 )
             });
         }
 
-        if q.len() >= self.cmd_inner.capacity {
+        if st.queue.len() >= self.cmd_inner.capacity {
             if is_policy_barrier {
                 // Policy barrier under full interactive queue: purge interactive commands,
-                // advance epoch, and latch a recovery barrier so no old press can follow policy.
-                let next_epoch = self
-                    .cmd_inner
-                    .min_valid_input_epoch
-                    .fetch_add(1, Ordering::AcqRel)
-                    + 1;
-                q.retain(|c| !is_stale_interactive_command(c, next_epoch));
-                if q.len() < self.cmd_inner.capacity {
-                    let mut latch = self.cmd_inner.recovery_latch.lock().unwrap();
-                    if latch.is_none() {
-                        *latch = Some(RecoveryBarrier {
-                            identity: SessionIdentity::default(),
+                // advance epoch under the same lock, and latch a RecoveryBarrier with the
+                // authoritative active_identity (or fail-closed disconnect if still full).
+                let next_epoch = st.min_valid_input_epoch.saturating_add(1);
+                st.min_valid_input_epoch = next_epoch;
+                st.queue
+                    .retain(|c| !is_stale_interactive_command(c, next_epoch));
+                if st.queue.len() < self.cmd_inner.capacity {
+                    let barrier_identity = st.active_identity;
+                    if st.recovery_latch.is_none() && barrier_identity.is_transport_bound() {
+                        st.recovery_latch = Some(RecoveryBarrier {
+                            identity: barrier_identity,
                             input_epoch: next_epoch,
                             barrier_id: next_epoch,
                             reason: "Policy barrier under queue saturation".into(),
                         });
                     }
-                    q.push_back(cmd);
-                    let len = q.len();
-                    self.cmd_inner.high_water.fetch_max(len, Ordering::Relaxed);
-                    drop(latch);
-                    drop(q);
+                    st.queue.push_back(cmd);
+                    let len = st.queue.len();
+                    st.high_water = st.high_water.max(len);
+                    drop(st);
                     let _ = self.cmd_inner.notify_tx.try_send(());
                     return Ok(());
+                } else {
+                    self.cmd_inner
+                        .disconnect_requested
+                        .store(true, Ordering::Release);
+                    drop(st);
+                    let _ = self.cmd_inner.notify_tx.try_send(());
+                    return Err(
+                        "Policy barrier triggered emergency disconnect: queue saturated".into(),
+                    );
                 }
             }
             return Err("Session command queue is full".into());
         }
 
-        q.push_back(cmd);
-        let len = q.len();
-        self.cmd_inner.high_water.fetch_max(len, Ordering::Relaxed);
-        drop(q);
+        st.queue.push_back(cmd);
+        let len = st.queue.len();
+        st.high_water = st.high_water.max(len);
+        drop(st);
         let _ = self.cmd_inner.notify_tx.try_send(());
         Ok(())
     }
 
     /// Return current command queue depth, high-water mark, and coalesced move count.
     pub fn command_queue_stats(&self) -> (usize, usize, u64) {
-        let len = self.cmd_inner.queue.lock().unwrap().len();
-        let hw = self.cmd_inner.high_water.load(Ordering::Relaxed);
-        let coalesced = self.cmd_inner.coalesced_moves.load(Ordering::Relaxed);
-        (len, hw, coalesced)
+        let st = self.cmd_inner.state.lock().unwrap();
+        (st.queue.len(), st.high_water, st.coalesced_moves)
     }
 
     /// Try to receive the next pending event without blocking.
@@ -580,21 +649,25 @@ impl SessionWorkerHandle {
         {
             return Ok(Some(SessionCommand::Disconnect));
         }
-        {
-            let mut latch = self.cmd_inner.recovery_latch.lock().unwrap();
-            if let Some(barrier) = latch.take() {
-                return Ok(Some(SessionCommand::RecoveryBarrier(barrier)));
-            }
+        let mut st = self.cmd_inner.state.lock().unwrap();
+        if let Some(barrier) = st.recovery_latch.take() {
+            return Ok(Some(SessionCommand::RecoveryBarrier(barrier)));
         }
-        let mut q = self.cmd_inner.queue.lock().unwrap();
-        if let Some(cmd) = q.pop_front() {
+        if let Some(cmd) = st.queue.pop_front() {
             return Ok(Some(cmd));
         }
-        drop(q);
+        drop(st);
         if self.cmd_inner.closed.load(Ordering::Acquire) {
             return Err("UI command channel closed".into());
         }
         Ok(None)
+    }
+
+    /// Clear queued control events and coalesced frame slot on transport boundary.
+    pub fn reset_event_queue(&self) {
+        self.ev_inner.control_queue.lock().unwrap().clear();
+        *self.ev_inner.latest_frame.lock().unwrap() = None;
+        while self.ev_inner.legacy_event_rx.try_recv().is_ok() {}
     }
 
     /// Close the worker side of the event channel.
@@ -607,11 +680,6 @@ impl SessionWorkerHandle {
 fn is_stale_interactive_command(cmd: &SessionCommand, min_valid_input_epoch: u64) -> bool {
     match cmd {
         SessionCommand::InputEnvelope(env) => env.input_epoch < min_valid_input_epoch,
-        SessionCommand::Input(_)
-        | SessionCommand::Shortcut(_)
-        | SessionCommand::Pointer(_)
-        | SessionCommand::Wheel(_)
-        | SessionCommand::Key(_) => min_valid_input_epoch > 0,
         _ => false,
     }
 }
@@ -626,14 +694,17 @@ pub fn create_session_channels(
     let (legacy_event_tx, legacy_event_rx) = bounded::<SessionEvent>(event_cap.max(64));
 
     let cmd_inner = Arc::new(CommandQueueInner {
-        queue: Mutex::new(VecDeque::with_capacity(command_cap.max(16))),
-        recovery_latch: Mutex::new(None),
-        min_valid_input_epoch: AtomicU64::new(0),
+        state: Mutex::new(CoordinatorState {
+            active_identity: SessionIdentity::default(),
+            min_valid_input_epoch: 1,
+            queue: VecDeque::with_capacity(command_cap.max(16)),
+            recovery_latch: None,
+            coalesced_moves: 0,
+            high_water: 0,
+        }),
         capacity: command_cap.max(16),
         closed: AtomicBool::new(false),
         disconnect_requested: AtomicBool::new(false),
-        coalesced_moves: AtomicU64::new(0),
-        high_water: AtomicUsize::new(0),
         notify_tx: cmd_notify_tx,
     });
 
@@ -669,6 +740,16 @@ mod tests {
     #[test]
     fn verifies_channel_plumbing_command_and_event_flow() {
         let (ui, worker) = create_session_channels(32, 32);
+        let id = SessionIdentity::new(1, 1, 1);
+        ui.set_active_identity(id);
+
+        // Zero identity must be rejected for any transport command (P0-06)
+        assert!(ui
+            .try_send_command(SessionCommand::SetAudioMute {
+                identity: SessionIdentity::default(),
+                muted: true,
+            })
+            .is_err());
 
         // UI sends command to worker
         ui.try_send_command(SessionCommand::Connect).unwrap();
@@ -687,10 +768,19 @@ mod tests {
 
         // UI sends SendFiles command
         let test_paths = vec![std::path::PathBuf::from("/tmp/test.txt")];
-        ui.try_send_command(SessionCommand::SendFiles(test_paths.clone()))
-            .unwrap();
+        ui.try_send_command(SessionCommand::SendFiles {
+            identity: id,
+            paths: test_paths.clone(),
+        })
+        .unwrap();
         let cmd = worker.try_recv_command().unwrap();
-        assert_eq!(cmd, Some(SessionCommand::SendFiles(test_paths)));
+        assert_eq!(
+            cmd,
+            Some(SessionCommand::SendFiles {
+                identity: id,
+                paths: test_paths
+            })
+        );
 
         // Worker sends ServerFilesReceived event
         let files = vec!["download.txt".to_string()];
@@ -708,17 +798,29 @@ mod tests {
         );
 
         // UI sends audio mute and volume commands
-        ui.try_send_command(SessionCommand::SetAudioMute(true))
-            .unwrap();
+        ui.try_send_command(SessionCommand::SetAudioMute {
+            identity: id,
+            muted: true,
+        })
+        .unwrap();
         assert_eq!(
             worker.try_recv_command().unwrap(),
-            Some(SessionCommand::SetAudioMute(true))
+            Some(SessionCommand::SetAudioMute {
+                identity: id,
+                muted: true
+            })
         );
-        ui.try_send_command(SessionCommand::SetAudioVolume(80))
-            .unwrap();
+        ui.try_send_command(SessionCommand::SetAudioVolume {
+            identity: id,
+            volume: 80,
+        })
+        .unwrap();
         assert_eq!(
             worker.try_recv_command().unwrap(),
-            Some(SessionCommand::SetAudioVolume(80))
+            Some(SessionCommand::SetAudioVolume {
+                identity: id,
+                volume: 80
+            })
         );
 
         // Worker sends AudioStatus event
@@ -746,30 +848,52 @@ mod tests {
     #[test]
     fn stresses_coalesced_moves_interleaved_with_critical_events_and_frame_non_starvation() {
         let (ui, worker) = create_session_channels(64, 64);
+        let id = SessionIdentity::new(1, 1, 1);
+        ui.set_active_identity(id);
+        let env = |seq: u64, input: RemoteInput| {
+            SessionCommand::InputEnvelope(InputEnvelope {
+                tab_id: id.tab_id,
+                connection_generation: id.connection_generation,
+                transport_epoch: id.transport_epoch,
+                input_epoch: 1,
+                policy_revision: 0,
+                seq,
+                input,
+            })
+        };
 
         // 10,000 synthetic moves interleaved with critical button down/up barriers
-        ui.try_send_command(SessionCommand::Input(RemoteInput::PointerButton {
-            button: crate::input::MouseButton::Left,
-            down: true,
-            x: 10,
-            y: 20,
-        }))
+        ui.try_send_command(env(
+            1,
+            RemoteInput::PointerButton {
+                button: crate::input::MouseButton::Left,
+                down: true,
+                x: 10,
+                y: 20,
+            },
+        ))
         .unwrap();
 
         for i in 0..10_000u32 {
-            ui.try_send_command(SessionCommand::Input(RemoteInput::PointerMove {
-                x: i % 1920,
-                y: (i * 2) % 1080,
-            }))
+            ui.try_send_command(env(
+                2 + i as u64,
+                RemoteInput::PointerMove {
+                    x: i % 1920,
+                    y: (i * 2) % 1080,
+                },
+            ))
             .unwrap();
         }
 
-        ui.try_send_command(SessionCommand::Input(RemoteInput::PointerButton {
-            button: crate::input::MouseButton::Left,
-            down: false,
-            x: 1919,
-            y: 1079,
-        }))
+        ui.try_send_command(env(
+            10_002,
+            RemoteInput::PointerButton {
+                button: crate::input::MouseButton::Left,
+                down: false,
+                x: 1919,
+                y: 1079,
+            },
+        ))
         .unwrap();
 
         let (depth, _hw, coalesced) = ui.command_queue_stats();
@@ -778,22 +902,22 @@ mod tests {
 
         assert!(matches!(
             worker.try_recv_command().unwrap(),
-            Some(SessionCommand::Input(RemoteInput::PointerButton {
-                down: true,
+            Some(SessionCommand::InputEnvelope(InputEnvelope {
+                input: RemoteInput::PointerButton { down: true, .. },
                 ..
             }))
         ));
-        assert_eq!(
-            worker.try_recv_command().unwrap(),
-            Some(SessionCommand::Input(RemoteInput::PointerMove {
-                x: 9999 % 1920,
-                y: (9999 * 2) % 1080,
-            }))
-        );
         assert!(matches!(
             worker.try_recv_command().unwrap(),
-            Some(SessionCommand::Input(RemoteInput::PointerButton {
-                down: false,
+            Some(SessionCommand::InputEnvelope(InputEnvelope {
+                input: RemoteInput::PointerMove { x, y },
+                ..
+            })) if x == 9999 % 1920 && y == (9999 * 2) % 1080
+        ));
+        assert!(matches!(
+            worker.try_recv_command().unwrap(),
+            Some(SessionCommand::InputEnvelope(InputEnvelope {
+                input: RemoteInput::PointerButton { down: false, .. },
                 ..
             }))
         ));
@@ -882,6 +1006,7 @@ mod tests {
             reason: "Queue saturation".into(),
         });
         ui.try_send_command(SessionCommand::SetViewOnly {
+            identity,
             enabled: true,
             transition_id: 42,
         })
@@ -917,7 +1042,8 @@ mod tests {
             c,
             SessionCommand::SetViewOnly {
                 enabled: true,
-                transition_id: 42
+                transition_id: 42,
+                ..
             }
         )));
         assert!(seen.iter().any(|c| matches!(c, SessionCommand::Disconnect)));

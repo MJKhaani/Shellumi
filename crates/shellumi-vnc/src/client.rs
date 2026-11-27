@@ -467,10 +467,18 @@ where
                                 reason: barrier.reason,
                             }).await;
                         }
-                        SessionCommand::SetViewOnly { enabled, transition_id } => {
+                        SessionCommand::SetViewOnly {
+                            identity,
+                            enabled,
+                            transition_id,
+                        } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             if enabled && !*view_only {
                                 last_sent_clipboard = None;
                                 last_received_clipboard = None;
+                                local_clipboard_offer = None;
                                 let releases = ledger.drain_releases();
                                 let released_count = releases.len();
                                 let mut release_bytes = Vec::new();
@@ -502,7 +510,7 @@ where
                                 }
                             }
                             *view_only = enabled;
-                            let _ = worker.send_event(SessionEvent::ViewOnlyChanged { enabled, transition_id }).await;
+                            let _ = worker.send_event(SessionEvent::ViewOnlyChanged { identity, enabled, transition_id }).await;
                         }
                         SessionCommand::InputEnvelope(env) => {
                             if env.transport_epoch == 0
@@ -573,144 +581,20 @@ where
                                 }
                             }
                         }
-                        SessionCommand::Input(input) => {
-                            if matches!(input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
-                                let releases = ledger.drain_releases();
-                                let mut bytes = Vec::new();
-                                for rel in &releases {
-                                    bytes.extend_from_slice(&translate_vnc_remote_input(
-                                        rel,
-                                        &mut held_buttons,
-                                        &mut last_pointer,
-                                        &mut scroll_acc_x,
-                                        &mut scroll_acc_y,
-                                        framebuffer.width(),
-                                        framebuffer.height(),
-                                    ));
-                                }
-                                if !bytes.is_empty() {
-                                    if let Err(err) = stream.write_all(&bytes).await {
-                                        let err_msg = format!("VNC write failed: {err}");
-                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                        return Err(VncClientError::Network(err));
-                                    }
-                                    metrics.record_bytes_sent(bytes.len() as u64);
-                                }
+                        SessionCommand::SetClipboardPolicy { identity, policy } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
                                 continue;
                             }
-                            let is_release = matches!(
-                                input,
-                                shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
-                                    | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
-                            );
-                            if !*view_only || is_release {
-                                let bytes = translate_vnc_remote_input(
-                                    &input,
-                                    &mut held_buttons,
-                                    &mut last_pointer,
-                                    &mut scroll_acc_x,
-                                    &mut scroll_acc_y,
-                                    framebuffer.width(),
-                                    framebuffer.height(),
-                                );
-                                if !bytes.is_empty() {
-                                    if let Err(err) = stream.write_all(&bytes).await {
-                                        let err_msg = format!("VNC write failed: {err}");
-                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                        return Err(VncClientError::Network(err));
-                                    }
-                                    ledger.record_submitted(&input);
-                                    metrics.record_bytes_sent(bytes.len() as u64);
-                                }
-                            }
-                        }
-                        SessionCommand::Shortcut(shortcut) => {
-                            if !*view_only {
-                                let bytes = build_vnc_shortcut_packets(shortcut);
-                                if !bytes.is_empty() {
-                                    if let Err(err) = stream.write_all(&bytes).await {
-                                        let err_msg = format!("VNC write failed: {err}");
-                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                        return Err(VncClientError::Network(err));
-                                    }
-                                    metrics.record_bytes_sent(bytes.len() as u64);
-                                }
-                            }
-                        }
-                        SessionCommand::Pointer(p) => {
-                            if !*view_only || !p.pressed {
-                                let x = (p.x.min(framebuffer.width().saturating_sub(1))).min(u16::MAX as u32) as u16;
-                                let y = (p.y.min(framebuffer.height().saturating_sub(1))).min(u16::MAX as u32) as u16;
-                                last_pointer = (x, y);
-                                if p.button_mask != 0 {
-                                    if p.pressed {
-                                        held_buttons |= p.button_mask;
-                                    } else {
-                                        held_buttons &= !p.button_mask;
-                                    }
-                                }
-                                let packet = build_pointer_event(held_buttons, x, y);
-                                if let Err(err) = stream.write_all(&packet).await {
-                                    let err_msg = format!("VNC write failed: {err}");
-                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                    return Err(VncClientError::Network(err));
-                                }
-                                metrics.record_bytes_sent(packet.len() as u64);
-                            }
-                        }
-                        SessionCommand::Wheel(w) => {
-                            if !*view_only {
-                                let input = shellumi_remote_desktop::RemoteInput::Scroll {
-                                    x: w.x,
-                                    y: w.y,
-                                    horizontal: w.delta_x,
-                                    vertical: w.delta_y,
-                                };
-                                let bytes = translate_vnc_remote_input(
-                                    &input,
-                                    &mut held_buttons,
-                                    &mut last_pointer,
-                                    &mut scroll_acc_x,
-                                    &mut scroll_acc_y,
-                                    framebuffer.width(),
-                                    framebuffer.height(),
-                                );
-                                if !bytes.is_empty() {
-                                    if let Err(err) = stream.write_all(&bytes).await {
-                                        let err_msg = format!("VNC write failed: {err}");
-                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                        return Err(VncClientError::Network(err));
-                                    }
-                                    metrics.record_bytes_sent(bytes.len() as u64);
-                                }
-                            }
-                        }
-                        SessionCommand::Key(k) => {
-                            if !*view_only || !k.pressed {
-                                let packet = build_key_event(k.pressed, k.keysym);
-                                if let Err(err) = stream.write_all(&packet).await {
-                                    let err_msg = format!("VNC write failed: {err}");
-                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                    return Err(VncClientError::Network(err));
-                                }
-                                metrics.record_bytes_sent(packet.len() as u64);
-                            }
-                        }
-                        SessionCommand::CtrlAltDel => {
-                            if !*view_only {
-                                let bytes = build_vnc_shortcut_packets(shellumi_remote_desktop::RemoteShortcut::CtrlAltDel);
-                                if let Err(err) = stream.write_all(&bytes).await {
-                                    let err_msg = format!("VNC write failed: {err}");
-                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                    return Err(VncClientError::Network(err));
-                                }
-                                metrics.record_bytes_sent(bytes.len() as u64);
-                            }
-                        }
-                        SessionCommand::SetClipboardPolicy(policy) => {
                             clipboard_policy = policy;
+                            if policy.mode == shellumi_remote_desktop::ClipboardSyncMode::Disabled || !policy.allow_send {
+                                local_clipboard_offer = None;
+                                last_sent_clipboard = None;
+                            }
                         }
-                        SessionCommand::SendClipboard(text) => {
+                        SessionCommand::SendClipboard { identity, text } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             let send_allowed = !*view_only
                                 && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled
                                 && clipboard_policy.allow_send;
@@ -756,7 +640,10 @@ where
                             }
                             metrics.record_bytes_sent(packet.len() as u64);
                         }
-                        SessionCommand::Refresh => {
+                        SessionCommand::Refresh { identity } => {
+                            if !identity.is_transport_bound() || identity.transport_epoch != transport_epoch {
+                                continue;
+                            }
                             let fbur = build_framebuffer_update_request(false, 0, 0, framebuffer.width() as u16, framebuffer.height() as u16);
                             if let Err(err) = stream.write_all(&fbur).await {
                                 let err_msg = format!("VNC write failed: {err}");
