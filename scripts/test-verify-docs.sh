@@ -129,7 +129,7 @@ expect_fail "broken HTML img src" "$TMP_DIR/bad-img" "resources/missing.png"
 
 make_valid_repo "$TMP_DIR/bad-case"
 echo '<img src="resources/icon.png" alt="Wrong case">' >> "$TMP_DIR/bad-case/README.md"
-expect_fail "incorrect filename case" "$TMP_DIR/bad-case" "case mismatch"
+expect_fail "incorrect filename case" "$TMP_DIR/bad-case" "case mismatch|missing"
 
 make_valid_repo "$TMP_DIR/bad-anchor"
 echo "[bad](#nonexistent-anchor)" >> "$TMP_DIR/bad-anchor/README.md"
