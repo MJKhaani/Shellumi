@@ -492,6 +492,20 @@ impl Shellumi {
                 search_query: String::new(),
                 search_matches: Vec::new(),
                 current_match_idx: None,
+                search_case_sensitive: false,
+                search_regex: false,
+                search_error: None,
+                session_uuid: uuid::Uuid::new_v4().to_string(),
+                session_generation: 1,
+                vault_id: self.active_vault_id.clone(),
+                host_id: sess.host_id,
+                recording_id: None,
+                recording_started_at: None,
+                recording_state: shellumi_core::RecordingLifecycleState::Idle,
+                focus_handle: cx.focus_handle(),
+                bell_flash_until: None,
+                has_unread_bell: false,
+                selection: None,
             };
 
             if sess.excluded_from_broadcast {

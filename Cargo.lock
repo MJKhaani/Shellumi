@@ -7310,6 +7310,7 @@ version = "0.0.8-alpha"
 dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
+ "cpal",
  "gpui",
  "hex",
  "image",
@@ -7438,11 +7439,14 @@ dependencies = [
 name = "shellumi-terminal"
 version = "0.0.8-alpha"
 dependencies = [
+ "base64 0.22.1",
  "grid",
  "portable-pty",
+ "regex",
  "serde",
  "serde_json",
  "tracing",
+ "unicode-width 0.2.3",
  "vte",
  "which 6.0.3",
 ]

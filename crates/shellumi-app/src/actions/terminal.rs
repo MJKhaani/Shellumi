@@ -44,35 +44,104 @@ impl Shellumi {
         events: async_channel::Receiver<SessionEvent>,
         cx: &mut Context<Self>,
     ) {
+        let expected_gen = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.panes.iter().find(|p| p.id == pane_id))
+            .map(|p| p.session_generation)
+            .unwrap_or(1);
         cx.spawn(async move |app, cx| {
             while let Ok(event) = events.recv().await {
                 let closed = matches!(event, SessionEvent::Closed | SessionEvent::Error(_));
                 if app
                     .update(cx, |app, cx| {
+                        let active_tab_id = app
+                            .active_tab_idx
+                            .and_then(|ti| app.tabs.get(ti))
+                            .map(|t| t.id);
                         if let Some(tab) = app.tabs.iter_mut().find(|t| t.id == tab_id) {
+                            let active_pane_id = tab.panes.get(tab.active_pane_idx).map(|p| p.id);
                             if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                                if pane.session_generation != expected_gen {
+                                    return;
+                                }
                                 match event {
                                     SessionEvent::Output(bytes) => {
                                         let follow = pane.scroll.max_offset().height
                                             + pane.scroll.offset().y
                                             <= px(24.0);
                                         pane.terminal.process_bytes(&bytes);
+                                        let term_events = pane.terminal.drain_events();
+                                        for ev in term_events {
+                                            match ev {
+                                                shellumi_terminal::TerminalEvent::ProtocolReply(
+                                                    reply,
+                                                ) => {
+                                                    if let Some(sess) = &pane.session {
+                                                        let _ = sess.input(reply);
+                                                    }
+                                                }
+                                                shellumi_terminal::TerminalEvent::Bell => {
+                                                    pane.bell_flash_until = Some(
+                                                        std::time::Instant::now()
+                                                            + std::time::Duration::from_millis(160),
+                                                    );
+                                                    let is_active_pane = active_tab_id
+                                                        == Some(tab_id)
+                                                        && active_pane_id == Some(pane_id);
+                                                    if !is_active_pane {
+                                                        pane.has_unread_bell = true;
+                                                    }
+                                                    let _ = app.bell_audio.trigger(pane_id, 0.7);
+                                                }
+                                                shellumi_terminal::TerminalEvent::TitleChanged(
+                                                    Some(title),
+                                                ) if !title.is_empty() => {
+                                                    pane.name = title;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
                                         if follow {
                                             pane.scroll.scroll_to_bottom();
                                         }
                                         if !pane.search_query.is_empty() {
-                                            pane.search_matches =
-                                                pane.terminal.search(&pane.search_query, false);
+                                            let opts = shellumi_terminal::SearchOptions {
+                                                query: pane.search_query.clone(),
+                                                case_sensitive: pane.search_case_sensitive,
+                                                regex: pane.search_regex,
+                                                max_matches: 10_000,
+                                            };
+                                            if let Ok(matches) =
+                                                pane.terminal.search_with_options(&opts)
+                                            {
+                                                pane.search_matches = matches;
+                                            }
                                         }
                                         app.broadcast_collab_output(tab_id, &bytes, cx);
                                     }
                                     SessionEvent::Error(error) => {
                                         pane.message = Some(format!("Session error: {error}"));
                                         pane.session = None;
+                                        if pane.terminal.is_recording() {
+                                            app.finalize_pane_recording(
+                                                pane_id,
+                                                "Session error",
+                                                cx,
+                                            );
+                                        }
                                     }
                                     SessionEvent::Closed => {
                                         pane.message = Some("Session ended.".into());
                                         pane.session = None;
+                                        if pane.terminal.is_recording() {
+                                            app.finalize_pane_recording(
+                                                pane_id,
+                                                "Session closed",
+                                                cx,
+                                            );
+                                        }
                                     }
                                 }
                                 cx.notify();
@@ -144,6 +213,20 @@ impl Shellumi {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
+            search_case_sensitive: false,
+            search_regex: false,
+            search_error: None,
+            session_uuid: uuid::Uuid::new_v4().to_string(),
+            session_generation: 1,
+            vault_id: self.active_vault_id.clone(),
+            host_id: None,
+            recording_id: None,
+            recording_started_at: None,
+            recording_state: shellumi_core::RecordingLifecycleState::Idle,
+            focus_handle: cx.focus_handle(),
+            bell_flash_until: None,
+            has_unread_bell: false,
+            selection: None,
         };
 
         let sftp_state = if kind == SessionKind::Sftp {
@@ -209,7 +292,7 @@ impl Shellumi {
         let Some(tab) = self.tabs.get_mut(active_idx) else {
             return;
         };
-        if tab.panes.len() >= 2 {
+        if tab.panes.len() >= 8 {
             return;
         }
         let tab_id = tab.id;
@@ -236,6 +319,20 @@ impl Shellumi {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
+            search_case_sensitive: false,
+            search_regex: false,
+            search_error: None,
+            session_uuid: uuid::Uuid::new_v4().to_string(),
+            session_generation: 1,
+            vault_id: self.active_vault_id.clone(),
+            host_id: None,
+            recording_id: None,
+            recording_started_at: None,
+            recording_state: shellumi_core::RecordingLifecycleState::Idle,
+            focus_handle: cx.focus_handle(),
+            bell_flash_until: None,
+            has_unread_bell: false,
+            selection: None,
         };
 
         tab.panes.push(pane);
@@ -248,6 +345,7 @@ impl Shellumi {
     }
 
     pub(crate) fn close_pane(&mut self, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.finalize_pane_recording(pane_id, "Pane closed", cx);
         let Some(active_idx) = self.active_tab_idx else {
             return;
         };
@@ -294,17 +392,67 @@ impl Shellumi {
         if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
             let query = pane.search_input.read(cx).value().trim().to_string();
             pane.search_query = query.clone();
-            pane.search_matches = if query.is_empty() {
-                Vec::new()
+            pane.search_error = None;
+            if query.is_empty() {
+                pane.search_matches = Vec::new();
             } else {
-                pane.terminal.search(&query, false)
-            };
+                let opts = shellumi_terminal::SearchOptions {
+                    query,
+                    case_sensitive: pane.search_case_sensitive,
+                    regex: pane.search_regex,
+                    max_matches: 10_000,
+                };
+                match pane.terminal.search_with_options(&opts) {
+                    Ok(matches) => pane.search_matches = matches,
+                    Err(err) => {
+                        pane.search_matches = Vec::new();
+                        pane.search_error = Some(err);
+                    }
+                }
+            }
             pane.current_match_idx = if pane.search_matches.is_empty() {
                 None
             } else {
                 Some(0)
             };
             cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_search_case_sensitive(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        if let Some(tab) = self.active_tab_idx.and_then(|i| self.tabs.get_mut(i)) {
+            if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                pane.search_case_sensitive = !pane.search_case_sensitive;
+            }
+        }
+        self.execute_search(pane_id, cx);
+    }
+
+    pub(crate) fn toggle_search_regex(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        if let Some(tab) = self.active_tab_idx.and_then(|i| self.tabs.get_mut(i)) {
+            if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                pane.search_regex = !pane.search_regex;
+            }
+        }
+        self.execute_search(pane_id, cx);
+    }
+
+    fn scroll_pane_to_search_match(&mut self, pane_id: u64) {
+        let font_size = self.desktop.preferences.terminal_font_size as f32;
+        let line_height = font_size * 1.5;
+        if let Some(tab) = self.active_tab_idx.and_then(|i| self.tabs.get_mut(i)) {
+            if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                if let Some(idx) = pane.current_match_idx {
+                    if let Some(m) = pane.search_matches.get(idx) {
+                        let abs_row = match m.buffer {
+                            SearchBuffer::Scrollback(r) => r,
+                            SearchBuffer::Screen(r) => pane.terminal.scrollback_count() + r,
+                        };
+                        let target_y = -(abs_row as f32 * line_height);
+                        pane.scroll.set_offset(gpui::point(px(0.0), px(target_y)));
+                    }
+                }
+            }
         }
     }
 
@@ -323,9 +471,10 @@ impl Shellumi {
                     None => 0,
                 };
                 pane.current_match_idx = Some(next_idx);
-                cx.notify();
             }
         }
+        self.scroll_pane_to_search_match(pane_id);
+        cx.notify();
     }
 
     pub(crate) fn search_prev(&mut self, pane_id: u64, cx: &mut Context<Self>) {
@@ -343,9 +492,10 @@ impl Shellumi {
                     Some(i) => i - 1,
                 };
                 pane.current_match_idx = Some(prev_idx);
-                cx.notify();
             }
         }
+        self.scroll_pane_to_search_match(pane_id);
+        cx.notify();
     }
 
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -357,6 +507,15 @@ impl Shellumi {
             return;
         }
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
+            let recording_panes: Vec<u64> = self.tabs[pos]
+                .panes
+                .iter()
+                .filter(|p| p.terminal.is_recording())
+                .map(|p| p.id)
+                .collect();
+            for pid in recording_panes {
+                self.finalize_pane_recording(pid, "Tab closed", cx);
+            }
             self.sftp_jobs.retain(|(tab_id, _), job| {
                 if *tab_id == id {
                     job.control.cancel();

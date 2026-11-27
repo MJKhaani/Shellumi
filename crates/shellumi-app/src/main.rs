@@ -20,6 +20,7 @@ pub(crate) struct InviteScope {
 
 mod app_render;
 mod askpass;
+mod bell_audio;
 
 mod connection;
 mod data_path;
@@ -29,6 +30,7 @@ mod hosts_view;
 #[allow(unexpected_cfgs)]
 mod native_clipboard;
 mod session;
+mod sftp_editor;
 mod sftp_transfer;
 mod sftp_ui;
 mod text_input;
@@ -183,23 +185,45 @@ enum SftpModalAction {
     NewFolder {
         input: Entity<TextInput>,
     },
+    NewFile {
+        input: Entity<TextInput>,
+    },
     EditPermissions {
         entry_name: String,
         entry_path: String,
         input: Entity<TextInput>,
+    },
+    Properties {
+        entry_name: String,
+        entry_path: String,
+        size: u64,
+        permissions: String,
+        sha256: Option<String>,
     },
 }
 
 #[derive(Clone)]
 struct SftpModalState {
     is_left: bool,
+    endpoint_generation: u64,
+    target_dir: String,
     action: SftpModalAction,
     error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum SftpSortField {
+    #[default]
+    Name,
+    Size,
+    Modified,
+    Kind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct SftpPaneView {
     host: Option<SftpPaneHost>,
+    endpoint_id: Option<shellumi_core::EndpointId>,
     is_selecting_host: bool,
     current_path: String,
     history_back: Vec<String>,
@@ -210,17 +234,21 @@ struct SftpPaneView {
     filter: String,
     filter_active: bool,
     show_hidden: bool,
+    sort_field: SftpSortField,
+    sort_ascending: bool,
     actions_open: bool,
     search_host_query: String,
     loading: bool,
     error: Option<String>,
     listing_generation: u64,
+    capacity: Option<shellumi_core::DiskCapacity>,
 }
 
 impl Default for SftpPaneView {
     fn default() -> Self {
         Self {
             host: None,
+            endpoint_id: None,
             is_selecting_host: false,
             current_path: "/".to_string(),
             history_back: Vec::new(),
@@ -231,11 +259,14 @@ impl Default for SftpPaneView {
             filter: String::new(),
             filter_active: false,
             show_hidden: false,
+            sort_field: SftpSortField::Name,
+            sort_ascending: true,
             actions_open: false,
             search_host_query: String::new(),
             loading: false,
             error: None,
             listing_generation: 0,
+            capacity: None,
         }
     }
 }
@@ -245,11 +276,14 @@ enum RemoteFileOperation {
     Rename { source: String, destination: String },
     Delete { path: String, is_dir: bool },
     Mkdir { path: String },
+    CreateFile { path: String },
     Permissions { path: String, mode: u32 },
 }
 
-fn connect_saved_sftp(
+pub(crate) fn connect_saved_sftp(
     database: Option<String>,
+    active_vault_id: Option<&str>,
+    active_vault_key: Option<&shellumi_core::VaultKey>,
     host_id: i64,
     destination: &SshDestination,
     options: &SftpConnectOptions,
@@ -259,12 +293,15 @@ fn connect_saved_sftp(
     };
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
     let plan = runtime
-        .block_on(shellumi_storage::desktop::resolve_connection(
-            &database, host_id,
+        .block_on(shellumi_storage::desktop::resolve_connection_with_key(
+            &database,
+            host_id,
+            active_vault_id,
+            active_vault_key,
         ))
         .map_err(SftpError::ProcessSpawn)?;
     let command = askpass::command("ssh", Vec::new(), &plan).map_err(SftpError::ProcessSpawn)?;
-    let mut resolved = SftpConnectOptions {
+    let base = SftpConnectOptions {
         port: Some(plan.destination.port().get()),
         identity_file: plan.identity_file,
         certificate_file: plan.certificate_file,
@@ -272,8 +309,15 @@ fn connect_saved_sftp(
         environment: command.env.into_iter().collect(),
         ..Default::default()
     };
+    let mut resolved = shellumi_core::merge_connect_options(&base, options);
     if let Some(jump) = plan.jump_host {
-        resolved.extra_ssh_options.push(("ProxyJump".into(), jump));
+        if !resolved
+            .extra_ssh_options
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("ProxyJump"))
+        {
+            resolved.extra_ssh_options.push(("ProxyJump".into(), jump));
+        }
     }
     SftpClient::connect(&plan.destination, &resolved)
 }
@@ -291,6 +335,8 @@ fn parse_sftp_permissions(input: &str) -> Option<u32> {
 #[derive(Clone, Debug)]
 struct SftpDragPayload {
     from_left: bool,
+    source_generation: u64,
+    source_dir: String,
     files: Vec<String>,
 }
 
@@ -606,13 +652,14 @@ enum SessionReplayTab {
     ReplayPlayer,
 }
 
-#[derive(Clone, Debug, PartialEq)]
 struct SessionReplayModalState {
     active_tab: SessionReplayTab,
     recordings: Vec<SessionRecordingSummary>,
     selected_recording_id: Option<String>,
     current_recording: Option<SessionRecordingRecord>,
     playback_engine: Option<CastPlaybackEngine>,
+    replay_terminal: Option<Terminal>,
+    replay_generation: u64,
     screen_output_buffer: String,
     status_notification: Option<String>,
     search_query: String,
@@ -832,6 +879,13 @@ struct Shellumi {
     available_vaults: Vec<actions::VaultContextSummary>,
     sftp_left_pane: SftpPaneView,
     sftp_right_pane: SftpPaneView,
+    sftp_connection_manager: std::sync::Arc<shellumi_core::SftpConnectionManager>,
+    sftp_transfer_manager: std::sync::Arc<shellumi_core::UnifiedTransferManager>,
+    sftp_transfer_drawer_open: bool,
+    sftp_split_ratio: f32,
+    sftp_narrow_active_left: bool,
+    sftp_editors: Vec<sftp_editor::SftpEditorTabState>,
+    active_sftp_editor_idx: Option<usize>,
     view_mode: HostViewMode,
     view_mode_menu_open: bool,
     sort_mode: HostSortMode,
@@ -858,6 +912,8 @@ struct Shellumi {
     pub(crate) tab_overflow_menu_open: bool,
     pub(crate) tab_overflow_x: f32,
     pub(crate) rd_display_menu_open: bool,
+    pub(crate) failed_recordings: Vec<FailedRecoverableRecording>,
+    pub(crate) bell_audio: bell_audio::BellAudioService,
     pub(crate) rd_keyboard_menu_open: bool,
     pub(crate) rd_more_menu_open: bool,
     pub(crate) snippet_form: Option<SnippetFormState>,
@@ -1395,6 +1451,22 @@ pub(crate) enum PendingWindowAction {
     QuitApp,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct FailedRecoverableRecording {
+    record: SessionRecordingRecord,
+    vault_id: String,
+    error: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalSelection {
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    rectangular: bool,
+}
+
 struct TerminalPane {
     id: u64,
     name: String,
@@ -1409,6 +1481,20 @@ struct TerminalPane {
     search_query: String,
     search_matches: Vec<SearchMatch>,
     current_match_idx: Option<usize>,
+    search_case_sensitive: bool,
+    search_regex: bool,
+    search_error: Option<String>,
+    session_uuid: String,
+    session_generation: u64,
+    vault_id: String,
+    host_id: Option<i64>,
+    recording_id: Option<String>,
+    recording_started_at: Option<String>,
+    recording_state: shellumi_core::RecordingLifecycleState,
+    focus_handle: gpui::FocusHandle,
+    bell_flash_until: Option<std::time::Instant>,
+    has_unread_bell: bool,
+    selection: Option<TerminalSelection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1690,38 +1776,348 @@ fn render_terminal_spans(spans: Vec<StyledSpan>, line_height: f32) -> gpui::Div 
 }
 
 fn is_paste_keystroke(key: &gpui::Keystroke) -> bool {
-    (key.modifiers.platform && !key.modifiers.control && key.key == "v")
+    (key.modifiers.platform && !key.modifiers.control && key.key.eq_ignore_ascii_case("v"))
         || (key.modifiers.control && key.modifiers.shift && key.key.eq_ignore_ascii_case("v"))
 }
 
-fn key_bytes(key: &gpui::Keystroke) -> Option<Vec<u8>> {
-    if key.modifiers.platform || key.modifiers.function {
+fn is_copy_keystroke(key: &gpui::Keystroke) -> bool {
+    (key.modifiers.platform && !key.modifiers.control && key.key.eq_ignore_ascii_case("c"))
+        || (key.modifiers.control && key.modifiers.shift && key.key.eq_ignore_ascii_case("c"))
+}
+
+fn encode_paste_bytes(text: &str, bracketed_paste: bool) -> Vec<u8> {
+    // Strip embedded bracketed-paste terminator/starter sequences to prevent paste-escape injection.
+    let sanitized = text
+        .replace("\x1b[200~", "")
+        .replace("\x1b[201~", "")
+        .replace("\r\n", "\r")
+        .replace('\n', "\r");
+    if bracketed_paste {
+        let mut out = Vec::with_capacity(sanitized.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        out.extend_from_slice(sanitized.as_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        sanitized.into_bytes()
+    }
+}
+
+fn encode_mouse_event(
+    button_code: u8,
+    row_1based: usize,
+    col_1based: usize,
+    pressed: bool,
+    motion: bool,
+    modifiers: &gpui::Modifiers,
+    modes: &shellumi_terminal::TerminalModes,
+) -> Option<Vec<u8>> {
+    use shellumi_terminal::MouseTrackingMode;
+    if modifiers.shift {
+        // Shift overrides remote mouse tracking for local selection.
         return None;
     }
-    if key.modifiers.control {
-        let ascii = key.key.as_bytes();
-        if ascii.len() == 1 && ascii[0].is_ascii_alphabetic() {
-            return Some(vec![ascii[0].to_ascii_lowercase() - b'a' + 1]);
+    match modes.mouse_mode {
+        MouseTrackingMode::None => return None,
+        MouseTrackingMode::X10 => {
+            if !pressed || motion {
+                return None;
+            }
         }
+        MouseTrackingMode::Normal => {
+            if motion {
+                return None;
+            }
+        }
+        MouseTrackingMode::ButtonMotion => {
+            if motion && button_code == 3 {
+                return None;
+            }
+        }
+        MouseTrackingMode::AnyMotion => {}
+    }
+
+    let mut cb = button_code;
+    if motion {
+        cb |= 32;
+    }
+    if modifiers.shift {
+        cb |= 4;
+    }
+    if modifiers.alt {
+        cb |= 8;
+    }
+    if modifiers.control {
+        cb |= 16;
+    }
+
+    let col = col_1based.max(1);
+    let row = row_1based.max(1);
+    if modes.sgr_mouse {
+        let suffix = if pressed || motion { 'M' } else { 'm' };
+        Some(format!("\x1b[<{cb};{col};{row}{suffix}").into_bytes())
+    } else {
+        let code = if !pressed && !motion { 3 } else { cb };
+        let b = code.saturating_add(32);
+        let cx = (col.min(223) as u8).saturating_add(32);
+        let cy = (row.min(223) as u8).saturating_add(32);
+        Some(vec![0x1b, b'[', b'M', b, cx, cy])
+    }
+}
+
+fn selected_text_from_terminal(terminal: &Terminal, sel: TerminalSelection) -> String {
+    let grid = terminal.grid();
+    let scrollback_len = grid.scrollback_count();
+    let total_rows = scrollback_len + grid.rows();
+    if total_rows == 0 {
+        return String::new();
+    }
+    let ((r0, c0), (r1, c1)) = if (sel.start_line, sel.start_col) <= (sel.end_line, sel.end_col) {
+        ((sel.start_line, sel.start_col), (sel.end_line, sel.end_col))
+    } else {
+        ((sel.end_line, sel.end_col), (sel.start_line, sel.start_col))
+    };
+    let r0 = r0.min(total_rows - 1);
+    let r1 = r1.min(total_rows - 1);
+
+    let mut out = String::new();
+    for line_idx in r0..=r1 {
+        let (spans, wrapped) = if line_idx < scrollback_len {
+            (
+                grid.scrollback_row_spans(line_idx).unwrap_or_default(),
+                grid.is_scrollback_row_wrapped(line_idx),
+            )
+        } else {
+            let sr = line_idx - scrollback_len;
+            (
+                grid.row_spans(sr).unwrap_or_default(),
+                grid.is_row_wrapped(sr),
+            )
+        };
+        let row_str: String = spans
+            .into_iter()
+            .filter(|s| !s.attrs.hidden)
+            .map(|s| s.text)
+            .collect();
+        let chars: Vec<char> = row_str.chars().collect();
+        let start_c = if sel.rectangular {
+            c0.min(c1)
+        } else if line_idx == r0 {
+            c0
+        } else {
+            0
+        };
+        let end_c = if sel.rectangular {
+            c0.max(c1).saturating_add(1)
+        } else if line_idx == r1 {
+            c1.saturating_add(1)
+        } else {
+            chars.len()
+        };
+        let s = start_c.min(chars.len());
+        let e = end_c.min(chars.len());
+        for ch in &chars[s..e] {
+            out.push(*ch);
+        }
+        if line_idx < r1 && (sel.rectangular || !wrapped) {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn xterm_modifier_param(modifiers: &gpui::Modifiers) -> u8 {
+    let mut m = 1u8;
+    if modifiers.shift {
+        m += 1;
+    }
+    if modifiers.alt {
+        m += 2;
+    }
+    if modifiers.control {
+        m += 4;
+    }
+    m
+}
+
+fn key_bytes(key: &gpui::Keystroke) -> Option<Vec<u8>> {
+    key_bytes_for_modes(key, &shellumi_terminal::TerminalModes::default())
+}
+
+fn key_bytes_for_modes(
+    key: &gpui::Keystroke,
+    modes: &shellumi_terminal::TerminalModes,
+) -> Option<Vec<u8>> {
+    if key.modifiers.platform {
         return None;
     }
-    let bytes = match key.key.as_str() {
+    // Preserve AltGr / international composed characters on Windows/Linux (ctrl + alt + key_char)
+    if key.modifiers.control && key.modifiers.alt {
+        if let Some(ref kc) = key.key_char {
+            if !kc.is_empty() && !kc.chars().all(|c| c.is_control()) {
+                return Some(kc.as_bytes().to_vec());
+            }
+        }
+    }
+    if key.modifiers.control && !key.modifiers.alt {
+        let lower = key.key.to_ascii_lowercase();
+        if lower == "space" || lower == "@" || lower == "2" {
+            return Some(vec![0x00]);
+        }
+        match lower.as_str() {
+            "[" => return Some(vec![0x1b]),
+            "\\" => return Some(vec![0x1c]),
+            "]" => return Some(vec![0x1d]),
+            "^" | "6" => return Some(vec![0x1e]),
+            "_" | "-" => return Some(vec![0x1f]),
+            _ => {}
+        }
+        let ascii = lower.as_bytes();
+        if ascii.len() == 1 && ascii[0].is_ascii_alphabetic() {
+            return Some(vec![ascii[0] - b'a' + 1]);
+        }
+    }
+
+    let mod_param = xterm_modifier_param(&key.modifiers);
+    let has_mod = mod_param > 1;
+    let bytes = match key.key.to_ascii_lowercase().as_str() {
         "enter" => vec![b'\r'],
         "backspace" => vec![0x7f],
-        "tab" => vec![b'\t'],
+        "tab" => {
+            if key.modifiers.shift {
+                return Some(b"\x1b[Z".to_vec());
+            }
+            vec![b'\t']
+        }
         "escape" => vec![0x1b],
-        "up" => b"\x1b[A".to_vec(),
-        "down" => b"\x1b[B".to_vec(),
-        "right" => b"\x1b[C".to_vec(),
-        "left" => b"\x1b[D".to_vec(),
-        "home" => b"\x1b[H".to_vec(),
-        "end" => b"\x1b[F".to_vec(),
-        "pageup" => b"\x1b[5~".to_vec(),
-        "pagedown" => b"\x1b[6~".to_vec(),
-        "delete" => b"\x1b[3~".to_vec(),
-        _ => key.key_char.as_ref()?.as_bytes().to_vec(),
+        "up" => {
+            if has_mod {
+                return Some(format!("\x1b[1;{mod_param}A").into_bytes());
+            } else if modes.application_cursor {
+                return Some(b"\x1bOA".to_vec());
+            } else {
+                return Some(b"\x1b[A".to_vec());
+            }
+        }
+        "down" => {
+            if has_mod {
+                return Some(format!("\x1b[1;{mod_param}B").into_bytes());
+            } else if modes.application_cursor {
+                return Some(b"\x1bOB".to_vec());
+            } else {
+                return Some(b"\x1b[B".to_vec());
+            }
+        }
+        "right" => {
+            if has_mod {
+                return Some(format!("\x1b[1;{mod_param}C").into_bytes());
+            } else if modes.application_cursor {
+                return Some(b"\x1bOC".to_vec());
+            } else {
+                return Some(b"\x1b[C".to_vec());
+            }
+        }
+        "left" => {
+            if has_mod {
+                return Some(format!("\x1b[1;{mod_param}D").into_bytes());
+            } else if modes.application_cursor {
+                return Some(b"\x1bOD".to_vec());
+            } else {
+                return Some(b"\x1b[D".to_vec());
+            }
+        }
+        "home" => {
+            if has_mod {
+                return Some(format!("\x1b[1;{mod_param}H").into_bytes());
+            } else if modes.application_cursor {
+                return Some(b"\x1bOH".to_vec());
+            } else {
+                return Some(b"\x1b[H".to_vec());
+            }
+        }
+        "end" => {
+            if has_mod {
+                return Some(format!("\x1b[1;{mod_param}F").into_bytes());
+            } else if modes.application_cursor {
+                return Some(b"\x1bOF".to_vec());
+            } else {
+                return Some(b"\x1b[F".to_vec());
+            }
+        }
+        "pageup" => {
+            return Some(if has_mod {
+                format!("\x1b[5;{mod_param}~").into_bytes()
+            } else {
+                b"\x1b[5~".to_vec()
+            });
+        }
+        "pagedown" => {
+            return Some(if has_mod {
+                format!("\x1b[6;{mod_param}~").into_bytes()
+            } else {
+                b"\x1b[6~".to_vec()
+            });
+        }
+        "delete" => {
+            return Some(if has_mod {
+                format!("\x1b[3;{mod_param}~").into_bytes()
+            } else {
+                b"\x1b[3~".to_vec()
+            });
+        }
+        "f1" => {
+            return Some(if has_mod {
+                format!("\x1b[1;{mod_param}P").into_bytes()
+            } else {
+                b"\x1bOP".to_vec()
+            });
+        }
+        "f2" => {
+            return Some(if has_mod {
+                format!("\x1b[1;{mod_param}Q").into_bytes()
+            } else {
+                b"\x1bOQ".to_vec()
+            });
+        }
+        "f3" => {
+            return Some(if has_mod {
+                format!("\x1b[1;{mod_param}R").into_bytes()
+            } else {
+                b"\x1bOR".to_vec()
+            });
+        }
+        "f4" => {
+            return Some(if has_mod {
+                format!("\x1b[1;{mod_param}S").into_bytes()
+            } else {
+                b"\x1bOS".to_vec()
+            });
+        }
+        "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
+            let code = match key.key.to_ascii_lowercase().as_str() {
+                "f5" => 15,
+                "f6" => 17,
+                "f7" => 18,
+                "f8" => 19,
+                "f9" => 20,
+                "f10" => 21,
+                "f11" => 23,
+                _ => 24,
+            };
+            return Some(if has_mod {
+                format!("\x1b[{code};{mod_param}~").into_bytes()
+            } else {
+                format!("\x1b[{code}~").into_bytes()
+            });
+        }
+        _ => {
+            if key.modifiers.function {
+                return None;
+            }
+            key.key_char.as_ref()?.as_bytes().to_vec()
+        }
     };
-    if key.modifiers.alt {
+    if key.modifiers.alt && !key.modifiers.control {
         let mut alt = vec![0x1b];
         alt.extend(bytes);
         Some(alt)
@@ -1750,7 +2146,8 @@ impl Shellumi {
     ) -> Self {
         cx.on_release(|app, _| app.invalidate_invitation_scope())
             .detach();
-        cx.on_app_quit(|app, _| {
+        cx.on_app_quit(|app, cx| {
+            app.finalize_all_active_recordings("Application quit", cx);
             app.invalidate_invitation_scope();
             app.inspector_coordinator.invalidate_scope();
             std::future::ready(())
@@ -1851,16 +2248,31 @@ impl Shellumi {
                 is_locked: false,
             }],
             sftp_left_pane: {
-                let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let home_dir = shellumi_core::local_home_dir()
+                    .to_string_lossy()
+                    .into_owned();
                 let entries = list_local_directory(&home_dir, false).unwrap_or_default();
+                let capacity = shellumi_core::local_disk_capacity(std::path::Path::new(&home_dir));
                 SftpPaneView {
                     host: Some(SftpPaneHost::Local),
                     current_path: home_dir,
                     entries,
+                    capacity,
                     ..Default::default()
                 }
             },
             sftp_right_pane: SftpPaneView::default(),
+            sftp_connection_manager: std::sync::Arc::new(
+                shellumi_core::SftpConnectionManager::new(),
+            ),
+            sftp_transfer_manager: std::sync::Arc::new(shellumi_core::UnifiedTransferManager::new(
+                3,
+            )),
+            sftp_transfer_drawer_open: false,
+            sftp_split_ratio: 0.5,
+            sftp_narrow_active_left: true,
+            sftp_editors: Vec::new(),
+            active_sftp_editor_idx: None,
             view_mode: HostViewMode::Grid,
             view_mode_menu_open: false,
             sort_mode: HostSortMode::Newest,
@@ -1907,6 +2319,8 @@ impl Shellumi {
             rd_display_menu_open: false,
             rd_keyboard_menu_open: false,
             rd_more_menu_open: false,
+            failed_recordings: Vec::new(),
+            bell_audio: bell_audio::BellAudioService::new(),
         }
     }
 
@@ -2199,78 +2613,6 @@ fn dismiss_editor<T>(editor: &mut Option<T>, busy: bool) -> bool {
 
 fn sftp_valid_transfer_names(files: &[String]) -> bool {
     !files.is_empty() && files.iter().all(|name| PathUtils::is_safe_file_name(name))
-}
-
-fn sftp_local_copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    if src.is_dir() {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let child_src = entry.path();
-            let child_dst = dst.join(entry.file_name());
-            sftp_local_copy_recursive(&child_src, &child_dst)?;
-        }
-        Ok(())
-    } else {
-        if let Some(parent) = dst.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::copy(src, dst).map(|_| ())
-    }
-}
-
-fn sftp_upload_recursive(
-    client: &mut SftpClient,
-    local: &std::path::Path,
-    remote: &str,
-) -> Result<(), SftpError> {
-    if local.is_dir() {
-        match client.stat(remote) {
-            Ok(_) => {}
-            Err(SftpError::FileNotFound(_)) => client.mkdir(remote)?,
-            Err(err) => return Err(err),
-        }
-        for entry in std::fs::read_dir(local)? {
-            let entry = entry?;
-            let sub_local = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), name);
-            sftp_upload_recursive(client, &sub_local, &sub_remote)?;
-        }
-    } else {
-        client.upload_file::<fn(u64, u64)>(local, remote, None)?;
-    }
-    Ok(())
-}
-
-fn sftp_download_recursive(
-    client: &mut SftpClient,
-    remote: &str,
-    local: &std::path::Path,
-) -> Result<(), SftpError> {
-    if let Ok(entries) = client.list_remote_directory(remote) {
-        std::fs::create_dir_all(local)?;
-        for entry in entries {
-            if entry.name == "." || entry.name == ".." {
-                continue;
-            }
-            if !PathUtils::is_safe_file_name(&entry.name) {
-                return Err(SftpError::UnexpectedResponse(
-                    "Unsafe remote filename".into(),
-                ));
-            }
-            let sub_remote = format!("{}/{}", remote.trim_end_matches('/'), entry.name);
-            let sub_local = local.join(&entry.name);
-            if entry.kind == FileKind::Directory {
-                sftp_download_recursive(client, &sub_remote, &sub_local)?;
-            } else {
-                client.download_file::<fn(u64, u64)>(&sub_remote, &sub_local, None)?;
-            }
-        }
-    } else {
-        client.download_file::<fn(u64, u64)>(remote, local, None)?;
-    }
-    Ok(())
 }
 
 impl Shellumi {
@@ -2641,6 +2983,7 @@ impl Shellumi {
     ) -> bool {
         if self.approved_close_once {
             self.approved_close_once = false;
+            self.finalize_all_active_recordings("Window closed", cx);
             return true;
         }
         if !self
@@ -2654,6 +2997,7 @@ impl Shellumi {
             cx.notify();
             return false;
         }
+        self.finalize_all_active_recordings("Window closed", cx);
         true
     }
 

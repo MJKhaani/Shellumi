@@ -1669,6 +1669,8 @@ fn verifies_session_replay_modal_and_recording_integration() {
         selected_recording_id: Some("rec-test-1".to_string()),
         current_recording: None,
         playback_engine: Some(engine),
+        replay_terminal: None,
+        replay_generation: 0,
         screen_output_buffer: screen_buffer,
         status_notification: None,
         search_query: String::new(),
@@ -3640,4 +3642,191 @@ fn test_vault_quarantine_crash_recovery_restores_database_when_interrupted_at_in
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn term_rec_t01_t02_t03_recording_lifecycle_uuids_and_recovery() {
+    use crate::session::{Session, SessionEvent};
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("vault.db");
+    let db_str = db_path.to_string_lossy().to_string();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let vault_key = shellumi_core::VaultKey::from_bytes([0x22; 32]);
+    let vault_id = shellumi_core::VaultId::new("vault-rec-test").unwrap();
+
+    // 1. Real PTY session + Terminal + SessionRecorder + SessionRedactor + RecoveryJournal + Turso DB
+    let mut term1 = shellumi_terminal::Terminal::new(24, 80);
+    term1.start_recording(Some("PTY Recording 1".into()));
+    let sess =
+        Session::start(shellumi_terminal::TerminalCommand::new("/bin/echo").arg("pty-rec-ok"));
+    loop {
+        match sess.events.recv_blocking().unwrap() {
+            SessionEvent::Output(bytes) => term1.process_bytes(&bytes),
+            SessionEvent::Closed => break,
+            SessionEvent::Error(e) => panic!("{e}"),
+        }
+    }
+    let rec1 = term1.stop_recording().unwrap();
+    let raw1 = rec1.to_asciicast_v2().unwrap();
+    let clean1 = shellumi_core::SessionRedactor::redact_asciicast_v2(&raw1).unwrap();
+    assert!(clean1.contains("pty-rec-ok"));
+
+    let mut term2 = shellumi_terminal::Terminal::new(24, 80);
+    term2.start_recording(Some("PTY Recording 2".into()));
+    term2.process_str("pane2 output\r\n");
+    let rec2 = term2.stop_recording().unwrap();
+    let clean2 =
+        shellumi_core::SessionRedactor::redact_asciicast_v2(&rec2.to_asciicast_v2().unwrap())
+            .unwrap();
+
+    let id1 = uuid::Uuid::new_v4().to_string();
+    let id2 = uuid::Uuid::new_v4().to_string();
+    assert_ne!(id1, id2);
+    let now = shellumi_core::format_rfc3339_utc(std::time::SystemTime::now());
+
+    // Encrypted recovery journal roundtrip before DB commit
+    let journal = shellumi_core::RecordingRecoveryJournal::new(tmp.path().join("recovery"));
+    let cp = shellumi_core::RecordingCheckpoint {
+        recording_id: id1.clone(),
+        vault_id: vault_id.as_str().to_string(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        pane_id: 1,
+        host_id: None,
+        protocol: "Local".into(),
+        title: "PTY Recording 1".into(),
+        started_at: now.clone(),
+        duration_secs: rec1.duration_secs(),
+        event_count: rec1.event_count(),
+        byte_size: clean1.len(),
+        cast_data: clean1.clone(),
+        truncated: false,
+    };
+    journal.save_checkpoint(&cp, &vault_id, &vault_key).unwrap();
+    assert_eq!(
+        journal
+            .load_checkpoint(&id1, &vault_id, &vault_key)
+            .unwrap(),
+        cp
+    );
+
+    rt.block_on(async {
+        let mut store = shellumi_storage::HostStore::open_with_key(&db_str, Some(&vault_key))
+            .await
+            .unwrap();
+        let db_rec1 = shellumi_storage::SessionRecordingRecord {
+            id: id1.clone(),
+            session_id: cp.session_id.clone(),
+            host_id: None,
+            title: "PTY Recording 1".into(),
+            duration_secs: rec1.duration_secs(),
+            event_count: rec1.event_count(),
+            byte_size: clean1.len(),
+            cast_data: clean1,
+            recorded_at: now.clone(),
+            created_at: now.clone(),
+        };
+        let db_rec2 = shellumi_storage::SessionRecordingRecord {
+            id: id2.clone(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            host_id: None,
+            title: "PTY Recording 2".into(),
+            duration_secs: rec2.duration_secs(),
+            event_count: rec2.event_count(),
+            byte_size: clean2.len(),
+            cast_data: clean2,
+            recorded_at: now.clone(),
+            created_at: now,
+        };
+        store.save_session_recording(&db_rec1).await.unwrap();
+        // Idempotent retry
+        store.save_session_recording(&db_rec1).await.unwrap();
+        store.save_session_recording(&db_rec2).await.unwrap();
+        let list = store.list_session_recordings(None).await.unwrap();
+        assert_eq!(list.len(), 2);
+
+        // Cross-vault ID collision must fail closed
+        store.set_vault_id(shellumi_core::VaultId::new("other-vault").unwrap());
+        assert!(store.save_session_recording(&db_rec1).await.is_err());
+    });
+}
+
+#[test]
+fn term_ui_t01_t02_t03_modes_paste_and_selection() {
+    let modes = shellumi_terminal::TerminalModes {
+        application_cursor: true,
+        ..Default::default()
+    };
+    let up = gpui::Keystroke::parse("up").unwrap();
+    assert_eq!(super::key_bytes_for_modes(&up, &modes).unwrap(), b"\x1bOA");
+    let f5 = gpui::Keystroke::parse("f5").unwrap();
+    assert_eq!(
+        super::key_bytes_for_modes(&f5, &modes).unwrap(),
+        b"\x1b[15~"
+    );
+    let shift_tab = gpui::Keystroke::parse("shift-tab").unwrap();
+    assert_eq!(
+        super::key_bytes_for_modes(&shift_tab, &modes).unwrap(),
+        b"\x1b[Z"
+    );
+
+    let paste = super::encode_paste_bytes("echo ok\x1b[201~evil\nline2", true);
+    assert_eq!(paste, b"\x1b[200~echo okevil\rline2\x1b[201~".to_vec());
+
+    let mut term = shellumi_terminal::Terminal::new(4, 20);
+    term.process_str("pub\x1b[8mSECRET\x1b[0mend");
+    let sel = super::TerminalSelection {
+        start_line: 0,
+        start_col: 0,
+        end_line: 0,
+        end_col: 15,
+        rectangular: false,
+    };
+    let copied = super::selected_text_from_terminal(&term, sel);
+    assert!(!copied.contains("SECRET"));
+    assert!(copied.contains("pub"));
+    assert!(copied.contains("end"));
+}
+
+#[test]
+fn term_ui_t06_virtualized_50k_scrollback_benchmark() {
+    let mut term = shellumi_terminal::Terminal::new(24, 80);
+    term.set_scrollback_limit(50_000);
+    let t0 = std::time::Instant::now();
+    for i in 0..50_025 {
+        term.process_str(&format!("Row {i:05}: benchmark payload\r\n"));
+    }
+    let ingest_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(term.scrollback_count(), 50_000);
+
+    let r0 = std::time::Instant::now();
+    let mut rendered_rows = 0usize;
+    for i in (50_000 - 32)..50_000 {
+        if let Some(spans) = term.grid().scrollback_row_spans(i) {
+            let _ = super::render_terminal_spans(spans, 21.0);
+            rendered_rows += 1;
+        }
+    }
+    let render_ms = r0.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(rendered_rows, 32);
+    assert!(ingest_ms < 5000.0, "50k ingest took {ingest_ms:.2}ms");
+    assert!(
+        render_ms < 50.0,
+        "32-row virtualized render took {render_ms:.2}ms"
+    );
+}
+
+#[test]
+fn term_play_t01_isolated_replay_and_side_effect_suppression() {
+    let cast = "{\"version\":2,\"width\":40,\"height\":10,\"duration\":2.0}\n[0.5,\"o\",\"\\u0007\\u001b]52;c;aGVsbG8=\\u0007\\u001b[6nHello\"]\n[1.0,\"r\",\"60x15\"]\n[1.5,\"o\",\" World\"]\n";
+    let mut engine = shellumi_core::CastPlaybackEngine::from_asciicast_v2(cast).unwrap();
+    engine.play();
+    let frames = engine.advance(1.6);
+    let mut term = crate::actions::recordings::rebuild_replay_terminal(cast, &frames);
+    assert_eq!(term.grid().cols(), 60);
+    assert_eq!(term.grid().rows(), 15);
+    assert!(term.screen_to_string().contains("Hello World"));
+    assert!(term.drain_events().is_empty());
 }

@@ -8971,6 +8971,23 @@ impl HostStore {
             ));
         }
 
+        // Prevent cross-vault ID collisions from overwriting another vault's recording.
+        let mut existing = self
+            .connection
+            .query(
+                "SELECT vault_id FROM session_recordings WHERE id = ?",
+                (record.id.as_str(),),
+            )
+            .await?;
+        if let Some(row) = existing.next().await? {
+            let existing_vault: String = row.get(0)?;
+            if existing_vault != self.host_vault_id.as_str() {
+                return Err(StorageError::InvalidRecording(
+                    "recording ID conflict across vaults".to_string(),
+                ));
+            }
+        }
+
         self.connection
             .execute(
                 "INSERT INTO session_recordings (

@@ -3,21 +3,22 @@ use shellumi_core::{
     delete_secret_by_ref, diff_sync_records_with_passphrase, discover_serial_ports,
     execute_cloud_vault_sync, export_csv, export_ssh_config, format_duration_hms,
     generate_bash_hook, generate_ed25519_key, generate_fish_hook, generate_pkce_challenge,
-    generate_zsh_hook, list_local_directory, parse_csv, parse_quick_connect_target,
-    parse_ssh_config, probe_keychain_daemon, render_command, render_preview,
-    resolve_secret_from_ref, store_secret_to_ref, AccessoryBarLayout, AnsibleInventoryEngine,
-    AuditAction, AuthMethod, AutocompleteContext, AutocompleteEngine, AwsEc2Parser, AzureVmParser,
-    BatchExecutionPlan, BatchHostTarget, BatchPolicy, BenchmarkCategory, BenchmarkRunner,
-    CastPlaybackEngine, CloudProviderConfig, CloudProviderKind, ConflictResolutionChoice,
-    ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser, FileAttributes, ForwardingType,
-    GoogleDriveSyncClient, HostConfigEntry, HostExportItem, HostGroup, MobileFfiBridge,
-    MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform, MoshConfig, MoshPredictMode,
-    MultiplayerSession, NewIdentity, OpenFlags, OpenSshCertificate, PaletteAction, PaletteCategory,
-    PaletteCommand, PaletteRegistry, PasswordPromptDetector, PlaybackSpeed, PlaybackStatus,
-    PortForwardRule, ProtocolError, SerialConfig, SessionRedactor, SftpClient, SftpConnectOptions,
-    SftpPacket, SharedVault, SharingAuditRecord, Snippet, SshDestination, SyncCycleResult,
-    SyncVault, SystemHttpTransport, TeamMember, TeamRole, TelnetConfig, TransferDirection,
-    TransferQueue, VirtualAccessoryBar, DEFAULT_KDF_ITERATIONS, DEFAULT_KEYCHAIN_SERVICE,
+    generate_powershell_hook, generate_zsh_hook, list_local_directory, parse_csv,
+    parse_quick_connect_target, parse_ssh_config, probe_keychain_daemon, render_command,
+    render_preview, resolve_secret_from_ref, store_secret_to_ref, AccessoryBarLayout,
+    AnsibleInventoryEngine, AuditAction, AuthMethod, AutocompleteContext, AutocompleteEngine,
+    AwsEc2Parser, AzureVmParser, BatchExecutionPlan, BatchHostTarget, BatchPolicy,
+    BenchmarkCategory, BenchmarkRunner, CastPlaybackEngine, CloudProviderConfig, CloudProviderKind,
+    ConflictResolutionChoice, ConnectionProtocol, DiagnosticsRunner, DigitalOceanParser,
+    FileAttributes, ForwardingType, GoogleDriveSyncClient, HostConfigEntry, HostExportItem,
+    HostGroup, MobileFfiBridge, MobileLifecycleEvent, MobileLifecycleManager, MobilePlatform,
+    MoshConfig, MoshPredictMode, MultiplayerSession, NewIdentity, OpenFlags, OpenSshCertificate,
+    PaletteAction, PaletteCategory, PaletteCommand, PaletteRegistry, PasswordPromptDetector,
+    PlaybackSpeed, PlaybackStatus, PortForwardRule, ProtocolError, SerialConfig, SessionRedactor,
+    SftpClient, SftpConnectOptions, SftpPacket, SharedVault, SharingAuditRecord, Snippet,
+    SshDestination, SyncCycleResult, SyncVault, SystemHttpTransport, TeamMember, TeamRole,
+    TelnetConfig, TransferDirection, TransferQueue, VirtualAccessoryBar, DEFAULT_KDF_ITERATIONS,
+    DEFAULT_KEYCHAIN_SERVICE,
 };
 use shellumi_storage::{
     CloudProviderRecord, DiscoveredHostRecord, HostStore, NewTransfer, SessionRecordingRecord,
@@ -526,16 +527,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     if args[0] == "shell-hook" {
         if args.len() < 2 {
-            println!("Usage: shellumi-cli shell-hook <bash|zsh|fish>");
+            println!("Usage: shellumi-cli shell-hook <bash|zsh|fish|powershell>");
             return Ok(());
         }
         match args[1].to_ascii_lowercase().as_str() {
             "bash" => print!("{}", generate_bash_hook()),
             "zsh" => print!("{}", generate_zsh_hook()),
             "fish" => print!("{}", generate_fish_hook()),
+            "powershell" | "pwsh" => print!("{}", generate_powershell_hook()),
             other => {
                 return Err(invalid(&format!(
-                    "Unsupported shell for hook: '{other}'. Use bash, zsh, or fish."
+                    "Unsupported shell for hook: '{other}'. Use bash, zsh, fish, or powershell."
                 ))
                 .into())
             }

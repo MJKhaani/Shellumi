@@ -150,6 +150,19 @@ impl Shellumi {
             }
         }
 
+        if is_copy_keystroke(&event.keystroke) {
+            if let Some(active_p) = tab.panes.get(active_pane_idx) {
+                if let Some(sel) = active_p.selection {
+                    let copied = selected_text_from_terminal(&active_p.terminal, sel);
+                    if !copied.is_empty() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied));
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+            }
+        }
+
         let broadcast = self.broadcast_manager.is_enabled();
 
         if is_paste_keystroke(&event.keystroke) {
@@ -168,7 +181,6 @@ impl Shellumi {
                         return;
                     }
                 }
-                let bytes = text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
                 for (idx, p) in tab.panes.iter_mut().enumerate() {
                     let should_send = if idx == active_pane_idx {
                         true
@@ -176,10 +188,14 @@ impl Shellumi {
                         broadcast && !self.broadcast_manager.is_pane_excluded(idx)
                     };
                     if should_send {
+                        let bracketed = p.terminal.modes().bracketed_paste;
+                        let bytes = encode_paste_bytes(&text, bracketed);
                         if let Some(sess) = &p.session {
                             if let Err(error) = sess.input(bytes.clone()) {
                                 p.message = Some(error.into());
                                 p.session = None;
+                            } else {
+                                p.terminal.record_input_with_policy(&bytes, false);
                             }
                         }
                     }
@@ -189,7 +205,12 @@ impl Shellumi {
                 return;
             }
         }
-        if let Some(bytes) = key_bytes(&event.keystroke) {
+        let active_modes = tab
+            .panes
+            .get(active_pane_idx)
+            .map(|p| *p.terminal.modes())
+            .unwrap_or_default();
+        if let Some(bytes) = key_bytes_for_modes(&event.keystroke, &active_modes) {
             if broadcast && (bytes == *b"\r" || bytes == *b"\n") {
                 if let Some(active_p) = tab.panes.get(active_pane_idx) {
                     let cursor = active_p.terminal.grid().cursor();
@@ -223,10 +244,14 @@ impl Shellumi {
                     broadcast && !self.broadcast_manager.is_pane_excluded(idx)
                 };
                 if should_send {
+                    let target_bytes = key_bytes_for_modes(&event.keystroke, p.terminal.modes())
+                        .unwrap_or_else(|| bytes.clone());
                     if let Some(sess) = &p.session {
-                        if let Err(error) = sess.input(bytes.clone()) {
+                        if let Err(error) = sess.input(target_bytes.clone()) {
                             p.message = Some(error.into());
                             p.session = None;
+                        } else {
+                            p.terminal.record_input_with_policy(&target_bytes, false);
                         }
                     }
                 }

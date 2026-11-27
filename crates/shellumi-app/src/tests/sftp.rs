@@ -145,3 +145,66 @@ fn verifies_sftp_dual_pane_state_and_navigation() {
     };
     assert_eq!(sftp_state.mode, SftpTabMode::Terminal);
 }
+
+#[test]
+fn app_sftp_unified_transfer_and_editor_engine_integration() {
+    use shellumi_core::{
+        detect_language, format_document, BatchId, EditorBuffer, EditorLanguage, EndpointKind,
+        EndpointPath, FormatOutcome, JobId, SymlinkPolicy, TransferIntent, TransferJobState,
+        TransferRoute, UnifiedTransferManager, VaultScope,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("sshd_config");
+    let dst = dir.path().join("sshd_config.bak");
+    std::fs::write(&src, b"Port 22\nPermitRootLogin no\n").unwrap();
+
+    // 1. UnifiedTransferManager staged local-to-local copy
+    let scope = VaultScope::new("test-vault", 1);
+    let mgr = UnifiedTransferManager::new(2);
+    let job_id = JobId::new();
+    let intent = TransferIntent {
+        job_id,
+        batch_id: BatchId::new(),
+        vault_scope: scope.clone(),
+        route: TransferRoute::LocalToLocal,
+        source_endpoint: EndpointKind::local(scope.clone()),
+        destination_endpoint: EndpointKind::local(scope.clone()),
+        source_path: EndpointPath::Local(src.clone()),
+        destination_path: EndpointPath::Local(dst.clone()),
+        source_options: None,
+        destination_options: None,
+        conflict_policy: shellumi_core::ConflictPolicy::Ask,
+        symlink_policy: SymlinkPolicy::Skip,
+        preserve_metadata: true,
+        delete_source_after_commit: false,
+        expected_bytes: Some(27),
+    };
+    mgr.enqueue(intent).unwrap();
+    let ready = mgr.dispatch_ready(&scope);
+    assert_eq!(ready.len(), 1);
+    let res = mgr.execute_local_to_local(&ready[0].0, ready[0].1, &ready[0].2);
+    mgr.complete_attempt(job_id, ready[0].1, res);
+    assert_eq!(
+        mgr.snapshot(job_id).unwrap().state,
+        TransferJobState::Completed
+    );
+    assert_eq!(
+        std::fs::read(&dst).unwrap(),
+        b"Port 22\nPermitRootLogin no\n"
+    );
+
+    // 2. Editor language detection & conservative formatting
+    let content = std::fs::read_to_string(&src).unwrap();
+    assert_eq!(
+        detect_language(src.to_str().unwrap(), &content),
+        EditorLanguage::SshConfig
+    );
+    assert!(matches!(
+        format_document(EditorLanguage::SshConfig, &content, 2),
+        FormatOutcome::Unsupported(_)
+    ));
+
+    let buf = EditorBuffer::from_bytes(content.as_bytes()).unwrap();
+    assert!(!buf.is_dirty());
+}

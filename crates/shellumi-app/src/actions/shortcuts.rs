@@ -180,38 +180,94 @@ impl Shellumi {
         cx.notify();
     }
 
+    pub(crate) fn is_terminal_pane_focused(&self, window: &Window) -> bool {
+        if self.form.is_some()
+            || self.command_palette.is_some()
+            || self.page.is_some()
+            || self.snippet_modal.is_some()
+            || self.batch_modal.is_some()
+            || self.session_replay_modal.is_some()
+            || self.shell_integration_modal.is_some()
+            || self.tunnel_modal.is_some()
+            || self.create_vault_modal.is_some()
+            || self.unlock_vault_modal.is_some()
+            || self.setup_wizard_modal.is_some()
+            || self.team_modal.is_some()
+            || self.infra_modal.is_some()
+            || self.diagnostics_modal.is_some()
+            || self.mobile_modal.is_some()
+            || self.conflict_modal.is_some()
+            || self.identity_modal.is_some()
+            || self.sftp_modal.is_some()
+            || self.delete_confirm.is_some()
+        {
+            return false;
+        }
+        let Some(active_idx) = self.active_tab_idx else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(active_idx) else {
+            return false;
+        };
+        if tab.kind == SessionKind::RemoteDesktop || tab.kind == SessionKind::Sftp {
+            return false;
+        }
+        let pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+        tab.panes.get(pane_idx).is_some_and(|p| {
+            !p.search_open && (p.focus_handle.is_focused(window) || self.focus.is_focused(window))
+        })
+    }
+
     pub(crate) fn handle_app_shortcut(
         &mut self,
         key: &gpui::Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let is_primary =
-            key.modifiers.platform || (key.modifiers.control && !key.modifiers.platform);
+        let terminal_focused = self.is_terminal_pane_focused(window);
+        // On macOS, Cmd (platform) is the app shortcut modifier; raw Ctrl sequences always go to the terminal.
+        // On Windows/Linux, when a terminal pane is focused, reserve Ctrl+Shift / Ctrl+Alt for app shortcuts
+        // so raw Ctrl+A..Z (Ctrl+C/D/L/W/K/B/F/O/T/R/N/Z) reach the PTY.
+        #[cfg(target_os = "macos")]
+        let is_primary = {
+            let _ = terminal_focused;
+            key.modifiers.platform && !key.modifiers.control
+        };
+        #[cfg(not(target_os = "macos"))]
+        let is_primary = if terminal_focused {
+            key.modifiers.platform
+        } else {
+            key.modifiers.platform || (key.modifiers.control && !key.modifiers.platform)
+        };
+        let is_win_linux_term_shortcut = !cfg!(target_os = "macos")
+            && key.modifiers.control
+            && key.modifiers.shift
+            && !key.modifiers.platform;
         let shift = key.modifiers.shift;
         let alt = key.modifiers.alt;
         let k = key.key.to_ascii_lowercase();
 
-        // 1. Command Palette: Cmd+K / Ctrl+K (without Shift/Alt)
-        if is_primary && !shift && !alt && k == "k" {
+        // 1. Command Palette: Cmd+K (macOS) / Ctrl+Shift+K (Win/Linux terminal) / Ctrl+K (non-terminal)
+        if ((is_primary && !shift) || is_win_linux_term_shortcut) && !alt && k == "k" {
             self.toggle_command_palette(window, cx);
             return true;
         }
 
-        // 2. New Tab / Local Terminal: Cmd+T / Ctrl+T, Cmd+L / Ctrl+L
-        if is_primary && !shift && !alt && (k == "t" || k == "l") {
+        // 2. New Tab / Local Terminal: Cmd+T/L (macOS) / Ctrl+Shift+T/L (Win/Linux terminal)
+        if ((is_primary && !shift) || is_win_linux_term_shortcut) && !alt && (k == "t" || k == "l")
+        {
             self.open_local_terminal(window, cx);
             return true;
         }
 
-        // 3. Close Tab: Cmd+W / Ctrl+W (without Shift)
+        // 3. Close Tab: Cmd+W (macOS) / Ctrl+W (non-terminal only)
         if is_primary && !shift && !alt && k == "w" {
             self.close_active_tab(window, cx);
             return true;
         }
 
         // 4. Close Pane: Cmd+Shift+W / Ctrl+Shift+W
-        if is_primary && shift && !alt && k == "w" {
+        if (is_primary && shift || is_win_linux_term_shortcut) && !alt && k == "w" {
             self.close_active_pane(window, cx);
             return true;
         }
@@ -297,8 +353,8 @@ impl Shellumi {
             return true;
         }
 
-        // 15. Find in Terminal: Cmd+F / Ctrl+F
-        if is_primary && !shift && !alt && k == "f" {
+        // 15. Find in Terminal: Cmd+F (macOS) / Ctrl+Shift+F (Win/Linux terminal) / Ctrl+F (non-terminal)
+        if ((is_primary && !shift) || is_win_linux_term_shortcut) && !alt && k == "f" {
             self.trigger_find_in_terminal(cx);
             return true;
         }

@@ -15,23 +15,24 @@ Shellumi includes a dual-pane SFTP file manager (`shellumi-core::sftp` and `shel
 
 ## Dual-Pane Navigation & File Operations
 
-- **Local & Remote Panes:** Left/local pane browses your workstation; right/remote pane browses the connected SSH server.
-- **Navigation Controls:** Breadcrumb bar, editable path/address bar, Back/Forward history, Refresh, and **Show Hidden Files** toggle.
+- **Local & Remote Panes:** Either pane can browse the local filesystem or an authorized remote SSH host; remote home directories are discovered via `REALPATH(".")`.
+- **Navigation Controls:** Breadcrumb bar, editable path/address bar, Back/Forward history, Refresh, column sorting (Name, Date Modified, Size, Kind), and **Show Hidden Files** toggle.
 - **Supported Operations:**
-  - Upload (`local → remote`) and Download (`remote → local`).
-  - Create files and directories, rename, move, delete, and update permissions (`chmod`).
-  - Inspect file metadata (size, permissions, modified timestamp, symlink targets).
+  - All four transfer directions: `Local → Local` (staged atomic copy), `Local → Remote` (pipelined upload), `Remote → Local` (pipelined download), and `Remote → Remote` (bounded streaming relay).
+  - Create files and directories (exclusive creation), rename, move, recursive delete (post-order without following symlinks), update permissions (`chmod`), inspect properties & SHA-256 checksums.
+  - Inspect file metadata (size, permissions including `s/S`/`t/T` special bits, modified timestamp, symlink targets, local disk capacity).
 
-> **Server Extension Note:** Not all SFTP servers implement identical SFTP v3+ extensions, checksums, or byte-range resume. Shellumi probes capabilities safely rather than assuming non-standard extensions exist.
+> **Server Extension Note:** Not all SFTP servers implement identical SFTP v3+ extensions (`posix-rename@openssh.com`, `fsync@openssh.com`, `statvfs@openssh.com`, `copy-data`, `limits@openssh.com`). Shellumi negotiates capabilities at `SSH_FXP_VERSION` and falls back safely without deleting existing destinations.
 
 ---
 
-## Remote Text Editing
+## Integrated Administrative Text/Code Editor
 
-1. Double-click or choose **Edit** on a supported remote text file.
-2. Shellumi downloads the file into an isolated temporary workspace.
-3. Edit the file and save (`Cmd+S` / `Ctrl+S`): dirty tracking detects local changes and uploads them back to the server.
-4. Remote modification checks help prevent silently overwriting changes made concurrently on the server, and temporary files are cleaned up when the editor closes.
+1. Double-click a regular text file or choose **Edit in Editor** from the context menu.
+2. Shellumi detects the language mode across 15 admin/config/script formats (JSON, JSONC, YAML, TOML, INI/systemd, dotenv, SSH config, nginx/Apache, Shell, Python, PowerShell, Dockerfile, XML, Properties, Plain Text) without executing file contents.
+3. **Formatting:** Explicit **Format** supports strict non-lossy JSON (rejecting duplicate keys and preserving key order), conservative YAML (preserving block scalars and comments), and conservative TOML; script/config modes where full-document formatting could alter semantics remain safely disabled.
+4. **Safe Save & Conflict Detection:** Saving verifies the target SHA-256 against checkout baseline, surfaces conflicts before overwriting, and keeps newer edits dirty if you continue typing while a save is in flight.
+5. **Vault Isolation:** Locking or switching vaults cancels unauthorized SFTP sessions/transfers and clears remote editor state.
 
 ---
 

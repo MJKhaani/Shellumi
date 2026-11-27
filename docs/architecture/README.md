@@ -9,6 +9,7 @@ Technical architecture of Shellumi's 8-crate Rust workspace, storage, connection
 | Document | Scope |
 | :--- | :--- |
 | [**Workspace & Crates**](workspace-and-crates.md) | 8-crate Cargo workspace, dependency graph, GPUI `0.2.2`, Turso, and Tokio |
+| [**Terminal Engine ADR**](terminal-engine-adr.md) | `TERM-ARCH-01` evaluation of `alacritty_terminal` vs hardening `shellumi-terminal` |
 | [**Application Lifecycle**](application-lifecycle.md) | Startup sequence, vault unlock, multi-window isolation, and background tasks |
 | [**Connection Engine**](connection-engine.md) | `ConnectionOpRegistry`, `resolve_protocol_auth`, OpenSSH, Askpass, SFTP, and Mosh |
 | [**Storage & Database**](storage-and-database.md) | Encrypted Turso SQLite, Schema 32 tables, migrations, and transaction safety |

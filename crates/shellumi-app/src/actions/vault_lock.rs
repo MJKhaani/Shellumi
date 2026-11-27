@@ -248,6 +248,18 @@ impl Shellumi {
         let is_active = self.active_vault_id == vault_id;
         let vname = self.active_vault.clone();
 
+        // 0. Finalize any active recordings for this vault before evicting keys.
+        let vault_rec_panes: Vec<u64> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .filter(|p| p.vault_id == vault_id && p.terminal.is_recording())
+            .map(|p| p.id)
+            .collect();
+        for pid in vault_rec_panes {
+            self.finalize_pane_recording(pid, "Vault locked", cx);
+        }
+
         // 1. Evict from active in-memory keys
         let _ = self.active_vault_keys.remove(&vault_id);
 
@@ -265,6 +277,7 @@ impl Shellumi {
 
         // 3. If active, revoke access: clear in-memory sensitive data immediately
         if is_active {
+            self.enforce_sftp_vault_scope(true);
             self.invalidate_invitation_scope();
             self.incomplete_enrollments.clear();
             self.has_pending_device_replacements = false;

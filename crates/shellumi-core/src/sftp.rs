@@ -6,10 +6,56 @@
 //! - Transfer tasks, queue management, and progress calculations
 //! - Local filesystem listing and directory browsing
 
+pub mod connection;
+pub mod editor;
+pub mod endpoint;
+pub mod manager;
+pub mod operations;
+pub mod path;
+pub mod planner;
+pub mod protocol;
 mod queue;
 mod transfer;
 mod transport;
 mod wire;
+pub use connection::{
+    classify_ssh_error, is_allowed_ssh_option, merge_connect_options, PersistentSftpSession,
+    SftpConnectionManager, SftpConnectionState, SftpErrorKind,
+};
+pub use editor::{
+    detect_language, format_document, highlight_line, EditorBuffer, EditorLanguage,
+    EditorSessionMeta, FormatOutcome, LineEnding, SyntaxSpan, SyntaxTokenKind,
+    DEFAULT_EDITABLE_LIMIT_BYTES, DEFAULT_PREVIEW_LIMIT_BYTES,
+};
+pub use endpoint::{
+    AttemptId, BatchId, EditorId, EndpointId, EndpointKind, EntryId, JobId, OperationId, PaneId,
+    RemoteEndpoint, TransferRoute, VaultScope, WorkspaceTabId,
+};
+pub use manager::{
+    relay_remote_to_remote, EndpointPath, TransferIntent, TransferJobSnapshot, TransferJobState,
+    UnifiedTransferManager,
+};
+pub use operations::{
+    compare_directory_entries, compute_local_sha256, compute_remote_sha256, local_disk_capacity,
+    plan_multi_rename, plan_one_way_sync, search_local_recursive, validate_new_entry_name,
+    DiffEntryStatus, DirectoryDiffRow, DiskCapacity, MultiRenameItem, SearchMatch, SyncActionKind,
+    SyncPlanItem,
+};
+pub use path::{
+    classify_listing_name, escape_bytes_for_display, is_protected_local_root, local_breadcrumbs,
+    local_home_dir, local_join_child, local_parent, validate_destination_name, CanonicalDestKey,
+    ListingNameKind, PathSemantics, PathValidationError, RemotePath, ValidatedChildName,
+};
+pub use planner::{
+    delete_local_recursive, plan_local_tree, staged_local_copy_file,
+    validate_non_overlapping_local_copy, validate_non_overlapping_same_endpoint_remote,
+    ConflictAction, ConflictContext, ConflictDecision, ConflictPolicy,
+    DestinationReservationRegistry, LocalTreePlan, PlanLimits, PlannedTransferItem,
+    ReservationGuard, SymlinkPolicy,
+};
+pub use protocol::{
+    ListingLimits, RemoteStatVfs, ServerCapabilities, ServerLimits, TransferTuning,
+};
 pub use queue::{TransferQueue, TransferQueueSummary};
 pub use transfer::TransferControl;
 pub use wire::{
@@ -90,18 +136,33 @@ impl FileEntry {
             _ => '-',
         };
 
-        let rwx = |shift: u32| -> [char; 3] {
+        let rwx = |shift: u32,
+                   special_bit: u32,
+                   special_char_lower: char,
+                   special_char_upper: char|
+         -> [char; 3] {
             let val = (mode >> shift) & 0o7;
+            let exec = if (mode & special_bit) != 0 {
+                if val & 0o1 != 0 {
+                    special_char_lower
+                } else {
+                    special_char_upper
+                }
+            } else if val & 0o1 != 0 {
+                'x'
+            } else {
+                '-'
+            };
             [
                 if val & 0o4 != 0 { 'r' } else { '-' },
                 if val & 0o2 != 0 { 'w' } else { '-' },
-                if val & 0o1 != 0 { 'x' } else { '-' },
+                exec,
             ]
         };
 
-        let u = rwx(6);
-        let g = rwx(3);
-        let o = rwx(0);
+        let u = rwx(6, 0o4000, 's', 'S');
+        let g = rwx(3, 0o2000, 's', 'S');
+        let o = rwx(0, 0o1000, 't', 'T');
 
         format!(
             "{}{}{}{}{}{}{}{}{}{}",
@@ -370,6 +431,8 @@ pub fn list_local_directory(
 #[derive(Debug)]
 pub enum SftpError {
     Protocol(SftpProtocolError),
+    UnsupportedVersion(u32),
+    ChannelCorrupted(String),
     Status { code: StatusCode, message: String },
     Io(std::io::Error),
     ProcessSpawn(String),
@@ -379,12 +442,19 @@ pub enum SftpError {
     PermissionDenied(String),
     Cancelled,
     CleanupFailed { path: String, message: String },
+    OutcomeUnknown { path: String, message: String },
 }
 
 impl fmt::Display for SftpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Protocol(err) => write!(f, "SFTP protocol error: {err}"),
+            Self::UnsupportedVersion(v) => {
+                write!(f, "unsupported SFTP protocol version {v} (expected v3)")
+            }
+            Self::ChannelCorrupted(msg) => {
+                write!(f, "SFTP channel is corrupted and cannot be reused: {msg}")
+            }
             Self::Status { code, message } => {
                 write!(f, "SFTP server returned error {:?}: {}", code, message)
             }
@@ -397,6 +467,9 @@ impl fmt::Display for SftpError {
             Self::Cancelled => f.write_str("SFTP operation cancelled"),
             Self::CleanupFailed { path, message } => {
                 write!(f, "{message}; temporary remote file may remain at {path}")
+            }
+            Self::OutcomeUnknown { path, message } => {
+                write!(f, "transfer commit outcome unknown for {path}: {message}")
             }
         }
     }
@@ -449,9 +522,13 @@ pub struct SftpClient {
     writer: transport::PacketWriter,
     active_control: Option<TransferControl>,
     child_process: Option<std::process::Child>,
+    stderr_buffer: std::sync::Arc<std::sync::Mutex<String>>,
     next_request_id: u32,
     server_version: u32,
     server_extensions: Vec<(String, String)>,
+    capabilities: ServerCapabilities,
+    tuning: TransferTuning,
+    corrupted: bool,
 }
 
 impl SftpClient {
@@ -519,7 +596,7 @@ impl SftpClient {
 
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
             SftpError::ProcessSpawn(format!("failed to spawn ssh sftp subsystem: {e}"))
@@ -531,20 +608,59 @@ impl SftpClient {
         let stdout = child.stdout.take().ok_or_else(|| {
             SftpError::ProcessSpawn("failed to open stdout pipe from ssh".to_string())
         })?;
+        let stderr = child.stderr.take();
+        let stderr_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(mut err_pipe) = stderr {
+            let buf_ref = std::sync::Arc::clone(&stderr_buffer);
+            let _ = std::thread::Builder::new()
+                .name("sftp-stderr-drain".into())
+                .spawn(move || {
+                    let mut chunk = [0u8; 4096];
+                    const MAX_STDERR_BYTES: usize = 64 * 1024;
+                    while let Ok(n) = err_pipe.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        if let Ok(mut guard) = buf_ref.lock() {
+                            if guard.len() < MAX_STDERR_BYTES {
+                                let text = String::from_utf8_lossy(&chunk[..n]);
+                                let sanitized = crate::logging::redact_sensitive(&text);
+                                let remain = MAX_STDERR_BYTES.saturating_sub(guard.len());
+                                if sanitized.len() <= remain {
+                                    guard.push_str(sanitized);
+                                } else {
+                                    guard.push_str(&sanitized[..remain]);
+                                }
+                            }
+                        }
+                    }
+                });
+        }
 
         let mut client = Self {
             reader: transport::PacketReader::Direct(Box::new(std::io::empty())),
             writer: transport::PacketWriter::Direct(Box::new(std::io::sink())),
             active_control: Some(control.clone()),
             child_process: Some(child),
+            stderr_buffer,
             next_request_id: 1,
             server_version: 0,
             server_extensions: Vec::new(),
+            capabilities: ServerCapabilities::default(),
+            tuning: TransferTuning::default(),
+            corrupted: false,
         };
 
         client.reader = transport::PacketReader::process(stdout, timeout)?;
         client.writer = transport::PacketWriter::process(stdin, timeout)?;
-        client.init()?;
+        if let Err(err) = client.init() {
+            let diag = client.stderr_diagnostics();
+            if !diag.is_empty() {
+                tracing::warn!(stderr = %diag, "SFTP handshake failed");
+                return Err(SftpError::HandshakeFailed(format!("{err} ({diag})")));
+            }
+            return Err(err);
+        }
         control.check()?;
         client.active_control = None;
         Ok(client)
@@ -560,9 +676,13 @@ impl SftpClient {
             writer: transport::PacketWriter::Direct(writer),
             active_control: None,
             child_process: None,
+            stderr_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             next_request_id: 1,
             server_version: 0,
             server_extensions: Vec::new(),
+            capabilities: ServerCapabilities::default(),
+            tuning: TransferTuning::default(),
+            corrupted: false,
         };
         client.init()?;
         Ok(client)
@@ -578,6 +698,29 @@ impl SftpClient {
         &self.server_extensions
     }
 
+    /// Typed server capabilities negotiated during `SSH_FXP_VERSION`.
+    pub fn capabilities(&self) -> &ServerCapabilities {
+        &self.capabilities
+    }
+
+    /// Update transfer pipelining and chunk tuning.
+    pub fn set_tuning(&mut self, tuning: TransferTuning) {
+        self.tuning = tuning.clamped_for_limits(self.capabilities.limits);
+    }
+
+    /// Returns true if the channel has experienced framing desynchronization or transport loss.
+    pub fn is_corrupted(&self) -> bool {
+        self.corrupted
+    }
+
+    /// Sanitized bounded stderr diagnostics captured from the SSH child process.
+    pub fn stderr_diagnostics(&self) -> String {
+        self.stderr_buffer
+            .lock()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+
     fn next_id(&mut self) -> u32 {
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1);
@@ -585,6 +728,11 @@ impl SftpClient {
     }
 
     pub fn send_packet(&mut self, packet: &SftpPacket) -> Result<(), SftpError> {
+        if self.corrupted {
+            return Err(SftpError::ChannelCorrupted(
+                "cannot send on corrupted SFTP channel".into(),
+            ));
+        }
         let wire = packet.encode();
         self.writer.begin(self.active_control.as_ref());
         if let Err(error) = self
@@ -598,6 +746,11 @@ impl SftpClient {
     }
 
     pub fn read_packet(&mut self) -> Result<SftpPacket, SftpError> {
+        if self.corrupted {
+            return Err(SftpError::ChannelCorrupted(
+                "cannot read from corrupted SFTP channel".into(),
+            ));
+        }
         self.reader.begin(self.active_control.as_ref());
         let mut len_bytes = [0u8; 4];
         if let Err(error) = self.reader.read_exact(&mut len_bytes) {
@@ -605,6 +758,7 @@ impl SftpClient {
         }
         let length = u32::from_be_bytes(len_bytes) as usize;
         if length == 0 || length > MAX_SFTP_PACKET_LENGTH {
+            self.invalidate_channel();
             return Err(SftpError::Protocol(SftpProtocolError::InvalidPacketLength(
                 length,
             )));
@@ -619,18 +773,30 @@ impl SftpClient {
         full_wire.extend_from_slice(&len_bytes);
         full_wire.extend_from_slice(&payload);
 
-        let (packet, _consumed) = SftpPacket::decode(&full_wire)
-            .map_err(SftpError::Protocol)?
-            .ok_or(SftpError::Protocol(SftpProtocolError::UnexpectedEof))?;
-        Ok(packet)
+        match SftpPacket::decode(&full_wire) {
+            Ok(Some((packet, _consumed))) => Ok(packet),
+            Ok(None) => {
+                self.invalidate_channel();
+                Err(SftpError::Protocol(SftpProtocolError::UnexpectedEof))
+            }
+            Err(err) => {
+                self.invalidate_channel();
+                Err(SftpError::Protocol(err))
+            }
+        }
     }
 
-    fn transport_error(&mut self, error: std::io::Error) -> SftpError {
-        // A timed-out/cancelled partial frame is not safe to resume or reuse.
+    fn invalidate_channel(&mut self) {
+        self.corrupted = true;
         if let Some(mut child) = self.child_process.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    fn transport_error(&mut self, error: std::io::Error) -> SftpError {
+        // A timed-out/cancelled partial frame is not safe to resume or reuse.
+        self.invalidate_channel();
         if self
             .active_control
             .as_ref()
@@ -660,14 +826,174 @@ impl SftpClient {
                 version,
                 extensions,
             } => {
+                if version != 3 {
+                    self.invalidate_channel();
+                    return Err(SftpError::UnsupportedVersion(version));
+                }
                 self.server_version = version;
+                self.capabilities = ServerCapabilities::from_extensions(&extensions);
                 self.server_extensions = extensions;
+                self.tuning = self.tuning.clamped_for_limits(self.capabilities.limits);
                 Ok(())
             }
+            SftpPacket::Status { code, message, .. } => {
+                self.invalidate_channel();
+                Err(SftpError::Status { code, message })
+            }
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::HandshakeFailed(format!(
+                    "expected SSH_FXP_VERSION, received {other:?}"
+                )))
+            }
+        }
+    }
+
+    fn packet_id(packet: &SftpPacket) -> Option<u32> {
+        match packet {
+            SftpPacket::Status { id, .. }
+            | SftpPacket::Handle { id, .. }
+            | SftpPacket::Data { id, .. }
+            | SftpPacket::Name { id, .. }
+            | SftpPacket::Attrs { id, .. }
+            | SftpPacket::ExtendedReply { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
+    fn read_response_for(&mut self, expected_id: u32) -> Result<SftpPacket, SftpError> {
+        let packet = self.read_packet()?;
+        match Self::packet_id(&packet) {
+            Some(id) if id == expected_id => Ok(packet),
+            Some(other_id) => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!(
+                    "SFTP response ID mismatch: expected {expected_id}, received {other_id}"
+                )))
+            }
+            None => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!(
+                    "Unexpected non-response SFTP packet for request {expected_id}: {packet:?}"
+                )))
+            }
+        }
+    }
+
+    fn expect_status(&mut self, expected_id: u32, path_ctx: Option<&str>) -> Result<(), SftpError> {
+        match self.read_response_for(expected_id)? {
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Ok(()),
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => Err(SftpError::FileNotFound(
+                path_ctx.unwrap_or("<unknown>").to_string(),
+            )),
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => Err(SftpError::PermissionDenied(
+                path_ctx.unwrap_or("<unknown>").to_string(),
+            )),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::HandshakeFailed(format!(
-                "expected SSH_FXP_VERSION, received {other:?}"
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!(
+                    "Expected SSH_FXP_STATUS for request {expected_id}, received {other:?}"
+                )))
+            }
+        }
+    }
+
+    fn expect_handle(&mut self, expected_id: u32, path_ctx: &str) -> Result<Vec<u8>, SftpError> {
+        match self.read_response_for(expected_id)? {
+            SftpPacket::Handle { handle, .. } => Ok(handle),
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => Err(SftpError::FileNotFound(path_ctx.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => Err(SftpError::PermissionDenied(path_ctx.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Err(SftpError::UnexpectedResponse(format!(
+                "Server returned STATUS OK instead of HANDLE for '{path_ctx}'"
             ))),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!(
+                    "Expected SSH_FXP_HANDLE for '{path_ctx}', received {other:?}"
+                )))
+            }
+        }
+    }
+
+    fn expect_attrs(
+        &mut self,
+        expected_id: u32,
+        path_ctx: &str,
+    ) -> Result<FileAttributes, SftpError> {
+        match self.read_response_for(expected_id)? {
+            SftpPacket::Attrs { attrs, .. } => Ok(attrs),
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => Err(SftpError::FileNotFound(path_ctx.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => Err(SftpError::PermissionDenied(path_ctx.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Err(SftpError::UnexpectedResponse(format!(
+                "Server returned STATUS OK instead of ATTRS for '{path_ctx}'"
+            ))),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!(
+                    "Expected SSH_FXP_ATTRS for '{path_ctx}', received {other:?}"
+                )))
+            }
+        }
+    }
+
+    fn expect_name(
+        &mut self,
+        expected_id: u32,
+        path_ctx: &str,
+    ) -> Result<Vec<NameEntry>, SftpError> {
+        match self.read_response_for(expected_id)? {
+            SftpPacket::Name { entries, .. } => Ok(entries),
+            SftpPacket::Status {
+                code: StatusCode::NoSuchFile,
+                ..
+            } => Err(SftpError::FileNotFound(path_ctx.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::PermissionDenied,
+                ..
+            } => Err(SftpError::PermissionDenied(path_ctx.to_string())),
+            SftpPacket::Status {
+                code: StatusCode::Ok,
+                ..
+            } => Err(SftpError::UnexpectedResponse(format!(
+                "Server returned STATUS OK instead of NAME for '{path_ctx}'"
+            ))),
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!(
+                    "Expected SSH_FXP_NAME for '{path_ctx}', received {other:?}"
+                )))
+            }
         }
     }
 
@@ -676,97 +1002,123 @@ impl SftpClient {
     fn close_handle(&mut self, handle: Vec<u8>) -> Result<(), SftpError> {
         let id = self.next_id();
         self.send_packet(&SftpPacket::Close { id, handle })?;
-        match self.read_packet()? {
-            SftpPacket::Status {
-                id: response_id,
-                code,
-                message,
-                ..
-            } if response_id == id => {
-                if code == StatusCode::Ok {
-                    Ok(())
-                } else {
-                    Err(SftpError::Status { code, message })
-                }
-            }
-            other => Err(SftpError::UnexpectedResponse(format!(
-                "Expected status for CLOSE request {id}, received {other:?}"
-            ))),
-        }
+        self.expect_status(id, None)
     }
 
-    /// List entries in a remote directory, returning parsed `FileEntry` records sorted by directories first.
+    /// List entries in a remote directory with bounded limits and entry name validation.
     pub fn list_remote_directory(
         &mut self,
         remote_path: &str,
     ) -> Result<Vec<FileEntry>, SftpError> {
+        self.list_remote_directory_with_limits(remote_path, ListingLimits::default())
+    }
+
+    pub fn list_remote_directory_with_limits(
+        &mut self,
+        remote_path: &str,
+        limits: ListingLimits,
+    ) -> Result<Vec<FileEntry>, SftpError> {
+        let started = std::time::Instant::now();
         let opendir_id = self.next_id();
         self.send_packet(&SftpPacket::OpenDir {
             id: opendir_id,
             path: remote_path.to_string(),
         })?;
 
-        let handle = match self.read_packet()? {
-            SftpPacket::Handle { handle, .. } => handle,
-            SftpPacket::Status {
-                code: StatusCode::NoSuchFile,
-                ..
-            } => return Err(SftpError::FileNotFound(remote_path.to_string())),
-            SftpPacket::Status {
-                code: StatusCode::PermissionDenied,
-                ..
-            } => return Err(SftpError::PermissionDenied(remote_path.to_string())),
-            SftpPacket::Status { code, message, .. } => {
-                return Err(SftpError::Status { code, message })
-            }
-            other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        };
-
+        let handle = self.expect_handle(opendir_id, remote_path)?;
         let mut entries = Vec::new();
-        loop {
-            let readdir_id = self.next_id();
-            self.send_packet(&SftpPacket::ReadDir {
-                id: readdir_id,
-                handle: handle.clone(),
-            })?;
+        let mut requests = 0usize;
+        let mut consecutive_empty = 0usize;
 
-            match self.read_packet()? {
-                SftpPacket::Name {
-                    entries: name_entries,
-                    ..
-                } => {
-                    for entry in name_entries {
-                        if entry.filename != "." && entry.filename != ".." {
-                            entries.push(entry.to_file_entry(remote_path));
+        let list_res = (|| -> Result<(), SftpError> {
+            loop {
+                if let Some(ctrl) = &self.active_control {
+                    ctrl.check()?;
+                }
+                if started.elapsed() > limits.overall_deadline {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Directory listing timed out after {:?}",
+                        limits.overall_deadline
+                    )));
+                }
+                if requests >= limits.max_requests {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Directory listing exceeded max requests ({})",
+                        limits.max_requests
+                    )));
+                }
+                requests += 1;
+
+                let readdir_id = self.next_id();
+                self.send_packet(&SftpPacket::ReadDir {
+                    id: readdir_id,
+                    handle: handle.clone(),
+                })?;
+
+                match self.read_response_for(readdir_id)? {
+                    SftpPacket::Name {
+                        entries: name_entries,
+                        ..
+                    } => {
+                        if name_entries.is_empty() {
+                            consecutive_empty += 1;
+                            if consecutive_empty >= limits.max_empty_replies {
+                                return Err(SftpError::UnexpectedResponse(
+                                    "Non-progressing peer: too many empty SSH_FXP_NAME replies"
+                                        .into(),
+                                ));
+                            }
+                            continue;
+                        }
+                        consecutive_empty = 0;
+                        for entry in name_entries {
+                            match classify_listing_name(
+                                entry.filename.as_bytes(),
+                                PathSemantics::Posix,
+                            ) {
+                                Ok(ListingNameKind::Dot | ListingNameKind::DotDot) => continue,
+                                Ok(ListingNameKind::Child(_)) => {
+                                    if entries.len() >= limits.max_entries {
+                                        return Err(SftpError::UnexpectedResponse(format!(
+                                            "Directory listing exceeded max entries ({})",
+                                            limits.max_entries
+                                        )));
+                                    }
+                                    entries.push(entry.to_file_entry(remote_path));
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        path = %remote_path,
+                                        reason = %err,
+                                        "Skipping unsafe remote listing entry"
+                                    );
+                                }
+                            }
                         }
                     }
-                }
-                SftpPacket::Status {
-                    code: StatusCode::Eof,
-                    ..
-                } => break,
-                SftpPacket::Status { code, message, .. } => {
-                    let close_id = self.next_id();
-                    let _ = self.send_packet(&SftpPacket::Close {
-                        id: close_id,
-                        handle,
-                    });
-                    let _ = self.read_packet();
-                    return Err(SftpError::Status { code, message });
-                }
-                other => {
-                    let close_id = self.next_id();
-                    let _ = self.send_packet(&SftpPacket::Close {
-                        id: close_id,
-                        handle,
-                    });
-                    let _ = self.read_packet();
-                    return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                    SftpPacket::Status {
+                        code: StatusCode::Eof,
+                        ..
+                    } => break,
+                    SftpPacket::Status { code, message, .. } => {
+                        return Err(SftpError::Status { code, message });
+                    }
+                    other => {
+                        self.invalidate_channel();
+                        return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                    }
                 }
             }
-        }
+            Ok(())
+        })();
 
-        self.close_handle(handle)?;
+        let close_res = if self.corrupted {
+            Ok(())
+        } else {
+            self.close_handle(handle)
+        };
+        list_res?;
+        close_res?;
 
         entries.sort_by(|a, b| match (a.kind.is_dir(), b.kind.is_dir()) {
             (true, false) => std::cmp::Ordering::Less,
@@ -818,8 +1170,11 @@ impl SftpClient {
     where
         F: Fn(u64, u64),
     {
+        use std::collections::{HashMap, VecDeque};
+        use std::io::{Seek, SeekFrom, Write};
+
         control.check()?;
-        let size = self.stat(remote_path)?.size;
+        let initial_size = self.stat(remote_path)?.size;
         let mut staging = transfer::LocalStaging::new(local_path)?;
         control.check()?;
         let id = self.next_id();
@@ -829,64 +1184,174 @@ impl SftpClient {
             pflags: SSH_FXF_READ,
             attrs: FileAttributes::new(),
         })?;
-        let handle = match self.read_packet()? {
-            SftpPacket::Handle {
-                id: response,
-                handle,
-            } if response == id => handle,
-            SftpPacket::Status { code, message, .. } => {
-                return Err(SftpError::Status { code, message })
+        let handle = self.expect_handle(id, remote_path)?;
+
+        // Compare opened-handle metadata rather than relying solely on path STAT.
+        let size = match self.fstat(&handle) {
+            Ok(fattrs) => {
+                if let (Some(s1), Some(s2)) = (initial_size, fattrs.size) {
+                    if s1 != s2 {
+                        let _ = self.close_handle(handle);
+                        return Err(SftpError::UnexpectedResponse(
+                            "Remote file size changed between stat and open".into(),
+                        ));
+                    }
+                }
+                fattrs.size.or(initial_size)
             }
-            other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+            Err(_) => initial_size,
         };
+
+        let tuning = self.tuning.clamped_for_limits(self.capabilities.limits);
+        let chunk_size = tuning.chunk_size as u32;
+        let pipeline_depth = tuning.pipeline_depth.max(1);
+
         let transferred = (|| {
-            let mut offset = 0;
+            // If size is known to be 0, still do a single read or return 0 after EOF check.
+            let mut in_flight: HashMap<u32, (u64, u32)> = HashMap::new();
+            let mut retry_queue: VecDeque<(u64, u32)> = VecDeque::new();
+            let mut next_offset: u64 = 0;
+            let mut bytes_received: u64 = 0;
+            let mut eof_seen = false;
+
             loop {
                 control.check()?;
-                let id = self.next_id();
-                self.send_packet(&SftpPacket::Read {
-                    id,
-                    handle: handle.clone(),
-                    offset,
-                    len: 32768,
-                })?;
+                // Fill pipeline window
+                while in_flight.len() < pipeline_depth {
+                    let (req_off, req_len) = if let Some(pair) = retry_queue.pop_front() {
+                        pair
+                    } else if eof_seen {
+                        break;
+                    } else if let Some(expected) = size {
+                        if next_offset >= expected
+                            && !(expected == 0
+                                && next_offset == 0
+                                && in_flight.is_empty()
+                                && bytes_received == 0)
+                        {
+                            break;
+                        }
+                        let len = if expected == 0 {
+                            chunk_size
+                        } else {
+                            let rem = expected - next_offset;
+                            rem.min(chunk_size as u64) as u32
+                        };
+                        let off = next_offset;
+                        next_offset = next_offset.saturating_add(len as u64);
+                        (off, len)
+                    } else {
+                        let off = next_offset;
+                        next_offset = next_offset.saturating_add(chunk_size as u64);
+                        (off, chunk_size)
+                    };
+
+                    let mut req_id = self.next_id();
+                    while in_flight.contains_key(&req_id) {
+                        req_id = self.next_id();
+                    }
+                    self.send_packet(&SftpPacket::Read {
+                        id: req_id,
+                        handle: handle.clone(),
+                        offset: req_off,
+                        len: req_len,
+                    })?;
+                    in_flight.insert(req_id, (req_off, req_len));
+                    if size == Some(0) {
+                        eof_seen = true;
+                        break;
+                    }
+                }
+
+                if in_flight.is_empty() {
+                    break;
+                }
+
                 let reply = self.read_packet()?;
                 control.check()?;
                 match reply {
-                    SftpPacket::Data { id: response, data }
-                        if response == id && !data.is_empty() =>
-                    {
-                        use std::io::Write;
-                        staging
+                    SftpPacket::Data { id: response, data } => {
+                        let Some((req_off, req_len)) = in_flight.remove(&response) else {
+                            self.invalidate_channel();
+                            return Err(SftpError::UnexpectedResponse(format!(
+                                "Unexpected READ response ID {response}"
+                            )));
+                        };
+                        if data.is_empty() {
+                            eof_seen = true;
+                            continue;
+                        }
+                        if data.len() > req_len as usize {
+                            self.invalidate_channel();
+                            return Err(SftpError::UnexpectedResponse(format!(
+                                "Server returned {} bytes for {}-byte READ",
+                                data.len(),
+                                req_len
+                            )));
+                        }
+                        let file = staging
                             .file
                             .as_mut()
-                            .expect("staging file is open until publication")
-                            .write_all(&data)?;
-                        offset += data.len() as u64;
+                            .expect("staging file is open until publication");
+                        file.seek(SeekFrom::Start(req_off))?;
+                        file.write_all(&data)?;
+                        bytes_received = bytes_received.saturating_add(data.len() as u64);
+                        if (data.len() as u32) < req_len && !eof_seen {
+                            // Short read: re-issue remaining sub-range if before known EOF.
+                            let rem_off = req_off + data.len() as u64;
+                            let rem_len = req_len - data.len() as u32;
+                            if size.is_none_or(|exp| rem_off < exp) {
+                                retry_queue.push_back((rem_off, rem_len));
+                            }
+                        }
                         if let Some(callback) = &callback {
-                            callback(offset, size.unwrap_or(offset));
+                            callback(bytes_received, size.unwrap_or(bytes_received));
                         }
                     }
                     SftpPacket::Status {
                         id: response,
                         code: StatusCode::Eof,
                         ..
-                    } if response == id => break,
-                    SftpPacket::Status { code, message, .. } => {
-                        return Err(SftpError::Status { code, message })
+                    } => {
+                        if in_flight.remove(&response).is_none() {
+                            self.invalidate_channel();
+                            return Err(SftpError::UnexpectedResponse(format!(
+                                "Unexpected EOF response ID {response}"
+                            )));
+                        }
+                        eof_seen = true;
                     }
-                    other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+                    SftpPacket::Status {
+                        id: response,
+                        code,
+                        message,
+                        ..
+                    } => {
+                        if in_flight.remove(&response).is_none() {
+                            self.invalidate_channel();
+                        }
+                        return Err(SftpError::Status { code, message });
+                    }
+                    other => {
+                        self.invalidate_channel();
+                        return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                    }
                 }
             }
-            if size.is_some_and(|expected| offset != expected) {
+
+            if size.is_some_and(|expected| bytes_received != expected) {
                 return Err(SftpError::UnexpectedResponse(
                     "Remote file size changed or transfer ended early".into(),
                 ));
             }
-            Ok(offset)
+            Ok(bytes_received)
         })();
         self.active_control = None;
-        let closed = self.close_handle(handle);
+        let closed = if self.corrupted {
+            Ok(())
+        } else {
+            self.close_handle(handle)
+        };
         let bytes = transferred?;
         closed?;
         staging.publish(local_path, control)?;
@@ -934,7 +1399,9 @@ impl SftpClient {
     where
         F: Fn(u64, u64),
     {
+        use std::collections::HashMap;
         use std::io::Read;
+
         control.check()?;
         if remote_path.is_empty() || remote_path.ends_with('/') {
             return Err(std::io::Error::new(
@@ -957,38 +1424,57 @@ impl SftpClient {
             pflags: SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL,
             attrs: FileAttributes::new().with_permissions(0o600),
         })?;
-        let creation_reply = self
-            .read_packet()
-            .map_err(|error| SftpError::CleanupFailed {
-                path: staging.clone(),
-                message: format!("Could not confirm remote staging creation: {error}"),
-            })?;
+        let creation_reply =
+            self.read_response_for(id)
+                .map_err(|error| SftpError::CleanupFailed {
+                    path: staging.clone(),
+                    message: format!("Could not confirm remote staging creation: {error}"),
+                })?;
         let handle = match creation_reply {
-            SftpPacket::Handle {
-                id: response,
-                handle,
-            } if response == id => handle,
+            SftpPacket::Handle { handle, .. } => handle,
             SftpPacket::Status { code, message, .. } => {
                 return Err(SftpError::Status { code, message })
             }
             other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
         };
+
+        let tuning = self.tuning.clamped_for_limits(self.capabilities.limits);
+        let chunk_size = tuning.chunk_size;
+        let pipeline_depth = tuning.pipeline_depth.max(1);
+
         let transferred = (|| {
-            let mut buffer = vec![0u8; 32768];
-            let mut offset = 0;
+            let mut buffer = vec![0u8; chunk_size];
+            let mut in_flight: HashMap<u32, u64> = HashMap::new();
+            let mut write_offset: u64 = 0;
+            let mut acked_bytes: u64 = 0;
+            let mut eof_local = false;
+
             loop {
                 control.check()?;
-                let count = source.read(&mut buffer)?;
-                if count == 0 {
+                while !eof_local && in_flight.len() < pipeline_depth {
+                    let count = source.read(&mut buffer)?;
+                    if count == 0 {
+                        eof_local = true;
+                        break;
+                    }
+                    let mut req_id = self.next_id();
+                    while in_flight.contains_key(&req_id) {
+                        req_id = self.next_id();
+                    }
+                    self.send_packet(&SftpPacket::Write {
+                        id: req_id,
+                        handle: handle.clone(),
+                        offset: write_offset,
+                        data: buffer[..count].to_vec(),
+                    })?;
+                    write_offset = write_offset.saturating_add(count as u64);
+                    in_flight.insert(req_id, count as u64);
+                }
+
+                if in_flight.is_empty() {
                     break;
                 }
-                let id = self.next_id();
-                self.send_packet(&SftpPacket::Write {
-                    id,
-                    handle: handle.clone(),
-                    offset,
-                    data: buffer[..count].to_vec(),
-                })?;
+
                 let reply = self.read_packet()?;
                 control.check()?;
                 match reply {
@@ -996,50 +1482,111 @@ impl SftpClient {
                         id: response,
                         code: StatusCode::Ok,
                         ..
-                    } if response == id => {
-                        offset += count as u64;
+                    } => {
+                        let Some(chunk_len) = in_flight.remove(&response) else {
+                            self.invalidate_channel();
+                            return Err(SftpError::UnexpectedResponse(format!(
+                                "Unexpected WRITE response ID {response}"
+                            )));
+                        };
+                        acked_bytes = acked_bytes.saturating_add(chunk_len);
                         if let Some(callback) = &callback {
-                            callback(offset, size);
+                            callback(acked_bytes, size);
                         }
                     }
-                    SftpPacket::Status { code, message, .. } => {
-                        return Err(SftpError::Status { code, message })
+                    SftpPacket::Status {
+                        id: response,
+                        code,
+                        message,
+                        ..
+                    } => {
+                        if in_flight.remove(&response).is_none() {
+                            self.invalidate_channel();
+                        }
+                        return Err(SftpError::Status { code, message });
                     }
-                    other => return Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+                    other => {
+                        self.invalidate_channel();
+                        return Err(SftpError::UnexpectedResponse(format!("{other:?}")));
+                    }
                 }
             }
-            if offset != size {
+            if acked_bytes != size {
                 return Err(SftpError::UnexpectedResponse(
                     "Local file size changed during transfer".into(),
                 ));
             }
-            Ok(offset)
+            Ok(acked_bytes)
         })();
+
         self.active_control = None;
-        let closed = self.close_handle(handle);
-        let result = transferred.and_then(|bytes| {
+        let fsync_res = if transferred.is_ok() && self.capabilities.fsync && !self.corrupted {
+            self.fsync_handle(&handle)
+        } else {
+            Ok(())
+        };
+        let closed = if self.corrupted {
+            Ok(())
+        } else {
+            self.close_handle(handle)
+        };
+        let bytes = match transferred.and_then(|b| {
+            fsync_res?;
             closed?;
-            control.begin_commit()?;
-            self.publish_upload(&staging, remote_path)?;
-            Ok(bytes)
-        });
-        match result {
-            Ok(bytes) => Ok(bytes),
-            Err(error) => match self.remove_file(&staging) {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(SftpError::CleanupFailed {
-                    path: staging,
-                    message: format!("{error}; staging cleanup failed: {cleanup}"),
-                }),
-            },
+            Ok(b)
+        }) {
+            Ok(b) => b,
+            Err(error) => {
+                if self.corrupted {
+                    return Err(SftpError::CleanupFailed {
+                        path: staging,
+                        message: format!("{error}; channel closed before staging cleanup"),
+                    });
+                }
+                return match self.remove_file(&staging) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(SftpError::CleanupFailed {
+                        path: staging,
+                        message: format!("{error}; staging cleanup failed: {cleanup}"),
+                    }),
+                };
+            }
+        };
+
+        control.begin_commit()?;
+        match self.publish_upload(&staging, remote_path) {
+            Ok(()) => Ok(bytes),
+            Err(SftpError::Io(err)) => Err(SftpError::OutcomeUnknown {
+                path: remote_path.to_string(),
+                message: format!(
+                    "transport error while awaiting rename reply (staging: {staging}): {err}"
+                ),
+            }),
+            Err(SftpError::ChannelCorrupted(msg)) => Err(SftpError::OutcomeUnknown {
+                path: remote_path.to_string(),
+                message: format!(
+                    "channel lost while awaiting rename reply (staging: {staging}): {msg}"
+                ),
+            }),
+            Err(error) => {
+                if self.corrupted {
+                    return Err(SftpError::CleanupFailed {
+                        path: staging,
+                        message: format!("{error}; channel closed before staging cleanup"),
+                    });
+                }
+                match self.remove_file(&staging) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(SftpError::CleanupFailed {
+                        path: staging,
+                        message: format!("{error}; staging cleanup failed: {cleanup}"),
+                    }),
+                }
+            }
         }
     }
     fn publish_upload(&mut self, staging: &str, destination: &str) -> Result<(), SftpError> {
-        if !self
-            .server_extensions
-            .iter()
-            .any(|(name, version)| name == "posix-rename@openssh.com" && version == "1")
-        {
+        if !self.capabilities.posix_rename {
             // SFTP v3 rename refuses existing targets. Never emulate replace by deleting them.
             return self.rename(staging, destination);
         }
@@ -1052,34 +1599,206 @@ impl SftpClient {
             request: "posix-rename@openssh.com".into(),
             data,
         })?;
-        match self.read_packet()? {
-            SftpPacket::Status {
-                id: response,
-                code: StatusCode::Ok,
-                ..
-            } if response == id => Ok(()),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        }
+        self.expect_status(id, Some(destination))
     }
 
-    /// Query remote file attributes.
+    /// Query remote file attributes (follows symlinks).
     pub fn stat(&mut self, path: &str) -> Result<FileAttributes, SftpError> {
         let req_id = self.next_id();
         self.send_packet(&SftpPacket::Stat {
             id: req_id,
             path: path.to_string(),
         })?;
+        self.expect_attrs(req_id, path)
+    }
 
-        match self.read_packet()? {
-            SftpPacket::Attrs { attrs, .. } => Ok(attrs),
-            SftpPacket::Status {
-                code: StatusCode::NoSuchFile,
-                ..
-            } => Err(SftpError::FileNotFound(path.to_string())),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+    /// Query remote file attributes without following symlinks.
+    pub fn lstat(&mut self, path: &str) -> Result<FileAttributes, SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Lstat {
+            id: req_id,
+            path: path.to_string(),
+        })?;
+        self.expect_attrs(req_id, path)
+    }
+
+    /// Query remote file attributes on an open handle.
+    pub fn fstat(&mut self, handle: &[u8]) -> Result<FileAttributes, SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Fstat {
+            id: req_id,
+            handle: handle.to_vec(),
+        })?;
+        self.expect_attrs(req_id, "<handle>")
+    }
+
+    /// Set attributes on a remote path.
+    pub fn setstat(&mut self, path: &str, attrs: FileAttributes) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::SetStat {
+            id: req_id,
+            path: path.to_string(),
+            attrs,
+        })?;
+        self.expect_status(req_id, Some(path))
+    }
+
+    /// Set attributes on an open remote handle.
+    pub fn fsetstat(&mut self, handle: &[u8], attrs: FileAttributes) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::FsetStat {
+            id: req_id,
+            handle: handle.to_vec(),
+            attrs,
+        })?;
+        self.expect_status(req_id, None)
+    }
+
+    /// Read target of a remote symlink.
+    pub fn readlink(&mut self, path: &str) -> Result<String, SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::ReadLink {
+            id: req_id,
+            path: path.to_string(),
+        })?;
+        let mut entries = self.expect_name(req_id, path)?;
+        entries
+            .pop()
+            .map(|e| e.filename)
+            .ok_or_else(|| SftpError::UnexpectedResponse("READLINK returned empty NAME".into()))
+    }
+
+    /// Create a remote symlink at `linkpath` pointing to `targetpath`.
+    pub fn symlink(&mut self, linkpath: &str, targetpath: &str) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::SymLink {
+            id: req_id,
+            linkpath: linkpath.to_string(),
+            targetpath: targetpath.to_string(),
+        })?;
+        self.expect_status(req_id, Some(linkpath))
+    }
+
+    /// Create an empty remote file exclusively (`O_CREAT | O_EXCL`).
+    pub fn create_exclusive_file(&mut self, path: &str, mode: u32) -> Result<(), SftpError> {
+        let req_id = self.next_id();
+        self.send_packet(&SftpPacket::Open {
+            id: req_id,
+            filename: path.to_string(),
+            pflags: SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL,
+            attrs: FileAttributes::new().with_permissions(mode),
+        })?;
+        let handle = self.expect_handle(req_id, path)?;
+        self.close_handle(handle)
+    }
+
+    /// Flush remote file handle via `fsync@openssh.com` if advertised.
+    pub fn fsync_handle(&mut self, handle: &[u8]) -> Result<(), SftpError> {
+        if !self.capabilities.fsync {
+            return Err(SftpError::Status {
+                code: StatusCode::OpUnsupported,
+                message: "fsync@openssh.com is not advertised by server".into(),
+            });
         }
+        let id = self.next_id();
+        let mut data = Vec::with_capacity(4 + handle.len());
+        data.extend_from_slice(&(handle.len() as u32).to_be_bytes());
+        data.extend_from_slice(handle);
+        self.send_packet(&SftpPacket::Extended {
+            id,
+            request: "fsync@openssh.com".into(),
+            data,
+        })?;
+        self.expect_status(id, None)
+    }
+
+    /// Query remote filesystem capacity via `statvfs@openssh.com` if advertised.
+    pub fn statvfs(&mut self, path: &str) -> Result<RemoteStatVfs, SftpError> {
+        if !self.capabilities.statvfs {
+            return Err(SftpError::Status {
+                code: StatusCode::OpUnsupported,
+                message: "statvfs@openssh.com is not advertised by server".into(),
+            });
+        }
+        let id = self.next_id();
+        let mut data = Vec::new();
+        write_string(&mut data, path);
+        self.send_packet(&SftpPacket::Extended {
+            id,
+            request: "statvfs@openssh.com".into(),
+            data,
+        })?;
+        match self.read_response_for(id)? {
+            SftpPacket::ExtendedReply { data, .. } => {
+                RemoteStatVfs::decode(&data).map_err(SftpError::Protocol)
+            }
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!("{other:?}")))
+            }
+        }
+    }
+
+    /// Query server limits via `limits@openssh.com` if advertised.
+    pub fn query_limits(&mut self) -> Result<ServerLimits, SftpError> {
+        if !self.capabilities.limits_extension {
+            return Err(SftpError::Status {
+                code: StatusCode::OpUnsupported,
+                message: "limits@openssh.com is not advertised by server".into(),
+            });
+        }
+        let id = self.next_id();
+        self.send_packet(&SftpPacket::Extended {
+            id,
+            request: "limits@openssh.com".into(),
+            data: Vec::new(),
+        })?;
+        match self.read_response_for(id)? {
+            SftpPacket::ExtendedReply { data, .. } => {
+                let limits = ServerLimits::decode(&data).map_err(SftpError::Protocol)?;
+                self.capabilities.limits = Some(limits);
+                self.tuning = self.tuning.clamped_for_limits(Some(limits));
+                Ok(limits)
+            }
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
+            other => {
+                self.invalidate_channel();
+                Err(SftpError::UnexpectedResponse(format!("{other:?}")))
+            }
+        }
+    }
+
+    /// Server-side copy via `copy-data` extension when advertised.
+    pub fn copy_data(
+        &mut self,
+        read_handle: &[u8],
+        read_offset: u64,
+        len: u64,
+        write_handle: &[u8],
+        write_offset: u64,
+    ) -> Result<(), SftpError> {
+        if !self.capabilities.copy_data {
+            return Err(SftpError::Status {
+                code: StatusCode::OpUnsupported,
+                message: "copy-data is not advertised by server".into(),
+            });
+        }
+        let id = self.next_id();
+        let mut data = Vec::with_capacity(8 + read_handle.len() + write_handle.len() + 24);
+        data.extend_from_slice(&(read_handle.len() as u32).to_be_bytes());
+        data.extend_from_slice(read_handle);
+        data.extend_from_slice(&read_offset.to_be_bytes());
+        data.extend_from_slice(&len.to_be_bytes());
+        data.extend_from_slice(&(write_handle.len() as u32).to_be_bytes());
+        data.extend_from_slice(write_handle);
+        data.extend_from_slice(&write_offset.to_be_bytes());
+        self.send_packet(&SftpPacket::Extended {
+            id,
+            request: "copy-data".into(),
+            data,
+        })?;
+        self.expect_status(id, None)
     }
 
     /// Canonicalize a remote path.
@@ -1089,17 +1808,11 @@ impl SftpClient {
             id: req_id,
             path: path.to_string(),
         })?;
-
-        match self.read_packet()? {
-            SftpPacket::Name { mut entries, .. } => {
-                if let Some(first) = entries.pop() {
-                    Ok(first.filename)
-                } else {
-                    Ok(path.to_string())
-                }
-            }
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
+        let mut entries = self.expect_name(req_id, path)?;
+        if let Some(first) = entries.pop() {
+            Ok(first.filename)
+        } else {
+            Ok(path.to_string())
         }
     }
 
@@ -1111,15 +1824,7 @@ impl SftpClient {
             path: path.to_string(),
             attrs: FileAttributes::new().with_permissions(0o755),
         })?;
-
-        match self.read_packet()? {
-            SftpPacket::Status {
-                code: StatusCode::Ok,
-                ..
-            } => Ok(()),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        }
+        self.expect_status(req_id, Some(path))
     }
 
     /// Remove a remote directory.
@@ -1129,15 +1834,7 @@ impl SftpClient {
             id: req_id,
             path: path.to_string(),
         })?;
-
-        match self.read_packet()? {
-            SftpPacket::Status {
-                code: StatusCode::Ok,
-                ..
-            } => Ok(()),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        }
+        self.expect_status(req_id, Some(path))
     }
 
     /// Remove a remote file.
@@ -1147,15 +1844,7 @@ impl SftpClient {
             id: req_id,
             filename: filename.to_string(),
         })?;
-
-        match self.read_packet()? {
-            SftpPacket::Status {
-                code: StatusCode::Ok,
-                ..
-            } => Ok(()),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        }
+        self.expect_status(req_id, Some(filename))
     }
 
     /// Rename or move a remote file/directory.
@@ -1166,36 +1855,12 @@ impl SftpClient {
             oldpath: oldpath.to_string(),
             newpath: newpath.to_string(),
         })?;
-
-        match self.read_packet()? {
-            SftpPacket::Status {
-                id: response,
-                code: StatusCode::Ok,
-                ..
-            } if response == req_id => Ok(()),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        }
+        self.expect_status(req_id, Some(oldpath))
     }
 
     /// Update permissions (chmod) for a remote path.
     pub fn set_permissions(&mut self, path: &str, mode: u32) -> Result<(), SftpError> {
-        let req_id = self.next_id();
-        self.send_packet(&SftpPacket::SetStat {
-            id: req_id,
-            path: path.to_string(),
-            attrs: FileAttributes::new().with_permissions(mode),
-        })?;
-
-        match self.read_packet()? {
-            SftpPacket::Status {
-                id: response,
-                code: StatusCode::Ok,
-                ..
-            } if response == req_id => Ok(()),
-            SftpPacket::Status { code, message, .. } => Err(SftpError::Status { code, message }),
-            other => Err(SftpError::UnexpectedResponse(format!("{other:?}"))),
-        }
+        self.setstat(path, FileAttributes::new().with_permissions(mode))
     }
 }
 

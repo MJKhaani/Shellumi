@@ -108,6 +108,10 @@ fn lists_local_temporary_directory() {
 }
 
 mod codec;
+mod phase1_safety;
+mod phase2_protocol;
+mod phase3_4_manager;
+mod phase6_7_ops_editor;
 
 fn loopback_tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

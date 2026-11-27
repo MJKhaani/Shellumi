@@ -205,8 +205,10 @@ impl Shellumi {
         self.team_form = None;
         self.selected_host_id = None;
 
+        self.finalize_all_active_recordings("Vault switched", cx);
         self.invalidate_invitation_scope();
         self.active_vault_id = vault_id;
+        self.enforce_sftp_vault_scope(false);
         self.active_vault = vault_name;
         self.vault_dropdown_open = false;
         self.active_ws_client = None;

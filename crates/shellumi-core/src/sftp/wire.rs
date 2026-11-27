@@ -265,7 +265,12 @@ impl FileAttributes {
         };
         let extended = if (flags & SSH_FILEXFER_ATTR_EXTENDED) != 0 {
             let count = reader.read_u32()?;
-            let mut exts = Vec::with_capacity(count.min(128) as usize);
+            if count > 1024 {
+                return Err(SftpProtocolError::MalformedPayload(format!(
+                    "extended attribute count {count} exceeds limit"
+                )));
+            }
+            let mut exts = Vec::with_capacity(count as usize);
             for _ in 0..count {
                 let k = reader.read_string()?;
                 let v = reader.read_string()?;
@@ -861,6 +866,11 @@ impl SftpPacket {
             SSH_FXP_NAME => {
                 let id = reader.read_u32()?;
                 let count = reader.read_u32()?;
+                if count > 65_536 {
+                    return Err(SftpProtocolError::MalformedPayload(format!(
+                        "SSH_FXP_NAME entry count {count} exceeds limit"
+                    )));
+                }
                 let mut entries = Vec::with_capacity(count.min(4096) as usize);
                 for _ in 0..count {
                     let filename = reader.read_string()?;
@@ -883,15 +893,25 @@ impl SftpPacket {
                 let id = reader.read_u32()?;
                 let request = reader.read_string()?;
                 let data = reader.remaining_slice().to_vec();
-                Self::Extended { id, request, data }
+                return Ok(Some((
+                    Self::Extended { id, request, data },
+                    total_packet_bytes,
+                )));
             }
             SSH_FXP_EXTENDED_REPLY => {
                 let id = reader.read_u32()?;
                 let data = reader.remaining_slice().to_vec();
-                Self::ExtendedReply { id, data }
+                return Ok(Some((Self::ExtendedReply { id, data }, total_packet_bytes)));
             }
             other => return Err(SftpProtocolError::UnknownPacketType(other)),
         };
+
+        if reader.remaining() > 0 {
+            return Err(SftpProtocolError::MalformedPayload(format!(
+                "trailing {} byte(s) in SFTP packet",
+                reader.remaining()
+            )));
+        }
 
         Ok(Some((packet, total_packet_bytes)))
     }

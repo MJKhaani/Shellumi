@@ -254,7 +254,20 @@ impl Shellumi {
             }
         }
 
-        // Table Header
+        // Table Header (clickable sort columns)
+        let sort_field = pane.sort_field;
+        let sort_asc = pane.sort_ascending;
+        let sort_indicator = |f: SftpSortField| -> &'static str {
+            if sort_field == f {
+                if sort_asc {
+                    " ▲"
+                } else {
+                    " ▼"
+                }
+            } else {
+                ""
+            }
+        };
         let table_header = div()
             .h(px(28.0))
             .px_3()
@@ -266,10 +279,65 @@ impl Shellumi {
             .text_xs()
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(MacTheme::TEXT_TERTIARY))
-            .child(div().flex_1().child("Name"))
-            .child(div().w(px(140.0)).child("Date Modified"))
-            .child(div().w(px(90.0)).child("Size"))
-            .child(div().w(px(70.0)).child("Kind"));
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-sort-name"
+                    } else {
+                        "sftp-r-sort-name"
+                    })
+                    .flex_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_toggle_sort(is_left, SftpSortField::Name, cx);
+                    }))
+                    .child(format!("Name{}", sort_indicator(SftpSortField::Name))),
+            )
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-sort-mod"
+                    } else {
+                        "sftp-r-sort-mod"
+                    })
+                    .w(px(140.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_toggle_sort(is_left, SftpSortField::Modified, cx);
+                    }))
+                    .child(format!(
+                        "Date Modified{}",
+                        sort_indicator(SftpSortField::Modified)
+                    )),
+            )
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-sort-size"
+                    } else {
+                        "sftp-r-sort-size"
+                    })
+                    .w(px(90.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_toggle_sort(is_left, SftpSortField::Size, cx);
+                    }))
+                    .child(format!("Size{}", sort_indicator(SftpSortField::Size))),
+            )
+            .child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-sort-kind"
+                    } else {
+                        "sftp-r-sort-kind"
+                    })
+                    .w(px(70.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.sftp_toggle_sort(is_left, SftpSortField::Kind, cx);
+                    }))
+                    .child(format!("Kind{}", sort_indicator(SftpSortField::Kind))),
+            );
 
         // Table Rows with Drop handling and right-click backdrop
         let mut table_body = div()
@@ -284,7 +352,21 @@ impl Shellumi {
             .flex()
             .flex_col()
             .on_drop(cx.listener(move |app, payload: &SftpDragPayload, _, cx| {
-                if payload.from_left != is_left {
+                let (src_gen, src_dir) = if payload.from_left {
+                    (
+                        app.sftp_left_pane.listing_generation,
+                        &app.sftp_left_pane.current_path,
+                    )
+                } else {
+                    (
+                        app.sftp_right_pane.listing_generation,
+                        &app.sftp_right_pane.current_path,
+                    )
+                };
+                if payload.from_left != is_left
+                    && payload.source_generation == src_gen
+                    && payload.source_dir == *src_dir
+                {
                     app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
                     cx.stop_propagation();
                 }
@@ -551,6 +633,8 @@ impl Shellumi {
                 .on_drag(
                     SftpDragPayload {
                         from_left: is_left,
+                        source_generation: pane.listing_generation,
+                        source_dir: pane.current_path.clone(),
                         files: drag_files,
                     },
                     move |_, _, _, cx| {
@@ -574,6 +658,8 @@ impl Shellumi {
                             if event.click_count == 2 {
                                 if is_dir {
                                     app.sftp_navigate_dir(is_left, entry_path.clone(), cx);
+                                } else {
+                                    app.sftp_open_in_editor(is_left, entry_path.clone(), cx);
                                 }
                             } else if event.modifiers.shift
                                 || event.modifiers.platform
@@ -639,21 +725,18 @@ impl Shellumi {
                 row = row.on_drop(cx.listener({
                     let entry_path_for_drop = entry_path_for_drop.clone();
                     move |app, payload: &SftpDragPayload, _, cx| {
-                        if payload.from_left != is_left {
-                            let p = if !payload.from_left {
-                                &mut app.sftp_left_pane
-                            } else {
-                                &mut app.sftp_right_pane
-                            };
-                            let previous_path =
-                                std::mem::replace(&mut p.current_path, entry_path_for_drop.clone());
-                            app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
-                            let p = if is_left {
-                                &mut app.sftp_left_pane
-                            } else {
-                                &mut app.sftp_right_pane
-                            };
-                            p.current_path = previous_path;
+                        let src_gen = if payload.from_left {
+                            app.sftp_left_pane.listing_generation
+                        } else {
+                            app.sftp_right_pane.listing_generation
+                        };
+                        if payload.from_left != is_left && payload.source_generation == src_gen {
+                            app.sftp_transfer_files_to_dir(
+                                payload.from_left,
+                                payload.files.clone(),
+                                Some(entry_path_for_drop.clone()),
+                                cx,
+                            );
                             cx.stop_propagation();
                         }
                     }
@@ -807,7 +890,21 @@ impl Shellumi {
             .flex_col()
             .size_full()
             .on_drop(cx.listener(move |app, payload: &SftpDragPayload, _, cx| {
-                if payload.from_left != is_left {
+                let (src_gen, src_dir) = if payload.from_left {
+                    (
+                        app.sftp_left_pane.listing_generation,
+                        &app.sftp_left_pane.current_path,
+                    )
+                } else {
+                    (
+                        app.sftp_right_pane.listing_generation,
+                        &app.sftp_right_pane.current_path,
+                    )
+                };
+                if payload.from_left != is_left
+                    && payload.source_generation == src_gen
+                    && payload.source_dir == *src_dir
+                {
                     app.sftp_transfer_files(payload.from_left, payload.files.clone(), cx);
                     cx.stop_propagation();
                 }

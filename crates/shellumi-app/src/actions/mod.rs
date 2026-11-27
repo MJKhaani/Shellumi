@@ -11,7 +11,7 @@ mod invitations;
 mod legacy_sftp;
 mod mobile;
 mod palette;
-mod recordings;
+pub(crate) mod recordings;
 mod remote_desktop;
 mod server_sync;
 mod shell_integration;

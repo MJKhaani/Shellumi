@@ -152,6 +152,79 @@ impl Shellumi {
             SessionReplayTab::RecordingsList => {
                 let mut list_body = div().flex().flex_col().gap_3();
 
+                for failed in self
+                    .failed_recordings
+                    .iter()
+                    .filter(|f| f.vault_id == self.active_vault_id)
+                {
+                    let rec_id_retry = failed.record.id.clone();
+                    let rec_id_discard = failed.record.id.clone();
+                    list_body = list_body.child(
+                        div()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x3a1818))
+                            .border_1()
+                            .border_color(rgb(MacTheme::DANGER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .child(format!(
+                                        "Recoverable recording '{}' failed to commit: {}",
+                                        failed.record.title, failed.error
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(("retry-failed-rec", failed.record.event_count))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                                            .text_xs()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.retry_failed_recording(
+                                                    rec_id_retry.clone(),
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("Retry Save"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("discard-failed-rec", failed.record.byte_size))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(rgb(MacTheme::SURFACE_HOVER))
+                                            .text_xs()
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.discard_failed_recording(
+                                                    rec_id_discard.clone(),
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("Discard"),
+                                    ),
+                            ),
+                    );
+                }
+
                 if modal.recordings.is_empty() {
                     list_body = list_body.child(
                         div()
@@ -190,7 +263,17 @@ impl Shellumi {
                         .flex_col()
                         .gap_2();
 
-                    for (idx, rec) in modal.recordings.iter().enumerate() {
+                    for (idx, rec) in modal
+                        .recordings
+                        .iter()
+                        .filter(|r| {
+                            let q = modal.search_query.trim().to_ascii_lowercase();
+                            q.is_empty()
+                                || r.title.to_ascii_lowercase().contains(&q)
+                                || r.id.to_ascii_lowercase().contains(&q)
+                        })
+                        .enumerate()
+                    {
                         let is_selected = modal.selected_recording_id.as_deref() == Some(&rec.id);
                         let rec_id_play = rec.id.clone();
                         let rec_id_exp = rec.id.clone();

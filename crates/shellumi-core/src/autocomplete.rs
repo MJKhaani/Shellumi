@@ -757,6 +757,24 @@ end
 "#
 }
 
+/// Generates reversible shell integration hook scripts for PowerShell (5.1+ / pwsh 7+).
+pub fn generate_powershell_hook() -> &'static str {
+    r#"# Shellumi Semantic Shell Integration for PowerShell
+if (-not $global:__ShellumiOrigPrompt) {
+    $global:__ShellumiOrigPrompt = $function:prompt
+}
+function global:prompt {
+    $ec = if ($?) { 0 } else { if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 } }
+    $esc = [char]27
+    $bel = [char]7
+    $cwd = (Get-Location).ProviderPath -replace '\\', '/'
+    [Console]::Write("${esc}]133;D;$ec${bel}")
+    [Console]::Write("${esc}]133;A${bel}${esc}]7;file://localhost/$cwd${bel}")
+    if ($global:__ShellumiOrigPrompt) { & $global:__ShellumiOrigPrompt } else { "PS $PWD> " }
+}
+"#
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

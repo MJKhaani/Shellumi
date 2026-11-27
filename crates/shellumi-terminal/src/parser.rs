@@ -1,27 +1,38 @@
-//! VT/ANSI escape sequence processing updating the terminal grid.
+//! VT/ANSI escape sequence processing updating the terminal grid and emitting typed events.
 
 use crate::cell::{Cell, CellAttributes};
 use crate::color::{Color, NamedColor};
+use crate::events::{
+    sanitize_hyperlink_uri, sanitize_title, CursorShape, HyperlinkTarget, MouseTrackingMode,
+    TerminalEvent, MAX_OSC52_PAYLOAD_BYTES, MAX_TERMINAL_EVENTS,
+};
 use crate::grid::TerminalGrid;
 use crate::shell_integration::ShellIntegrationState;
+use base64::Engine as _;
 use vte::{Params, Perform};
 
-/// Handles VTE parser actions and applies them to the terminal grid.
+/// Handles VTE parser actions, updates the terminal grid, and records typed events.
 pub struct TerminalHandler<'a> {
     pub grid: &'a mut TerminalGrid,
     pub title: &'a mut Option<String>,
     pub shell_integration: Option<&'a mut ShellIntegrationState>,
+    pub events: &'a mut Vec<TerminalEvent>,
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttributes,
 }
 
 impl<'a> TerminalHandler<'a> {
-    pub fn new(grid: &'a mut TerminalGrid, title: &'a mut Option<String>) -> Self {
+    pub fn new(
+        grid: &'a mut TerminalGrid,
+        title: &'a mut Option<String>,
+        events: &'a mut Vec<TerminalEvent>,
+    ) -> Self {
         Self {
             grid,
             title,
             shell_integration: None,
+            events,
             fg: Color::Default,
             bg: Color::Default,
             attrs: CellAttributes::default(),
@@ -31,6 +42,12 @@ impl<'a> TerminalHandler<'a> {
     pub fn with_shell_integration(mut self, integration: &'a mut ShellIntegrationState) -> Self {
         self.shell_integration = Some(integration);
         self
+    }
+
+    fn emit(&mut self, event: TerminalEvent) {
+        if self.events.len() < MAX_TERMINAL_EVENTS {
+            self.events.push(event);
+        }
     }
 
     fn current_cell(&self, c: char) -> Cell {
@@ -90,6 +107,93 @@ impl<'a> TerminalHandler<'a> {
         self.bg = Color::Default;
         self.attrs = CellAttributes::default();
     }
+
+    fn set_private_mode(&mut self, mode: u16, enabled: bool) {
+        let mut mode_changed = true;
+        match mode {
+            1 => self.grid.modes_mut().application_cursor = enabled,
+            6 => {
+                self.grid.modes_mut().origin_mode = enabled;
+                self.grid.move_cursor_home();
+            }
+            7 => self.grid.modes_mut().autowrap = enabled,
+            9 => {
+                self.grid.modes_mut().mouse_mode = if enabled {
+                    MouseTrackingMode::X10
+                } else {
+                    MouseTrackingMode::None
+                };
+            }
+            12 => self.grid.modes_mut().cursor_blink = enabled,
+            25 => self.grid.cursor_mut().visible = enabled,
+            47 => {
+                if enabled {
+                    self.grid.enter_alt_screen_with_options(false, false);
+                } else {
+                    self.grid.exit_alt_screen_with_options(false);
+                }
+            }
+            1000 => {
+                self.grid.modes_mut().mouse_mode = if enabled {
+                    MouseTrackingMode::Normal
+                } else {
+                    MouseTrackingMode::None
+                };
+            }
+            1002 => {
+                self.grid.modes_mut().mouse_mode = if enabled {
+                    MouseTrackingMode::ButtonMotion
+                } else {
+                    MouseTrackingMode::None
+                };
+            }
+            1003 => {
+                self.grid.modes_mut().mouse_mode = if enabled {
+                    MouseTrackingMode::AnyMotion
+                } else {
+                    MouseTrackingMode::None
+                };
+            }
+            1004 => self.grid.modes_mut().focus_reporting = enabled,
+            1006 => self.grid.modes_mut().sgr_mouse = enabled,
+            1047 => {
+                if enabled {
+                    self.grid.enter_alt_screen_with_options(false, true);
+                } else {
+                    self.grid.exit_alt_screen_with_options(false);
+                }
+            }
+            1048 => {
+                if enabled {
+                    self.grid.save_cursor_with_sgr(self.fg, self.bg, self.attrs);
+                } else {
+                    let (fg, bg, attrs) = self.grid.restore_cursor_with_sgr();
+                    self.fg = fg;
+                    self.bg = bg;
+                    self.attrs = attrs;
+                }
+            }
+            1049 => {
+                if enabled {
+                    self.grid.save_cursor_with_sgr(self.fg, self.bg, self.attrs);
+                    self.grid.enter_alt_screen_with_options(false, true);
+                } else {
+                    self.grid.exit_alt_screen_with_options(false);
+                    let (fg, bg, attrs) = self.grid.restore_cursor_with_sgr();
+                    self.fg = fg;
+                    self.bg = bg;
+                    self.attrs = attrs;
+                }
+            }
+            2004 => self.grid.modes_mut().bracketed_paste = enabled,
+            _ => {
+                mode_changed = false;
+            }
+        }
+        if mode_changed {
+            self.emit(TerminalEvent::ModeChanged);
+        }
+    }
 }
 
 fn ansi_named_color(offset: u16, bright: bool) -> NamedColor {
@@ -124,12 +228,10 @@ where
 {
     match iter.next()?.first().copied()? {
         5 => {
-            // 256-color palette
             let index = *iter.next()?.first()? as u8;
             Some(Color::Indexed(index))
         }
         2 => {
-            // 24-bit TrueColor RGB
             let r = *iter.next()?.first()? as u8;
             let g = *iter.next()?.first()? as u8;
             let b = *iter.next()?.first()? as u8;
@@ -147,29 +249,30 @@ impl<'a> Perform for TerminalHandler<'a> {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\n' | 0x0b | 0x0c => {
-                let cur_row = self.grid.cursor().row;
-                if cur_row + 1 >= self.grid.rows() {
-                    self.grid.scroll_up();
-                } else {
-                    self.grid.cursor_mut().row += 1;
-                }
-            }
-            b'\r' => {
-                self.grid.cursor_mut().col = 0;
+            0x07 => {
+                // Standalone BEL (vte consumes BEL inside OSC terminators without calling execute)
+                self.emit(TerminalEvent::Bell);
             }
             0x08 => {
-                // Backspace
+                // Backspace (BS)
+                self.grid.clear_pending_wrap();
                 let cur_col = self.grid.cursor().col;
                 if cur_col > 0 {
                     self.grid.cursor_mut().col = cur_col - 1;
                 }
             }
             b'\t' => {
-                // Tab (advance to next multiple of 8)
-                let cur_col = self.grid.cursor().col;
-                let next_col = ((cur_col / 8) + 1) * 8;
-                self.grid.cursor_mut().col = next_col.min(self.grid.cols().saturating_sub(1));
+                // Horizontal Tab (HT)
+                self.grid.tab_forward(1);
+            }
+            b'\n' | 0x0b | 0x0c => {
+                // LF / VT / FF
+                self.grid.line_feed();
+            }
+            b'\r' => {
+                // Carriage Return (CR)
+                self.grid.clear_pending_wrap();
+                self.grid.cursor_mut().col = 0;
             }
             _ => {}
         }
@@ -177,6 +280,10 @@ impl<'a> Perform for TerminalHandler<'a> {
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let is_private = intermediates.first() == Some(&b'?');
+        let is_gt = intermediates.first() == Some(&b'>');
+        let is_space = intermediates.first() == Some(&b' ');
+        let is_bang = intermediates.first() == Some(&b'!');
+
         let first_param = params
             .iter()
             .next()
@@ -192,33 +299,42 @@ impl<'a> Perform for TerminalHandler<'a> {
 
         match action {
             'A' => {
-                // Cursor Up (CUU)
+                // CUU
                 let count = (first_param as usize).max(1);
+                let min_row = if self.grid.modes().origin_mode {
+                    self.grid.scroll_margins().0
+                } else {
+                    0
+                };
                 let cur = self.grid.cursor().row;
-                self.grid.cursor_mut().row = cur.saturating_sub(count);
+                self.grid.cursor_mut().row = cur.saturating_sub(count).max(min_row);
             }
-            'B' => {
-                // Cursor Down (CUD)
+            'B' | 'e' => {
+                // CUD / VPR
                 let count = (first_param as usize).max(1);
+                let max_row = if self.grid.modes().origin_mode {
+                    self.grid.scroll_margins().1
+                } else {
+                    self.grid.rows().saturating_sub(1)
+                };
                 let cur = self.grid.cursor().row;
-                let max_row = self.grid.rows().saturating_sub(1);
                 self.grid.cursor_mut().row = (cur + count).min(max_row);
             }
-            'C' => {
-                // Cursor Forward (CUF)
+            'C' | 'a' => {
+                // CUF / HPR
                 let count = (first_param as usize).max(1);
                 let cur = self.grid.cursor().col;
                 let max_col = self.grid.cols().saturating_sub(1);
                 self.grid.cursor_mut().col = (cur + count).min(max_col);
             }
             'D' => {
-                // Cursor Back (CUB)
+                // CUB
                 let count = (first_param as usize).max(1);
                 let cur = self.grid.cursor().col;
                 self.grid.cursor_mut().col = cur.saturating_sub(count);
             }
             'E' => {
-                // Cursor Next Line (CNL)
+                // CNL
                 let count = (first_param as usize).max(1);
                 let cur = self.grid.cursor().row;
                 let max_row = self.grid.rows().saturating_sub(1);
@@ -226,73 +342,203 @@ impl<'a> Perform for TerminalHandler<'a> {
                 self.grid.cursor_mut().col = 0;
             }
             'F' => {
-                // Cursor Previous Line (CPL)
+                // CPL
                 let count = (first_param as usize).max(1);
                 let cur = self.grid.cursor().row;
                 self.grid.cursor_mut().row = cur.saturating_sub(count);
                 self.grid.cursor_mut().col = 0;
             }
-            'G' => {
-                // Cursor Horizontal Absolute (CHA)
+            'G' | '`' => {
+                // CHA / HPA
                 let col = (first_param as usize).saturating_sub(1);
                 let max_col = self.grid.cols().saturating_sub(1);
                 self.grid.cursor_mut().col = col.min(max_col);
             }
+            'd' => {
+                // VPA
+                let row = (first_param as usize).max(1);
+                let col_1 = self.grid.cursor().col + 1;
+                self.grid.set_cursor_pos(row, col_1);
+            }
             'H' | 'f' => {
-                // Cursor Position (CUP / HVP)
-                let row = (first_param as usize).saturating_sub(1);
-                let col = (second_param as usize).saturating_sub(1);
-                let max_row = self.grid.rows().saturating_sub(1);
-                let max_col = self.grid.cols().saturating_sub(1);
-                self.grid.cursor_mut().row = row.min(max_row);
-                self.grid.cursor_mut().col = col.min(max_col);
+                // CUP / HVP
+                let row = (first_param as usize).max(1);
+                let col = (second_param as usize).max(1);
+                self.grid.set_cursor_pos(row, col);
+            }
+            'I' => {
+                // CHT
+                self.grid.tab_forward((first_param as usize).max(1));
+            }
+            'Z' => {
+                // CBT
+                self.grid.tab_backward((first_param as usize).max(1));
+            }
+            'g' => {
+                // TBC
+                self.grid.clear_tab_stop(first_param);
             }
             'J' => {
-                // Erase in Display (ED)
+                // ED
+                self.grid.clear_pending_wrap();
                 match first_param {
                     0 => self.grid.clear_from_cursor_down(),
                     1 => self.grid.clear_from_cursor_up(),
-                    2 | 3 => self.grid.clear_all(),
+                    2 => self.grid.clear_all(),
+                    3 => {
+                        self.grid.clear_all();
+                        self.grid.clear_scrollback();
+                    }
                     _ => {}
                 }
             }
             'K' => {
-                // Erase in Line (EL)
+                // EL
+                self.grid.clear_pending_wrap();
                 self.grid.clear_line(first_param as u8);
             }
+            'X' => {
+                // ECH
+                self.grid.clear_pending_wrap();
+                self.grid.erase_chars((first_param as usize).max(1));
+            }
+            '@' => {
+                // ICH
+                self.grid.clear_pending_wrap();
+                self.grid.insert_chars((first_param as usize).max(1));
+            }
+            'P' => {
+                // DCH
+                self.grid.clear_pending_wrap();
+                self.grid.delete_chars((first_param as usize).max(1));
+            }
+            'L' => {
+                // IL
+                self.grid.clear_pending_wrap();
+                self.grid.insert_lines((first_param as usize).max(1));
+            }
+            'M' => {
+                // DL
+                self.grid.clear_pending_wrap();
+                self.grid.delete_lines((first_param as usize).max(1));
+            }
             'S' => {
-                // Scroll Up (SU)
-                let count = (first_param as usize).max(1);
-                for _ in 0..count {
-                    self.grid.scroll_up();
-                }
+                // SU
+                self.grid.scroll_up_in_region((first_param as usize).max(1));
             }
             'T' => {
-                // Scroll Down (SD)
-                let count = (first_param as usize).max(1);
-                for _ in 0..count {
-                    self.grid.scroll_down();
+                // SD
+                self.grid
+                    .scroll_down_in_region((first_param as usize).max(1));
+            }
+            'r' if !is_private => {
+                // DECSTBM
+                let top = if first_param == 0 {
+                    None
+                } else {
+                    Some(first_param as usize)
+                };
+                let bottom = if second_param == 0 {
+                    None
+                } else {
+                    Some(second_param as usize)
+                };
+                self.grid.set_scroll_margins(top, bottom);
+            }
+            's' if !is_private => {
+                self.grid.save_cursor_with_sgr(self.fg, self.bg, self.attrs);
+            }
+            'u' if !is_private => {
+                let (fg, bg, attrs) = self.grid.restore_cursor_with_sgr();
+                self.fg = fg;
+                self.bg = bg;
+                self.attrs = attrs;
+            }
+            'c' if is_gt => {
+                // Secondary Device Attributes (DA2)
+                self.emit(TerminalEvent::ProtocolReply(b"\x1b[>1;10;0c".to_vec()));
+            }
+            'c' if !is_private => {
+                // Primary Device Attributes (DA1)
+                self.emit(TerminalEvent::ProtocolReply(b"\x1b[?62;22c".to_vec()));
+            }
+            'n' if !is_private => {
+                // Device Status Report (DSR) & Cursor Position Report (CPR)
+                match first_param {
+                    5 => {
+                        self.emit(TerminalEvent::ProtocolReply(b"\x1b[0n".to_vec()));
+                    }
+                    6 => {
+                        let row = if self.grid.modes().origin_mode {
+                            self.grid
+                                .cursor()
+                                .row
+                                .saturating_sub(self.grid.scroll_margins().0)
+                                + 1
+                        } else {
+                            self.grid.cursor().row + 1
+                        };
+                        let col = self.grid.cursor().col + 1;
+                        self.emit(TerminalEvent::ProtocolReply(
+                            format!("\x1b[{row};{col}R").into_bytes(),
+                        ));
+                    }
+                    _ => {}
                 }
             }
-            'm' => {
-                // Select Graphic Rendition (SGR)
+            'm' if !is_private && !is_gt => {
                 self.parse_sgr(params);
             }
             'h' if is_private => {
-                // DECSET private modes
-                match first_param {
-                    25 => self.grid.cursor_mut().visible = true,
-                    47 | 1047 | 1049 => self.grid.enter_alt_screen(),
-                    _ => {}
+                for param in params.iter() {
+                    if let Some(&mode) = param.first() {
+                        self.set_private_mode(mode, true);
+                    }
                 }
             }
             'l' if is_private => {
-                // DECRST private modes
-                match first_param {
-                    25 => self.grid.cursor_mut().visible = false,
-                    47 | 1047 | 1049 => self.grid.exit_alt_screen(),
-                    _ => {}
+                for param in params.iter() {
+                    if let Some(&mode) = param.first() {
+                        self.set_private_mode(mode, false);
+                    }
                 }
+            }
+            'h' if !is_private => {
+                for param in params.iter() {
+                    if param.first().copied() == Some(4) {
+                        self.grid.modes_mut().insert_mode = true;
+                        self.emit(TerminalEvent::ModeChanged);
+                    }
+                }
+            }
+            'l' if !is_private => {
+                for param in params.iter() {
+                    if param.first().copied() == Some(4) {
+                        self.grid.modes_mut().insert_mode = false;
+                        self.emit(TerminalEvent::ModeChanged);
+                    }
+                }
+            }
+            'q' if is_space => {
+                // DECSCUSR
+                let (shape, blink) = match first_param {
+                    0 | 1 => (CursorShape::Block, true),
+                    2 => (CursorShape::Block, false),
+                    3 => (CursorShape::Underline, true),
+                    4 => (CursorShape::Underline, false),
+                    5 => (CursorShape::Beam, true),
+                    6 => (CursorShape::Beam, false),
+                    _ => return,
+                };
+                self.grid.modes_mut().cursor_shape = shape;
+                self.grid.modes_mut().cursor_blink = blink;
+                self.emit(TerminalEvent::ModeChanged);
+            }
+            'p' if is_bang => {
+                // DECSTR (Soft terminal reset)
+                self.reset_sgr();
+                self.grid.reset(false);
+                self.emit(TerminalEvent::ModeChanged);
             }
             _ => {}
         }
@@ -300,40 +546,112 @@ impl<'a> Perform for TerminalHandler<'a> {
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         match byte {
-            b'7' => self.grid.save_cursor(),
-            b'8' => self.grid.restore_cursor(),
+            b'7' => self.grid.save_cursor_with_sgr(self.fg, self.bg, self.attrs),
+            b'8' => {
+                let (fg, bg, attrs) = self.grid.restore_cursor_with_sgr();
+                self.fg = fg;
+                self.bg = bg;
+                self.attrs = attrs;
+            }
+            b'D' => self.grid.line_feed(),
+            b'E' => {
+                self.grid.cursor_mut().col = 0;
+                self.grid.line_feed();
+            }
+            b'H' => self.grid.set_tab_stop(),
+            b'M' => self.grid.reverse_index(),
+            b'c' => {
+                self.reset_sgr();
+                self.grid.reset(true);
+                self.emit(TerminalEvent::ModeChanged);
+            }
+            b'=' => {
+                self.grid.modes_mut().application_keypad = true;
+                self.emit(TerminalEvent::ModeChanged);
+            }
+            b'>' => {
+                self.grid.modes_mut().application_keypad = false;
+                self.emit(TerminalEvent::ModeChanged);
+            }
             _ => {}
         }
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if params.len() >= 2 {
-            let command = params[0];
-            if command == b"0" || command == b"2" {
-                if let Ok(title) = std::str::from_utf8(params[1]) {
-                    // Sanitize non-printable control characters and cap title length to 256 characters
-                    let sanitized: String = title
-                        .chars()
-                        .filter(|c| !c.is_control())
-                        .take(256)
-                        .collect();
-                    *self.title = Some(sanitized);
+        if params.len() < 2 {
+            return;
+        }
+        let command = params[0];
+        if command == b"0" || command == b"2" {
+            if let Ok(title) = std::str::from_utf8(params[1]) {
+                let sanitized = sanitize_title(title);
+                *self.title = Some(sanitized.clone());
+                self.emit(TerminalEvent::TitleChanged(Some(sanitized)));
+            }
+        } else if command == b"7" {
+            let mut dir_opt = None;
+            if let Some(ref mut integration) = self.shell_integration {
+                integration.handle_osc_7(params[1]);
+                dir_opt = integration.current_dir().map(|s| s.to_string());
+            }
+            if let Some(dir) = dir_opt {
+                self.emit(TerminalEvent::CwdChanged(dir));
+            }
+        } else if command == b"8" {
+            // OSC 8 ; params ; URI ST
+            if params.len() >= 3 {
+                let raw_uri = std::str::from_utf8(params[2]).unwrap_or("");
+                if raw_uri.trim().is_empty() {
+                    self.grid.set_active_hyperlink(None);
+                } else if let Some(uri) = sanitize_hyperlink_uri(raw_uri) {
+                    let id = std::str::from_utf8(params[1]).ok().and_then(|p| {
+                        p.split(':')
+                            .find_map(|kv| kv.strip_prefix("id="))
+                            .filter(|s| !s.is_empty() && s.len() <= 128)
+                            .map(|s| s.to_string())
+                    });
+                    self.grid
+                        .set_active_hyperlink(Some(HyperlinkTarget { id, uri }));
+                } else {
+                    // Unsafe or malformed URI: close active hyperlink instead of applying
+                    self.grid.set_active_hyperlink(None);
                 }
-            } else if command == b"7" {
-                // OSC 7: Current Working Directory (file://[hostname]/path)
-                if let Some(ref mut integration) = self.shell_integration {
-                    integration.handle_osc_7(params[1]);
+            }
+        } else if command == b"52" {
+            // OSC 52 ; selection ; base64_data ST
+            // Never read clipboard ("?"); bound decoded size; emit request for policy check.
+            if params.len() >= 3 {
+                let payload = params[2];
+                if payload == b"?" || payload.is_empty() {
+                    return;
                 }
-            } else if command == b"133" {
-                // OSC 133: FinalTerm / iTerm2 Semantic Prompt Protocol
-                if let Some(ref mut integration) = self.shell_integration {
-                    integration.handle_osc_133(&params[1..]);
+                // Cap encoded length before decoding (~4/3 of MAX_OSC52_PAYLOAD_BYTES)
+                if payload.len() > MAX_OSC52_PAYLOAD_BYTES * 2 {
+                    return;
                 }
-            } else if command == b"9" && params.len() >= 3 && params[1] == b"9" {
-                // OSC 9;9: ConEmu CWD ("path")
-                if let Some(ref mut integration) = self.shell_integration {
-                    integration.handle_osc_9_9(params[2]);
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(payload) {
+                    if decoded.len() <= MAX_OSC52_PAYLOAD_BYTES {
+                        if let Ok(text) = std::str::from_utf8(&decoded) {
+                            self.emit(TerminalEvent::ClipboardWriteRequest(text.to_string()));
+                        }
+                    }
                 }
+            }
+        } else if command == b"133" {
+            if let Some(ref mut integration) = self.shell_integration {
+                integration.handle_osc_133(&params[1..]);
+                if let Some(mark) = integration.current_mark.clone() {
+                    self.emit(TerminalEvent::PromptMark(mark));
+                }
+            }
+        } else if command == b"9" && params.len() >= 3 && params[1] == b"9" {
+            let mut dir_opt = None;
+            if let Some(ref mut integration) = self.shell_integration {
+                integration.handle_osc_9_9(params[2]);
+                dir_opt = integration.current_dir().map(|s| s.to_string());
+            }
+            if let Some(dir) = dir_opt {
+                self.emit(TerminalEvent::CwdChanged(dir));
             }
         }
     }

@@ -1,25 +1,282 @@
-//! SFTP browser UI.
+//! SFTP browser UI, integrated editor switcher, and transfer drawer.
 use super::*;
 
 impl Shellumi {
     pub(crate) fn render_sftp_redesigned_dual_pane(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut dual_pane = div()
+        let mut root = div()
             .relative()
             .size_full()
             .flex()
-            .bg(rgb(MacTheme::CONTENT_BG))
-            .child(self.render_sftp_pane(true, cx))
-            .child(self.render_sftp_pane(false, cx));
+            .flex_col()
+            .bg(rgb(MacTheme::CONTENT_BG));
+
+        // Top bar when editor tabs or transfer drawer toggle are present
+        if !self.sftp_editors.is_empty() || self.sftp_transfer_drawer_open {
+            let active_ed = self.active_sftp_editor_idx;
+            let jobs_count = self.sftp_transfer_manager.all_snapshots().len();
+            let mut bar = div()
+                .h(px(32.0))
+                .px_3()
+                .border_b_1()
+                .border_color(rgb(MacTheme::BORDER))
+                .bg(rgb(MacTheme::SURFACE))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .id("sftp-tab-browser")
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .bg(if active_ed.is_none() {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::SURFACE)
+                                })
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.active_sftp_editor_idx = None;
+                                    cx.notify();
+                                }))
+                                .child("Files"),
+                        )
+                        .children(self.sftp_editors.iter().enumerate().map(|(idx, ed)| {
+                            let is_active = active_ed == Some(idx);
+                            div()
+                                .id(("sftp-editor-tab", idx))
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .bg(if is_active {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::SURFACE)
+                                })
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.active_sftp_editor_idx = Some(idx);
+                                    cx.notify();
+                                }))
+                                .child(ed.title())
+                        })),
+                )
+                .child(
+                    div()
+                        .id("sftp-toggle-transfer-drawer")
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(MacTheme::SURFACE_HOVER))
+                        .text_xs()
+                        .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.sftp_transfer_drawer_open = !app.sftp_transfer_drawer_open;
+                            cx.notify();
+                        }))
+                        .child(format!("Transfers ({jobs_count})")),
+                );
+            let _ = &mut bar;
+            root = root.child(bar);
+        }
+
+        // Main content: either active integrated editor or dual-pane browser (with narrow switcher)
+        let is_narrow = self.measured_workspace_width.is_some_and(|w| w < 760.0);
+        let main_area = if let Some(ed) = self
+            .active_sftp_editor_idx
+            .and_then(|idx| self.sftp_editors.get(idx))
+        {
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(self.render_sftp_editor_panel(ed, cx))
+        } else if is_narrow {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(28.0))
+                        .px_3()
+                        .border_b_1()
+                        .border_color(rgb(MacTheme::BORDER))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("sftp-narrow-left")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(if self.sftp_narrow_active_left {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::SURFACE)
+                                })
+                                .text_xs()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.sftp_narrow_active_left = true;
+                                    cx.notify();
+                                }))
+                                .child("Source Pane"),
+                        )
+                        .child(
+                            div()
+                                .id("sftp-narrow-right")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(if !self.sftp_narrow_active_left {
+                                    rgb(MacTheme::SURFACE_ACTIVE)
+                                } else {
+                                    rgb(MacTheme::SURFACE)
+                                })
+                                .text_xs()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.sftp_narrow_active_left = false;
+                                    cx.notify();
+                                }))
+                                .child("Target Pane"),
+                        ),
+                )
+                .child(self.render_sftp_pane(self.sftp_narrow_active_left, cx))
+        } else {
+            let left_weight = self.sftp_split_ratio.clamp(0.25, 0.75);
+            let right_weight = 1.0 - left_weight;
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(
+                    div()
+                        .flex_grow()
+                        .flex_basis(gpui::relative(left_weight))
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_sftp_pane(true, cx)),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .flex_basis(gpui::relative(right_weight))
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_sftp_pane(false, cx)),
+                )
+        };
+
+        root = root.child(main_area);
+
+        // Collapsible Transfer Drawer
+        if self.sftp_transfer_drawer_open {
+            let snapshots = self.sftp_transfer_manager.all_snapshots();
+            root = root.child(
+                div()
+                    .h(px(150.0))
+                    .border_t_1()
+                    .border_color(rgb(MacTheme::BORDER))
+                    .bg(rgb(MacTheme::SURFACE))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(28.0))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child(format!("Transfer Queue ({})", snapshots.len()))
+                            .child(
+                                div()
+                                    .id("sftp-close-drawer")
+                                    .cursor_pointer()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.sftp_transfer_drawer_open = false;
+                                        cx.notify();
+                                    }))
+                                    .child("Hide"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("sftp-transfer-drawer-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(snapshots.into_iter().enumerate().map(|(i, snap)| {
+                                let job_id = snap.intent.job_id;
+                                let status_text = format!(
+                                    "{} · {} -> {} · {:?} ({} B)",
+                                    snap.intent.route,
+                                    snap.intent.source_path.display(),
+                                    snap.intent.destination_path.display(),
+                                    snap.state,
+                                    snap.bytes_transferred
+                                );
+                                div()
+                                    .id(("sftp-drawer-row", i))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgb(MacTheme::CONTENT_BG))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .child(status_text)
+                                    .when(snap.state.is_active(), |row| {
+                                        row.child(
+                                            div()
+                                                .id(("sftp-drawer-cancel", i))
+                                                .cursor_pointer()
+                                                .text_color(rgb(MacTheme::DANGER))
+                                                .on_click(cx.listener(move |app, _, _, cx| {
+                                                    app.sftp_transfer_manager.cancel_job(job_id);
+                                                    cx.notify();
+                                                }))
+                                                .child("Cancel"),
+                                        )
+                                    })
+                            })),
+                    ),
+            );
+        }
 
         if let Some(ctx_menu) = &self.sftp_context_menu {
-            dual_pane = dual_pane.child(self.render_sftp_context_menu_overlay(ctx_menu, cx));
+            root = root.child(self.render_sftp_context_menu_overlay(ctx_menu, cx));
         }
 
         if let Some(modal) = &self.sftp_modal {
-            dual_pane = dual_pane.child(self.render_sftp_modal_overlay(modal, cx));
+            root = root.child(self.render_sftp_modal_overlay(modal, cx));
         }
 
-        dual_pane
+        root
     }
 
     fn render_sftp_pane(&self, is_left: bool, cx: &mut Context<Self>) -> gpui::Div {

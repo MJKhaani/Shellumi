@@ -4,7 +4,222 @@
 //! redaction of classified secrets (private keys, passwords, bearer tokens, API keys, MFA codes),
 //! and a frame-by-frame Asciicast playback state machine supporting variable speed playback and seeking.
 
+use crate::sync::EncryptedEnvelope;
+use crate::vault::VaultId;
+use crate::vault_cipher::VaultCipher;
+use crate::vault_key::VaultKey;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Lifecycle state of an active or finalizing session recording.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RecordingLifecycleState {
+    #[default]
+    Idle,
+    Recording,
+    Paused,
+    Finalizing,
+    Saved {
+        recording_id: String,
+    },
+    FailedRecoverable {
+        recording_id: String,
+        error: String,
+    },
+}
+
+/// Formats a `SystemTime` as an RFC-3339 UTC timestamp string (`YYYY-MM-DDTHH:MM:SSZ`).
+pub fn format_rfc3339_utc(time: SystemTime) -> String {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+
+    // Howard Hinnant's civil-from-days algorithm
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Encrypted crash-recovery checkpoint for an active or failed-to-commit recording.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecordingCheckpoint {
+    pub recording_id: String,
+    pub vault_id: String,
+    pub session_id: String,
+    pub pane_id: u64,
+    pub host_id: Option<i64>,
+    pub protocol: String,
+    pub title: String,
+    pub started_at: String,
+    pub duration_secs: f64,
+    pub event_count: usize,
+    pub byte_size: usize,
+    pub cast_data: String,
+    pub truncated: bool,
+}
+
+const MAX_RECOVERY_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Encrypted on-disk recovery journal for active and recoverable session recordings.
+/// Never writes plaintext cast data or secret material to disk.
+pub struct RecordingRecoveryJournal {
+    dir: PathBuf,
+}
+
+impl RecordingRecoveryJournal {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    fn checkpoint_path(&self, recording_id: &str) -> Result<PathBuf, String> {
+        let clean = recording_id.trim();
+        if clean.is_empty() || clean.contains('/') || clean.contains('\\') || clean.contains("..") {
+            return Err("Invalid recording ID for recovery checkpoint".to_string());
+        }
+        Ok(self.dir.join(format!("{clean}.rec.enc")))
+    }
+
+    pub fn save_checkpoint(
+        &self,
+        checkpoint: &RecordingCheckpoint,
+        vault_id: &VaultId,
+        vault_key: &VaultKey,
+    ) -> Result<PathBuf, String> {
+        if checkpoint.vault_id != vault_id.as_str() {
+            return Err("Vault ID mismatch when saving recovery checkpoint".to_string());
+        }
+        let plaintext = serde_json::to_vec(checkpoint)
+            .map_err(|e| format!("Failed to serialize recovery checkpoint: {e}"))?;
+        if plaintext.len() > MAX_RECOVERY_CHECKPOINT_BYTES {
+            return Err("Recovery checkpoint exceeds maximum allowed size".to_string());
+        }
+
+        let cipher = VaultCipher::new(vault_key, vault_id);
+        let entity_tag = format!("recording_recovery:{}", checkpoint.recording_id);
+        let envelope = cipher
+            .encrypt_record(&entity_tag, &plaintext)
+            .map_err(|e| format!("Failed to encrypt recovery checkpoint: {e}"))?;
+        let encoded = serde_json::to_vec(&envelope)
+            .map_err(|e| format!("Failed to encode encrypted envelope: {e}"))?;
+
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| format!("Failed to create recovery journal directory: {e}"))?;
+        let dest = self.checkpoint_path(&checkpoint.recording_id)?;
+        let tmp = self.dir.join(format!(
+            ".{}.{}.tmp",
+            checkpoint.recording_id,
+            std::process::id()
+        ));
+        write_restricted_atomic(&tmp, &dest, &encoded)?;
+        Ok(dest)
+    }
+
+    pub fn load_checkpoint(
+        &self,
+        recording_id: &str,
+        vault_id: &VaultId,
+        vault_key: &VaultKey,
+    ) -> Result<RecordingCheckpoint, String> {
+        let path = self.checkpoint_path(recording_id)?;
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("Failed to read recovery checkpoint: {e}"))?;
+        if bytes.len() > MAX_RECOVERY_CHECKPOINT_BYTES * 2 {
+            return Err("Encrypted recovery checkpoint exceeds size limit".to_string());
+        }
+        let envelope: EncryptedEnvelope = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("Corrupt recovery checkpoint envelope: {e}"))?;
+        let cipher = VaultCipher::new(vault_key, vault_id);
+        let entity_tag = format!("recording_recovery:{recording_id}");
+        let plaintext = cipher
+            .decrypt_record(&entity_tag, &envelope)
+            .map_err(|e| format!("Failed to decrypt recovery checkpoint: {e}"))?;
+        let checkpoint: RecordingCheckpoint = serde_json::from_slice(&plaintext)
+            .map_err(|e| format!("Corrupt recovery checkpoint payload: {e}"))?;
+        if checkpoint.vault_id != vault_id.as_str() {
+            return Err("Recovery checkpoint vault mismatch".to_string());
+        }
+        Ok(checkpoint)
+    }
+
+    pub fn list_checkpoint_ids(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if let Some(id) = name.strip_suffix(".rec.enc") {
+                    if !id.starts_with('.') {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    pub fn remove_checkpoint(&self, recording_id: &str) -> Result<(), String> {
+        let path = self.checkpoint_path(recording_id)?;
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove recovery checkpoint: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn write_restricted_atomic(tmp: &Path, dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(tmp)
+            .map_err(|e| format!("Failed to open temp checkpoint: {e}"))?;
+        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| {
+            let _ = std::fs::remove_file(tmp);
+            format!("Failed to write temp checkpoint: {e}")
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(tmp)
+            .map_err(|e| format!("Failed to open temp checkpoint: {e}"))?;
+        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| {
+            let _ = std::fs::remove_file(tmp);
+            format!("Failed to write temp checkpoint: {e}")
+        })?;
+    }
+    std::fs::rename(tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(tmp);
+        format!("Failed to commit recovery checkpoint: {e}")
+    })?;
+    Ok(())
+}
 
 /// Metadata describing a recorded terminal session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -369,52 +584,103 @@ impl SessionRedactor {
 
     /// Redacts all events in an Asciicast v2 formatted string while preserving
     /// JSON syntax, time offsets, and window resize operations.
+    /// Also scans across adjacent `"o"` or `"i"` event boundaries so secrets
+    /// split across chunks are redacted.
     pub fn redact_asciicast_v2(cast_data: &str) -> Result<String, String> {
         let mut lines = cast_data.lines();
         let header_line = lines.next().ok_or_else(|| "Empty cast data".to_string())?;
 
-        // Verify header is valid JSON
-        let _header_val: serde_json::Value = serde_json::from_str(header_line)
+        let header_val: serde_json::Value = serde_json::from_str(header_line)
             .map_err(|e| format!("Invalid asciicast header: {e}"))?;
+        if header_val.get("version").and_then(|v| v.as_u64()) != Some(2) {
+            return Err("Unsupported or missing asciicast v2 version".to_string());
+        }
 
-        let mut output = String::with_capacity(cast_data.len());
-        output.push_str(header_line);
-        output.push('\n');
-
+        let mut parsed_events: Vec<(serde_json::Value, String, String)> = Vec::new();
         for (idx, line) in lines.enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-
             let val: serde_json::Value = serde_json::from_str(trimmed)
                 .map_err(|e| format!("Invalid cast event on line {}: {e}", idx + 2))?;
-
-            if let Some(arr) = val.as_array() {
-                if arr.len() >= 3 {
-                    let time = arr[0].clone();
-                    let ev_type = arr[1].as_str().unwrap_or("o");
-                    let data = arr[2].as_str().unwrap_or("");
-
-                    let redacted_data = if ev_type == "o" || ev_type == "i" {
-                        Self::redact_text(data)
-                    } else {
-                        data.to_string()
-                    };
-
-                    let sanitized_event = serde_json::json!([time, ev_type, redacted_data]);
-                    let event_line = serde_json::to_string(&sanitized_event)
-                        .map_err(|e| format!("Failed to serialize event: {e}"))?;
-                    output.push_str(&event_line);
-                    output.push('\n');
-                } else {
-                    output.push_str(trimmed);
-                    output.push('\n');
-                }
-            } else {
-                output.push_str(trimmed);
-                output.push('\n');
+            let arr = val
+                .as_array()
+                .ok_or_else(|| format!("Cast event on line {} is not an array", idx + 2))?;
+            if arr.len() < 3 {
+                return Err(format!(
+                    "Cast event on line {} has fewer than 3 items",
+                    idx + 2
+                ));
             }
+            let time = arr[0].clone();
+            let ev_type = arr[1]
+                .as_str()
+                .ok_or_else(|| format!("Cast event type on line {} is not a string", idx + 2))?
+                .to_string();
+            let data = arr[2]
+                .as_str()
+                .ok_or_else(|| format!("Cast event data on line {} is not a string", idx + 2))?
+                .to_string();
+            parsed_events.push((time, ev_type, data));
+        }
+
+        // Chunk-aware redaction across consecutive same-stream ("o" or "i") events:
+        // Coalesce contiguous same-type text runs, redact the joined run, and redistribute
+        // or emit on the first event of the run with empty strings on subsequent merged chunks
+        // only when a secret actually spanned a boundary; otherwise preserve per-chunk boundaries.
+        let mut i = 0;
+        while i < parsed_events.len() {
+            let stream = parsed_events[i].1.clone();
+            if stream != "o" && stream != "i" {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < parsed_events.len() && parsed_events[j].1 == stream {
+                j += 1;
+            }
+            if j - i == 1 {
+                parsed_events[i].2 = Self::redact_text(&parsed_events[i].2);
+            } else {
+                let mut combined = String::new();
+                let mut offsets = Vec::with_capacity(j - i);
+                for ev in &parsed_events[i..j] {
+                    let start = combined.len();
+                    combined.push_str(&ev.2);
+                    offsets.push((start, combined.len()));
+                }
+                let redacted_combined = Self::redact_text(&combined);
+                // Check if per-chunk redaction matches combined redaction
+                let per_chunk: String = parsed_events[i..j]
+                    .iter()
+                    .map(|ev| Self::redact_text(&ev.2))
+                    .collect();
+                if per_chunk == redacted_combined {
+                    for ev in &mut parsed_events[i..j] {
+                        ev.2 = Self::redact_text(&ev.2);
+                    }
+                } else {
+                    // A secret spanned a chunk boundary: store redacted combined in first chunk
+                    // and clear continuation chunks to avoid leaking half of the secret.
+                    parsed_events[i].2 = redacted_combined;
+                    for ev in &mut parsed_events[(i + 1)..j] {
+                        ev.2.clear();
+                    }
+                }
+            }
+            i = j;
+        }
+
+        let mut output = String::with_capacity(cast_data.len());
+        output.push_str(header_line);
+        output.push('\n');
+        for (time, ev_type, data) in parsed_events {
+            let sanitized_event = serde_json::json!([time, ev_type, data]);
+            let event_line = serde_json::to_string(&sanitized_event)
+                .map_err(|e| format!("Failed to serialize event: {e}"))?;
+            output.push_str(&event_line);
+            output.push('\n');
         }
 
         Ok(output)
@@ -799,5 +1065,65 @@ mod tests {
         let end_frames = engine.advance(2.0);
         assert_eq!(end_frames.len(), 2);
         assert_eq!(engine.status(), PlaybackStatus::Completed);
+    }
+
+    #[test]
+    fn redacts_secrets_split_across_asciicast_chunks() {
+        let split_cast = "{\"version\":2,\"width\":80,\"height\":24}\n[0.1, \"o\", \"token=ghp_\"]\n[0.2, \"o\", \"1234567890abcdef1234567890abcdef1234\\r\\n\"]\n";
+        let redacted = SessionRedactor::redact_asciicast_v2(split_cast).expect("should redact");
+        assert!(!redacted.contains("ghp_1234567890abcdef"));
+        assert!(
+            redacted.contains("[REDACTED_GIT_TOKEN]") || redacted.contains("[REDACTED_SECRET]")
+        );
+    }
+
+    #[test]
+    fn encrypted_recovery_journal_roundtrips_and_rejects_wrong_key_or_tamper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = RecordingRecoveryJournal::new(tmp.path());
+        let vault_id = VaultId::new("vault-a").unwrap();
+        let other_vault = VaultId::new("vault-b").unwrap();
+        let key = VaultKey::from_bytes([0x42; 32]);
+        let wrong_key = VaultKey::from_bytes([0x99; 32]);
+
+        let cp = RecordingCheckpoint {
+            recording_id: "11111111-2222-4333-8444-555555555555".into(),
+            vault_id: vault_id.as_str().to_string(),
+            session_id: "sess-1".into(),
+            pane_id: 7,
+            host_id: Some(42),
+            protocol: "ssh".into(),
+            title: "prod".into(),
+            started_at: format_rfc3339_utc(SystemTime::now()),
+            duration_secs: 1.5,
+            event_count: 2,
+            byte_size: 48,
+            cast_data: "{\"version\":2,\"width\":80,\"height\":24}\n[0.1,\"o\",\"ok\"]\n".into(),
+            truncated: false,
+        };
+
+        let path = journal.save_checkpoint(&cp, &vault_id, &key).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("prod"));
+        assert!(!on_disk.contains("ok"));
+
+        let loaded = journal
+            .load_checkpoint(&cp.recording_id, &vault_id, &key)
+            .unwrap();
+        assert_eq!(loaded, cp);
+
+        // Wrong key and wrong vault must fail closed
+        assert!(journal
+            .load_checkpoint(&cp.recording_id, &vault_id, &wrong_key)
+            .is_err());
+        assert!(journal
+            .load_checkpoint(&cp.recording_id, &other_vault, &key)
+            .is_err());
+
+        // Corrupt journal must fail closed
+        std::fs::write(&path, b"{corrupt").unwrap();
+        assert!(journal
+            .load_checkpoint(&cp.recording_id, &vault_id, &key)
+            .is_err());
     }
 }

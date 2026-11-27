@@ -57,6 +57,27 @@ impl Shellumi {
                     .flex()
                     .flex_col()
                     .gap_0p5()
+                    .when(has_item && !is_dir, |this| {
+                        this.child(
+                            div()
+                                .id("sftp-ctx-edit")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener({
+                                    let entry_path = entry_path.clone();
+                                    move |app, _, _, cx| {
+                                        app.sftp_close_context_menu(cx);
+                                        app.sftp_open_in_editor(is_left, entry_path.clone(), cx);
+                                    }
+                                }))
+                                .child("Edit in Editor"),
+                        )
+                    })
                     .when(has_item, |this| {
                         this.child(
                             div()
@@ -158,6 +179,21 @@ impl Shellumi {
                     )
                     .child(
                         div()
+                            .id("sftp-ctx-new-file")
+                            .px_3()
+                            .py_1p5()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.sftp_open_new_file_modal(is_left, cx);
+                            }))
+                            .child("New File"),
+                    )
+                    .child(
+                        div()
                             .id("sftp-ctx-new-folder")
                             .px_3()
                             .py_1p5()
@@ -173,6 +209,30 @@ impl Shellumi {
                     )
                     .when(has_item, |this| {
                         this.child(
+                            div()
+                                .id("sftp-ctx-properties")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                .hover(|s| s.bg(rgb(MacTheme::SURFACE_HOVER)))
+                                .cursor_pointer()
+                                .on_click(cx.listener({
+                                    let entry_name = entry_name.clone();
+                                    let entry_path = entry_path.clone();
+                                    move |app, _, _, cx| {
+                                        app.sftp_open_properties_modal(
+                                            is_left,
+                                            entry_name.clone(),
+                                            entry_path.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }))
+                                .child("Properties & SHA-256"),
+                        )
+                        .child(
                             div()
                                 .id("sftp-ctx-permissions")
                                 .px_3()
@@ -317,6 +377,60 @@ impl Shellumi {
                             .child(input.clone()),
                     ),
                 "Create Folder",
+                false,
+            ),
+            SftpModalAction::NewFile { input } => (
+                "New File".to_string(),
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child("File name:"),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .rounded_lg()
+                            .bg(rgb(MacTheme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .px_3()
+                            .py_1p5()
+                            .child(input.clone()),
+                    ),
+                "Create File",
+                false,
+            ),
+            SftpModalAction::Properties {
+                entry_name,
+                entry_path,
+                size,
+                permissions,
+                sha256,
+            } => (
+                format!("Properties: {entry_name}"),
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .child(format!("Path: {entry_path}"))
+                    .child(format!(
+                        "Size: {} ({size} bytes)",
+                        shellumi_core::format_bytes(*size)
+                    ))
+                    .child(format!("Permissions: {permissions}"))
+                    .when_some(sha256.clone(), |d, hash| {
+                        d.child(format!("SHA-256: {hash}"))
+                    }),
+                "Close",
                 false,
             ),
             SftpModalAction::EditPermissions {

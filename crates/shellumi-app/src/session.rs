@@ -16,14 +16,14 @@ enum SessionCommand {
 }
 
 pub struct Session {
-    commands: mpsc::Sender<SessionCommand>,
+    commands: mpsc::SyncSender<SessionCommand>,
     pub events: async_channel::Receiver<SessionEvent>,
 }
 
 impl Session {
     pub fn start(command: TerminalCommand) -> Self {
-        let (commands, incoming) = mpsc::channel();
-        let (outgoing, events) = async_channel::bounded(32);
+        let (commands, incoming) = mpsc::sync_channel(256);
+        let (outgoing, events) = async_channel::bounded(64);
         thread::spawn(move || {
             let mut pty = match PtySession::spawn(&command, 24, 80) {
                 Ok(pty) => pty,
@@ -81,21 +81,27 @@ impl Session {
 
     pub fn input(&self, bytes: Vec<u8>) -> Result<(), &'static str> {
         self.commands
-            .send(SessionCommand::Input(bytes))
-            .map_err(|_| "Session is closed.")
+            .try_send(SessionCommand::Input(bytes))
+            .map_err(|e| match e {
+                mpsc::TrySendError::Full(_) => "Session input queue full (backpressure).",
+                mpsc::TrySendError::Disconnected(_) => "Session is closed.",
+            })
     }
 
     #[allow(dead_code)]
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), &'static str> {
         self.commands
-            .send(SessionCommand::Resize(rows, cols))
-            .map_err(|_| "Session is closed.")
+            .try_send(SessionCommand::Resize(rows, cols))
+            .map_err(|e| match e {
+                mpsc::TrySendError::Full(_) => "Session resize queue full (backpressure).",
+                mpsc::TrySendError::Disconnected(_) => "Session is closed.",
+            })
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.commands.send(SessionCommand::Close);
+        let _ = self.commands.try_send(SessionCommand::Close);
     }
 }
 

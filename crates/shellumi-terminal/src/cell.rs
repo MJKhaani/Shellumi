@@ -1,6 +1,7 @@
 //! Terminal character cell representation.
 
 use crate::color::Color;
+use std::collections::HashMap;
 
 /// Text rendering attributes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,6 +15,15 @@ pub struct CellAttributes {
     pub strikethrough: bool,
 }
 
+/// Structural flags for wide characters and continuation cells.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CellFlags {
+    /// Leading cell of a 2-column wide character (CJK / emoji).
+    pub wide: bool,
+    /// Trailing continuation spacer cell of a 2-column wide character.
+    pub wide_spacer: bool,
+}
+
 /// A single character cell on the terminal grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
@@ -21,6 +31,8 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttributes,
+    pub flags: CellFlags,
+    pub hyperlink_id: u32,
 }
 
 impl Default for Cell {
@@ -30,13 +42,32 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             attrs: CellAttributes::default(),
+            flags: CellFlags::default(),
+            hyperlink_id: 0,
         }
     }
 }
 
 impl Cell {
     pub fn new(c: char, fg: Color, bg: Color, attrs: CellAttributes) -> Self {
-        Self { c, fg, bg, attrs }
+        Self {
+            c,
+            fg,
+            bg,
+            attrs,
+            flags: CellFlags::default(),
+            hyperlink_id: 0,
+        }
+    }
+
+    pub fn with_flags(mut self, flags: CellFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn with_hyperlink(mut self, hyperlink_id: u32) -> Self {
+        self.hyperlink_id = hyperlink_id;
+        self
     }
 
     pub fn reset(&mut self) {
@@ -56,8 +87,18 @@ pub struct StyledSpan {
 /// Converts a slice of cells into minimal contiguous styled spans,
 /// trimming unstyled trailing spaces.
 pub fn cells_to_spans(cells: &[Cell]) -> Vec<StyledSpan> {
+    cells_to_spans_with_combining(cells, None)
+}
+
+/// Converts a slice of cells and optional per-column combining marks into
+/// minimal contiguous styled spans, skipping wide-char continuation spacers
+/// and masking hidden text.
+pub fn cells_to_spans_with_combining(
+    cells: &[Cell],
+    combining: Option<&HashMap<usize, String>>,
+) -> Vec<StyledSpan> {
     let last_content_idx = cells.iter().rposition(|c| {
-        c.c != ' '
+        (!c.flags.wide_spacer && c.c != ' ')
             || c.bg != Color::Default
             || c.attrs.underline
             || c.attrs.strikethrough
@@ -72,23 +113,40 @@ pub fn cells_to_spans(cells: &[Cell]) -> Vec<StyledSpan> {
     let mut spans = Vec::new();
     let mut current_span: Option<StyledSpan> = None;
 
-    for cell in relevant_cells {
+    for (col_idx, cell) in relevant_cells.iter().enumerate() {
+        if cell.flags.wide_spacer {
+            continue;
+        }
+
         let (fg, bg) = if cell.attrs.inverse {
             (cell.bg, cell.fg)
         } else {
             (cell.fg, cell.bg)
         };
 
+        // Never display hidden text through normal visual rendering.
+        let ch = if cell.attrs.hidden { ' ' } else { cell.c };
+
         if let Some(ref mut span) = current_span {
             if span.fg == fg && span.bg == bg && span.attrs == cell.attrs {
-                span.text.push(cell.c);
+                span.text.push(ch);
+                if !cell.attrs.hidden {
+                    if let Some(comb) = combining.and_then(|m| m.get(&col_idx)) {
+                        span.text.push_str(comb);
+                    }
+                }
                 continue;
             }
             spans.push(current_span.take().unwrap());
         }
 
         let mut text = String::new();
-        text.push(cell.c);
+        text.push(ch);
+        if !cell.attrs.hidden {
+            if let Some(comb) = combining.and_then(|m| m.get(&col_idx)) {
+                text.push_str(comb);
+            }
+        }
         current_span = Some(StyledSpan {
             text,
             fg,
@@ -167,8 +225,8 @@ mod tests {
     fn inverts_colors_when_inverse_attribute_is_set() {
         let cells = vec![Cell::new(
             'X',
+            Color::Named(NamedColor::White),
             Color::Named(NamedColor::Blue),
-            Color::Named(NamedColor::Yellow),
             CellAttributes {
                 inverse: true,
                 ..Default::default()
@@ -176,7 +234,35 @@ mod tests {
         )];
         let spans = cells_to_spans(&cells);
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].fg, Color::Named(NamedColor::Yellow));
-        assert_eq!(spans[0].bg, Color::Named(NamedColor::Blue));
+        assert_eq!(spans[0].fg, Color::Named(NamedColor::Blue));
+        assert_eq!(spans[0].bg, Color::Named(NamedColor::White));
+    }
+
+    #[test]
+    fn masks_hidden_cells_and_attaches_combining_marks() {
+        let cells = vec![
+            Cell::new(
+                'e',
+                Color::Default,
+                Color::Default,
+                CellAttributes::default(),
+            ),
+            Cell::new(
+                'S',
+                Color::Default,
+                Color::Default,
+                CellAttributes {
+                    hidden: true,
+                    ..Default::default()
+                },
+            ),
+        ];
+        let mut combining = HashMap::new();
+        combining.insert(0, "\u{0301}".to_string());
+        combining.insert(1, "\u{0301}".to_string());
+        let spans = cells_to_spans_with_combining(&cells, Some(&combining));
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "e\u{0301}");
+        assert_eq!(spans[1].text, " ");
     }
 }

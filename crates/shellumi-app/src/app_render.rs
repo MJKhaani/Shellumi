@@ -1230,9 +1230,53 @@ impl Render for Shellumi {
                             )
                             .child(
                                 div()
+                                    .id(("case-search", pane_id))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(if pane.search_case_sensitive {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    })
                                     .text_xs()
-                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                                    .child(match_label),
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.toggle_search_case_sensitive(pane_id, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child("Aa"),
+                            )
+                            .child(
+                                div()
+                                    .id(("regex-search", pane_id))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(if pane.search_regex {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    })
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.toggle_search_regex(pane_id, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(".*"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if pane.search_error.is_some() {
+                                        rgb(MacTheme::DANGER)
+                                    } else {
+                                        rgb(MacTheme::TEXT_TERTIARY)
+                                    })
+                                    .child(pane.search_error.clone().unwrap_or(match_label)),
                             );
                         pane_el = pane_el.child(search_bar);
                     }
@@ -1248,11 +1292,15 @@ impl Render for Shellumi {
                         );
                     }
 
-                    // Terminal screen rendering with search highlights
+                    // Terminal screen rendering with viewport virtualization & search highlights
                     let font_size = self.desktop.preferences.terminal_font_size as f32;
                     let line_height = font_size * 1.5;
+                    let is_bell_flashing = pane
+                        .bell_flash_until
+                        .is_some_and(|until| until > std::time::Instant::now());
                     let mut screen = div()
                         .id(("terminal-screen", pane_id))
+                        .track_focus(&pane.focus_handle)
                         .line_height(px(line_height))
                         .track_scroll(&pane.scroll)
                         .text_size(px(self.desktop.preferences.terminal_font_size as f32))
@@ -1261,50 +1309,137 @@ impl Render for Shellumi {
                         .flex_1()
                         .overflow_y_scroll()
                         .font_family(MONOSPACE_FONT)
-                        .bg(rgb(MacTheme::TERMINAL_BG))
+                        .bg(if is_bell_flashing {
+                            rgb(0x282038)
+                        } else {
+                            rgb(MacTheme::TERMINAL_BG)
+                        })
                         .p_3()
                         .flex()
-                        .flex_col();
+                        .flex_col()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |app, event: &gpui::MouseDownEvent, window, cx| {
+                                if let Some(tab) =
+                                    app.active_tab_idx.and_then(|i| app.tabs.get_mut(i))
+                                {
+                                    if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane_id)
+                                    {
+                                        p.has_unread_bell = false;
+                                        window.focus(&p.focus_handle);
+                                        let modes = *p.terminal.modes();
+                                        let cell_w = (font_size * 0.6).max(4.0);
+                                        let col_1 = ((f32::from(event.position.x) / cell_w).floor()
+                                            as usize)
+                                            + 1;
+                                        let row_1 = ((f32::from(event.position.y) / line_height)
+                                            .floor()
+                                            as usize)
+                                            + 1;
+                                        if let Some(bytes) = encode_mouse_event(
+                                            0,
+                                            row_1,
+                                            col_1,
+                                            true,
+                                            false,
+                                            &event.modifiers,
+                                            &modes,
+                                        ) {
+                                            if let Some(sess) = &p.session {
+                                                let _ = sess.input(bytes);
+                                            }
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            }),
+                        );
 
                     let scrollback_len = pane.terminal.scrollback_count();
-                    let start_scrollback =
-                        scrollback_len.saturating_sub(self.desktop.preferences.scrollback_lines);
+                    let screen_rows = grid.rows();
+                    let total_rows = scrollback_len + screen_rows;
+                    let scroll_offset_y = f32::from(pane.scroll.offset().y).min(0.0).abs();
+                    let viewport_h = f32::from(pane.scroll.bounds().size.height)
+                        .max(line_height * screen_rows as f32);
+                    let overscan = 4usize;
+                    let first_visible = ((scroll_offset_y / line_height).floor() as usize)
+                        .saturating_sub(overscan)
+                        .min(total_rows);
+                    let visible_count = (viewport_h / line_height).ceil() as usize + overscan * 2;
+                    let last_visible = (first_visible + visible_count).min(total_rows);
 
-                    for i in start_scrollback..scrollback_len {
-                        let mut highlight_ranges = Vec::new();
-                        if !pane.search_query.is_empty() {
-                            for m in &pane.search_matches {
-                                if m.buffer == SearchBuffer::Scrollback(i) {
-                                    highlight_ranges.push(m.col_start..m.col_end);
+                    if first_visible > 0 {
+                        screen = screen.child(
+                            div()
+                                .h(px(first_visible as f32 * line_height))
+                                .flex_shrink_0(),
+                        );
+                    }
+
+                    for abs_row in first_visible..last_visible {
+                        if abs_row < scrollback_len {
+                            let i = abs_row;
+                            let mut highlight_ranges = Vec::new();
+                            if !pane.search_query.is_empty() {
+                                for m in &pane.search_matches {
+                                    if m.buffer == SearchBuffer::Scrollback(i) {
+                                        highlight_ranges.push(m.col_start..m.col_end);
+                                    }
                                 }
                             }
-                        }
-                        if let Some(spans) = if highlight_ranges.is_empty() {
-                            pane.terminal.scrollback_row_spans(i)
+                            if let Some(spans) = if highlight_ranges.is_empty() {
+                                pane.terminal.scrollback_row_spans(i)
+                            } else {
+                                pane.terminal
+                                    .scrollback_row_spans_highlighted(i, &highlight_ranges)
+                            } {
+                                screen = screen.child(render_terminal_spans(spans, line_height));
+                            }
                         } else {
-                            pane.terminal
-                                .scrollback_row_spans_highlighted(i, &highlight_ranges)
-                        } {
-                            screen = screen.child(render_terminal_spans(spans, line_height));
+                            let r = abs_row - scrollback_len;
+                            let mut highlight_ranges = Vec::new();
+                            if !pane.search_query.is_empty() {
+                                for m in &pane.search_matches {
+                                    if m.buffer == SearchBuffer::Screen(r) {
+                                        highlight_ranges.push(m.col_start..m.col_end);
+                                    }
+                                }
+                            }
+                            if let Some(spans) = if highlight_ranges.is_empty() {
+                                pane.terminal.row_spans(r)
+                            } else {
+                                pane.terminal.row_spans_highlighted(r, &highlight_ranges)
+                            } {
+                                let mut row_el = render_terminal_spans(spans, line_height);
+                                if grid.cursor().visible && grid.cursor().row == r {
+                                    let cursor_indicator = match pane.terminal.modes().cursor_shape
+                                    {
+                                        shellumi_terminal::CursorShape::Block => div()
+                                            .w(px(font_size * 0.55))
+                                            .h(px(line_height))
+                                            .bg(rgba(0x38bdf866)),
+                                        shellumi_terminal::CursorShape::Underline => div()
+                                            .w(px(font_size * 0.55))
+                                            .h(px(2.0))
+                                            .mt(px(line_height - 2.0))
+                                            .bg(rgb(0x38bdf8)),
+                                        shellumi_terminal::CursorShape::Beam => {
+                                            div().w(px(2.0)).h(px(line_height)).bg(rgb(0x38bdf8))
+                                        }
+                                    };
+                                    row_el = row_el.child(cursor_indicator);
+                                }
+                                screen = screen.child(row_el);
+                            }
                         }
                     }
 
-                    for r in 0..grid.rows() {
-                        let mut highlight_ranges = Vec::new();
-                        if !pane.search_query.is_empty() {
-                            for m in &pane.search_matches {
-                                if m.buffer == SearchBuffer::Screen(r) {
-                                    highlight_ranges.push(m.col_start..m.col_end);
-                                }
-                            }
-                        }
-                        if let Some(spans) = if highlight_ranges.is_empty() {
-                            pane.terminal.row_spans(r)
-                        } else {
-                            pane.terminal.row_spans_highlighted(r, &highlight_ranges)
-                        } {
-                            screen = screen.child(render_terminal_spans(spans, line_height));
-                        }
+                    if last_visible < total_rows {
+                        screen = screen.child(
+                            div()
+                                .h(px((total_rows - last_visible) as f32 * line_height))
+                                .flex_shrink_0(),
+                        );
                     }
 
                     let view = cx.entity().downgrade();

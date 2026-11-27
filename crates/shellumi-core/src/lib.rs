@@ -53,9 +53,9 @@ pub use vault_manifest::{VaultManifest, MANIFEST_FORMAT_VERSION};
 pub use vault_policy::{CrossVaultAction, CrossVaultError, CrossVaultTransferPolicy};
 
 pub use autocomplete::{
-    generate_bash_hook, generate_fish_hook, generate_zsh_hook, AutocompleteContext,
-    AutocompleteEngine, CompletionItem, CompletionKind, PasswordPromptDetector, PasswordPromptKind,
-    PasswordPromptMatch,
+    generate_bash_hook, generate_fish_hook, generate_powershell_hook, generate_zsh_hook,
+    AutocompleteContext, AutocompleteEngine, CompletionItem, CompletionKind,
+    PasswordPromptDetector, PasswordPromptKind, PasswordPromptMatch,
 };
 pub use batch::{
     BatchExecutionPlan, BatchExecutionSummary, BatchHostResult, BatchHostStatus, BatchHostTarget,
@@ -137,7 +137,8 @@ pub fn discover_serial_ports() -> Vec<String> {
     SerialConfig::discover_serial_ports()
 }
 pub use recording::{
-    format_duration_hms, CastPlaybackEngine, PlaybackFrame, PlaybackSpeed, PlaybackStatus,
+    format_duration_hms, format_rfc3339_utc, CastPlaybackEngine, PlaybackFrame, PlaybackSpeed,
+    PlaybackStatus, RecordingCheckpoint, RecordingLifecycleState, RecordingRecoveryJournal,
     SessionRecordingMetadata, SessionRecordingSummary, SessionRedactor,
 };
 pub use setup::{
@@ -146,18 +147,37 @@ pub use setup::{
     SETUP_STATE_TMP_FILE,
 };
 pub use sftp::{
-    format_bytes, list_local_directory, ConflictResolution, FileAttributes, FileEntry, FileKind,
-    NameEntry, OpenFlags, PathUtils, RemoteEditorWorkspace, RemoteTrackedFile, SftpClient,
-    SftpConnectOptions, SftpError, SftpPacket, SftpProtocolError, StatusCode, TransferControl,
-    TransferDirection, TransferQueue, TransferQueueSummary, TransferStatus, TransferTask,
-    SSH_FILEXFER_ATTR_ACMODTIME, SSH_FILEXFER_ATTR_EXTENDED, SSH_FILEXFER_ATTR_PERMISSIONS,
-    SSH_FILEXFER_ATTR_SIZE, SSH_FILEXFER_ATTR_UIDGID, SSH_FXF_APPEND, SSH_FXF_CREAT, SSH_FXF_EXCL,
-    SSH_FXF_READ, SSH_FXF_TRUNC, SSH_FXF_WRITE, SSH_FXP_ATTRS, SSH_FXP_CLOSE, SSH_FXP_DATA,
-    SSH_FXP_EXTENDED, SSH_FXP_EXTENDED_REPLY, SSH_FXP_FSETSTAT, SSH_FXP_FSTAT, SSH_FXP_HANDLE,
-    SSH_FXP_INIT, SSH_FXP_LSTAT, SSH_FXP_MKDIR, SSH_FXP_NAME, SSH_FXP_OPEN, SSH_FXP_OPENDIR,
-    SSH_FXP_READ, SSH_FXP_READDIR, SSH_FXP_READLINK, SSH_FXP_REALPATH, SSH_FXP_REMOVE,
-    SSH_FXP_RENAME, SSH_FXP_RMDIR, SSH_FXP_SETSTAT, SSH_FXP_STAT, SSH_FXP_STATUS, SSH_FXP_SYMLINK,
-    SSH_FXP_VERSION, SSH_FXP_WRITE,
+    classify_listing_name, classify_ssh_error, compare_directory_entries, compute_local_sha256,
+    compute_remote_sha256, delete_local_recursive, detect_language, escape_bytes_for_display,
+    format_bytes, format_document, highlight_line, is_allowed_ssh_option, is_protected_local_root,
+    list_local_directory, local_breadcrumbs, local_disk_capacity, local_home_dir, local_join_child,
+    local_parent, merge_connect_options, plan_local_tree, plan_multi_rename, plan_one_way_sync,
+    relay_remote_to_remote, search_local_recursive, staged_local_copy_file,
+    validate_destination_name, validate_new_entry_name, validate_non_overlapping_local_copy,
+    validate_non_overlapping_same_endpoint_remote, AttemptId, BatchId, CanonicalDestKey,
+    ConflictAction, ConflictContext, ConflictDecision, ConflictPolicy, ConflictResolution,
+    DestinationReservationRegistry, DiffEntryStatus, DirectoryDiffRow, DiskCapacity, EditorBuffer,
+    EditorId, EditorLanguage, EditorSessionMeta, EndpointId, EndpointKind, EndpointPath, EntryId,
+    FileAttributes, FileEntry, FileKind, FormatOutcome, JobId, LineEnding, ListingLimits,
+    ListingNameKind, LocalTreePlan, MultiRenameItem, NameEntry, OpenFlags, OperationId, PaneId,
+    PathSemantics, PathUtils, PathValidationError, PersistentSftpSession, PlanLimits,
+    PlannedTransferItem, RemoteEditorWorkspace, RemoteEndpoint, RemotePath, RemoteStatVfs,
+    RemoteTrackedFile, ReservationGuard, SearchMatch, ServerCapabilities,
+    ServerLimits as SftpServerLimits, SftpClient, SftpConnectOptions, SftpConnectionManager,
+    SftpConnectionState, SftpError, SftpErrorKind, SftpPacket, SftpProtocolError, StatusCode,
+    SymlinkPolicy, SyncActionKind, SyncPlanItem, SyntaxSpan, SyntaxTokenKind, TransferControl,
+    TransferDirection, TransferIntent, TransferJobSnapshot, TransferJobState, TransferQueue,
+    TransferQueueSummary, TransferRoute, TransferStatus, TransferTask, TransferTuning,
+    UnifiedTransferManager, ValidatedChildName, VaultScope, WorkspaceTabId,
+    DEFAULT_EDITABLE_LIMIT_BYTES, DEFAULT_PREVIEW_LIMIT_BYTES, SSH_FILEXFER_ATTR_ACMODTIME,
+    SSH_FILEXFER_ATTR_EXTENDED, SSH_FILEXFER_ATTR_PERMISSIONS, SSH_FILEXFER_ATTR_SIZE,
+    SSH_FILEXFER_ATTR_UIDGID, SSH_FXF_APPEND, SSH_FXF_CREAT, SSH_FXF_EXCL, SSH_FXF_READ,
+    SSH_FXF_TRUNC, SSH_FXF_WRITE, SSH_FXP_ATTRS, SSH_FXP_CLOSE, SSH_FXP_DATA, SSH_FXP_EXTENDED,
+    SSH_FXP_EXTENDED_REPLY, SSH_FXP_FSETSTAT, SSH_FXP_FSTAT, SSH_FXP_HANDLE, SSH_FXP_INIT,
+    SSH_FXP_LSTAT, SSH_FXP_MKDIR, SSH_FXP_NAME, SSH_FXP_OPEN, SSH_FXP_OPENDIR, SSH_FXP_READ,
+    SSH_FXP_READDIR, SSH_FXP_READLINK, SSH_FXP_REALPATH, SSH_FXP_REMOVE, SSH_FXP_RENAME,
+    SSH_FXP_RMDIR, SSH_FXP_SETSTAT, SSH_FXP_STAT, SSH_FXP_STATUS, SSH_FXP_SYMLINK, SSH_FXP_VERSION,
+    SSH_FXP_WRITE,
 };
 pub use snippet::{
     export_snippets_json, extract_variables, parse_snippets_json, render_command, render_preview,
