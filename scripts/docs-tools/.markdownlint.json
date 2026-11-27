@@ -11,7 +11,7 @@
   "MD031": false,
   "MD032": false,
   "MD033": {
-    "allowed_elements": ["img", "a", "table", "thead", "tbody", "tr", "th", "td", "br", "details", "summary", "sub", "sup", "kbd", "p", "div", "h1", "h2", "h3", "span", "code"]
+    "allowed_elements": ["img", "a", "table", "thead", "tbody", "tr", "th", "td", "br", "details", "summary", "sub", "sup", "kbd", "p", "div", "h1", "h2", "h3", "span", "code", "strong", "b", "em", "i"]
   },
   "MD036": false,
   "MD041": false
