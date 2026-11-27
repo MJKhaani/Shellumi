@@ -125,6 +125,17 @@ pub enum RemoteInput {
     ReleaseAll,
 }
 
+/// Epoch-tagged input envelope ensuring every input command is bound to an immutable
+/// session tab, connection generation, transport epoch, and monotonic sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputEnvelope {
+    pub tab_id: u64,
+    pub connection_generation: u64,
+    pub transport_epoch: u64,
+    pub seq: u64,
+    pub input: RemoteInput,
+}
+
 /// Bitmask constants for mouse buttons (compatible with RFB 3.8 pointer events).
 pub mod pointer_mask {
     pub const BUTTON_LEFT: u8 = 1 << 0;

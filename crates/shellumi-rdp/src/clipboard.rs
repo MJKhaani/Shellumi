@@ -32,12 +32,17 @@ static STAGING_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 static TRANSFER_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Create a private per-session/transfer staging directory with 0700 permissions on Unix.
+/// Uses randomized suffix to prevent predictable path collisions; never falls back to a shared directory.
 pub fn create_private_staging_dir() -> std::io::Result<PathBuf> {
     let seq = STAGING_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("shellumi-rdp-{pid}-{seq}"));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("shellumi-rdp-{pid}-{seq}-{nanos:x}"));
     let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
+    builder.recursive(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

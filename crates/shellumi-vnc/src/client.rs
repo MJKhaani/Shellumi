@@ -7,8 +7,8 @@ use crate::rectangles::{
     ENCODING_DESKTOP_SIZE, ENCODING_HEXTILE, ENCODING_RAW, ENCODING_TIGHT, ENCODING_ZRLE,
 };
 use crate::wire::{
-    build_client_cut_text, build_framebuffer_update_request, build_key_event, build_pointer_event,
-    build_set_encodings, build_set_pixel_format, server_msg, PixelFormat, RectangleHeader,
+    build_framebuffer_update_request, build_key_event, build_pointer_event, build_set_encodings,
+    build_set_pixel_format, server_msg, PixelFormat, RectangleHeader,
 };
 use shellumi_remote_desktop::{
     Framebuffer, SessionCommand, SessionConfig, SessionEvent, SessionMetrics, SessionState,
@@ -49,8 +49,17 @@ pub async fn run_vnc_session(
 ) -> Result<(), VncClientError> {
     let policy = config.reconnect_policy;
     let mut attempt = 0;
+    let mut view_only = config.view_only;
+    let mut transport_epoch: u64 = 0;
 
     loop {
+        transport_epoch = transport_epoch.wrapping_add(1);
+        let _ = worker
+            .send_event(SessionEvent::TransportEpochChanged {
+                connection_generation: 0,
+                transport_epoch,
+            })
+            .await;
         let _ = worker
             .send_event(SessionEvent::StateChanged(SessionState::Connecting))
             .await;
@@ -164,11 +173,14 @@ pub async fn run_vnc_session(
         };
 
         // Run the connected session
-        let session_res = run_vnc_session_with_stream(
+        let mut fb_attempt = framebuffer.clone();
+        let session_res = run_vnc_session_with_stream_inner(
             stream,
-            config.clone(),
-            worker.clone(),
-            framebuffer.clone(),
+            &config,
+            &worker,
+            &mut fb_attempt,
+            &mut view_only,
+            transport_epoch,
         )
         .await;
 
@@ -247,10 +259,33 @@ pub async fn run_vnc_session(
 
 /// Run an RFB VNC session over an arbitrary asynchronous stream (e.g. TCP, TLS, or in-memory duplex).
 pub async fn run_vnc_session_with_stream<S>(
-    mut stream: S,
+    stream: S,
     config: SessionConfig,
     worker: SessionWorkerHandle,
     mut framebuffer: Framebuffer,
+) -> Result<(), VncClientError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut view_only = config.view_only;
+    run_vnc_session_with_stream_inner(
+        stream,
+        &config,
+        &worker,
+        &mut framebuffer,
+        &mut view_only,
+        1,
+    )
+    .await
+}
+
+async fn run_vnc_session_with_stream_inner<S>(
+    mut stream: S,
+    config: &SessionConfig,
+    worker: &SessionWorkerHandle,
+    framebuffer: &mut Framebuffer,
+    view_only: &mut bool,
+    transport_epoch: u64,
 ) -> Result<(), VncClientError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -335,7 +370,7 @@ where
     let set_pf_packet = build_set_pixel_format(&client_pf);
     stream.write_all(&set_pf_packet).await?;
 
-    // 7. Request supported encodings (CopyRect, Hextile, ZRLE, Tight, Raw, DesktopSize)
+    // 7. Request supported encodings (CopyRect, Hextile, ZRLE, Tight, Raw, DesktopSize, ExtendedClipboard)
     let supported_encodings = [
         ENCODING_COPYRECT,
         ENCODING_HEXTILE,
@@ -343,6 +378,7 @@ where
         ENCODING_TIGHT,
         ENCODING_RAW,
         ENCODING_DESKTOP_SIZE,
+        crate::wire::ENCODING_EXTENDED_CLIPBOARD,
     ];
     let set_enc_packet = build_set_encodings(&supported_encodings);
     stream.write_all(&set_enc_packet).await?;
@@ -370,7 +406,9 @@ where
     let mut tight_decoder = TightDecoder::new();
     let mut last_sent_clipboard: Option<String> = None;
     let mut last_received_clipboard: Option<String> = None;
-    let mut view_only = config.view_only;
+    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
+    let mut ext_clipboard_utf8 = false;
+    let mut ledger = shellumi_remote_desktop::SubmittedInputLedger::new();
     let mut held_buttons: u8 = 0;
     let mut last_pointer: (u16, u16) = (0, 0);
     let mut scroll_acc_x: i32 = 0;
@@ -384,27 +422,137 @@ where
                 match cmd_res {
                     Ok(cmd) => match cmd {
                         SessionCommand::SetViewOnly { enabled, transition_id } => {
-                            if enabled && !view_only && held_buttons != 0 {
-                                held_buttons = 0;
-                                let packet = build_pointer_event(0, last_pointer.0, last_pointer.1);
-                                if let Err(err) = stream.write_all(&packet).await {
-                                    let err_msg = format!("VNC write failed: {err}");
-                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                    return Err(VncClientError::Network(err));
+                            if enabled && !*view_only {
+                                let releases = ledger.drain_releases();
+                                let released_count = releases.len();
+                                let mut release_bytes = Vec::new();
+                                for rel in &releases {
+                                    release_bytes.extend_from_slice(&translate_vnc_remote_input(
+                                        rel,
+                                        &mut held_buttons,
+                                        &mut last_pointer,
+                                        &mut scroll_acc_x,
+                                        &mut scroll_acc_y,
+                                        framebuffer.width(),
+                                        framebuffer.height(),
+                                    ));
                                 }
-                                metrics.record_bytes_sent(packet.len() as u64);
+                                if !release_bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&release_bytes).await {
+                                        let err_msg = format!("VNC write failed: {err}");
+                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    metrics.record_bytes_sent(release_bytes.len() as u64);
+                                }
+                                if released_count > 0 {
+                                    let _ = worker.send_event(SessionEvent::InputRecovery {
+                                        transport_epoch,
+                                        released_count,
+                                        reason: "View-only enabled".into(),
+                                    }).await;
+                                }
                             }
-                            view_only = enabled;
+                            *view_only = enabled;
                             let _ = worker.send_event(SessionEvent::ViewOnlyChanged { enabled, transition_id }).await;
                         }
-                        SessionCommand::Input(input) => {
+                        SessionCommand::InputEnvelope(env) => {
+                            if env.transport_epoch != 0 && env.transport_epoch != transport_epoch {
+                                continue;
+                            }
+                            if matches!(env.input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
+                                let releases = ledger.drain_releases();
+                                let released_count = releases.len();
+                                let mut bytes = Vec::new();
+                                for rel in &releases {
+                                    bytes.extend_from_slice(&translate_vnc_remote_input(
+                                        rel,
+                                        &mut held_buttons,
+                                        &mut last_pointer,
+                                        &mut scroll_acc_x,
+                                        &mut scroll_acc_y,
+                                        framebuffer.width(),
+                                        framebuffer.height(),
+                                    ));
+                                }
+                                if !bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&bytes).await {
+                                        let _ = worker.send_event(SessionEvent::InputError {
+                                            transport_epoch,
+                                            seq: env.seq,
+                                            reason: err.to_string(),
+                                        }).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    metrics.record_bytes_sent(bytes.len() as u64);
+                                }
+                                let _ = worker.send_event(SessionEvent::InputRecovery {
+                                    transport_epoch,
+                                    released_count,
+                                    reason: "ReleaseAll".into(),
+                                }).await;
+                                continue;
+                            }
                             let is_release = matches!(
-                                input,
-                                shellumi_remote_desktop::RemoteInput::ReleaseAll
-                                    | shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
+                                env.input,
+                                shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
                                     | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
                             );
-                            if !view_only || is_release {
+                            if !*view_only || is_release {
+                                let bytes = translate_vnc_remote_input(
+                                    &env.input,
+                                    &mut held_buttons,
+                                    &mut last_pointer,
+                                    &mut scroll_acc_x,
+                                    &mut scroll_acc_y,
+                                    framebuffer.width(),
+                                    framebuffer.height(),
+                                );
+                                if !bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&bytes).await {
+                                        let _ = worker.send_event(SessionEvent::InputError {
+                                            transport_epoch,
+                                            seq: env.seq,
+                                            reason: err.to_string(),
+                                        }).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    ledger.record_submitted(&env.input);
+                                    metrics.record_bytes_sent(bytes.len() as u64);
+                                }
+                            }
+                        }
+                        SessionCommand::Input(input) => {
+                            if matches!(input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
+                                let releases = ledger.drain_releases();
+                                let mut bytes = Vec::new();
+                                for rel in &releases {
+                                    bytes.extend_from_slice(&translate_vnc_remote_input(
+                                        rel,
+                                        &mut held_buttons,
+                                        &mut last_pointer,
+                                        &mut scroll_acc_x,
+                                        &mut scroll_acc_y,
+                                        framebuffer.width(),
+                                        framebuffer.height(),
+                                    ));
+                                }
+                                if !bytes.is_empty() {
+                                    if let Err(err) = stream.write_all(&bytes).await {
+                                        let err_msg = format!("VNC write failed: {err}");
+                                        let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                        return Err(VncClientError::Network(err));
+                                    }
+                                    metrics.record_bytes_sent(bytes.len() as u64);
+                                }
+                                continue;
+                            }
+                            let is_release = matches!(
+                                input,
+                                shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
+                                    | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
+                            );
+                            if !*view_only || is_release {
                                 let bytes = translate_vnc_remote_input(
                                     &input,
                                     &mut held_buttons,
@@ -420,12 +568,13 @@ where
                                         let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
                                         return Err(VncClientError::Network(err));
                                     }
+                                    ledger.record_submitted(&input);
                                     metrics.record_bytes_sent(bytes.len() as u64);
                                 }
                             }
                         }
                         SessionCommand::Shortcut(shortcut) => {
-                            if !view_only {
+                            if !*view_only {
                                 let bytes = build_vnc_shortcut_packets(shortcut);
                                 if !bytes.is_empty() {
                                     if let Err(err) = stream.write_all(&bytes).await {
@@ -438,7 +587,7 @@ where
                             }
                         }
                         SessionCommand::Pointer(p) => {
-                            if !view_only || !p.pressed {
+                            if !*view_only || !p.pressed {
                                 let x = (p.x.min(framebuffer.width().saturating_sub(1))).min(u16::MAX as u32) as u16;
                                 let y = (p.y.min(framebuffer.height().saturating_sub(1))).min(u16::MAX as u32) as u16;
                                 last_pointer = (x, y);
@@ -459,7 +608,7 @@ where
                             }
                         }
                         SessionCommand::Wheel(w) => {
-                            if !view_only {
+                            if !*view_only {
                                 let input = shellumi_remote_desktop::RemoteInput::Scroll {
                                     x: w.x,
                                     y: w.y,
@@ -486,7 +635,7 @@ where
                             }
                         }
                         SessionCommand::Key(k) => {
-                            if !view_only || !k.pressed {
+                            if !*view_only || !k.pressed {
                                 let packet = build_key_event(k.pressed, k.keysym);
                                 if let Err(err) = stream.write_all(&packet).await {
                                     let err_msg = format!("VNC write failed: {err}");
@@ -497,7 +646,7 @@ where
                             }
                         }
                         SessionCommand::CtrlAltDel => {
-                            if !view_only {
+                            if !*view_only {
                                 let bytes = build_vnc_shortcut_packets(shellumi_remote_desktop::RemoteShortcut::CtrlAltDel);
                                 if let Err(err) = stream.write_all(&bytes).await {
                                     let err_msg = format!("VNC write failed: {err}");
@@ -507,17 +656,44 @@ where
                                 metrics.record_bytes_sent(bytes.len() as u64);
                             }
                         }
+                        SessionCommand::SetClipboardPolicy(policy) => {
+                            clipboard_policy = policy;
+                        }
                         SessionCommand::SendClipboard(text) => {
-                            if !view_only && last_received_clipboard.as_deref() != Some(&text) {
-                                last_sent_clipboard = Some(text.clone());
-                                let packet = build_client_cut_text(&text);
-                                if let Err(err) = stream.write_all(&packet).await {
-                                    let err_msg = format!("VNC write failed: {err}");
-                                    let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
-                                    return Err(VncClientError::Network(err));
-                                }
-                                metrics.record_bytes_sent(packet.len() as u64);
+                            let send_allowed = !*view_only
+                                && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled
+                                && clipboard_policy.allow_send;
+                            if !send_allowed {
+                                continue;
                             }
+                            if last_received_clipboard.as_deref() == Some(&text) {
+                                last_received_clipboard = None;
+                                continue;
+                            }
+                            last_sent_clipboard = Some(text.clone());
+                            let packet = if ext_clipboard_utf8 {
+                                match crate::wire::build_extended_clipboard_provide_utf8(&text) {
+                                    Ok(p) => p,
+                                    Err(err) => {
+                                        let _ = worker.send_event(SessionEvent::Error(err)).await;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                match crate::wire::encode_latin1_cut_text(&text) {
+                                    Ok(p) => p,
+                                    Err(err) => {
+                                        let _ = worker.send_event(SessionEvent::Error(err)).await;
+                                        continue;
+                                    }
+                                }
+                            };
+                            if let Err(err) = stream.write_all(&packet).await {
+                                let err_msg = format!("VNC write failed: {err}");
+                                let _ = worker.send_event(SessionEvent::Error(err_msg)).await;
+                                return Err(VncClientError::Network(err));
+                            }
+                            metrics.record_bytes_sent(packet.len() as u64);
                         }
                         SessionCommand::Refresh => {
                             let fbur = build_framebuffer_update_request(false, 0, 0, framebuffer.width() as u16, framebuffer.height() as u16);
@@ -529,6 +705,22 @@ where
                             metrics.record_bytes_sent(fbur.len() as u64);
                         }
                         SessionCommand::Disconnect => {
+                            let releases = ledger.drain_releases();
+                            let mut bytes = Vec::new();
+                            for rel in &releases {
+                                bytes.extend_from_slice(&translate_vnc_remote_input(
+                                    rel,
+                                    &mut held_buttons,
+                                    &mut last_pointer,
+                                    &mut scroll_acc_x,
+                                    &mut scroll_acc_y,
+                                    framebuffer.width(),
+                                    framebuffer.height(),
+                                ));
+                            }
+                            if !bytes.is_empty() {
+                                let _ = stream.write_all(&bytes).await;
+                            }
                             break;
                         }
                         _ => {}
@@ -574,23 +766,23 @@ where
 
                             match header.encoding_type {
                                 ENCODING_RAW => {
-                                    decode_raw_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                    decode_raw_rectangle(&mut stream, &header, &client_pf, framebuffer).await?;
                                 }
                                 ENCODING_COPYRECT => {
-                                    decode_copy_rect(&mut stream, &header, &mut framebuffer).await?;
+                                    decode_copy_rect(&mut stream, &header, framebuffer).await?;
                                     metrics.record_bytes_received(4);
                                 }
                                 ENCODING_HEXTILE => {
-                                    decode_hextile_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                    decode_hextile_rectangle(&mut stream, &header, &client_pf, framebuffer).await?;
                                 }
                                 ENCODING_ZRLE => {
-                                    zrle_decoder.decode_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                    zrle_decoder.decode_rectangle(&mut stream, &header, &client_pf, framebuffer).await?;
                                 }
                                 ENCODING_TIGHT => {
-                                    tight_decoder.decode_rectangle(&mut stream, &header, &client_pf, &mut framebuffer).await?;
+                                    tight_decoder.decode_rectangle(&mut stream, &header, &client_pf, framebuffer).await?;
                                 }
                                 ENCODING_DESKTOP_SIZE => {
-                                    handle_desktop_size(&header, &mut framebuffer)?;
+                                    handle_desktop_size(&header, framebuffer)?;
                                     let _ = worker.send_event(SessionEvent::RemoteResize {
                                         width: header.width as u32,
                                         height: header.height as u32,
@@ -634,25 +826,76 @@ where
                     server_msg::SERVER_CUT_TEXT => {
                         let mut pad = [0u8; 3];
                         stream.read_exact(&mut pad).await?;
-                        let len = stream.read_u32().await? as usize;
+                        let raw_len = stream.read_i32().await?;
                         metrics.record_bytes_received(7);
 
-                        if len > MAX_CLIPBOARD_BYTES {
-                            return Err(VncClientError::Protocol(format!(
-                                "ServerCutText payload ({len} bytes) exceeds maximum limit ({MAX_CLIPBOARD_BYTES} bytes)"
-                            )));
+                        let receive_allowed = !*view_only
+                            && clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled
+                            && clipboard_policy.allow_receive;
+
+                        if raw_len < 0 {
+                            let ext_len = raw_len.unsigned_abs() as usize;
+                            if !(4..=MAX_CLIPBOARD_BYTES).contains(&ext_len) {
+                                return Err(VncClientError::Protocol(format!(
+                                    "Extended ServerCutText payload ({ext_len} bytes) out of bounds"
+                                )));
+                            }
+                            let mut ext_buf = vec![0u8; ext_len];
+                            stream.read_exact(&mut ext_buf).await?;
+                            metrics.record_bytes_received(ext_len as u64);
+
+                            let flags = u32::from_be_bytes([ext_buf[0], ext_buf[1], ext_buf[2], ext_buf[3]]);
+                            let action = flags & 0xFF00_0000;
+                            if action == crate::wire::ext_clipboard::ACTION_CAPS {
+                                if (flags & crate::wire::ext_clipboard::FORMAT_UTF8) != 0 {
+                                    ext_clipboard_utf8 = true;
+                                    let caps_pkt = crate::wire::build_extended_clipboard_caps(MAX_CLIPBOARD_BYTES as u32);
+                                    stream.write_all(&caps_pkt).await?;
+                                    metrics.record_bytes_sent(caps_pkt.len() as u64);
+                                }
+                            } else if action == crate::wire::ext_clipboard::ACTION_NOTIFY {
+                                if receive_allowed && (flags & crate::wire::ext_clipboard::FORMAT_UTF8) != 0 {
+                                    let req_pkt = crate::wire::build_extended_clipboard_request(crate::wire::ext_clipboard::FORMAT_UTF8);
+                                    stream.write_all(&req_pkt).await?;
+                                    metrics.record_bytes_sent(req_pkt.len() as u64);
+                                }
+                            } else if action == crate::wire::ext_clipboard::ACTION_PROVIDE
+                                && receive_allowed
+                                && (flags & crate::wire::ext_clipboard::FORMAT_UTF8) != 0
+                            {
+                                match crate::wire::decode_extended_clipboard_provide_utf8(&ext_buf[4..], MAX_CLIPBOARD_BYTES) {
+                                    Ok(text) => {
+                                        if last_sent_clipboard.as_deref() == Some(&text) {
+                                            last_sent_clipboard = None;
+                                        } else {
+                                            last_received_clipboard = Some(text.clone());
+                                            let _ = worker.send_event(SessionEvent::ServerClipboard(text)).await;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        return Err(VncClientError::Protocol(err));
+                                    }
+                                }
+                            }
                         } else {
+                            let len = raw_len as usize;
+                            if len > MAX_CLIPBOARD_BYTES {
+                                return Err(VncClientError::Protocol(format!(
+                                    "ServerCutText payload ({len} bytes) exceeds maximum limit ({MAX_CLIPBOARD_BYTES} bytes)"
+                                )));
+                            }
                             let mut text_buf = vec![0u8; len];
                             stream.read_exact(&mut text_buf).await?;
                             metrics.record_bytes_received(len as u64);
 
-                            let text = crate::wire::decode_server_cut_text_latin1(&text_buf);
-                            // Bounded echo suppression: consume one matching echo, then allow future identical copies
-                            if last_sent_clipboard.as_deref() == Some(&text) {
-                                last_sent_clipboard = None;
-                            } else {
-                                last_received_clipboard = Some(text.clone());
-                                let _ = worker.send_event(SessionEvent::ServerClipboard(text)).await;
+                            if receive_allowed {
+                                let text = crate::wire::decode_server_cut_text_latin1(&text_buf);
+                                if last_sent_clipboard.as_deref() == Some(&text) {
+                                    last_sent_clipboard = None;
+                                } else {
+                                    last_received_clipboard = Some(text.clone());
+                                    let _ = worker.send_event(SessionEvent::ServerClipboard(text)).await;
+                                }
                             }
                         }
                     }

@@ -5,12 +5,12 @@
 //! Handles volume scaling, muting, and real-time audio telemetry reporting.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ironrdp_rdpsnd::client::RdpsndClientHandler;
-use ironrdp_rdpsnd::pdu::{AudioFormat, AudioFormatFlags, PitchPdu, VolumePdu};
+use ironrdp_rdpsnd::pdu::{AudioFormat, AudioFormatFlags, PitchPdu, VolumePdu, WaveFormat};
 use shellumi_remote_desktop::SessionEvent;
 use tracing::{debug, trace};
 
@@ -25,6 +25,9 @@ pub struct ShellumiRdpsndControl {
     audio_active: Arc<AtomicBool>,
     bytes_received: Arc<AtomicU64>,
     packets_received: Arc<AtomicU64>,
+    format_name: Arc<Mutex<String>>,
+    sample_rate: Arc<AtomicU32>,
+    channels: Arc<AtomicU16>,
 }
 
 impl Default for ShellumiRdpsndControl {
@@ -42,7 +45,38 @@ impl ShellumiRdpsndControl {
             audio_active: Arc::new(AtomicBool::new(false)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             packets_received: Arc::new(AtomicU64::new(0)),
+            format_name: Arc::new(Mutex::new("Unnegotiated".to_string())),
+            sample_rate: Arc::new(AtomicU32::new(0)),
+            channels: Arc::new(AtomicU16::new(0)),
         }
+    }
+
+    /// Update the active negotiated audio format metadata.
+    pub fn set_negotiated_format(
+        &self,
+        format: impl Into<String>,
+        sample_rate: u32,
+        channels: u16,
+    ) {
+        if let Ok(mut g) = self.format_name.lock() {
+            *g = format.into();
+        }
+        self.sample_rate.store(sample_rate, Ordering::Relaxed);
+        self.channels.store(channels, Ordering::Relaxed);
+    }
+
+    /// Build a `SessionEvent::AudioStatus` snapshot using the actual negotiated format.
+    pub fn current_status_snapshot(&self) -> SessionEvent {
+        let fmt = self
+            .format_name
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "Unknown".to_string());
+        self.status_snapshot(
+            &fmt,
+            self.sample_rate.load(Ordering::Relaxed),
+            self.channels.load(Ordering::Relaxed),
+        )
     }
 
     /// Check if audio output is currently muted.
@@ -187,7 +221,9 @@ impl RdpsndClientHandler for ShellumiRdpsndHandler {
         }
 
         // Cache format parameters if available
+        let mut is_pcm_16bit = false;
         let format_info = self.get_formats().get(format_no).map(|fmt| {
+            is_pcm_16bit = fmt.format == WaveFormat::PCM && fmt.bits_per_sample == 16;
             (
                 format!("{}", fmt.format),
                 fmt.n_samples_per_sec,
@@ -195,9 +231,10 @@ impl RdpsndClientHandler for ShellumiRdpsndHandler {
             )
         });
         if let Some((name, rate, channels)) = format_info {
-            self.current_format_name = name;
+            self.current_format_name = name.clone();
             self.current_sample_rate = rate;
             self.current_channels = channels;
+            self.control.set_negotiated_format(name, rate, channels);
         }
 
         // Throttle UI status updates
@@ -217,7 +254,7 @@ impl RdpsndClientHandler for ShellumiRdpsndHandler {
         }
 
         let volume = self.control.volume();
-        if volume >= 100 {
+        if volume >= 100 || !is_pcm_16bit {
             self.inner.wave(format_no, ts, data);
         } else {
             let scaled = scale_pcm_16bit(&data, volume);

@@ -232,6 +232,127 @@ pub fn build_pointer_event(button_mask: u8, x: u16, y: u16) -> [u8; 6] {
     buf
 }
 
+/// RFB Extended Clipboard pseudo-encoding (`0xC0A1E5CE`).
+pub const ENCODING_EXTENDED_CLIPBOARD: i32 = -1063256064;
+
+/// Extended Clipboard format and action flags (TigerVNC / RFB specification).
+pub mod ext_clipboard {
+    pub const FORMAT_UTF8: u32 = 1 << 0;
+    pub const ACTION_CAPS: u32 = 1 << 24;
+    pub const ACTION_REQUEST: u32 = 1 << 25;
+    pub const ACTION_PEEK: u32 = 1 << 26;
+    pub const ACTION_NOTIFY: u32 = 1 << 27;
+    pub const ACTION_PROVIDE: u32 = 1 << 28;
+}
+
+/// Build an Extended Clipboard `CAPS` message advertising UTF-8 text support.
+pub fn build_extended_clipboard_caps(max_utf8_bytes: u32) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8);
+    let flags = ext_clipboard::ACTION_CAPS | ext_clipboard::FORMAT_UTF8;
+    let mut tmp = [0u8; 4];
+    BigEndian::write_u32(&mut tmp, flags);
+    payload.extend_from_slice(&tmp);
+    BigEndian::write_u32(&mut tmp, max_utf8_bytes);
+    payload.extend_from_slice(&tmp);
+
+    let neg_len = -(payload.len() as i32);
+    let mut out = vec![0u8; 8 + payload.len()];
+    out[0] = client_msg::CLIENT_CUT_TEXT;
+    BigEndian::write_i32(&mut out[4..8], neg_len);
+    out[8..].copy_from_slice(&payload);
+    out
+}
+
+/// Build an Extended Clipboard `REQUEST` message for UTF-8 text.
+pub fn build_extended_clipboard_request(formats: u32) -> Vec<u8> {
+    let flags = ext_clipboard::ACTION_REQUEST | (formats & 0x00FF_FFFF);
+    let mut out = vec![0u8; 12];
+    out[0] = client_msg::CLIENT_CUT_TEXT;
+    BigEndian::write_i32(&mut out[4..8], -4);
+    BigEndian::write_u32(&mut out[8..12], flags);
+    out
+}
+
+/// Build an Extended Clipboard `PROVIDE` message carrying zlib-compressed UTF-8 text.
+pub fn build_extended_clipboard_provide_utf8(text: &str) -> Result<Vec<u8>, String> {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let mut raw = Vec::with_capacity(4 + text.len() + 1);
+    let mut len_buf = [0u8; 4];
+    let text_with_nul_len = (text.len() + 1) as u32;
+    BigEndian::write_u32(&mut len_buf, text_with_nul_len);
+    raw.extend_from_slice(&len_buf);
+    raw.extend_from_slice(text.as_bytes());
+    raw.push(0);
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&raw)
+        .map_err(|e| format!("zlib write failed: {e}"))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| format!("zlib finish failed: {e}"))?;
+
+    let flags = ext_clipboard::ACTION_PROVIDE | ext_clipboard::FORMAT_UTF8;
+    let mut out = vec![0u8; 12 + compressed.len()];
+    out[0] = client_msg::CLIENT_CUT_TEXT;
+    BigEndian::write_i32(&mut out[4..8], -((4 + compressed.len()) as i32));
+    BigEndian::write_u32(&mut out[8..12], flags);
+    out[12..].copy_from_slice(&compressed);
+    Ok(out)
+}
+
+/// Decode a zlib-compressed Extended Clipboard `PROVIDE` UTF-8 payload with strict decompression limit.
+pub fn decode_extended_clipboard_provide_utf8(
+    compressed: &[u8],
+    max_bytes: usize,
+) -> Result<String, String> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut decompressed = Vec::new();
+    let mut limited = (&mut decoder).take((max_bytes + 5) as u64);
+    limited
+        .read_to_end(&mut decompressed)
+        .map_err(|e| format!("Extended clipboard zlib decode failed: {e}"))?;
+    if decompressed.len() < 4 || decompressed.len() > max_bytes + 4 {
+        return Err("Extended clipboard payload length out of bounds".into());
+    }
+    let declared_len = BigEndian::read_u32(&decompressed[0..4]) as usize;
+    if declared_len > max_bytes || 4 + declared_len > decompressed.len() {
+        return Err("Extended clipboard declared UTF-8 length exceeds decompressed bounds".into());
+    }
+    let slice = &decompressed[4..4 + declared_len];
+    let trimmed = slice.strip_suffix(&[0]).unwrap_or(slice);
+    String::from_utf8(trimmed.to_vec())
+        .map_err(|e| format!("Invalid UTF-8 in extended clipboard: {e}"))
+}
+
+/// Encode a baseline RFB `ClientCutText` packet in ISO-8859-1 (Latin-1) per RFC 6143.
+/// Returns an error if the text contains characters outside `U+0000..=U+00FF` when
+/// Extended Clipboard is not negotiated.
+pub fn encode_latin1_cut_text(text: &str) -> Result<Vec<u8>, String> {
+    let mut latin1 = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let cp = ch as u32;
+        if cp <= 0xFF {
+            latin1.push(cp as u8);
+        } else {
+            return Err(format!(
+                "Character U+{cp:04X} cannot be encoded in baseline RFB Latin-1 CutText"
+            ));
+        }
+    }
+    let mut buf = vec![0u8; 8 + latin1.len()];
+    buf[0] = client_msg::CLIENT_CUT_TEXT;
+    BigEndian::write_u32(&mut buf[4..8], latin1.len() as u32);
+    buf[8..].copy_from_slice(&latin1);
+    Ok(buf)
+}
+
 /// Build a baseline RFB `ClientCutText` packet encoded in ISO-8859-1 (Latin-1) per RFC 6143.
 /// Characters outside `U+0000..=U+00FF` are replaced with `?`.
 pub fn build_client_cut_text(text: &str) -> Vec<u8> {

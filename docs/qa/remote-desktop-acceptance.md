@@ -6,8 +6,12 @@
 
 ## Executive Summary
 
-- **Final Release Gate:** **NOT READY** (L1–L3 automated unit, adversarial, and mock-wire checks **PASS**; L4 live server and L5 packaged native interactive hardware tests are **BLOCKED** pending external Windows/xrdp/TigerVNC/Apple Screen Sharing targets and interactive desktop execution).
-- **Evidence Policy:** Unit/mock-wire passes are recorded strictly under `L1`/`L2` and are never conflated with `L4` (live server) or `L5` (packaged native GUI).
+- **Final Release Gate:** **`NOT READY`**
+- **Matrix Summary (derived from [remote-desktop-matrix.csv](remote-desktop-matrix.csv), 1,164 individual rows across 72 catalog IDs and `M01`–`M15`):**
+  - `PASS`: **84** (L1 unit/adversarial/controller/translator checks and L2 mock-wire RFB/RDP checks)
+  - `BLOCKED`: **905** (L4 live Windows RDP, `xrdp`, TigerVNC, Apple Screen Sharing, and L5 packaged native interactive hardware/audio/clipboard checks — no live remote desktop servers in workspace)
+  - `N/A`: **175** (baseline VNC RDP-only file/drive/audio/mic/dynamic-resize cells with negative UI/worker gating)
+- **Evidence Policy:** Unit/mock-wire passes are recorded strictly under `L1`/`L2` and are never conflated with `L3` (GPUI integration), `L4` (live server), or `L5` (packaged native GUI). Validate with `python3 scripts/verify-remote-desktop-matrix.py`.
 
 ## Work Item Status (RD-A01–RD-A20)
 

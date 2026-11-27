@@ -26,6 +26,8 @@ mod data_path;
 mod desktop;
 mod embedded_icons;
 mod hosts_view;
+#[allow(unexpected_cfgs)]
+mod native_clipboard;
 mod session;
 mod sftp_transfer;
 mod sftp_ui;

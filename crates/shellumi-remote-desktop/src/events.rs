@@ -1,7 +1,9 @@
 //! Bidirectional channel communication between UI and protocol worker tasks.
 
 use crate::framebuffer::{FramebufferSnapshot, Rect};
-use crate::input::{KeyEvent, PointerEvent, RemoteInput, RemoteShortcut, WheelEvent};
+use crate::input::{
+    InputEnvelope, KeyEvent, PointerEvent, RemoteInput, RemoteShortcut, WheelEvent,
+};
 use crate::metrics::SessionMetricsSnapshot;
 use crate::security::SecurityWarning;
 use crate::session::SessionState;
@@ -54,6 +56,8 @@ pub enum SessionCommand {
     Disconnect,
     /// Normalized semantic remote input event (preferred over legacy Pointer/Wheel/Key).
     Input(RemoteInput),
+    /// Epoch-tagged normalized input envelope.
+    InputEnvelope(InputEnvelope),
     /// Runtime view-only policy transition with monotonic transition ID.
     SetViewOnly { enabled: bool, transition_id: u64 },
     /// Typed atomic shortcut sequence.
@@ -102,6 +106,23 @@ pub enum SessionEvent {
     StateChanged(SessionState),
     /// Worker acknowledged a runtime view-only transition.
     ViewOnlyChanged { enabled: bool, transition_id: u64 },
+    /// Worker started a new transport epoch.
+    TransportEpochChanged {
+        connection_generation: u64,
+        transport_epoch: u64,
+    },
+    /// Worker performed input release recovery (e.g. after ReleaseAll or ViewOnly).
+    InputRecovery {
+        transport_epoch: u64,
+        released_count: usize,
+        reason: String,
+    },
+    /// Worker failed to submit an input event to the transport.
+    InputError {
+        transport_epoch: u64,
+        seq: u64,
+        reason: String,
+    },
     /// Remote screen resolution updated.
     RemoteResize { width: u32, height: u32 },
     /// Framebuffer rectangle updates applied.
@@ -205,6 +226,7 @@ pub enum SessionEvent {
 #[derive(Debug)]
 struct CommandQueueInner {
     queue: Mutex<VecDeque<SessionCommand>>,
+    priority_queue: Mutex<VecDeque<SessionCommand>>,
     capacity: usize,
     closed: AtomicBool,
     disconnect_requested: AtomicBool,
@@ -249,31 +271,94 @@ impl SessionUiHandle {
         }
 
         if matches!(cmd, SessionCommand::Disconnect) {
-            self.cmd_inner
-                .disconnect_requested
-                .store(true, Ordering::Release);
+            let mut q = self.cmd_inner.queue.lock().unwrap();
+            if q.len() < self.cmd_inner.capacity {
+                q.push_back(cmd);
+                let len = q.len();
+                self.cmd_inner.high_water.fetch_max(len, Ordering::Relaxed);
+            } else {
+                // Queue is full: deliver Disconnect out-of-band so it is never starved
+                self.cmd_inner
+                    .disconnect_requested
+                    .store(true, Ordering::Release);
+            }
+            drop(q);
             let _ = self.cmd_inner.notify_tx.try_send(());
             return Ok(());
         }
 
+        let is_priority_release_or_policy = matches!(
+            cmd,
+            SessionCommand::SetViewOnly { .. }
+                | SessionCommand::Input(RemoteInput::ReleaseAll)
+                | SessionCommand::InputEnvelope(InputEnvelope {
+                    input: RemoteInput::ReleaseAll,
+                    ..
+                })
+        );
+
         let mut q = self.cmd_inner.queue.lock().unwrap();
-        if let SessionCommand::Input(RemoteInput::PointerMove { x, y }) = cmd {
-            if let Some(SessionCommand::Input(RemoteInput::PointerMove {
-                x: prev_x,
-                y: prev_y,
-            })) = q.back_mut()
-            {
-                *prev_x = x;
-                *prev_y = y;
-                self.cmd_inner
-                    .coalesced_moves
-                    .fetch_add(1, Ordering::Relaxed);
-                let _ = self.cmd_inner.notify_tx.try_send(());
-                return Ok(());
+        match &cmd {
+            SessionCommand::Input(RemoteInput::PointerMove { x, y }) => {
+                if let Some(SessionCommand::Input(RemoteInput::PointerMove {
+                    x: prev_x,
+                    y: prev_y,
+                })) = q.back_mut()
+                {
+                    *prev_x = *x;
+                    *prev_y = *y;
+                    self.cmd_inner
+                        .coalesced_moves
+                        .fetch_add(1, Ordering::Relaxed);
+                    let _ = self.cmd_inner.notify_tx.try_send(());
+                    return Ok(());
+                }
             }
+            SessionCommand::InputEnvelope(env) => {
+                if let RemoteInput::PointerMove { x, y } = env.input {
+                    if let Some(SessionCommand::InputEnvelope(prev)) = q.back_mut() {
+                        if prev.transport_epoch == env.transport_epoch
+                            && matches!(prev.input, RemoteInput::PointerMove { .. })
+                        {
+                            prev.input = RemoteInput::PointerMove { x, y };
+                            prev.seq = env.seq;
+                            self.cmd_inner
+                                .coalesced_moves
+                                .fetch_add(1, Ordering::Relaxed);
+                            let _ = self.cmd_inner.notify_tx.try_send(());
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
 
         if q.len() >= self.cmd_inner.capacity {
+            // Evict only safely coalescible PointerMove commands if a critical command arrives
+            q.retain(|c| {
+                !matches!(
+                    c,
+                    SessionCommand::Input(RemoteInput::PointerMove { .. })
+                        | SessionCommand::InputEnvelope(InputEnvelope {
+                            input: RemoteInput::PointerMove { .. },
+                            ..
+                        })
+                )
+            });
+        }
+
+        if q.len() >= self.cmd_inner.capacity {
+            drop(q);
+            if is_priority_release_or_policy {
+                let mut pq = self.cmd_inner.priority_queue.lock().unwrap();
+                if pq.len() < 64 {
+                    pq.push_back(cmd);
+                    drop(pq);
+                    let _ = self.cmd_inner.notify_tx.try_send(());
+                    return Ok(());
+                }
+            }
             return Err("Session command queue is full".into());
         }
 
@@ -414,11 +499,6 @@ impl SessionWorkerHandle {
 
     /// Try to receive the next pending command without blocking.
     pub fn try_recv_command(&self) -> Result<Option<SessionCommand>, String> {
-        let mut q = self.cmd_inner.queue.lock().unwrap();
-        if let Some(cmd) = q.pop_front() {
-            return Ok(Some(cmd));
-        }
-        drop(q);
         if self
             .cmd_inner
             .disconnect_requested
@@ -426,6 +506,17 @@ impl SessionWorkerHandle {
         {
             return Ok(Some(SessionCommand::Disconnect));
         }
+        {
+            let mut pq = self.cmd_inner.priority_queue.lock().unwrap();
+            if let Some(cmd) = pq.pop_front() {
+                return Ok(Some(cmd));
+            }
+        }
+        let mut q = self.cmd_inner.queue.lock().unwrap();
+        if let Some(cmd) = q.pop_front() {
+            return Ok(Some(cmd));
+        }
+        drop(q);
         if self.cmd_inner.closed.load(Ordering::Acquire) {
             return Err("UI command channel closed".into());
         }
@@ -449,8 +540,9 @@ pub fn create_session_channels(
     let (legacy_event_tx, legacy_event_rx) = bounded::<SessionEvent>(event_cap.max(64));
 
     let cmd_inner = Arc::new(CommandQueueInner {
-        queue: Mutex::new(VecDeque::with_capacity(command_cap.max(64))),
-        capacity: command_cap.max(64),
+        queue: Mutex::new(VecDeque::with_capacity(command_cap.max(16))),
+        priority_queue: Mutex::new(VecDeque::with_capacity(16)),
+        capacity: command_cap.max(16),
         closed: AtomicBool::new(false),
         disconnect_requested: AtomicBool::new(false),
         coalesced_moves: AtomicU64::new(0),
@@ -640,6 +732,69 @@ mod tests {
             Some(SessionEvent::FrameReady {
                 sequence: 499,
                 snapshot: None
+            })
+        );
+    }
+
+    #[test]
+    fn non_coalescible_queue_saturation_never_drops_release_view_only_or_disconnect() {
+        let (ui, worker) = create_session_channels(16, 16);
+
+        // Fill all 16 slots with non-coalescible PhysicalKey presses
+        for i in 0..16u16 {
+            ui.try_send_command(SessionCommand::Input(RemoteInput::PhysicalKey {
+                key: crate::input::RemoteKey {
+                    keysym: 0x0061 + i as u32,
+                    scancode: 0x1E + i,
+                    extended: false,
+                    is_modifier: false,
+                    key_name: format!("k{i}"),
+                },
+                down: true,
+                repeat: false,
+            }))
+            .unwrap();
+        }
+        // 17th ordinary key press must be rejected cleanly
+        assert!(ui
+            .try_send_command(SessionCommand::Input(RemoteInput::PhysicalKey {
+                key: crate::input::RemoteKey {
+                    keysym: 0x007A,
+                    scancode: 0x2C,
+                    extended: false,
+                    is_modifier: false,
+                    key_name: "z".into(),
+                },
+                down: true,
+                repeat: false,
+            }))
+            .is_err());
+
+        // Critical ReleaseAll, SetViewOnly, and Disconnect must STILL be admitted
+        ui.try_send_command(SessionCommand::Input(RemoteInput::ReleaseAll))
+            .unwrap();
+        ui.try_send_command(SessionCommand::SetViewOnly {
+            enabled: true,
+            transition_id: 42,
+        })
+        .unwrap();
+        ui.try_send_command(SessionCommand::Disconnect).unwrap();
+
+        // Disconnect is not starved by the 16 full slots
+        assert_eq!(
+            worker.try_recv_command().unwrap(),
+            Some(SessionCommand::Disconnect)
+        );
+        // Priority ReleaseAll and SetViewOnly are delivered next
+        assert_eq!(
+            worker.try_recv_command().unwrap(),
+            Some(SessionCommand::Input(RemoteInput::ReleaseAll))
+        );
+        assert_eq!(
+            worker.try_recv_command().unwrap(),
+            Some(SessionCommand::SetViewOnly {
+                enabled: true,
+                transition_id: 42
             })
         );
     }

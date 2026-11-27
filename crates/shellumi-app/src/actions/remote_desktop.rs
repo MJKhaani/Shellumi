@@ -209,7 +209,7 @@ impl Shellumi {
 
         self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);
-        self.rd_focus_handles.insert(tab_id, cx.focus_handle());
+        self.ensure_rd_focus_handle(tab_id, window, cx);
         self.rd_input_controllers.insert(
             tab_id,
             shellumi_remote_desktop::RemoteInputController::new(
@@ -430,7 +430,7 @@ impl Shellumi {
 
         self.page = None;
         self.active_tab_idx = Some(self.tabs.len() - 1);
-        self.rd_focus_handles.insert(tab_id, cx.focus_handle());
+        self.ensure_rd_focus_handle(tab_id, window, cx);
         self.rd_input_controllers.insert(
             tab_id,
             shellumi_remote_desktop::RemoteInputController::new(
@@ -656,18 +656,20 @@ impl Shellumi {
                 self.rd_view_only_transition_seq = self.rd_view_only_transition_seq.wrapping_add(1);
                 let transition_id = self.rd_view_only_transition_seq;
 
-                if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
-                    let releases = ctrl.set_view_only(next_enabled);
-                    if let Some(ui_handle) = &rd.ui_handle {
-                        for rel in releases {
-                            let _ = ui_handle.try_send_command(
-                                shellumi_remote_desktop::SessionCommand::Input(rel),
-                            );
-                        }
-                    }
-                }
+                let envelopes: Vec<_> =
+                    if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                        let rels = ctrl.begin_view_only_transition(next_enabled, transition_id);
+                        rels.into_iter().map(|r| ctrl.wrap_envelope(r)).collect()
+                    } else {
+                        Vec::new()
+                    };
 
                 if let Some(ui_handle) = &rd.ui_handle {
+                    for env in envelopes {
+                        let _ = ui_handle.try_send_command(
+                            shellumi_remote_desktop::SessionCommand::InputEnvelope(env),
+                        );
+                    }
                     if let Err(err) = ui_handle.try_send_command(
                         shellumi_remote_desktop::SessionCommand::SetViewOnly {
                             enabled: next_enabled,
@@ -681,12 +683,12 @@ impl Shellumi {
                     }
                 }
 
-                rd.view_only = next_enabled;
-                rd.last_action_note = Some(if next_enabled {
-                    "View-only mode activated".into()
+                if next_enabled {
+                    rd.view_only = true;
+                    rd.last_action_note = Some("View-only mode activated".into());
                 } else {
-                    "Interactive control enabled".into()
-                });
+                    rd.last_action_note = Some("Requesting interactive control…".into());
+                }
                 cx.notify();
             }
         }
@@ -937,6 +939,10 @@ impl Shellumi {
                         let mut trigger_auto_resize = false;
                         let mut ack_size: Option<(u32, u32)> = None;
                         let res = this.update(cx, |app, cx| {
+                            let is_active_tab = app
+                                .active_tab_idx
+                                .and_then(|i| app.tabs.get(i))
+                                .is_some_and(|t| t.id == session_key.tab_id);
                             let Some(tab) = app.tabs.iter_mut().find(|t| t.id == session_key.tab_id)
                             else {
                                 keep_running = false;
@@ -1013,12 +1019,53 @@ impl Shellumi {
                                 },
                                 shellumi_remote_desktop::SessionEvent::ViewOnlyChanged {
                                     enabled,
-                                    transition_id: _,
+                                    transition_id,
                                 } => {
-                                    rd.view_only = enabled;
-                                    if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
-                                        ctrl.view_only = enabled;
+                                    let accepted = app
+                                        .rd_input_controllers
+                                        .get_mut(&session_key.tab_id)
+                                        .is_none_or(|ctrl| {
+                                            ctrl.ack_view_only_transition(enabled, transition_id)
+                                        });
+                                    if accepted {
+                                        rd.view_only = enabled;
+                                        rd.last_action_note = Some(if enabled {
+                                            "View-only mode active".into()
+                                        } else {
+                                            "Interactive control enabled".into()
+                                        });
                                     }
+                                }
+                                shellumi_remote_desktop::SessionEvent::TransportEpochChanged {
+                                    connection_generation: _,
+                                    transport_epoch,
+                                } => {
+                                    if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                        ctrl.reset_for_transport(rd.connection_generation, transport_epoch);
+                                        ctrl.view_only = rd.view_only;
+                                    }
+                                }
+                                shellumi_remote_desktop::SessionEvent::InputRecovery {
+                                    transport_epoch: _,
+                                    released_count,
+                                    reason,
+                                } => {
+                                    if released_count > 0 {
+                                        rd.last_action_note = Some(format!(
+                                            "Released {released_count} held input(s) ({reason})"
+                                        ));
+                                    }
+                                }
+                                shellumi_remote_desktop::SessionEvent::InputError {
+                                    transport_epoch: _,
+                                    seq: _,
+                                    reason,
+                                } => {
+                                    if let Some(ctrl) = app.rd_input_controllers.get_mut(&session_key.tab_id) {
+                                        ctrl.counters.transport_failed += 1;
+                                        ctrl.counters.last_error_category = Some(reason.clone());
+                                    }
+                                    rd.last_action_note = Some(format!("Input failed: {reason}"));
                                 }
                                 shellumi_remote_desktop::SessionEvent::RemoteResize {
                                     width,
@@ -1048,11 +1095,77 @@ impl Shellumi {
                                 }
                                 shellumi_remote_desktop::SessionEvent::ServerClipboard(text) => {
                                     rd.clipboard_text = Some(text.clone());
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                                    rd.last_action_note = Some(
-                                        "Remote clipboard text received and copied to local clipboard"
-                                            .into(),
-                                    );
+                                    if is_active_tab && !rd.view_only {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                        rd.last_action_note = Some(
+                                            "Remote clipboard text received and copied to local clipboard"
+                                                .into(),
+                                        );
+                                    } else {
+                                        rd.last_action_note = Some(
+                                            "Remote clipboard received (held in session; inactive or view-only)"
+                                                .into(),
+                                        );
+                                    }
+                                }
+                                shellumi_remote_desktop::SessionEvent::TransferStarted {
+                                    transfer_id: _,
+                                    direction,
+                                    file_count,
+                                    total_bytes,
+                                } => {
+                                    rd.last_action_note = Some(format!(
+                                        "{direction:?} started: {file_count} file(s), {total_bytes} bytes"
+                                    ));
+                                }
+                                shellumi_remote_desktop::SessionEvent::TransferProgress {
+                                    transfer_id: _,
+                                    file_index: _,
+                                    file_name,
+                                    bytes_transferred,
+                                    file_total_bytes,
+                                } => {
+                                    rd.last_action_note = Some(format!(
+                                        "Transferring {file_name}: {bytes_transferred}/{file_total_bytes} bytes"
+                                    ));
+                                }
+                                shellumi_remote_desktop::SessionEvent::TransferCompleted {
+                                    transfer_id: _,
+                                    direction,
+                                    files,
+                                    target_dir,
+                                } => {
+                                    if direction == shellumi_remote_desktop::TransferDirection::Download
+                                        && is_active_tab
+                                        && !rd.view_only
+                                    {
+                                        if let Some(ref dir) = target_dir {
+                                            let full_paths: Vec<std::path::PathBuf> = files
+                                                .iter()
+                                                .map(|f| std::path::Path::new(dir).join(f))
+                                                .collect();
+                                            let _ = crate::native_clipboard::write_clipboard_files(&full_paths);
+                                        }
+                                    }
+                                    rd.last_action_note = Some(format!(
+                                        "{direction:?} completed: {} file(s)",
+                                        files.len()
+                                    ));
+                                }
+                                shellumi_remote_desktop::SessionEvent::TransferFailed {
+                                    transfer_id: _,
+                                    direction,
+                                    reason,
+                                } => {
+                                    rd.last_action_note = Some(format!(
+                                        "{direction:?} failed: {reason}"
+                                    ));
+                                }
+                                shellumi_remote_desktop::SessionEvent::TransferCancelled {
+                                    transfer_id: _,
+                                    direction,
+                                } => {
+                                    rd.last_action_note = Some(format!("{direction:?} cancelled"));
                                 }
                                 shellumi_remote_desktop::SessionEvent::ServerFilesReceived {
                                     files,
@@ -1207,27 +1320,68 @@ impl Shellumi {
     pub(crate) fn remote_desktop_sync_clipboard(&mut self, tab_idx: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if let Some(rd) = &mut tab.remote_desktop_state {
-                let mut text_to_send = rd.clipboard_text.clone();
-                if let Some(item) = cx.read_from_clipboard() {
-                    if let Some(t) = item.text() {
-                        if !t.is_empty() {
-                            text_to_send = Some(t);
-                        }
-                    }
+                if rd.view_only {
+                    rd.last_action_note = Some("View-only mode: clipboard sync blocked".into());
+                    cx.notify();
+                    return;
                 }
-                if let Some(ui_handle) = &rd.ui_handle {
-                    if let Some(text) = text_to_send {
-                        let _ = ui_handle.try_send_command(
-                            shellumi_remote_desktop::SessionCommand::SendClipboard(text),
-                        );
-                    }
-                }
-                if rd.status == RemoteDesktopStatus::Connected {
-                    rd.last_action_note = Some("Clipboard synchronized with remote session".into());
-                } else {
+                if rd.status != RemoteDesktopStatus::Connected {
                     rd.last_action_note = Some(
                         "Clipboard synchronization requires an active connected session".into(),
                     );
+                    cx.notify();
+                    return;
+                }
+
+                // Prefer native file references if present on the OS clipboard (RDP only)
+                if rd.protocol == RemoteDesktopProtocol::Rdp {
+                    let native_files = crate::native_clipboard::read_clipboard_files();
+                    if !native_files.is_empty() {
+                        let count = native_files.len();
+                        if let Some(ui_handle) = &rd.ui_handle {
+                            match ui_handle.try_send_command(
+                                shellumi_remote_desktop::SessionCommand::SendFiles(native_files),
+                            ) {
+                                Ok(()) => {
+                                    rd.last_action_note = Some(format!(
+                                        "Staged {count} local clipboard file(s) for remote paste"
+                                    ));
+                                }
+                                Err(e) => {
+                                    rd.last_action_note =
+                                        Some(format!("Failed to stage clipboard files: {e}"));
+                                }
+                            }
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+
+                // Never fall back to cached remote text when local clipboard has no text
+                let local_text = cx.read_from_clipboard().and_then(|item| item.text());
+                match local_text {
+                    Some(text) => {
+                        if let Some(ui_handle) = &rd.ui_handle {
+                            match ui_handle.try_send_command(
+                                shellumi_remote_desktop::SessionCommand::SendClipboard(text),
+                            ) {
+                                Ok(()) => {
+                                    rd.last_action_note = Some(
+                                        "Local clipboard text queued for remote session".into(),
+                                    );
+                                }
+                                Err(e) => {
+                                    rd.last_action_note =
+                                        Some(format!("Failed to queue clipboard text: {e}"));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        rd.last_action_note =
+                            Some("Local clipboard contains no text or files".into());
+                    }
                 }
                 cx.notify();
             }
@@ -1907,12 +2061,27 @@ impl Shellumi {
     pub(crate) fn ensure_rd_focus_handle(
         &mut self,
         tab_id: u64,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> FocusHandle {
-        self.rd_focus_handles
-            .entry(tab_id)
-            .or_insert_with(|| cx.focus_handle())
-            .clone()
+        if let Some(fh) = self.rd_focus_handles.get(&tab_id) {
+            return fh.clone();
+        }
+        let fh = cx.focus_handle();
+        cx.on_focus_out(&fh, window, move |app, _event, _window, cx| {
+            app.remote_desktop_release_all_for_tab(tab_id);
+            cx.notify();
+        })
+        .detach();
+        cx.observe_window_activation(window, move |app, window, cx| {
+            if !window.is_window_active() {
+                app.remote_desktop_release_all_for_tab(tab_id);
+                cx.notify();
+            }
+        })
+        .detach();
+        self.rd_focus_handles.insert(tab_id, fh.clone());
+        fh
     }
 
     pub(crate) fn rd_canvas_transform_for_tab(
@@ -1958,6 +2127,14 @@ impl Shellumi {
         if inputs.is_empty() {
             return;
         }
+        let envelopes: Vec<_> = if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+            inputs
+                .into_iter()
+                .map(|input| ctrl.wrap_envelope(input))
+                .collect()
+        } else {
+            return;
+        };
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;
         };
@@ -1967,8 +2144,9 @@ impl Shellumi {
         let Some(ui_handle) = rd.ui_handle.as_ref() else {
             return;
         };
-        for input in inputs {
-            match ui_handle.try_send_command(shellumi_remote_desktop::SessionCommand::Input(input))
+        for env in envelopes {
+            match ui_handle
+                .try_send_command(shellumi_remote_desktop::SessionCommand::InputEnvelope(env))
             {
                 Ok(()) => {
                     if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
@@ -2003,7 +2181,7 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let fh = self.ensure_rd_focus_handle(tab_id, cx);
+        let fh = self.ensure_rd_focus_handle(tab_id, window, cx);
         window.focus(&fh);
 
         let button = match gpui_button_to_domain(event.button) {
@@ -2129,10 +2307,56 @@ impl Shellumi {
                 _ => None,
             };
             if let Some(sc) = shortcut {
+                if sc == shellumi_remote_desktop::RemoteShortcut::CtrlV {
+                    self.remote_desktop_sync_clipboard(
+                        self.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0),
+                        cx,
+                    );
+                }
                 if let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) {
                     self.remote_desktop_send_shortcut(tab_idx, sc, cx);
                 }
                 return;
+            }
+            // Non-convenience Cmd+key: flush deferred Super press if not yet transmitted
+            let need_super = self
+                .rd_input_controllers
+                .get(&tab_id)
+                .is_some_and(|c| !c.held_keys.contains_key("platform"));
+            if need_super {
+                let super_key = shellumi_remote_desktop::RemoteKey {
+                    keysym: 0xFFEB,
+                    scancode: 0x5B,
+                    extended: true,
+                    is_modifier: true,
+                    key_name: "platform".into(),
+                };
+                if let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) {
+                    if let Ok(inputs) = ctrl.on_key_down("platform", super_key, false) {
+                        self.dispatch_rd_inputs(tab_id, inputs);
+                    }
+                }
+            }
+        }
+
+        // Separate IME/composed text from physical shortcut keys
+        if !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform {
+            if let Some(ch_str) = ks.key_char.as_deref().filter(|s| !s.is_empty()) {
+                let is_composed_or_non_ascii = !ch_str.is_ascii() || ch_str != ks.key;
+                if is_composed_or_non_ascii
+                    && gpui_keystroke_to_remote_key(ks).is_none_or(|rk| rk.scancode == 0)
+                {
+                    let result = {
+                        let Some(ctrl) = self.rd_input_controllers.get_mut(&tab_id) else {
+                            return;
+                        };
+                        ctrl.on_committed_text(ch_str)
+                    };
+                    if let Ok(inputs) = result {
+                        self.dispatch_rd_inputs(tab_id, inputs);
+                    }
+                    return;
+                }
             }
         }
 
@@ -2195,6 +2419,8 @@ impl Shellumi {
             }
             let old = ctrl.modifiers;
             ctrl.modifiers = new_mods;
+            let defer_super = self.rd_keyboard_mapping
+                == shellumi_remote_desktop::KeyboardMappingMode::MacToWindowsLinux;
             for (was, is, id, keysym, scancode, extended) in [
                 (
                     old.shift,
@@ -2209,6 +2435,11 @@ impl Shellumi {
                 (old.meta, new_mods.meta, "platform", 0xFFEB, 0x5B, true),
             ] {
                 if was != is {
+                    // In MacToWindowsLinux mode, defer sending Super down until a non-convenience
+                    // key is pressed so Cmd+C/V/X/A/Z never emits Super+Ctrl+V.
+                    if id == "platform" && is && defer_super {
+                        continue;
+                    }
                     let key = shellumi_remote_desktop::RemoteKey {
                         keysym,
                         scancode,

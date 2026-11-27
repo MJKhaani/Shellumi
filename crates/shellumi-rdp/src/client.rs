@@ -44,10 +44,24 @@ pub async fn run_rdp_session(
     let policy = config.reconnect_policy;
     let mut attempt = 0;
     let mut view_only = config.view_only;
+    let mut transport_epoch: u64 = 0;
 
     loop {
-        let (attempt_res, was_connected) =
-            run_rdp_session_attempt(&config, &worker, &mut framebuffer, &mut view_only).await;
+        transport_epoch = transport_epoch.wrapping_add(1);
+        let _ = worker
+            .send_event(SessionEvent::TransportEpochChanged {
+                connection_generation: 0,
+                transport_epoch,
+            })
+            .await;
+        let (attempt_res, was_connected) = run_rdp_session_attempt(
+            &config,
+            &worker,
+            &mut framebuffer,
+            &mut view_only,
+            transport_epoch,
+        )
+        .await;
 
         if was_connected {
             attempt = 0;
@@ -129,6 +143,7 @@ async fn run_rdp_session_attempt(
     worker: &SessionWorkerHandle,
     framebuffer: &mut Framebuffer,
     view_only: &mut bool,
+    transport_epoch: u64,
 ) -> (Result<(), RdpError>, bool) {
     let _ = worker
         .send_event(SessionEvent::StateChanged(SessionState::Connecting))
@@ -145,17 +160,21 @@ async fn run_rdp_session_attempt(
 
     let rdp_config = RdpClientConfig::from_session_config(config);
     let proxy = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let temp_dir = crate::clipboard::create_private_staging_dir()
-        .unwrap_or_else(|_| {
-            std::env::temp_dir().join(format!("shellumi-rdp-{}", std::process::id()))
-        })
-        .to_string_lossy()
-        .to_string();
+    let (temp_dir, staging_ok) = match crate::clipboard::create_private_staging_dir() {
+        Ok(dir) => (dir.to_string_lossy().to_string(), true),
+        Err(err) => {
+            tracing::error!(error = %err, "Failed to create private RDP staging directory; file transfers disabled");
+            (String::new(), false)
+        }
+    };
     let clipboard_backend = crate::clipboard::ShellumiCliprdrBackend::new(
         proxy.clone(),
         worker.event_sender(),
         temp_dir,
     );
+    if !staging_ok {
+        clipboard_backend.set_policy(true, false);
+    }
     let sound_control = crate::sound::ShellumiRdpsndControl::new(false, 100);
     let display_control = crate::display::DisplayControlState::new();
     let microphone_control = crate::microphone::MicrophoneControlState::new(false, 100);
@@ -239,6 +258,11 @@ async fn run_rdp_session_attempt(
     let mut metrics_interval = tokio::time::interval(Duration::from_millis(1000));
     let mut connected = false;
     let mut failure: Option<RdpError> = None;
+    let mut ledger = shellumi_remote_desktop::SubmittedInputLedger::new();
+    let mut clipboard_policy = shellumi_remote_desktop::ClipboardPolicy::default();
+    if *view_only {
+        clipboard_backend.set_policy(false, false);
+    }
 
     loop {
         worker.drain_legacy_events();
@@ -248,10 +272,32 @@ async fn run_rdp_session_attempt(
                 match cmd_res {
                     Ok(cmd) => match cmd {
                         SessionCommand::SetViewOnly { enabled, transition_id } => {
-                            *view_only = enabled;
-                            if enabled {
+                            if enabled && !*view_only {
+                                let releases = ledger.drain_releases();
+                                let released_count = releases.len();
+                                for rel in releases {
+                                    let events = translate_remote_input(&rel);
+                                    if !events.is_empty() {
+                                        let _ = input_sender.send(RdpInputEvent::FastPath(events.into()));
+                                    }
+                                }
+                                if released_count > 0 {
+                                    let _ = worker.send_event(SessionEvent::InputRecovery {
+                                        transport_epoch,
+                                        released_count,
+                                        reason: "View-only enabled".into(),
+                                    }).await;
+                                }
                                 microphone_control.set_recording(false);
+                                clipboard_backend.set_policy(false, false);
+                            } else if !enabled {
+                                let clip_on = clipboard_policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled;
+                                clipboard_backend.set_policy(
+                                    clip_on && clipboard_policy.allow_send,
+                                    clip_on && clipboard_policy.allow_receive,
+                                );
                             }
+                            *view_only = enabled;
                             let _ = worker
                                 .send_event(SessionEvent::ViewOnlyChanged {
                                     enabled,
@@ -259,18 +305,80 @@ async fn run_rdp_session_attempt(
                                 })
                                 .await;
                         }
+                        SessionCommand::InputEnvelope(env) => {
+                            if env.transport_epoch != 0 && env.transport_epoch != transport_epoch {
+                                tracing::debug!(
+                                    expected_epoch = transport_epoch,
+                                    got_epoch = env.transport_epoch,
+                                    "Dropped stale RDP input envelope"
+                                );
+                                continue;
+                            }
+                            if matches!(env.input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
+                                let releases = ledger.drain_releases();
+                                let released_count = releases.len();
+                                for rel in releases {
+                                    let events = translate_remote_input(&rel);
+                                    if !events.is_empty() {
+                                        if let Err(err) = input_sender.send(RdpInputEvent::FastPath(events.into())) {
+                                            let _ = worker.send_event(SessionEvent::InputError {
+                                                transport_epoch,
+                                                seq: env.seq,
+                                                reason: err.to_string(),
+                                            }).await;
+                                        }
+                                    }
+                                }
+                                let _ = worker.send_event(SessionEvent::InputRecovery {
+                                    transport_epoch,
+                                    released_count,
+                                    reason: "ReleaseAll".into(),
+                                }).await;
+                                continue;
+                            }
+                            let is_release = matches!(
+                                env.input,
+                                shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
+                                    | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
+                            );
+                            if !*view_only || is_release {
+                                let events = translate_remote_input(&env.input);
+                                if !events.is_empty() {
+                                    match input_sender.send(RdpInputEvent::FastPath(events.into())) {
+                                        Ok(()) => ledger.record_submitted(&env.input),
+                                        Err(err) => {
+                                            let _ = worker.send_event(SessionEvent::InputError {
+                                                transport_epoch,
+                                                seq: env.seq,
+                                                reason: err.to_string(),
+                                            }).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         SessionCommand::Input(input) => {
+                            if matches!(input, shellumi_remote_desktop::RemoteInput::ReleaseAll) {
+                                let releases = ledger.drain_releases();
+                                for rel in releases {
+                                    let events = translate_remote_input(&rel);
+                                    if !events.is_empty() {
+                                        let _ = input_sender.send(RdpInputEvent::FastPath(events.into()));
+                                    }
+                                }
+                                continue;
+                            }
                             let is_release = matches!(
                                 input,
-                                shellumi_remote_desktop::RemoteInput::ReleaseAll
-                                    | shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
+                                shellumi_remote_desktop::RemoteInput::PointerButton { down: false, .. }
                                     | shellumi_remote_desktop::RemoteInput::PhysicalKey { down: false, .. }
                             );
                             if !*view_only || is_release {
                                 let events = translate_remote_input(&input);
                                 if !events.is_empty() {
-                                    if let Err(err) = input_sender.send(RdpInputEvent::FastPath(events.into())) {
-                                        tracing::warn!(error = %err, "Failed to submit RDP FastPath input");
+                                    match input_sender.send(RdpInputEvent::FastPath(events.into())) {
+                                        Ok(()) => ledger.record_submitted(&input),
+                                        Err(err) => tracing::warn!(error = %err, "Failed to submit RDP FastPath input"),
                                     }
                                 }
                             }
@@ -332,13 +440,13 @@ async fn run_rdp_session_attempt(
                         SessionCommand::SetAudioMute(muted) => {
                             sound_control.set_muted(muted);
                             let _ = worker
-                                .send_event(sound_control.status_snapshot("PCM", 44100, 2))
+                                .send_event(sound_control.current_status_snapshot())
                                 .await;
                         }
                         SessionCommand::SetAudioVolume(volume) => {
                             sound_control.set_volume(volume);
                             let _ = worker
-                                .send_event(sound_control.status_snapshot("PCM", 44100, 2))
+                                .send_event(sound_control.current_status_snapshot())
                                 .await;
                         }
                         SessionCommand::SetMicrophoneMute(muted) => {
@@ -381,19 +489,34 @@ async fn run_rdp_session_attempt(
                         }
                         SessionCommand::ConfigureDrive(opt_path) => {
                             if let Some(ref dc) = drive_control {
-                                if let Some(target_path) = opt_path {
-                                    let d_name = crate::drive::derive_drive_name(&target_path);
-                                    dc.update_folder(d_name.clone(), target_path.clone());
-                                    let _ = worker
-                                        .send_event(SessionEvent::DriveStatus {
-                                            drive_name: d_name,
-                                            local_path: target_path.to_string_lossy().to_string(),
-                                            mounted: dc.is_mounted(),
-                                            bytes_read: dc.bytes_read(),
-                                            bytes_written: dc.bytes_written(),
-                                            operations_count: dc.operations_count(),
-                                        })
-                                        .await;
+                                match opt_path {
+                                    Some(target_path) => {
+                                        let d_name = crate::drive::derive_drive_name(&target_path);
+                                        dc.update_folder(d_name.clone(), target_path.clone());
+                                        let _ = worker
+                                            .send_event(SessionEvent::DriveStatus {
+                                                drive_name: d_name,
+                                                local_path: target_path.to_string_lossy().to_string(),
+                                                mounted: dc.is_mounted() && !dc.is_revoked(),
+                                                bytes_read: dc.bytes_read(),
+                                                bytes_written: dc.bytes_written(),
+                                                operations_count: dc.operations_count(),
+                                            })
+                                            .await;
+                                    }
+                                    None => {
+                                        dc.set_revoked(true);
+                                        let _ = worker
+                                            .send_event(SessionEvent::DriveStatus {
+                                                drive_name: dc.drive_name(),
+                                                local_path: String::new(),
+                                                mounted: false,
+                                                bytes_read: dc.bytes_read(),
+                                                bytes_written: dc.bytes_written(),
+                                                operations_count: dc.operations_count(),
+                                            })
+                                            .await;
+                                    }
                                 }
                             } else {
                                 let _ = worker
@@ -411,15 +534,20 @@ async fn run_rdp_session_attempt(
                         SessionCommand::ConfigureDrivePolicy { path, read_only } => {
                             if let Some(ref dc) = drive_control {
                                 dc.set_read_only(read_only);
-                                if let Some(target_path) = path {
-                                    let d_name = crate::drive::derive_drive_name(&target_path);
-                                    dc.update_folder(d_name.clone(), target_path.clone());
+                                match path {
+                                    Some(target_path) => {
+                                        let d_name = crate::drive::derive_drive_name(&target_path);
+                                        dc.update_folder(d_name.clone(), target_path.clone());
+                                    }
+                                    None => {
+                                        dc.set_revoked(true);
+                                    }
                                 }
                                 let _ = worker
                                     .send_event(SessionEvent::DriveStatus {
                                         drive_name: dc.drive_name(),
                                         local_path: dc.local_path().to_string_lossy().to_string(),
-                                        mounted: dc.is_mounted(),
+                                        mounted: dc.is_mounted() && !dc.is_revoked(),
                                         bytes_read: dc.bytes_read(),
                                         bytes_written: dc.bytes_written(),
                                         operations_count: dc.operations_count(),
@@ -428,6 +556,7 @@ async fn run_rdp_session_attempt(
                             }
                         }
                         SessionCommand::SetClipboardPolicy(policy) => {
+                            clipboard_policy = policy;
                             let enabled = policy.mode != shellumi_remote_desktop::ClipboardSyncMode::Disabled && !*view_only;
                             clipboard_backend.set_policy(
                                 enabled && policy.allow_send,
@@ -435,6 +564,12 @@ async fn run_rdp_session_attempt(
                             );
                         }
                         SessionCommand::Disconnect => {
+                            for rel in ledger.drain_releases() {
+                                let events = translate_remote_input(&rel);
+                                if !events.is_empty() {
+                                    let _ = input_sender.send(RdpInputEvent::FastPath(events.into()));
+                                }
+                            }
                             sound_control.set_active(false);
                             microphone_control.set_recording(false);
                             let _ = input_sender.send(RdpInputEvent::Close);

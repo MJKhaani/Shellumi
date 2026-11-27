@@ -1,10 +1,138 @@
 //! Per-session remote desktop input controller, state tracker, and diagnostics counters.
 
 use crate::input::{
-    CanvasTransform, KeyModifiers, MouseButton, RemoteInput, RemoteKey, RemoteShortcut,
+    CanvasTransform, InputEnvelope, KeyModifiers, MouseButton, RemoteInput, RemoteKey,
+    RemoteShortcut,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Atomic runtime view-only policy state machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ViewOnlyPolicyState {
+    #[default]
+    Interactive,
+    EnteringViewOnly {
+        transition_id: u64,
+    },
+    ViewOnly,
+    LeavingViewOnly {
+        transition_id: u64,
+    },
+    SafeBlocked {
+        reason: String,
+    },
+}
+
+/// Authoritative worker-side ledger of input state actually submitted to the transport.
+///
+/// Updated *only* after successful transport submission so `ReleaseAll` and disconnect
+/// recovery release every key and button that actually reached the wire.
+#[derive(Debug, Clone, Default)]
+pub struct SubmittedInputLedger {
+    pub held_buttons: u8,
+    pub last_pointer: (u32, u32),
+    pub held_keys: Vec<RemoteKey>,
+    pub submitted_count: u64,
+}
+
+impl SubmittedInputLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a successfully submitted `RemoteInput` in the authoritative worker ledger.
+    pub fn record_submitted(&mut self, input: &RemoteInput) {
+        self.submitted_count = self.submitted_count.saturating_add(1);
+        match input {
+            RemoteInput::PointerMove { x, y } => {
+                self.last_pointer = (*x, *y);
+            }
+            RemoteInput::PointerButton { button, down, x, y } => {
+                self.last_pointer = (*x, *y);
+                let mask = button.bit_mask();
+                if *down {
+                    self.held_buttons |= mask;
+                } else {
+                    self.held_buttons &= !mask;
+                }
+            }
+            RemoteInput::PhysicalKey { key, down, .. } => {
+                if *down {
+                    if !self.held_keys.iter().any(|k| {
+                        k.keysym == key.keysym
+                            && k.scancode == key.scancode
+                            && k.extended == key.extended
+                    }) {
+                        self.held_keys.push(key.clone());
+                    }
+                } else {
+                    self.held_keys.retain(|k| {
+                        !(k.keysym == key.keysym
+                            && k.scancode == key.scancode
+                            && k.extended == key.extended)
+                    });
+                }
+            }
+            RemoteInput::ReleaseAll => {
+                self.held_buttons = 0;
+                self.held_keys.clear();
+            }
+            RemoteInput::Scroll { x, y, .. } => {
+                self.last_pointer = (*x, *y);
+            }
+            RemoteInput::CommittedText(_) | RemoteInput::Shortcut(_) => {}
+        }
+    }
+
+    /// Drain all currently held buttons and keys into deterministic release events:
+    /// 1. Held mouse buttons
+    /// 2. Non-modifier keys in reverse press order
+    /// 3. Modifier keys in reverse press order
+    pub fn drain_releases(&mut self) -> Vec<RemoteInput> {
+        let mut out = Vec::new();
+        let (lx, ly) = self.last_pointer;
+        for (button, mask) in [
+            (MouseButton::Left, crate::input::pointer_mask::BUTTON_LEFT),
+            (
+                MouseButton::Middle,
+                crate::input::pointer_mask::BUTTON_MIDDLE,
+            ),
+            (MouseButton::Right, crate::input::pointer_mask::BUTTON_RIGHT),
+        ] {
+            if (self.held_buttons & mask) != 0 {
+                out.push(RemoteInput::PointerButton {
+                    button,
+                    down: false,
+                    x: lx,
+                    y: ly,
+                });
+            }
+        }
+        self.held_buttons = 0;
+
+        let keys: Vec<RemoteKey> = std::mem::take(&mut self.held_keys);
+        for key in keys.iter().rev().filter(|k| !k.is_modifier) {
+            out.push(RemoteInput::PhysicalKey {
+                key: key.clone(),
+                down: false,
+                repeat: false,
+            });
+        }
+        for key in keys.iter().rev().filter(|k| k.is_modifier) {
+            out.push(RemoteInput::PhysicalKey {
+                key: key.clone(),
+                down: false,
+                repeat: false,
+            });
+        }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.held_buttons == 0 && self.held_keys.is_empty()
+    }
+}
 
 /// Negotiated and policy-gated input capabilities for a remote session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +196,7 @@ pub struct RemoteInputController {
     pub connected: bool,
     pub focused: bool,
     pub view_only: bool,
+    pub policy_state: ViewOnlyPolicyState,
     pub capabilities: InputCapabilities,
     pub held_buttons: u8,
     pub dragging_button: Option<MouseButton>,
@@ -95,6 +224,11 @@ impl RemoteInputController {
             connected: false,
             focused: false,
             view_only,
+            policy_state: if view_only {
+                ViewOnlyPolicyState::ViewOnly
+            } else {
+                ViewOnlyPolicyState::Interactive
+            },
             capabilities,
             held_buttons: 0,
             dragging_button: None,
@@ -462,8 +596,78 @@ impl RemoteInputController {
         releases
     }
 
-    /// Transition view-only mode. When enabling view-only, returns any required release events
-    /// that must be flushed before input is blocked.
+    /// Begin an atomic view-only transition.
+    ///
+    /// - Enabling view-only immediately blocks new input locally and returns `release_all()`
+    ///   while entering `EnteringViewOnly`.
+    /// - Disabling view-only enters `LeavingViewOnly` and remains blocked (`view_only = true`)
+    ///   until `ack_view_only_transition` confirms the matching `transition_id`.
+    pub fn begin_view_only_transition(
+        &mut self,
+        enabled: bool,
+        transition_id: u64,
+    ) -> Vec<RemoteInput> {
+        if enabled {
+            let releases = if self.connected {
+                self.release_all()
+            } else {
+                Vec::new()
+            };
+            self.view_only = true;
+            self.policy_state = ViewOnlyPolicyState::EnteringViewOnly { transition_id };
+            releases
+        } else {
+            // Fail closed until worker acknowledges
+            self.view_only = true;
+            self.policy_state = ViewOnlyPolicyState::LeavingViewOnly { transition_id };
+            Vec::new()
+        }
+    }
+
+    /// Acknowledge a view-only transition from the worker; ignores stale/mismatched IDs.
+    pub fn ack_view_only_transition(&mut self, enabled: bool, transition_id: u64) -> bool {
+        match self.policy_state {
+            ViewOnlyPolicyState::EnteringViewOnly { transition_id: id }
+                if id == transition_id && enabled =>
+            {
+                self.view_only = true;
+                self.policy_state = ViewOnlyPolicyState::ViewOnly;
+                true
+            }
+            ViewOnlyPolicyState::LeavingViewOnly { transition_id: id }
+                if id == transition_id && !enabled =>
+            {
+                self.view_only = false;
+                self.policy_state = ViewOnlyPolicyState::Interactive;
+                true
+            }
+            _ if transition_id == 0 => {
+                // Initial connection policy sync
+                self.view_only = enabled;
+                self.policy_state = if enabled {
+                    ViewOnlyPolicyState::ViewOnly
+                } else {
+                    ViewOnlyPolicyState::Interactive
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Wrap a normalized `RemoteInput` in an epoch-bound `InputEnvelope`.
+    pub fn wrap_envelope(&mut self, input: RemoteInput) -> InputEnvelope {
+        self.command_seq = self.command_seq.wrapping_add(1);
+        InputEnvelope {
+            tab_id: self.tab_id,
+            connection_generation: self.connection_generation,
+            transport_epoch: self.transport_epoch,
+            seq: self.command_seq,
+            input,
+        }
+    }
+
+    /// Transition view-only mode (legacy convenience wrapper).
     pub fn set_view_only(&mut self, enabled: bool) -> Vec<RemoteInput> {
         let releases = if enabled && !self.view_only && self.connected {
             self.release_all()
@@ -471,6 +675,11 @@ impl RemoteInputController {
             Vec::new()
         };
         self.view_only = enabled;
+        self.policy_state = if enabled {
+            ViewOnlyPolicyState::ViewOnly
+        } else {
+            ViewOnlyPolicyState::Interactive
+        };
         releases
     }
 }
@@ -620,5 +829,71 @@ mod tests {
                 vertical: 0
             }]
         );
+    }
+
+    #[test]
+    fn submitted_ledger_drains_non_modifiers_before_modifiers_and_view_only_is_fail_closed() {
+        let mut ledger = SubmittedInputLedger::new();
+        let ctrl = RemoteKey {
+            keysym: 0xFFE3,
+            scancode: 0x1D,
+            extended: false,
+            is_modifier: true,
+            key_name: "control".into(),
+        };
+        let key_c = RemoteKey {
+            keysym: 0x0063,
+            scancode: 0x2E,
+            extended: false,
+            is_modifier: false,
+            key_name: "c".into(),
+        };
+        ledger.record_submitted(&RemoteInput::PointerButton {
+            button: MouseButton::Left,
+            down: true,
+            x: 10,
+            y: 20,
+        });
+        ledger.record_submitted(&RemoteInput::PhysicalKey {
+            key: ctrl.clone(),
+            down: true,
+            repeat: false,
+        });
+        ledger.record_submitted(&RemoteInput::PhysicalKey {
+            key: key_c.clone(),
+            down: true,
+            repeat: false,
+        });
+
+        let releases = ledger.drain_releases();
+        assert_eq!(releases.len(), 3);
+        assert!(matches!(
+            &releases[0],
+            RemoteInput::PointerButton {
+                button: MouseButton::Left,
+                down: false,
+                x: 10,
+                y: 20
+            }
+        ));
+        assert!(matches!(
+            &releases[1],
+            RemoteInput::PhysicalKey { key, down: false, .. } if key.key_name == "c"
+        ));
+        assert!(matches!(
+            &releases[2],
+            RemoteInput::PhysicalKey { key, down: false, .. } if key.key_name == "control"
+        ));
+        assert!(ledger.is_empty());
+
+        // Atomic view-only transition: leaving view-only stays blocked until matching ack
+        let mut ctrlr = RemoteInputController::new(1, true, InputCapabilities::default());
+        ctrlr.connected = true;
+        ctrlr.begin_view_only_transition(false, 7);
+        assert!(ctrlr.view_only);
+        assert!(!ctrlr.ack_view_only_transition(false, 6)); // stale ID ignored
+        assert!(ctrlr.view_only);
+        assert!(ctrlr.ack_view_only_transition(false, 7)); // matching ack unlocks
+        assert!(!ctrlr.view_only);
     }
 }

@@ -11,6 +11,7 @@ pub mod session;
 
 pub use controller::{
     InputCapabilities, InputPipelineCounters, InputRejectReason, RemoteInputController,
+    SubmittedInputLedger, ViewOnlyPolicyState,
 };
 pub use events::{
     create_session_channels, ClipboardPolicy, ClipboardSyncMode, SessionCommand, SessionEvent,
@@ -21,8 +22,8 @@ pub use framebuffer::{
     MAX_FRAMEBUFFER_DIMENSION,
 };
 pub use input::{
-    pointer_mask, translate_coordinates, CanvasTransform, ClipboardEvent, KeyEvent, KeyModifiers,
-    KeyboardMappingMode, MouseButton, PanState, PointerEvent, RemoteInput, RemoteKey,
+    pointer_mask, translate_coordinates, CanvasTransform, ClipboardEvent, InputEnvelope, KeyEvent,
+    KeyModifiers, KeyboardMappingMode, MouseButton, PanState, PointerEvent, RemoteInput, RemoteKey,
     RemoteShortcut, ScaleMode, WheelEvent,
 };
 pub use metrics::{SessionMetrics, SessionMetricsSnapshot};

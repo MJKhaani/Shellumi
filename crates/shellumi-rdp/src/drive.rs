@@ -45,6 +45,7 @@ pub struct DriveControlState {
     local_path: Arc<Mutex<PathBuf>>,
     mounted: Arc<AtomicBool>,
     read_only: Arc<AtomicBool>,
+    revoked: Arc<AtomicBool>,
     bytes_read: Arc<AtomicU64>,
     bytes_written: Arc<AtomicU64>,
     operations_count: Arc<AtomicU64>,
@@ -63,9 +64,23 @@ impl DriveControlState {
             local_path: Arc::new(Mutex::new(local_path.into())),
             mounted: Arc::new(AtomicBool::new(false)),
             read_only: Arc::new(AtomicBool::new(true)),
+            revoked: Arc::new(AtomicBool::new(false)),
             bytes_read: Arc::new(AtomicU64::new(0)),
             bytes_written: Arc::new(AtomicU64::new(0)),
             operations_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Returns true if this share has been explicitly revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Relaxed)
+    }
+
+    /// Mark this share as revoked (blocks all further I/O until reconnect).
+    pub fn set_revoked(&self, revoked: bool) {
+        self.revoked.store(revoked, Ordering::Relaxed);
+        if revoked {
+            self.mounted.store(false, Ordering::Relaxed);
         }
     }
 
@@ -231,26 +246,22 @@ impl RdpdrBackend for ShellumiRdpdrBackend {
     }
 
     fn handle_drive_io_request(&mut self, req: ServerDriveIoRequest) -> PduResult<Vec<SvcMessage>> {
-        // Check if user updated the local shared path dynamically
-        let current_path = self.state.local_path();
-        if current_path != self.active_path {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            {
-                if !current_path.exists() {
-                    let _ = std::fs::create_dir_all(&current_path);
-                }
-                self.inner = Box::new(ironrdp_rdpdr_native::backend::NixRdpdrBackend::new(
-                    current_path.to_string_lossy().to_string(),
-                ));
-                self.active_path = current_path.clone();
-                info!(
-                    new_path = %current_path.display(),
-                    "Swapped active local directory for RDPDR redirected drive"
-                );
-            }
+        if self.state.is_revoked() || self.state.local_path() != self.active_path {
+            warn!("Blocked RDPDR I/O on revoked or root-changed share (reconnect required)");
+            return deny_io_request(req, NtStatus::ACCESS_DENIED);
         }
 
         self.state.record_operation();
+
+        // Enforce strict path containment on Create and QueryDirectory requests
+        if let ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(ref q_req) = req {
+            let clean = q_req.path.trim_end_matches('*');
+            if !clean.is_empty() && validate_drive_relative_path(&self.active_path, clean).is_err()
+            {
+                warn!(path = %q_req.path, "Blocked RDPDR QueryDirectory path escape attempt");
+                return deny_io_request(req, NtStatus::ACCESS_DENIED);
+            }
+        }
 
         // Enforce strict path containment on Create requests
         if let ServerDriveIoRequest::ServerCreateDriveRequest(ref create_req) = req {
@@ -485,6 +496,7 @@ pub struct ShellumiFsRdpdrBackend {
     root: PathBuf,
     next_file_id: u32,
     files: std::collections::HashMap<u32, (PathBuf, Option<std::fs::File>)>,
+    dir_iters: std::collections::HashMap<u32, Vec<PathBuf>>,
 }
 
 impl ShellumiFsRdpdrBackend {
@@ -493,7 +505,70 @@ impl ShellumiFsRdpdrBackend {
             root,
             next_file_id: 1,
             files: std::collections::HashMap::new(),
+            dir_iters: std::collections::HashMap::new(),
         }
+    }
+}
+
+fn deny_io_request(req: ServerDriveIoRequest, status: NtStatus) -> PduResult<Vec<SvcMessage>> {
+    use ironrdp_rdpdr::pdu::efs::*;
+    match req {
+        ServerDriveIoRequest::ServerCreateDriveRequest(c) => Ok(vec![SvcMessage::from(
+            RdpdrPdu::DeviceCreateResponse(DeviceCreateResponse {
+                device_io_reply: DeviceIoResponse::new(c.device_io_request, status),
+                file_id: 0,
+                information: Information::empty(),
+            }),
+        )]),
+        ServerDriveIoRequest::DeviceReadRequest(r) => Ok(vec![SvcMessage::from(
+            RdpdrPdu::DeviceReadResponse(DeviceReadResponse {
+                device_io_reply: DeviceIoResponse::new(r.device_io_request, status),
+                read_data: Vec::new(),
+            }),
+        )]),
+        ServerDriveIoRequest::DeviceWriteRequest(w) => Ok(vec![SvcMessage::from(
+            RdpdrPdu::DeviceWriteResponse(DeviceWriteResponse {
+                device_io_reply: DeviceIoResponse::new(w.device_io_request, status),
+                length: 0,
+            }),
+        )]),
+        ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(q) => Ok(vec![SvcMessage::from(
+            RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
+                device_io_reply: DeviceIoResponse::new(q.device_io_request, status),
+                buffer: None,
+            }),
+        )]),
+        ServerDriveIoRequest::ServerDriveQueryInformationRequest(q) => Ok(vec![SvcMessage::from(
+            RdpdrPdu::ClientDriveQueryInformationResponse(ClientDriveQueryInformationResponse {
+                device_io_response: DeviceIoResponse::new(q.device_io_request, status),
+                buffer: None,
+            }),
+        )]),
+        ServerDriveIoRequest::ServerDriveSetInformationRequest(s) => {
+            if let Ok(resp) = ClientDriveSetInformationResponse::new(&s, status) {
+                Ok(vec![SvcMessage::from(
+                    RdpdrPdu::ClientDriveSetInformationResponse(resp),
+                )])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+        ServerDriveIoRequest::ServerDriveQueryVolumeInformationRequest(q) => {
+            Ok(vec![SvcMessage::from(
+                RdpdrPdu::ClientDriveQueryVolumeInformationResponse(
+                    ClientDriveQueryVolumeInformationResponse {
+                        device_io_reply: DeviceIoResponse::new(q.device_io_request, status),
+                        buffer: None,
+                    },
+                ),
+            )])
+        }
+        ServerDriveIoRequest::DeviceCloseRequest(c) => Ok(vec![SvcMessage::from(
+            RdpdrPdu::DeviceCloseResponse(DeviceCloseResponse {
+                device_io_response: DeviceIoResponse::new(c.device_io_request, NtStatus::SUCCESS),
+            }),
+        )]),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -590,6 +665,7 @@ impl RdpdrBackend for ShellumiFsRdpdrBackend {
             }
             ServerDriveIoRequest::DeviceCloseRequest(c) => {
                 self.files.remove(&c.device_io_request.file_id);
+                self.dir_iters.remove(&c.device_io_request.file_id);
                 Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCloseResponse(
                     DeviceCloseResponse {
                         device_io_response: DeviceIoResponse::new(
@@ -700,20 +776,142 @@ impl RdpdrBackend for ShellumiFsRdpdrBackend {
                 }),
             )]),
             ServerDriveIoRequest::ServerDriveQueryInformationRequest(q) => {
+                let fid = q.device_io_request.file_id;
+                let Some((path, _)) = self.files.get(&fid) else {
+                    return Ok(vec![SvcMessage::from(
+                        RdpdrPdu::ClientDriveQueryInformationResponse(
+                            ClientDriveQueryInformationResponse {
+                                device_io_response: DeviceIoResponse::new(
+                                    q.device_io_request,
+                                    NtStatus::NO_SUCH_FILE,
+                                ),
+                                buffer: None,
+                            },
+                        ),
+                    )]);
+                };
+                let Ok(meta) = std::fs::metadata(path) else {
+                    return Ok(vec![SvcMessage::from(
+                        RdpdrPdu::ClientDriveQueryInformationResponse(
+                            ClientDriveQueryInformationResponse {
+                                device_io_response: DeviceIoResponse::new(
+                                    q.device_io_request,
+                                    NtStatus::UNSUCCESSFUL,
+                                ),
+                                buffer: None,
+                            },
+                        ),
+                    )]);
+                };
+                let attrs = if meta.is_dir() {
+                    FileAttributes::FILE_ATTRIBUTE_DIRECTORY
+                } else {
+                    FileAttributes::FILE_ATTRIBUTE_NORMAL
+                };
+                let size_i64 = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+                let buffer =
+                    if q.file_info_class_lvl == FileInformationClassLevel::FILE_BASIC_INFORMATION {
+                        Some(FileInformationClass::Basic(FileBasicInformation {
+                            creation_time: 0,
+                            last_access_time: 0,
+                            last_write_time: 0,
+                            change_time: 0,
+                            file_attributes: attrs,
+                        }))
+                    } else if q.file_info_class_lvl
+                        == FileInformationClassLevel::FILE_STANDARD_INFORMATION
+                    {
+                        Some(FileInformationClass::Standard(FileStandardInformation {
+                            allocation_size: size_i64,
+                            end_of_file: size_i64,
+                            number_of_links: 1,
+                            delete_pending: Boolean::False,
+                            directory: if meta.is_dir() {
+                                Boolean::True
+                            } else {
+                                Boolean::False
+                            },
+                        }))
+                    } else if q.file_info_class_lvl
+                        == FileInformationClassLevel::FILE_ATTRIBUTE_TAG_INFORMATION
+                    {
+                        Some(FileInformationClass::AttributeTag(
+                            FileAttributeTagInformation {
+                                file_attributes: attrs,
+                                reparse_tag: 0,
+                            },
+                        ))
+                    } else {
+                        None
+                    };
+                let status = if buffer.is_some() {
+                    NtStatus::SUCCESS
+                } else {
+                    NtStatus::NOT_SUPPORTED
+                };
                 Ok(vec![SvcMessage::from(
                     RdpdrPdu::ClientDriveQueryInformationResponse(
                         ClientDriveQueryInformationResponse {
-                            device_io_response: DeviceIoResponse::new(
-                                q.device_io_request,
-                                NtStatus::NOT_SUPPORTED,
-                            ),
-                            buffer: None,
+                            device_io_response: DeviceIoResponse::new(q.device_io_request, status),
+                            buffer,
                         },
                     ),
                 )])
             }
             ServerDriveIoRequest::ServerDriveSetInformationRequest(s) => {
-                match ClientDriveSetInformationResponse::new(&s, NtStatus::NOT_SUPPORTED) {
+                let fid = s.device_io_request.file_id;
+                let status = match &s.set_buffer {
+                    FileInformationClass::EndOfFile(eof) => {
+                        if let Some((_, Some(file))) = self.files.get_mut(&fid) {
+                            if eof.end_of_file >= 0 && file.set_len(eof.end_of_file as u64).is_ok()
+                            {
+                                NtStatus::SUCCESS
+                            } else {
+                                NtStatus::UNSUCCESSFUL
+                            }
+                        } else {
+                            NtStatus::NO_SUCH_FILE
+                        }
+                    }
+                    FileInformationClass::Rename(ren) => {
+                        if let Some(old_path) = self.files.get(&fid).map(|(p, _)| p.clone()) {
+                            if let Ok(new_path) =
+                                validate_drive_relative_path(&self.root, &ren.file_name)
+                            {
+                                if std::fs::rename(&old_path, &new_path).is_ok() {
+                                    if let Some((p, _)) = self.files.get_mut(&fid) {
+                                        *p = new_path;
+                                    }
+                                    NtStatus::SUCCESS
+                                } else {
+                                    NtStatus::ACCESS_DENIED
+                                }
+                            } else {
+                                NtStatus::ACCESS_DENIED
+                            }
+                        } else {
+                            NtStatus::NO_SUCH_FILE
+                        }
+                    }
+                    FileInformationClass::Disposition(disp) if disp.delete_pending != 0 => {
+                        if let Some(path) = self.files.get(&fid).map(|(p, _)| p.clone()) {
+                            let res = if path.is_dir() {
+                                std::fs::remove_dir(&path)
+                            } else {
+                                std::fs::remove_file(&path)
+                            };
+                            if res.is_ok() {
+                                NtStatus::SUCCESS
+                            } else {
+                                NtStatus::ACCESS_DENIED
+                            }
+                        } else {
+                            NtStatus::NO_SUCH_FILE
+                        }
+                    }
+                    _ => NtStatus::NOT_SUPPORTED,
+                };
+                match ClientDriveSetInformationResponse::new(&s, status) {
                     Ok(resp) => Ok(vec![SvcMessage::from(
                         RdpdrPdu::ClientDriveSetInformationResponse(resp),
                     )]),
@@ -721,17 +919,84 @@ impl RdpdrBackend for ShellumiFsRdpdrBackend {
                 }
             }
             ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(q) => {
-                Ok(vec![SvcMessage::from(
-                    RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                        ClientDriveQueryDirectoryResponse {
-                            device_io_reply: DeviceIoResponse::new(
-                                q.device_io_request,
-                                NtStatus::NO_MORE_FILES,
+                let fid = q.device_io_request.file_id;
+                if q.initial_query > 0 {
+                    let clean_rel = q.path.trim_end_matches('*');
+                    let dir_path = if clean_rel.is_empty() {
+                        self.root.clone()
+                    } else if let Ok(p) = validate_drive_relative_path(&self.root, clean_rel) {
+                        p
+                    } else {
+                        return Ok(vec![SvcMessage::from(
+                            RdpdrPdu::ClientDriveQueryDirectoryResponse(
+                                ClientDriveQueryDirectoryResponse {
+                                    device_io_reply: DeviceIoResponse::new(
+                                        q.device_io_request,
+                                        NtStatus::ACCESS_DENIED,
+                                    ),
+                                    buffer: None,
+                                },
                             ),
-                            buffer: None,
-                        },
-                    ),
-                )])
+                        )]);
+                    };
+                    let mut entries = Vec::new();
+                    if let Ok(rd) = std::fs::read_dir(&dir_path) {
+                        for entry in rd.flatten() {
+                            entries.push(entry.path());
+                        }
+                    }
+                    self.dir_iters.insert(fid, entries);
+                }
+
+                let next_entry = self.dir_iters.get_mut(&fid).and_then(|v| {
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(v.remove(0))
+                    }
+                });
+
+                if let Some(entry_path) = next_entry {
+                    let meta = std::fs::metadata(&entry_path).ok();
+                    let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+                    let size = meta
+                        .as_ref()
+                        .map_or(0, |m| i64::try_from(m.len()).unwrap_or(i64::MAX));
+                    let attrs = if is_dir {
+                        FileAttributes::FILE_ATTRIBUTE_DIRECTORY
+                    } else {
+                        FileAttributes::FILE_ATTRIBUTE_NORMAL
+                    };
+                    let name = entry_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let info = FileBothDirectoryInformation::new(0, 0, 0, 0, size, attrs, name);
+                    Ok(vec![SvcMessage::from(
+                        RdpdrPdu::ClientDriveQueryDirectoryResponse(
+                            ClientDriveQueryDirectoryResponse {
+                                device_io_reply: DeviceIoResponse::new(
+                                    q.device_io_request,
+                                    NtStatus::SUCCESS,
+                                ),
+                                buffer: Some(FileInformationClass::BothDirectory(info)),
+                            },
+                        ),
+                    )])
+                } else {
+                    Ok(vec![SvcMessage::from(
+                        RdpdrPdu::ClientDriveQueryDirectoryResponse(
+                            ClientDriveQueryDirectoryResponse {
+                                device_io_reply: DeviceIoResponse::new(
+                                    q.device_io_request,
+                                    NtStatus::NO_MORE_FILES,
+                                ),
+                                buffer: None,
+                            },
+                        ),
+                    )])
+                }
             }
             ServerDriveIoRequest::ServerDriveQueryVolumeInformationRequest(q) => {
                 Ok(vec![SvcMessage::from(
