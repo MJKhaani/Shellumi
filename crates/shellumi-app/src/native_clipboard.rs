@@ -62,6 +62,7 @@ impl NativeClipboardBroker {
 }
 
 /// Parse a `text/uri-list` payload into validated local regular file paths.
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 pub fn parse_file_uri_list(uri_list: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for line in uri_list.lines() {
@@ -88,6 +89,7 @@ pub fn parse_file_uri_list(uri_list: &str) -> Vec<PathBuf> {
     out
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -106,6 +108,7 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn hex_val(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),

@@ -12,6 +12,14 @@ pub struct Preferences {
     pub ui_font_size: u16,
     pub show_hidden_files: bool,
     pub startup_overview: bool,
+    pub bell_mode: String,
+    pub bell_volume: u8,
+    pub copy_on_select: bool,
+    pub record_input_enabled: bool,
+    pub osc52_policy: String,
+    pub cursor_shape: String,
+    pub cursor_blink: bool,
+    pub font_ligatures: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -21,6 +29,14 @@ impl Default for Preferences {
             ui_font_size: 13,
             show_hidden_files: false,
             startup_overview: false,
+            bell_mode: "both".to_string(),
+            bell_volume: 70,
+            copy_on_select: false,
+            record_input_enabled: false,
+            osc52_policy: "deny".to_string(),
+            cursor_shape: "block".to_string(),
+            cursor_blink: true,
+            font_ligatures: false,
         }
     }
 }
@@ -32,6 +48,24 @@ impl Preferences {
         }
         if !(100..=50000).contains(&self.scrollback_lines) {
             return Err("Scrollback must be between 100 and 50,000 lines.".into());
+        }
+        if self.bell_volume > 100 {
+            return Err("Bell volume must be between 0 and 100.".into());
+        }
+        if !matches!(
+            self.bell_mode.as_str(),
+            "off" | "audible" | "visual" | "both"
+        ) {
+            return Err("Unsupported bell mode.".into());
+        }
+        if !matches!(
+            self.osc52_policy.as_str(),
+            "deny" | "prompt" | "allow_write"
+        ) {
+            return Err("Unsupported OSC 52 policy.".into());
+        }
+        if !matches!(self.cursor_shape.as_str(), "block" | "underline" | "beam") {
+            return Err("Unsupported cursor shape.".into());
         }
         Ok(())
     }
@@ -565,7 +599,23 @@ mod tests {
         }
         .save(&db)
         .is_err());
-        assert_eq!(Preferences::load(&db).unwrap(), Preferences::default());
+        assert!(Preferences {
+            bell_mode: "invalid".into(),
+            ..Preferences::default()
+        }
+        .validate()
+        .is_err());
+        // Legacy preferences JSON without new fields migrates cleanly via serde(default)
+        std::fs::write(
+            db.with_extension("preferences.json"),
+            br#"{"terminal_font_size":16,"scrollback_lines":8000,"ui_font_size":13,"show_hidden_files":true,"startup_overview":false}"#,
+        )
+        .unwrap();
+        let migrated = Preferences::load(&db).unwrap();
+        assert_eq!(migrated.terminal_font_size, 16);
+        assert_eq!(migrated.bell_mode, "both");
+        assert!(!migrated.record_input_enabled);
+        assert_eq!(migrated.osc52_policy, "deny");
     }
     #[tokio::test]
     async fn workspace_editor_supports_reopen_rename_duplicate_and_delete() {

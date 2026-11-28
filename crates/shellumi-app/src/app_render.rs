@@ -494,9 +494,10 @@ impl Render for Shellumi {
                                     let total = tab.panes.len();
                                     let count = if is_on {
                                         total.saturating_sub(
-                                            (0..total)
-                                                .filter(|&i| {
-                                                    self.broadcast_manager.is_pane_excluded(i)
+                                            tab.panes
+                                                .iter()
+                                                .filter(|p| {
+                                                    self.broadcast_manager.is_pane_excluded(p.id)
                                                 })
                                                 .count(),
                                         )
@@ -905,23 +906,31 @@ impl Render for Shellumi {
                     );
                 }
 
-                let mut panes_container = match tab.split {
-                    Some(SplitDirection::Grid) => div()
-                        .grid()
-                        .grid_cols(2)
-                        .grid_rows(2)
-                        .gap_3()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0(),
-                    Some(SplitDirection::Vertical) => {
-                        div().min_h_0().min_w_0().flex().flex_row().gap_3().flex_1()
+                let use_layout_tree =
+                    tab.split != Some(SplitDirection::Grid) && tab.layout_tree.is_some();
+                let mut panes_container = if use_layout_tree {
+                    div().min_h_0().min_w_0().flex().flex_1()
+                } else {
+                    match tab.split {
+                        Some(SplitDirection::Grid) => div()
+                            .grid()
+                            .grid_cols(2)
+                            .grid_rows(2)
+                            .gap_3()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0(),
+                        Some(SplitDirection::Vertical) => {
+                            div().min_h_0().min_w_0().flex().flex_row().gap_3().flex_1()
+                        }
+                        Some(SplitDirection::Horizontal) => {
+                            div().min_h_0().min_w_0().flex().flex_col().gap_3().flex_1()
+                        }
+                        None => div().min_h_0().min_w_0().flex().flex_col().flex_1(),
                     }
-                    Some(SplitDirection::Horizontal) => {
-                        div().min_h_0().min_w_0().flex().flex_col().gap_3().flex_1()
-                    }
-                    None => div().min_h_0().min_w_0().flex().flex_col().flex_1(),
                 };
+                let mut rendered_panes: std::collections::HashMap<u64, gpui::AnyElement> =
+                    std::collections::HashMap::new();
 
                 for (pane_idx, pane) in tab.panes.iter().enumerate() {
                     let pane_id = pane.id;
@@ -1063,6 +1072,8 @@ impl Render for Shellumi {
 
                     let mut pane_btn_group = div().flex().items_center().gap_1();
                     let is_recording = pane.terminal.is_recording();
+                    let is_rec_paused = pane.terminal.is_recording_paused();
+                    let is_rec_input = pane.terminal.is_recording_input_enabled();
                     let record_btn_label = if is_recording {
                         let dur = pane.terminal.recording_duration();
                         format!("⏹ Stop ({})", format_duration_hms(dur.as_secs_f64()))
@@ -1090,6 +1101,57 @@ impl Render for Shellumi {
                             }))
                             .child(record_btn_label),
                     );
+                    if is_recording {
+                        pane_btn_group = pane_btn_group
+                            .child(
+                                div()
+                                    .id(("pause-pane-recording", pane_id))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .bg(if is_rec_paused {
+                                        rgb(MacTheme::ACCENT_BLUE)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    })
+                                    .text_color(rgb(0xffffff))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.toggle_pause_pane_recording(pane_id, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(if is_rec_paused {
+                                        "▶ Resume"
+                                    } else {
+                                        "⏸ Pause"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("toggle-rec-input", pane_id))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .bg(if is_rec_input {
+                                        rgb(0x9a3412)
+                                    } else {
+                                        rgb(MacTheme::INPUT_BG)
+                                    })
+                                    .text_color(rgb(0xffffff))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.toggle_pane_recording_input(pane_id, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(if is_rec_input {
+                                        "Keys: ON"
+                                    } else {
+                                        "Keys: OFF"
+                                    }),
+                            );
+                    }
 
                     pane_btn_group = pane_btn_group.child(
                         div()
@@ -1113,7 +1175,7 @@ impl Render for Shellumi {
                     );
 
                     if tab.panes.len() > 1 && self.broadcast_manager.is_enabled() {
-                        let is_excluded = self.broadcast_manager.is_pane_excluded(pane_idx);
+                        let is_excluded = self.broadcast_manager.is_pane_excluded(pane_id);
                         pane_btn_group = pane_btn_group.child(
                             div()
                                 .id(("toggle-pane-broadcast", pane_id))
@@ -1129,7 +1191,7 @@ impl Render for Shellumi {
                                 })
                                 .text_color(rgb(0xffffff))
                                 .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.broadcast_manager.toggle_pane_exclusion(pane_idx);
+                                    app.broadcast_manager.toggle_pane_exclusion(pane_id);
                                     cx.notify();
                                     cx.stop_propagation();
                                 }))
@@ -1298,9 +1360,16 @@ impl Render for Shellumi {
                     let is_bell_flashing = pane
                         .bell_flash_until
                         .is_some_and(|until| until > std::time::Instant::now());
+                    let old_viewport_geometry = pane.viewport_geometry;
+                    let pane_cell_w = old_viewport_geometry
+                        .map(|g| g.cell_width)
+                        .unwrap_or(font_size * 0.6);
+                    let pane_selection = pane.selection;
+                    let pane_cols = grid.cols();
                     let mut screen = div()
                         .id(("terminal-screen", pane_id))
                         .track_focus(&pane.focus_handle)
+                        .key_context("TerminalPane")
                         .line_height(px(line_height))
                         .track_scroll(&pane.scroll)
                         .text_size(px(self.desktop.preferences.terminal_font_size as f32))
@@ -1320,40 +1389,158 @@ impl Render for Shellumi {
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             cx.listener(move |app, event: &gpui::MouseDownEvent, window, cx| {
+                                handle_terminal_mouse_down(
+                                    app,
+                                    pane_id,
+                                    0,
+                                    event.position,
+                                    &event.modifiers,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_down(
+                            gpui::MouseButton::Middle,
+                            cx.listener(move |app, event: &gpui::MouseDownEvent, window, cx| {
+                                handle_terminal_mouse_down(
+                                    app,
+                                    pane_id,
+                                    1,
+                                    event.position,
+                                    &event.modifiers,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_down(
+                            gpui::MouseButton::Right,
+                            cx.listener(move |app, event: &gpui::MouseDownEvent, window, cx| {
+                                handle_terminal_mouse_down(
+                                    app,
+                                    pane_id,
+                                    2,
+                                    event.position,
+                                    &event.modifiers,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |app, event: &gpui::MouseUpEvent, _window, cx| {
+                                handle_terminal_mouse_up(
+                                    app,
+                                    pane_id,
+                                    0,
+                                    event.position,
+                                    &event.modifiers,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_up(
+                            gpui::MouseButton::Middle,
+                            cx.listener(move |app, event: &gpui::MouseUpEvent, _window, cx| {
+                                handle_terminal_mouse_up(
+                                    app,
+                                    pane_id,
+                                    1,
+                                    event.position,
+                                    &event.modifiers,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_up(
+                            gpui::MouseButton::Right,
+                            cx.listener(move |app, event: &gpui::MouseUpEvent, _window, cx| {
+                                handle_terminal_mouse_up(
+                                    app,
+                                    pane_id,
+                                    2,
+                                    event.position,
+                                    &event.modifiers,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            move |app, event: &gpui::MouseMoveEvent, _window, cx| {
                                 if let Some(tab) =
                                     app.active_tab_idx.and_then(|i| app.tabs.get_mut(i))
                                 {
                                     if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane_id)
                                     {
-                                        p.has_unread_bell = false;
-                                        window.focus(&p.focus_handle);
-                                        let modes = *p.terminal.modes();
-                                        let cell_w = (font_size * 0.6).max(4.0);
-                                        let col_1 = ((f32::from(event.position.x) / cell_w).floor()
-                                            as usize)
-                                            + 1;
-                                        let row_1 = ((f32::from(event.position.y) / line_height)
-                                            .floor()
-                                            as usize)
-                                            + 1;
-                                        if let Some(bytes) = encode_mouse_event(
-                                            0,
-                                            row_1,
-                                            col_1,
-                                            true,
-                                            false,
-                                            &event.modifiers,
-                                            &modes,
-                                        ) {
-                                            if let Some(sess) = &p.session {
-                                                let _ = sess.input(bytes);
+                                        if p.is_selecting {
+                                            if let Some(geom) = p.viewport_geometry {
+                                                let scroll_y =
+                                                    f32::from(p.scroll.offset().y).min(0.0).abs();
+                                                let total_rows = p.terminal.scrollback_count()
+                                                    + p.terminal.grid().rows();
+                                                let (abs_row, col) = geom.hit_test_logical(
+                                                    f32::from(event.position.x),
+                                                    f32::from(event.position.y),
+                                                    scroll_y,
+                                                    total_rows,
+                                                );
+                                                if let Some(sel) = &mut p.selection {
+                                                    sel.end_line = abs_row;
+                                                    sel.end_col = col;
+                                                    cx.notify();
+                                                }
+                                            }
+                                        } else if p.terminal.modes().mouse_mode
+                                            != shellumi_terminal::MouseTrackingMode::None
+                                        {
+                                            let btn = p.pressed_mouse_button.unwrap_or(3);
+                                            send_mouse_to_pane(
+                                                p,
+                                                btn,
+                                                event.position,
+                                                p.pressed_mouse_button.is_some(),
+                                                true,
+                                                &event.modifiers,
+                                            );
+                                        }
+                                    }
+                                }
+                            },
+                        ))
+                        .on_scroll_wheel(cx.listener(
+                            move |app, event: &gpui::ScrollWheelEvent, _window, cx| {
+                                if let Some(tab) =
+                                    app.active_tab_idx.and_then(|i| app.tabs.get_mut(i))
+                                {
+                                    if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane_id)
+                                    {
+                                        if p.terminal.modes().mouse_mode
+                                            != shellumi_terminal::MouseTrackingMode::None
+                                            && !event.modifiers.shift
+                                        {
+                                            let dy = f32::from(
+                                                event.delta.pixel_delta(px(line_height)).y,
+                                            );
+                                            if dy.abs() > f32::EPSILON {
+                                                let btn = if dy > 0.0 { 64 } else { 65 };
+                                                if send_mouse_to_pane(
+                                                    p,
+                                                    btn,
+                                                    event.position,
+                                                    true,
+                                                    false,
+                                                    &event.modifiers,
+                                                ) {
+                                                    cx.stop_propagation();
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                cx.notify();
-                            }),
-                        );
+                            },
+                        ));
 
                     let scrollback_len = pane.terminal.scrollback_count();
                     let screen_rows = grid.rows();
@@ -1377,6 +1564,8 @@ impl Render for Shellumi {
                     }
 
                     for abs_row in first_visible..last_visible {
+                        let sel_range = pane_selection
+                            .and_then(|sel| selection_range_for_abs_row(sel, abs_row, pane_cols));
                         if abs_row < scrollback_len {
                             let i = abs_row;
                             let mut highlight_ranges = Vec::new();
@@ -1386,6 +1575,9 @@ impl Render for Shellumi {
                                         highlight_ranges.push(m.col_start..m.col_end);
                                     }
                                 }
+                            }
+                            if let Some(range) = sel_range {
+                                highlight_ranges.push(range);
                             }
                             if let Some(spans) = if highlight_ranges.is_empty() {
                                 pane.terminal.scrollback_row_spans(i)
@@ -1405,6 +1597,9 @@ impl Render for Shellumi {
                                     }
                                 }
                             }
+                            if let Some(range) = sel_range {
+                                highlight_ranges.push(range);
+                            }
                             if let Some(spans) = if highlight_ranges.is_empty() {
                                 pane.terminal.row_spans(r)
                             } else {
@@ -1412,22 +1607,32 @@ impl Render for Shellumi {
                             } {
                                 let mut row_el = render_terminal_spans(spans, line_height);
                                 if grid.cursor().visible && grid.cursor().row == r {
+                                    let cursor_left = grid.cursor().col as f32 * pane_cell_w;
                                     let cursor_indicator = match pane.terminal.modes().cursor_shape
                                     {
                                         shellumi_terminal::CursorShape::Block => div()
-                                            .w(px(font_size * 0.55))
+                                            .absolute()
+                                            .top_0()
+                                            .left(px(cursor_left))
+                                            .w(px(pane_cell_w))
                                             .h(px(line_height))
                                             .bg(rgba(0x38bdf866)),
                                         shellumi_terminal::CursorShape::Underline => div()
-                                            .w(px(font_size * 0.55))
+                                            .absolute()
+                                            .top(px(line_height - 2.0))
+                                            .left(px(cursor_left))
+                                            .w(px(pane_cell_w))
                                             .h(px(2.0))
-                                            .mt(px(line_height - 2.0))
                                             .bg(rgb(0x38bdf8)),
-                                        shellumi_terminal::CursorShape::Beam => {
-                                            div().w(px(2.0)).h(px(line_height)).bg(rgb(0x38bdf8))
-                                        }
+                                        shellumi_terminal::CursorShape::Beam => div()
+                                            .absolute()
+                                            .top_0()
+                                            .left(px(cursor_left))
+                                            .w(px(2.0))
+                                            .h(px(line_height))
+                                            .bg(rgb(0x38bdf8)),
                                     };
-                                    row_el = row_el.child(cursor_indicator);
+                                    row_el = row_el.relative().child(cursor_indicator);
                                 }
                                 screen = screen.child(row_el);
                             }
@@ -1459,7 +1664,20 @@ impl Render for Shellumi {
                                 width,
                                 line_height,
                             );
-                            if dimensions != old_dimensions {
+                            let new_geometry = TerminalViewportGeometry {
+                                origin_x: f32::from(bounds.origin.x),
+                                origin_y: f32::from(bounds.origin.y),
+                                width: f32::from(bounds.size.width),
+                                height: f32::from(bounds.size.height),
+                                padding: 12.0,
+                                cell_width: width.max(4.0),
+                                line_height: line_height.max(1.0),
+                                rows: dimensions.0,
+                                cols: dimensions.1,
+                            };
+                            if dimensions != old_dimensions
+                                || old_viewport_geometry != Some(new_geometry)
+                            {
                                 cx.defer(move |cx| {
                                     let _ = view.update(cx, |app, cx| {
                                         if let Some(pane) = app
@@ -1468,6 +1686,11 @@ impl Render for Shellumi {
                                             .flat_map(|tab| &mut tab.panes)
                                             .find(|pane| pane.id == pane_id)
                                         {
+                                            let mut changed = false;
+                                            if pane.viewport_geometry != Some(new_geometry) {
+                                                pane.viewport_geometry = Some(new_geometry);
+                                                changed = true;
+                                            }
                                             if (
                                                 pane.terminal.grid().rows(),
                                                 pane.terminal.grid().cols(),
@@ -1480,6 +1703,9 @@ impl Render for Shellumi {
                                                         dimensions.1 as u16,
                                                     );
                                                 }
+                                                changed = true;
+                                            }
+                                            if changed {
                                                 cx.notify();
                                             }
                                         }
@@ -1530,7 +1756,19 @@ impl Render for Shellumi {
                             .child(resize_sensor)
                             .child(scrollbar),
                     );
-                    panes_container = panes_container.child(pane_el);
+                    rendered_panes.insert(pane_id, pane_el.into_any_element());
+                }
+                if use_layout_tree {
+                    if let Some(ref tree) = tab.layout_tree {
+                        panes_container =
+                            panes_container.child(assemble_split_node(tree, &mut rendered_panes));
+                    }
+                } else {
+                    for pane in &tab.panes {
+                        if let Some(el) = rendered_panes.remove(&pane.id) {
+                            panes_container = panes_container.child(el);
+                        }
+                    }
                 }
 
                 let mut result =
@@ -1720,5 +1958,240 @@ impl Shellumi {
         }
 
         container
+    }
+}
+
+fn send_mouse_to_pane(
+    pane: &mut TerminalPane,
+    button_code: u8,
+    position: gpui::Point<gpui::Pixels>,
+    pressed: bool,
+    motion: bool,
+    modifiers: &gpui::Modifiers,
+) -> bool {
+    let Some(geom) = pane.viewport_geometry else {
+        return false;
+    };
+    let Some((row_1, col_1)) = geom.hit_test_live(f32::from(position.x), f32::from(position.y))
+    else {
+        return false;
+    };
+    let modes = *pane.terminal.modes();
+    let Some(bytes) = encode_mouse_event(
+        button_code,
+        row_1,
+        col_1,
+        pressed,
+        motion,
+        modifiers,
+        &modes,
+    ) else {
+        return false;
+    };
+    if let Some(sess) = &pane.session {
+        if let Err(crate::session::SessionInputError::Closed) = sess.input(bytes) {
+            tracing::warn!(pane_id = pane.id, "Mouse input dropped: session closed");
+        }
+    }
+    true
+}
+
+fn handle_terminal_mouse_down(
+    app: &mut Shellumi,
+    pane_id: u64,
+    button_code: u8,
+    position: gpui::Point<gpui::Pixels>,
+    modifiers: &gpui::Modifiers,
+    window: &mut Window,
+    cx: &mut Context<Shellumi>,
+) {
+    if let Some(tab) = app.active_tab_idx.and_then(|i| app.tabs.get_mut(i)) {
+        if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+            p.has_unread_bell = false;
+            window.focus(&p.focus_handle);
+            p.pressed_mouse_button = Some(button_code);
+            let sent_remote = send_mouse_to_pane(p, button_code, position, true, false, modifiers);
+            if !sent_remote && button_code == 0 {
+                if let Some(geom) = p.viewport_geometry {
+                    let scroll_y = f32::from(p.scroll.offset().y).min(0.0).abs();
+                    let total_rows = p.terminal.scrollback_count() + p.terminal.grid().rows();
+                    let (abs_row, col) = geom.hit_test_logical(
+                        f32::from(position.x),
+                        f32::from(position.y),
+                        scroll_y,
+                        total_rows,
+                    );
+                    p.selection = Some(TerminalSelection {
+                        start_line: abs_row,
+                        start_col: col,
+                        end_line: abs_row,
+                        end_col: col,
+                        rectangular: modifiers.alt,
+                    });
+                    p.is_selecting = true;
+                } else {
+                    p.selection = None;
+                    p.is_selecting = false;
+                }
+            }
+        }
+    }
+    cx.notify();
+}
+
+fn handle_terminal_mouse_up(
+    app: &mut Shellumi,
+    pane_id: u64,
+    button_code: u8,
+    position: gpui::Point<gpui::Pixels>,
+    modifiers: &gpui::Modifiers,
+    cx: &mut Context<Shellumi>,
+) {
+    let copy_on_select = app.desktop.preferences.copy_on_select;
+    let mut copied_text: Option<String> = None;
+    if let Some(tab) = app.active_tab_idx.and_then(|i| app.tabs.get_mut(i)) {
+        if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+            p.pressed_mouse_button = None;
+            if p.is_selecting && button_code == 0 {
+                p.is_selecting = false;
+                if let Some(sel) = p.selection {
+                    if sel.start_line == sel.end_line && sel.start_col == sel.end_col {
+                        p.selection = None;
+                    } else if copy_on_select {
+                        let text = selected_text_from_terminal(&p.terminal, sel);
+                        if !text.is_empty() {
+                            copied_text = Some(text);
+                        }
+                    }
+                }
+            } else {
+                send_mouse_to_pane(p, button_code, position, false, false, modifiers);
+            }
+        }
+    }
+    if let Some(text) = copied_text {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+    cx.notify();
+}
+
+fn selection_range_for_abs_row(
+    sel: TerminalSelection,
+    abs_row: usize,
+    cols: usize,
+) -> Option<std::ops::Range<usize>> {
+    if cols == 0 {
+        return None;
+    }
+    let ((r0, c0), (r1, c1)) = if (sel.start_line, sel.start_col) <= (sel.end_line, sel.end_col) {
+        ((sel.start_line, sel.start_col), (sel.end_line, sel.end_col))
+    } else {
+        ((sel.end_line, sel.end_col), (sel.start_line, sel.start_col))
+    };
+    if abs_row < r0 || abs_row > r1 {
+        return None;
+    }
+    let (start, end_inclusive) = if sel.rectangular {
+        (c0.min(c1), c0.max(c1))
+    } else if r0 == r1 {
+        (c0, c1)
+    } else if abs_row == r0 {
+        (c0, cols.saturating_sub(1))
+    } else if abs_row == r1 {
+        (0, c1)
+    } else {
+        (0, cols.saturating_sub(1))
+    };
+    let start = start.min(cols.saturating_sub(1));
+    let end_exclusive = (end_inclusive + 1).min(cols);
+    (start < end_exclusive).then_some(start..end_exclusive)
+}
+
+fn assemble_split_node(
+    node: &SplitNode,
+    rendered_panes: &mut std::collections::HashMap<u64, gpui::AnyElement>,
+) -> gpui::AnyElement {
+    match node {
+        SplitNode::Leaf(pane_id) => rendered_panes
+            .remove(pane_id)
+            .unwrap_or_else(|| div().flex_1().into_any_element()),
+        SplitNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let r = ratio.clamp(0.15, 0.85);
+            let first_el = assemble_split_node(first, rendered_panes);
+            let second_el = assemble_split_node(second, rendered_panes);
+            match direction {
+                SplitDirection::Horizontal => div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        div()
+                            .h(gpui::relative(r))
+                            .w_full()
+                            .min_h_0()
+                            .min_w_0()
+                            .flex()
+                            .child(first_el),
+                    )
+                    .child(
+                        div()
+                            .h(px(2.0))
+                            .w_full()
+                            .bg(rgb(MacTheme::BORDER))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .min_h_0()
+                            .min_w_0()
+                            .flex()
+                            .child(second_el),
+                    )
+                    .into_any_element(),
+                SplitDirection::Vertical | SplitDirection::Grid => div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(gpui::relative(r))
+                            .h_full()
+                            .min_h_0()
+                            .min_w_0()
+                            .flex()
+                            .child(first_el),
+                    )
+                    .child(
+                        div()
+                            .w(px(2.0))
+                            .h_full()
+                            .bg(rgb(MacTheme::BORDER))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .min_h_0()
+                            .min_w_0()
+                            .flex()
+                            .child(second_el),
+                    )
+                    .into_any_element(),
+            }
+        }
     }
 }

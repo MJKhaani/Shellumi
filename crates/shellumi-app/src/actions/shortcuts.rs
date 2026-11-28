@@ -180,7 +180,7 @@ impl Shellumi {
         cx.notify();
     }
 
-    pub(crate) fn is_terminal_pane_focused(&self, window: &Window) -> bool {
+    pub(crate) fn is_terminal_pane_focused(&self, window: &Window, cx: &App) -> bool {
         if self.form.is_some()
             || self.command_palette.is_some()
             || self.page.is_some()
@@ -214,7 +214,9 @@ impl Shellumi {
         }
         let pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
         tab.panes.get(pane_idx).is_some_and(|p| {
-            !p.search_open && (p.focus_handle.is_focused(window) || self.focus.is_focused(window))
+            let search_focused =
+                p.search_open && p.search_input.read(cx).focus_handle(cx).is_focused(window);
+            !search_focused && (p.focus_handle.is_focused(window) || self.focus.is_focused(window))
         })
     }
 
@@ -224,7 +226,7 @@ impl Shellumi {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let terminal_focused = self.is_terminal_pane_focused(window);
+        let terminal_focused = self.is_terminal_pane_focused(window, cx);
         // On macOS, Cmd (platform) is the app shortcut modifier; raw Ctrl sequences always go to the terminal.
         // On Windows/Linux, when a terminal pane is focused, reserve Ctrl+Shift / Ctrl+Alt for app shortcuts
         // so raw Ctrl+A..Z (Ctrl+C/D/L/W/K/B/F/O/T/R/N/Z) reach the PTY.
@@ -361,28 +363,19 @@ impl Shellumi {
 
         // 16. Zoom In: Cmd+= / Cmd++ / Ctrl+= / Ctrl++
         if is_primary && !alt && (k == "=" || k == "+") {
-            self.desktop.preferences.terminal_font_size =
-                (self.desktop.preferences.terminal_font_size + 1).min(32);
-            cx.notify();
+            self.change_preference("font", 1, cx);
             return true;
         }
 
         // 17. Zoom Out: Cmd+- / Ctrl+-
         if is_primary && !alt && k == "-" {
-            self.desktop.preferences.terminal_font_size = (self
-                .desktop
-                .preferences
-                .terminal_font_size
-                .saturating_sub(1))
-            .max(8);
-            cx.notify();
+            self.change_preference("font", -1, cx);
             return true;
         }
 
         // 18. Reset Zoom: Cmd+0 / Ctrl+0
         if is_primary && !alt && k == "0" {
-            self.desktop.preferences.terminal_font_size = 14;
-            cx.notify();
+            self.change_preference("font_reset", 0, cx);
             return true;
         }
 

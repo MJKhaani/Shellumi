@@ -340,6 +340,7 @@ pub struct SessionRecorder {
     input_recording_enabled: bool,
     limits: RecordingLimits,
     current_bytes: usize,
+    flushed_event_count: usize,
     truncated: bool,
     truncation_reason: Option<RecordingTruncationReason>,
     output_utf8: Utf8StreamDecoder,
@@ -367,6 +368,7 @@ impl SessionRecorder {
             input_recording_enabled: false,
             limits: RecordingLimits::default(),
             current_bytes: 0,
+            flushed_event_count: 0,
             truncated: false,
             truncation_reason: None,
             output_utf8: Utf8StreamDecoder::new(),
@@ -403,6 +405,7 @@ impl SessionRecorder {
         self.paused = false;
         self.events.clear();
         self.current_bytes = 0;
+        self.flushed_event_count = 0;
         self.truncated = false;
         self.truncation_reason = None;
         self.output_utf8 = Utf8StreamDecoder::new();
@@ -588,6 +591,34 @@ impl SessionRecorder {
 
     pub fn byte_count(&self) -> usize {
         self.current_bytes
+    }
+
+    pub fn header(&self) -> &AsciicastHeader {
+        &self.header
+    }
+
+    /// Returns any newly-captured events since the last flush without stopping the recorder.
+    pub fn peek_unflushed_events(&self) -> (usize, Vec<CastEvent>) {
+        if self.flushed_event_count >= self.events.len() {
+            return (0, Vec::new());
+        }
+        (
+            self.events.len(),
+            self.events[self.flushed_event_count..].to_vec(),
+        )
+    }
+
+    /// Marks events up to `new_flushed_count` as durably persisted.
+    pub fn mark_events_flushed(&mut self, new_flushed_count: usize) {
+        self.flushed_event_count = new_flushed_count.min(self.events.len());
+    }
+
+    /// Returns the number of bytes in unflushed events.
+    pub fn unflushed_bytes(&self) -> usize {
+        self.events
+            .get(self.flushed_event_count..)
+            .map(|slice| slice.iter().map(|e| e.data.len()).sum())
+            .unwrap_or(0)
     }
 
     pub fn elapsed_duration(&self) -> Duration {

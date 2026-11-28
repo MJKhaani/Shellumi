@@ -19,9 +19,9 @@ Shellumi records and plays back terminal sessions in asciicast (`.cast`) format 
 | --- | --- | --- |
 | **Browse / List Recordings** | **Session Logs** view (filtered by active vault) | `session list [--host-id <id>]` |
 | **Inspect Metadata** | Recording entry details | `session show <id>` |
-| **Playback (`.cast`)** | Basic log view | `session play <id> [--speed <multiplier>] [--raw]` |
-| **Import `.cast` File** | CLI only | `session import <cast-file> --title <title> [--host-id <id>] [--redact]` |
-| **Export `.cast` File** | CLI only | `session export <id> [--out <path>]` |
+| **Playback (`.cast`)** | Isolated terminal emulator playback with 60ms scheduler, seek/step/speed | `session play <id> [--speed <multiplier>] [--raw]` |
+| **Import `.cast` File** | File picker (`import_session_recording_ui`) with mandatory redaction | `session import <cast-file> --title <title> [--host-id <id>] [--redact]` |
+| **Export `.cast` File** | Save dialog (`export_session_recording_ui`) with atomic `0600` write | `session export <id> [--out <path>]` |
 | **Delete Recording** | CLI / vault management | `session delete <id>` |
 
 ### Practical CLI Examples

@@ -37,11 +37,16 @@ impl Shellumi {
             host_id: Some(host.id),
             recording_id: None,
             recording_started_at: None,
+            recording_durable_seq: 0,
+            recording_flush_generation: 0,
             recording_state: shellumi_core::RecordingLifecycleState::Idle,
             focus_handle: cx.focus_handle(),
             bell_flash_until: None,
             has_unread_bell: false,
             selection: None,
+            viewport_geometry: None,
+            pressed_mouse_button: None,
+            is_selecting: false,
         };
 
         let (
@@ -215,6 +220,7 @@ impl Shellumi {
             panes: vec![placeholder_pane],
             active_pane_idx: 0,
             split: None,
+            layout_tree: Some(SplitNode::Leaf(pane_id)),
             sftp_state: None,
             remote_desktop_state: Some(rd_state),
             multiplayer: None,
@@ -358,11 +364,16 @@ impl Shellumi {
             host_id: None,
             recording_id: None,
             recording_started_at: None,
+            recording_durable_seq: 0,
+            recording_flush_generation: 0,
             recording_state: shellumi_core::RecordingLifecycleState::Idle,
             focus_handle: cx.focus_handle(),
             bell_flash_until: None,
             has_unread_bell: false,
             selection: None,
+            viewport_geometry: None,
+            pressed_mouse_button: None,
+            is_selecting: false,
         };
 
         let username_input = cx.new(|cx| {
@@ -450,6 +461,7 @@ impl Shellumi {
             panes: vec![placeholder_pane],
             active_pane_idx: 0,
             split: None,
+            layout_tree: Some(SplitNode::Leaf(pane_id)),
             sftp_state: None,
             remote_desktop_state: Some(rd_state),
             multiplayer: None,

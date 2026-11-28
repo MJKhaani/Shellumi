@@ -10,7 +10,7 @@ Shellumi's GPU-accelerated terminal (`shellumi-terminal` + GPUI) handles interac
 
 | Session Type | Implementation Status | Runtime Notes & Dependencies |
 | --- | --- | --- |
-| **SSHv2** | Implemented | Native Rust SSH client with TOFU `known_hosts` verification, jump hosts, and port forwarding. |
+| **SSHv2** | Implemented | External system OpenSSH (`ssh`) transport with TOFU `known_hosts` verification, jump hosts, askpass credential handling, and port forwarding. |
 | **Local Terminal** | Implemented | Native PTY on macOS/Linux (`$SHELL` / `/bin/sh`) and ConPTY on Windows (`%COMSPEC%` / `cmd.exe`; Windows interactive `NOT TESTED`). |
 | **Serial** | Implemented (core + CLI) | Device discovery (`shellumi-cli serial-ports`) and configurable baud rate. |
 | **Telnet** | Partial | Option negotiation & unencrypted-traffic warning; live telnet server `NOT TESTED`. |
@@ -45,7 +45,7 @@ Shellumi's GPU-accelerated terminal (`shellumi-terminal` + GPUI) handles interac
 ## Shell Integration, Autocomplete & Session Recording (Implemented vs. Planned)
 
 - **Implemented:**
-  - Reversible shell hooks via `shellumi-cli shell-hook <bash|zsh|fish>`.
+  - Reversible shell hooks via `shellumi-cli shell-hook <bash|zsh|fish|powershell>`.
   - `AutocompleteEngine` (`shellumi-cli complete`) and `PasswordPromptDetector` (`shellumi-cli prompt-detect`).
   - Session recording/playback/redaction (`.cast` format) in [Session Recording](session-recording.md).
-- **Planned:** Inline PowerShell shell hook, full GUI autocomplete popup integration, and optional AI command assistant (`REQ-AI-001`..`003`).
+- **Planned:** Full inline GUI autocomplete popup integration and optional AI command assistant (`REQ-AI-001`..`003`).

@@ -74,6 +74,44 @@ pub struct RecordingCheckpoint {
 }
 
 const MAX_RECOVERY_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+
+/// A single event stored in an incremental encrypted recording journal chunk.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JournalCastEvent {
+    pub time_offset_secs: f64,
+    pub event_type: String,
+    pub data: String,
+}
+
+/// Authenticated manifest for an incremental crash-safe recording journal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecordingJournalManifest {
+    pub schema_version: u32,
+    pub recording_id: String,
+    pub vault_id: String,
+    pub session_id: String,
+    pub pane_id: u64,
+    pub host_id: Option<i64>,
+    pub protocol: String,
+    pub title: String,
+    pub started_at: String,
+    pub width: usize,
+    pub height: usize,
+    pub last_durable_seq: u64,
+    pub duration_secs: f64,
+    pub event_count: usize,
+    pub byte_size: usize,
+    pub truncated: bool,
+    pub paused: bool,
+    pub finalized: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct JournalChunkPayload {
+    seq: u64,
+    events: Vec<JournalCastEvent>,
+}
 
 /// Encrypted on-disk recovery journal for active and recoverable session recordings.
 /// Never writes plaintext cast data or secret material to disk.
@@ -84,6 +122,270 @@ pub struct RecordingRecoveryJournal {
 impl RecordingRecoveryJournal {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
+    }
+
+    fn validate_id(id: &str) -> Result<&str, String> {
+        let clean = id.trim();
+        if clean.is_empty()
+            || clean.starts_with('.')
+            || clean.contains('/')
+            || clean.contains('\\')
+            || clean.contains("..")
+        {
+            return Err("Invalid identifier for recovery journal".to_string());
+        }
+        Ok(clean)
+    }
+
+    fn vault_dir(&self, vault_id: &VaultId) -> Result<PathBuf, String> {
+        let clean_v = Self::validate_id(vault_id.as_str())?;
+        Ok(self.dir.join(clean_v))
+    }
+
+    fn recording_dir(&self, vault_id: &VaultId, recording_id: &str) -> Result<PathBuf, String> {
+        let clean_r = Self::validate_id(recording_id)?;
+        Ok(self.vault_dir(vault_id)?.join(clean_r))
+    }
+
+    fn ensure_owner_dir(path: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(path)
+            .map_err(|e| format!("Failed to create recovery journal directory: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+
+    /// Initializes an incremental encrypted journal for a newly started recording.
+    pub fn init_incremental_journal(
+        &self,
+        manifest: &RecordingJournalManifest,
+        vault_id: &VaultId,
+        vault_key: &VaultKey,
+    ) -> Result<(), String> {
+        if manifest.vault_id != vault_id.as_str() {
+            return Err("Vault ID mismatch initializing recording journal".to_string());
+        }
+        let rec_dir = self.recording_dir(vault_id, &manifest.recording_id)?;
+        Self::ensure_owner_dir(&rec_dir)?;
+        self.write_manifest_atomic(&rec_dir, manifest, vault_id, vault_key)
+    }
+
+    fn write_manifest_atomic(
+        &self,
+        rec_dir: &Path,
+        manifest: &RecordingJournalManifest,
+        vault_id: &VaultId,
+        vault_key: &VaultKey,
+    ) -> Result<(), String> {
+        let plaintext = serde_json::to_vec(manifest)
+            .map_err(|e| format!("Failed to serialize journal manifest: {e}"))?;
+        let cipher = VaultCipher::new(vault_key, vault_id);
+        let tag = format!(
+            "recording_manifest:v{}:{}:{}",
+            JOURNAL_SCHEMA_VERSION,
+            vault_id.as_str(),
+            manifest.recording_id
+        );
+        let envelope = cipher
+            .encrypt_record(&tag, &plaintext)
+            .map_err(|e| format!("Failed to encrypt journal manifest: {e}"))?;
+        let encoded = serde_json::to_vec(&envelope)
+            .map_err(|e| format!("Failed to encode journal manifest envelope: {e}"))?;
+        let dest = rec_dir.join("manifest.enc");
+        let tmp = rec_dir.join(format!(".manifest.{}.tmp", std::process::id()));
+        write_restricted_atomic(&tmp, &dest, &encoded)
+    }
+
+    /// Appends an encrypted chunk of events and atomically updates the journal manifest.
+    pub fn append_journal_chunk(
+        &self,
+        manifest: &RecordingJournalManifest,
+        seq: u64,
+        events: &[JournalCastEvent],
+        vault_id: &VaultId,
+        vault_key: &VaultKey,
+    ) -> Result<(), String> {
+        if manifest.vault_id != vault_id.as_str() {
+            return Err("Vault ID mismatch appending journal chunk".to_string());
+        }
+        if manifest.byte_size > MAX_RECOVERY_CHECKPOINT_BYTES {
+            return Err("Recording journal exceeded maximum size bound".to_string());
+        }
+        let rec_dir = self.recording_dir(vault_id, &manifest.recording_id)?;
+        Self::ensure_owner_dir(&rec_dir)?;
+
+        if !events.is_empty() {
+            let chunk = JournalChunkPayload {
+                seq,
+                events: events.to_vec(),
+            };
+            let plaintext = serde_json::to_vec(&chunk)
+                .map_err(|e| format!("Failed to serialize journal chunk: {e}"))?;
+            let cipher = VaultCipher::new(vault_key, vault_id);
+            let tag = format!(
+                "recording_chunk:v{}:{}:{}:{}",
+                JOURNAL_SCHEMA_VERSION,
+                vault_id.as_str(),
+                manifest.recording_id,
+                seq
+            );
+            let envelope = cipher
+                .encrypt_record(&tag, &plaintext)
+                .map_err(|e| format!("Failed to encrypt journal chunk: {e}"))?;
+            let encoded = serde_json::to_vec(&envelope)
+                .map_err(|e| format!("Failed to encode journal chunk envelope: {e}"))?;
+            let dest = rec_dir.join(format!("{seq:08}.chunk.enc"));
+            let tmp = rec_dir.join(format!(".{seq:08}.{}.tmp", std::process::id()));
+            write_restricted_atomic(&tmp, &dest, &encoded)?;
+        }
+
+        self.write_manifest_atomic(&rec_dir, manifest, vault_id, vault_key)
+    }
+
+    /// Lists recording IDs that have pending incremental journals in `vault_id` ONLY.
+    pub fn list_pending_journals_for_vault(&self, vault_id: &VaultId) -> Vec<String> {
+        let Ok(vdir) = self.vault_dir(vault_id) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&vdir) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if !name.starts_with('.') && path.join("manifest.enc").exists() {
+                        ids.push(name.to_string());
+                    }
+                }
+            }
+        }
+        ids.sort();
+        ids
+    }
+
+    /// Loads and authenticates an incremental journal for `vault_id`.
+    /// Never deletes corrupt or unknown-version journals; returns `Err` so they remain quarantined.
+    pub fn load_incremental_journal(
+        &self,
+        recording_id: &str,
+        vault_id: &VaultId,
+        vault_key: &VaultKey,
+    ) -> Result<(RecordingJournalManifest, Vec<JournalCastEvent>), String> {
+        let rec_dir = self.recording_dir(vault_id, recording_id)?;
+        let manifest_path = rec_dir.join("manifest.enc");
+        let manifest_bytes = std::fs::read(&manifest_path)
+            .map_err(|e| format!("Failed to read journal manifest: {e}"))?;
+        if manifest_bytes.len() > 1024 * 1024 {
+            return Err("Journal manifest exceeds maximum size".to_string());
+        }
+        let manifest_env: EncryptedEnvelope = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| format!("Corrupt journal manifest envelope: {e}"))?;
+        let cipher = VaultCipher::new(vault_key, vault_id);
+        let manifest_tag = format!(
+            "recording_manifest:v{}:{}:{}",
+            JOURNAL_SCHEMA_VERSION,
+            vault_id.as_str(),
+            recording_id
+        );
+        let manifest_plain = cipher
+            .decrypt_record(&manifest_tag, &manifest_env)
+            .map_err(|e| format!("Failed to decrypt journal manifest: {e}"))?;
+        let manifest: RecordingJournalManifest = serde_json::from_slice(&manifest_plain)
+            .map_err(|e| format!("Corrupt journal manifest payload: {e}"))?;
+
+        if manifest.schema_version != JOURNAL_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported journal schema version {}",
+                manifest.schema_version
+            ));
+        }
+        if manifest.vault_id != vault_id.as_str() || manifest.recording_id != recording_id {
+            return Err("Journal manifest identity mismatch".to_string());
+        }
+
+        let mut all_events = Vec::new();
+        let mut total_bytes = 0usize;
+        for seq in 1..=manifest.last_durable_seq {
+            let chunk_path = rec_dir.join(format!("{seq:08}.chunk.enc"));
+            let chunk_bytes = std::fs::read(&chunk_path)
+                .map_err(|e| format!("Missing or unreadable journal chunk {seq}: {e}"))?;
+            total_bytes = total_bytes.saturating_add(chunk_bytes.len());
+            if total_bytes > MAX_RECOVERY_CHECKPOINT_BYTES * 2 {
+                return Err("Journal chunks exceed maximum recovery size".to_string());
+            }
+            let chunk_env: EncryptedEnvelope = serde_json::from_slice(&chunk_bytes)
+                .map_err(|e| format!("Corrupt journal chunk {seq} envelope: {e}"))?;
+            let chunk_tag = format!(
+                "recording_chunk:v{}:{}:{}:{}",
+                JOURNAL_SCHEMA_VERSION,
+                vault_id.as_str(),
+                recording_id,
+                seq
+            );
+            let chunk_plain = cipher
+                .decrypt_record(&chunk_tag, &chunk_env)
+                .map_err(|e| format!("Failed to decrypt journal chunk {seq}: {e}"))?;
+            let chunk: JournalChunkPayload = serde_json::from_slice(&chunk_plain)
+                .map_err(|e| format!("Corrupt journal chunk {seq} payload: {e}"))?;
+            if chunk.seq != seq {
+                return Err(format!(
+                    "Journal chunk sequence mismatch: expected {seq}, got {}",
+                    chunk.seq
+                ));
+            }
+            all_events.extend(chunk.events);
+        }
+
+        Ok((manifest, all_events))
+    }
+
+    /// Reconstructs an Asciicast v2 string from a recovered manifest and its events.
+    pub fn build_asciicast_v2(
+        manifest: &RecordingJournalManifest,
+        events: &[JournalCastEvent],
+    ) -> Result<String, String> {
+        let mut out = String::new();
+        let header = serde_json::json!({
+            "version": 2,
+            "width": manifest.width.max(1),
+            "height": manifest.height.max(1),
+            "title": manifest.title,
+            "duration": manifest.duration_secs,
+        });
+        out.push_str(
+            &serde_json::to_string(&header)
+                .map_err(|e| format!("Failed to serialize recovered header: {e}"))?,
+        );
+        out.push('\n');
+        for ev in events {
+            let t = (ev.time_offset_secs * 1000.0).round() / 1000.0;
+            let row = serde_json::json!([t, ev.event_type, ev.data]);
+            out.push_str(
+                &serde_json::to_string(&row)
+                    .map_err(|e| format!("Failed to serialize recovered event: {e}"))?,
+            );
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
+    /// Removes an incremental journal after DB commit verification.
+    pub fn remove_incremental_journal(
+        &self,
+        recording_id: &str,
+        vault_id: &VaultId,
+    ) -> Result<(), String> {
+        let rec_dir = self.recording_dir(vault_id, recording_id)?;
+        if rec_dir.exists() {
+            std::fs::remove_dir_all(&rec_dir)
+                .map_err(|e| format!("Failed to remove incremental journal: {e}"))?;
+        }
+        Ok(())
     }
 
     fn checkpoint_path(&self, recording_id: &str) -> Result<PathBuf, String> {
@@ -1098,14 +1400,14 @@ mod tests {
             duration_secs: 1.5,
             event_count: 2,
             byte_size: 48,
-            cast_data: "{\"version\":2,\"width\":80,\"height\":24}\n[0.1,\"o\",\"ok\"]\n".into(),
+            cast_data: "{\"version\":2,\"width\":80,\"height\":24}\n[0.1,\"o\",\"UNIQUE_PLAINTEXT_SECRET_12345\"]\n".into(),
             truncated: false,
         };
 
         let path = journal.save_checkpoint(&cp, &vault_id, &key).unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(!on_disk.contains("prod"));
-        assert!(!on_disk.contains("ok"));
+        assert!(!on_disk.contains("UNIQUE_PLAINTEXT_SECRET_12345"));
 
         let loaded = journal
             .load_checkpoint(&cp.recording_id, &vault_id, &key)
@@ -1125,5 +1427,112 @@ mod tests {
         assert!(journal
             .load_checkpoint(&cp.recording_id, &vault_id, &key)
             .is_err());
+    }
+
+    #[test]
+    fn incremental_journal_chunks_recover_across_restart_and_quarantine_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = RecordingRecoveryJournal::new(tmp.path());
+        let vault_a = VaultId::new("vault-alpha").unwrap();
+        let vault_b = VaultId::new("vault-beta").unwrap();
+        let key_a = VaultKey::from_bytes([0x11; 32]);
+        let key_b = VaultKey::from_bytes([0x22; 32]);
+        let rec_id = "22222222-3333-4444-8555-666666666666".to_string();
+
+        let mut manifest = RecordingJournalManifest {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            recording_id: rec_id.clone(),
+            vault_id: vault_a.as_str().to_string(),
+            session_id: "sess-a".into(),
+            pane_id: 1,
+            host_id: Some(9),
+            protocol: "Ssh".into(),
+            title: "Alpha Prod".into(),
+            started_at: format_rfc3339_utc(SystemTime::now()),
+            width: 80,
+            height: 24,
+            last_durable_seq: 0,
+            duration_secs: 0.0,
+            event_count: 0,
+            byte_size: 0,
+            truncated: false,
+            paused: false,
+            finalized: false,
+        };
+        journal
+            .init_incremental_journal(&manifest, &vault_a, &key_a)
+            .unwrap();
+
+        manifest.last_durable_seq = 1;
+        manifest.event_count = 1;
+        manifest.byte_size = 12;
+        manifest.duration_secs = 0.5;
+        journal
+            .append_journal_chunk(
+                &manifest,
+                1,
+                &[JournalCastEvent {
+                    time_offset_secs: 0.5,
+                    event_type: "o".into(),
+                    data: "UNIQUE_CHUNK_1".into(),
+                }],
+                &vault_a,
+                &key_a,
+            )
+            .unwrap();
+
+        manifest.last_durable_seq = 2;
+        manifest.event_count = 2;
+        manifest.byte_size = 24;
+        manifest.duration_secs = 1.2;
+        journal
+            .append_journal_chunk(
+                &manifest,
+                2,
+                &[JournalCastEvent {
+                    time_offset_secs: 1.2,
+                    event_type: "r".into(),
+                    data: "100x30".into(),
+                }],
+                &vault_a,
+                &key_a,
+            )
+            .unwrap();
+
+        // Vault B must NOT see Vault A's pending journals
+        assert!(journal.list_pending_journals_for_vault(&vault_b).is_empty());
+        assert_eq!(
+            journal.list_pending_journals_for_vault(&vault_a),
+            vec![rec_id.clone()]
+        );
+
+        // Wrong key fails closed
+        assert!(journal
+            .load_incremental_journal(&rec_id, &vault_a, &key_b)
+            .is_err());
+
+        // Correct vault & key recovers all durable chunks in order
+        let (rec_m, rec_evs) = journal
+            .load_incremental_journal(&rec_id, &vault_a, &key_a)
+            .unwrap();
+        assert_eq!(rec_m.last_durable_seq, 2);
+        assert_eq!(rec_evs.len(), 2);
+        assert_eq!(rec_evs[0].data, "UNIQUE_CHUNK_1");
+        assert_eq!(rec_evs[1].data, "100x30");
+
+        // Corrupt chunk 2 -> fails closed AND does NOT delete the journal
+        let chunk2_path = tmp
+            .path()
+            .join(vault_a.as_str())
+            .join(&rec_id)
+            .join("00000002.chunk.enc");
+        std::fs::write(&chunk2_path, b"tampered").unwrap();
+        assert!(journal
+            .load_incremental_journal(&rec_id, &vault_a, &key_a)
+            .is_err());
+        assert!(
+            chunk2_path.exists(),
+            "Corrupt journal must remain quarantined"
+        );
     }
 }

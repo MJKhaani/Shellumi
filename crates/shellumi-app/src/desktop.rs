@@ -591,13 +591,19 @@ impl Shellumi {
         };
         self.desktop_command(action, cx);
     }
-    fn change_preference(&mut self, key: &'static str, delta: i32, cx: &mut Context<Self>) {
+    pub(crate) fn change_preference(
+        &mut self,
+        key: &'static str,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) {
         let mut preferences = self.desktop.preferences.clone();
         match key {
             "font" => {
                 preferences.terminal_font_size =
                     (i32::from(preferences.terminal_font_size) + delta).clamp(10, 24) as u16
             }
+            "font_reset" => preferences.terminal_font_size = 14,
             "ui" => {
                 preferences.ui_font_size =
                     (i32::from(preferences.ui_font_size) + delta).clamp(11, 18) as u16
@@ -608,8 +614,54 @@ impl Shellumi {
             }
             "hidden" => preferences.show_hidden_files = !preferences.show_hidden_files,
             "startup" => preferences.startup_overview = !preferences.startup_overview,
+            "bell_mode" => {
+                preferences.bell_mode = match preferences.bell_mode.as_str() {
+                    "both" => "visual".to_string(),
+                    "visual" => "audible".to_string(),
+                    "audible" => "off".to_string(),
+                    _ => "both".to_string(),
+                };
+            }
+            "bell_volume" => {
+                preferences.bell_volume =
+                    (i32::from(preferences.bell_volume) + delta).clamp(0, 100) as u8;
+            }
+            "copy_on_select" => preferences.copy_on_select = !preferences.copy_on_select,
+            "record_input" => preferences.record_input_enabled = !preferences.record_input_enabled,
+            "font_ligatures" => preferences.font_ligatures = !preferences.font_ligatures,
+            "osc52" => {
+                preferences.osc52_policy = match preferences.osc52_policy.as_str() {
+                    "deny" => "prompt".to_string(),
+                    "prompt" => "allow_write".to_string(),
+                    _ => "deny".to_string(),
+                };
+            }
+            "cursor_shape" => {
+                preferences.cursor_shape = match preferences.cursor_shape.as_str() {
+                    "block" => "underline".to_string(),
+                    "underline" => "beam".to_string(),
+                    _ => "block".to_string(),
+                };
+            }
+            "cursor_blink" => preferences.cursor_blink = !preferences.cursor_blink,
+            "ligatures" => preferences.font_ligatures = !preferences.font_ligatures,
             "reset" => preferences = Preferences::default(),
             _ => return,
+        }
+        let shape = match preferences.cursor_shape.as_str() {
+            "underline" => shellumi_terminal::CursorShape::Underline,
+            "beam" => shellumi_terminal::CursorShape::Beam,
+            _ => shellumi_terminal::CursorShape::Block,
+        };
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                pane.terminal
+                    .set_scrollback_limit(preferences.scrollback_lines);
+                pane.terminal
+                    .set_recording_input_enabled(preferences.record_input_enabled);
+                pane.terminal.grid_mut().modes_mut().cursor_shape = shape;
+                pane.terminal.grid_mut().modes_mut().cursor_blink = preferences.cursor_blink;
+            }
         }
         self.desktop_command(Command::SavePreferences(preferences), cx);
     }

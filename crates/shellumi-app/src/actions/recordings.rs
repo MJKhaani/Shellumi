@@ -3,7 +3,10 @@ use super::*;
 
 impl Shellumi {
     pub(crate) fn open_session_replay_modal(&mut self, cx: &mut Context<Self>) {
+        self.next_replay_modal_id = self.next_replay_modal_id.wrapping_add(1);
+        let modal_id = self.next_replay_modal_id;
         self.session_replay_modal = Some(SessionReplayModalState {
+            modal_instance_id: modal_id,
             active_tab: SessionReplayTab::RecordingsList,
             recordings: Vec::new(),
             selected_recording_id: None,
@@ -15,6 +18,7 @@ impl Shellumi {
             status_notification: None,
             search_query: String::new(),
         });
+        self.recover_pending_journals_for_active_vault(cx);
         self.load_session_recordings(cx);
         cx.notify();
     }
@@ -62,39 +66,274 @@ impl Shellumi {
     }
 
     pub(crate) fn start_pane_recording(&mut self, pane_id: u64, cx: &mut Context<Self>) {
-        let active_vault_id = self.active_vault_id.clone();
-        if self.vault_key_for(&active_vault_id).is_none() && self.database.is_some() {
+        let mut target_info = None;
+        for tab in &self.tabs {
+            for pane in &tab.panes {
+                if pane.id == pane_id {
+                    target_info = Some((
+                        pane.vault_id.clone(),
+                        pane.session.is_some(),
+                        pane.session_uuid.clone(),
+                        pane.host_id,
+                        format!("{:?}", pane.kind),
+                        pane.name.clone(),
+                        pane.terminal.grid().cols(),
+                        pane.terminal.grid().rows(),
+                    ));
+                    break;
+                }
+            }
+        }
+        let Some((
+            pane_vault_id,
+            has_session,
+            session_uuid,
+            host_id,
+            protocol,
+            pane_name,
+            cols,
+            rows,
+        )) = target_info
+        else {
+            return;
+        };
+
+        if !has_session {
             for tab in &mut self.tabs {
                 if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
-                    pane.message =
-                        Some("Cannot start recording while vault is locked.".to_string());
+                    pane.message = Some("Cannot record an inactive session.".to_string());
                 }
             }
             cx.notify();
             return;
         }
-        for tab in self.tabs.iter_mut() {
-            for pane in tab.panes.iter_mut() {
-                if pane.id == pane_id {
-                    if pane.session.is_none() {
-                        pane.message = Some("Cannot record an inactive session.".to_string());
-                        cx.notify();
-                        return;
+
+        let vault_key = self.vault_key_for(&pane_vault_id);
+        if vault_key.is_none() && self.database.is_some() {
+            for tab in &mut self.tabs {
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                    pane.message =
+                        Some("Cannot start recording while its vault is locked.".to_string());
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        let rec_id = uuid::Uuid::new_v4().to_string();
+        let started_at = shellumi_core::format_rfc3339_utc(std::time::SystemTime::now());
+
+        if let (Some(j), Some(key)) = (self.recording_recovery_journal(), vault_key.as_ref()) {
+            if let Ok(vid) = shellumi_core::VaultId::new(&pane_vault_id) {
+                let manifest = shellumi_core::RecordingJournalManifest {
+                    schema_version: 1,
+                    recording_id: rec_id.clone(),
+                    vault_id: pane_vault_id.clone(),
+                    session_id: session_uuid,
+                    pane_id,
+                    host_id,
+                    protocol,
+                    title: format!("Recorded Session: {pane_name}"),
+                    started_at: started_at.clone(),
+                    width: cols,
+                    height: rows,
+                    last_durable_seq: 0,
+                    duration_secs: 0.0,
+                    event_count: 0,
+                    byte_size: 0,
+                    truncated: false,
+                    paused: false,
+                    finalized: false,
+                };
+                if let Err(err) = j.init_incremental_journal(&manifest, &vid, key) {
+                    for tab in &mut self.tabs {
+                        if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                            pane.message = Some(format!(
+                                "Cannot start durable recording (journal init failed): {err}"
+                            ));
+                        }
                     }
-                    let rec_id = uuid::Uuid::new_v4().to_string();
-                    let started_at =
-                        shellumi_core::format_rfc3339_utc(std::time::SystemTime::now());
-                    pane.recording_id = Some(rec_id);
-                    pane.recording_started_at = Some(started_at);
-                    pane.recording_state = shellumi_core::RecordingLifecycleState::Recording;
-                    pane.terminal
-                        .start_recording(Some(format!("Session: {}", pane.name)));
-                    pane.message = Some("⏺ Session recording started.".to_string());
                     cx.notify();
                     return;
                 }
             }
         }
+
+        let record_input = self.desktop.preferences.record_input_enabled;
+        let mut flush_gen = 0u64;
+        for tab in self.tabs.iter_mut() {
+            for pane in tab.panes.iter_mut() {
+                if pane.id == pane_id {
+                    pane.recording_id = Some(rec_id.clone());
+                    pane.recording_started_at = Some(started_at.clone());
+                    pane.recording_durable_seq = 0;
+                    pane.recording_flush_generation =
+                        pane.recording_flush_generation.wrapping_add(1);
+                    flush_gen = pane.recording_flush_generation;
+                    pane.recording_state = shellumi_core::RecordingLifecycleState::Recording;
+                    pane.terminal
+                        .start_recording(Some(format!("Session: {}", pane.name)));
+                    pane.terminal.set_recording_input_enabled(record_input);
+                    pane.message = Some("⏺ Session recording started (durable).".to_string());
+                    break;
+                }
+            }
+        }
+        cx.notify();
+        self.schedule_recording_durability_flush(pane_id, rec_id, flush_gen, cx);
+    }
+
+    pub(crate) fn toggle_pause_pane_recording(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        for tab in &mut self.tabs {
+            if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                if !pane.terminal.is_recording() {
+                    return;
+                }
+                if pane.terminal.is_recording_paused() {
+                    pane.terminal.resume_recording();
+                    pane.recording_state = shellumi_core::RecordingLifecycleState::Recording;
+                    pane.message = Some("▶ Session recording resumed.".to_string());
+                } else {
+                    pane.terminal.pause_recording();
+                    pane.recording_state = shellumi_core::RecordingLifecycleState::Paused;
+                    pane.message = Some("⏸ Session recording paused.".to_string());
+                }
+                break;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_pane_recording_input(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        for tab in &mut self.tabs {
+            if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pane_id) {
+                if !pane.terminal.is_recording() {
+                    return;
+                }
+                let next = !pane.terminal.is_recording_input_enabled();
+                pane.terminal.set_recording_input_enabled(next);
+                pane.message = Some(if next {
+                    "⚠ Keystroke recording enabled for this session (sensitive prompts remain suppressed).".to_string()
+                } else {
+                    "Keystroke recording disabled for this session.".to_string()
+                });
+                break;
+            }
+        }
+        cx.notify();
+    }
+
+    fn schedule_recording_durability_flush(
+        &self,
+        pane_id: u64,
+        rec_id: String,
+        flush_gen: u64,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |app, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let keep_going = app
+                .update(cx, |app, cx| {
+                    let still_active = app.tabs.iter().any(|t| {
+                        t.panes.iter().any(|p| {
+                            p.id == pane_id
+                                && p.recording_flush_generation == flush_gen
+                                && p.recording_id.as_deref() == Some(&rec_id)
+                                && p.terminal.is_recording()
+                        })
+                    });
+                    if still_active {
+                        app.flush_pane_recording_chunk(pane_id, cx);
+                    }
+                    still_active
+                })
+                .unwrap_or(false);
+            if !keep_going {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn flush_pane_recording_chunk(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        let Some(journal) = self.recording_recovery_journal() else {
+            return;
+        };
+        let mut payload = None;
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                if pane.id == pane_id && pane.terminal.is_recording() {
+                    let (new_count, raw_events) = pane.terminal.peek_unflushed_recording_events();
+                    if raw_events.is_empty() {
+                        return;
+                    }
+                    let Some(rec_id) = pane.recording_id.clone() else {
+                        return;
+                    };
+                    let next_seq = pane.recording_durable_seq + 1;
+                    pane.recording_durable_seq = next_seq;
+                    pane.terminal.mark_recording_events_flushed(new_count);
+                    let header = pane.terminal.recording_header().unwrap_or_default();
+                    let manifest = shellumi_core::RecordingJournalManifest {
+                        schema_version: 1,
+                        recording_id: rec_id,
+                        vault_id: pane.vault_id.clone(),
+                        session_id: pane.session_uuid.clone(),
+                        pane_id,
+                        host_id: pane.host_id,
+                        protocol: format!("{:?}", pane.kind),
+                        title: format!("Recorded Session: {}", pane.name),
+                        started_at: pane.recording_started_at.clone().unwrap_or_else(|| {
+                            shellumi_core::format_rfc3339_utc(std::time::SystemTime::now())
+                        }),
+                        width: header.width,
+                        height: header.height,
+                        last_durable_seq: next_seq,
+                        duration_secs: pane.terminal.recording_duration().as_secs_f64(),
+                        event_count: pane.terminal.recording_event_count(),
+                        byte_size: pane.terminal.recording_byte_count(),
+                        truncated: pane.terminal.is_recording_truncated(),
+                        paused: pane.terminal.is_recording_paused(),
+                        finalized: false,
+                    };
+                    let j_events: Vec<shellumi_core::JournalCastEvent> = raw_events
+                        .into_iter()
+                        .map(|e| shellumi_core::JournalCastEvent {
+                            time_offset_secs: e.time_offset_secs,
+                            event_type: e.event_type.as_code().to_string(),
+                            data: e.data,
+                        })
+                        .collect();
+                    payload = Some((pane.vault_id.clone(), next_seq, manifest, j_events));
+                    break;
+                }
+            }
+        }
+        let Some((vault_id_str, seq, manifest, events)) = payload else {
+            return;
+        };
+        let Some(vault_key) = self.vault_key_for(&vault_id_str) else {
+            return;
+        };
+        let Ok(vid) = shellumi_core::VaultId::new(&vault_id_str) else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) =
+                    journal.append_journal_chunk(&manifest, seq, &events, &vid, &vault_key)
+                {
+                    tracing::warn!(
+                        recording_id = %manifest.recording_id,
+                        seq,
+                        error = %err,
+                        "Incremental recording journal flush failed"
+                    );
+                }
+            })
+            .detach();
     }
 
     pub(crate) fn finalize_all_active_recordings(&mut self, reason: &str, cx: &mut Context<Self>) {
@@ -218,18 +457,31 @@ impl Shellumi {
             }
         }
 
-        let Some(path) = self
-            .vault_db_path(&pane_vault_id)
-            .or_else(|| self.active_vault_db_path())
-        else {
+        // Strict vault isolation (REC-03): NEVER fall back to active_vault_db_path() or open without key.
+        let Some(path) = self.vault_db_path(&pane_vault_id) else {
             self.failed_recordings.push(FailedRecoverableRecording {
                 record: db_rec,
                 vault_id: pane_vault_id,
-                error: "No active vault database path".to_string(),
+                error: "Vault database path unavailable".to_string(),
             });
-            self.set_pane_recording_error(pane_id, &rec_id, "No active vault database path", cx);
+            self.set_pane_recording_error(pane_id, &rec_id, "Vault database path unavailable", cx);
             return;
         };
+        if vault_key.is_none() && self.database.is_some() {
+            self.failed_recordings.push(FailedRecoverableRecording {
+                record: db_rec,
+                vault_id: pane_vault_id,
+                error: "Vault is locked; recording retained in encrypted recovery journal"
+                    .to_string(),
+            });
+            self.set_pane_recording_error(
+                pane_id,
+                &rec_id,
+                "Vault is locked; recording retained in encrypted recovery journal",
+                cx,
+            );
+            return;
+        }
 
         let db_rec_clone = db_rec.clone();
         let expected_gen = self.vault_load_generation;
@@ -258,6 +510,9 @@ impl Shellumi {
                     Ok(()) => {
                         if let Some(j) = app.recording_recovery_journal() {
                             let _ = j.remove_checkpoint(&rec_id);
+                            if let Ok(vid) = shellumi_core::VaultId::new(&expected_vault) {
+                                let _ = j.remove_incremental_journal(&rec_id, &vid);
+                            }
                         }
                         app.failed_recordings.retain(|f| f.record.id != rec_id);
                         if app.active_vault_id == expected_vault
@@ -386,36 +641,168 @@ impl Shellumi {
         cx.notify();
     }
 
-    fn load_session_recordings(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.active_vault_db_path() {
-            let vault_key = self.active_vault_key();
-            let task = cx.background_executor().spawn(async move {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .build()
-                    .map_err(|e| e.to_string())?;
-                runtime.block_on(async {
-                    let store = HostStore::open_with_key(&path, vault_key.as_ref())
+    pub(crate) fn recover_pending_journals_for_active_vault(&mut self, cx: &mut Context<Self>) {
+        let Some(journal) = self.recording_recovery_journal() else {
+            return;
+        };
+        let active_vid_str = self.active_vault_id.clone();
+        let Ok(vid) = shellumi_core::VaultId::new(&active_vid_str) else {
+            return;
+        };
+        let Some(vault_key) = self.vault_key_for(&active_vid_str) else {
+            return;
+        };
+        let Some(db_path) = self.vault_db_path(&active_vid_str) else {
+            return;
+        };
+        let expected_gen = self.vault_load_generation;
+        let bg_vid_str = active_vid_str.clone();
+
+        let task = cx.background_executor().spawn(async move {
+            let pending_ids = journal.list_pending_journals_for_vault(&vid);
+            if pending_ids.is_empty() {
+                return Ok::<Vec<FailedRecoverableRecording>, String>(Vec::new());
+            }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut recovered = Vec::new();
+            for rec_id in pending_ids {
+                // Check if already committed in DB; reconcile if present
+                let existing = runtime.block_on(async {
+                    let store = HostStore::open_with_key(&db_path, Some(&vault_key))
                         .await
                         .map_err(|e| e.to_string())?;
                     store
-                        .list_session_recordings(None)
+                        .get_session_recording(&rec_id)
                         .await
                         .map_err(|e| e.to_string())
-                })
-            });
-            cx.spawn(async move |app, cx| {
-                let result = task.await;
-                let _ = app.update(cx, |app, cx| {
-                    if let Ok(recordings) = result {
-                        if let Some(ref mut m) = app.session_replay_modal {
-                            m.recordings = recordings;
+                })?;
+                if existing.is_some() {
+                    let _ = journal.remove_incremental_journal(&rec_id, &vid);
+                    continue;
+                }
+                match journal.load_incremental_journal(&rec_id, &vid, &vault_key) {
+                    Ok((manifest, events)) => {
+                        if let Ok(raw_cast) =
+                            shellumi_core::RecordingRecoveryJournal::build_asciicast_v2(
+                                &manifest, &events,
+                            )
+                        {
+                            let clean_cast = SessionRedactor::redact_asciicast_v2(&raw_cast)
+                                .unwrap_or_default();
+                            if !clean_cast.is_empty() {
+                                let now_str = shellumi_core::format_rfc3339_utc(
+                                    std::time::SystemTime::now(),
+                                );
+                                recovered.push(FailedRecoverableRecording {
+                                    record: SessionRecordingRecord {
+                                        id: manifest.recording_id,
+                                        session_id: manifest.session_id,
+                                        host_id: manifest.host_id,
+                                        title: manifest.title,
+                                        duration_secs: manifest.duration_secs,
+                                        event_count: manifest.event_count,
+                                        byte_size: clean_cast.len(),
+                                        cast_data: clean_cast,
+                                        recorded_at: manifest.started_at,
+                                        created_at: now_str,
+                                    },
+                                    vault_id: bg_vid_str.clone(),
+                                    error: "Recovered from crash/interrupted session".to_string(),
+                                });
+                            }
                         }
-                        cx.notify();
                     }
+                    Err(err) => {
+                        tracing::warn!(recording_id = %rec_id, error = %err, "Quarantined corrupt or unreadable recording journal");
+                    }
+                }
+            }
+            Ok(recovered)
+        });
+
+        cx.spawn(async move |app, cx| {
+            if let Ok(items) = task.await {
+                let _ = app.update(cx, |app, cx| {
+                    if app.active_vault_id != active_vid_str
+                        || app.vault_load_generation != expected_gen
+                    {
+                        return;
+                    }
+                    for item in items {
+                        if !app
+                            .failed_recordings
+                            .iter()
+                            .any(|f| f.record.id == item.record.id)
+                        {
+                            app.failed_recordings.push(item);
+                        }
+                    }
+                    cx.notify();
                 });
+            }
+        })
+        .detach();
+    }
+
+    fn load_session_recordings(&mut self, cx: &mut Context<Self>) {
+        let Some(modal_id) = self
+            .session_replay_modal
+            .as_ref()
+            .map(|m| m.modal_instance_id)
+        else {
+            return;
+        };
+        let active_vault = self.active_vault_id.clone();
+        let Some(path) = self.vault_db_path(&active_vault) else {
+            return;
+        };
+        let vault_key = self.vault_key_for(&active_vault);
+        let expected_gen = self.vault_load_generation;
+        self.replay_list_request_id = self.replay_list_request_id.wrapping_add(1);
+        let req_id = self.replay_list_request_id;
+
+        let task = cx.background_executor().spawn(async move {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let store = HostStore::open_with_key(&path, vault_key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .list_session_recordings(None)
+                    .await
+                    .map_err(|e| e.to_string())
             })
-            .detach();
-        }
+        });
+        cx.spawn(async move |app, cx| {
+            let result = task.await;
+            let _ = app.update(cx, |app, cx| {
+                // REC-04 fencing: check vault, vault_load_generation, modal_instance_id, and latest request_id
+                if app.active_vault_id != active_vault
+                    || app.vault_load_generation != expected_gen
+                    || app.replay_list_request_id != req_id
+                {
+                    return;
+                }
+                if let Some(ref mut m) = app.session_replay_modal {
+                    if m.modal_instance_id != modal_id {
+                        return;
+                    }
+                    match result {
+                        Ok(recordings) => m.recordings = recordings,
+                        Err(err) => {
+                            m.status_notification =
+                                Some(format!("Failed to load recordings: {err}"));
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn select_and_load_recording_for_playback(

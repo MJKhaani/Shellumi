@@ -206,7 +206,7 @@ impl Workspace {
 pub struct BroadcastManager {
     enabled: bool,
     total_panes: usize,
-    excluded_panes: HashSet<usize>,
+    excluded_panes: HashSet<u64>,
 }
 
 /// Safety evaluation result when typing or broadcasting input.
@@ -247,25 +247,30 @@ impl BroadcastManager {
 
     pub fn set_total_panes(&mut self, total: usize) {
         self.total_panes = total;
-        self.excluded_panes.retain(|&idx| idx < total);
     }
 
-    pub fn is_pane_excluded(&self, pane_idx: usize) -> bool {
-        self.excluded_panes.contains(&pane_idx)
+    pub fn retain_panes(&mut self, active_pane_ids: &[u64]) {
+        self.total_panes = active_pane_ids.len();
+        self.excluded_panes
+            .retain(|id| active_pane_ids.contains(id));
     }
 
-    pub fn toggle_pane_exclusion(&mut self, pane_idx: usize) {
-        if !self.excluded_panes.remove(&pane_idx) {
-            self.excluded_panes.insert(pane_idx);
+    pub fn is_pane_excluded(&self, pane_id: u64) -> bool {
+        self.excluded_panes.contains(&pane_id)
+    }
+
+    pub fn toggle_pane_exclusion(&mut self, pane_id: u64) {
+        if !self.excluded_panes.remove(&pane_id) {
+            self.excluded_panes.insert(pane_id);
         }
     }
 
-    pub fn exclude_pane(&mut self, pane_idx: usize) {
-        self.excluded_panes.insert(pane_idx);
+    pub fn exclude_pane(&mut self, pane_id: u64) {
+        self.excluded_panes.insert(pane_id);
     }
 
-    pub fn include_pane(&mut self, pane_idx: usize) {
-        self.excluded_panes.remove(&pane_idx);
+    pub fn include_pane(&mut self, pane_id: u64) {
+        self.excluded_panes.remove(&pane_id);
     }
 
     pub fn receiving_panes_count(&self) -> usize {
@@ -476,10 +481,10 @@ mod tests {
         assert!(!bm.is_pane_excluded(1));
         assert_eq!(bm.receiving_panes_count(), 4);
 
-        // Resize total panes
+        // Resize total panes / retain active pane IDs
         bm.exclude_pane(3);
-        bm.set_total_panes(2);
-        assert!(!bm.is_pane_excluded(3)); // Retained pane index cleaned up
+        bm.retain_panes(&[0, 1]);
+        assert!(!bm.is_pane_excluded(3)); // Closed pane ID cleaned up
         assert_eq!(bm.receiving_panes_count(), 2);
     }
 

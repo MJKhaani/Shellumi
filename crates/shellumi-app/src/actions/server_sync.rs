@@ -229,6 +229,7 @@ impl Shellumi {
 
         self.start_storage(false, cx);
         self.load_team_members(cx);
+        self.recover_pending_journals_for_active_vault(cx);
         self.desktop_command(Command::Refresh, cx);
 
         if self.is_active_vault_remote() {

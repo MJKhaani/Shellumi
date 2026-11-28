@@ -137,9 +137,10 @@ pub fn discover_serial_ports() -> Vec<String> {
     SerialConfig::discover_serial_ports()
 }
 pub use recording::{
-    format_duration_hms, format_rfc3339_utc, CastPlaybackEngine, PlaybackFrame, PlaybackSpeed,
-    PlaybackStatus, RecordingCheckpoint, RecordingLifecycleState, RecordingRecoveryJournal,
-    SessionRecordingMetadata, SessionRecordingSummary, SessionRedactor,
+    format_duration_hms, format_rfc3339_utc, CastPlaybackEngine, JournalCastEvent, PlaybackFrame,
+    PlaybackSpeed, PlaybackStatus, RecordingCheckpoint, RecordingJournalManifest,
+    RecordingLifecycleState, RecordingRecoveryJournal, SessionRecordingMetadata,
+    SessionRecordingSummary, SessionRedactor,
 };
 pub use setup::{
     verify_setup_integrity, CloudVaultSummary, ConfiguredVaultSummary, InstallationStatus,

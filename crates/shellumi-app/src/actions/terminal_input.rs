@@ -185,17 +185,26 @@ impl Shellumi {
                     let should_send = if idx == active_pane_idx {
                         true
                     } else {
-                        broadcast && !self.broadcast_manager.is_pane_excluded(idx)
+                        broadcast && !self.broadcast_manager.is_pane_excluded(p.id)
                     };
                     if should_send {
                         let bracketed = p.terminal.modes().bracketed_paste;
                         let bytes = encode_paste_bytes(&text, bracketed);
                         if let Some(sess) = &p.session {
-                            if let Err(error) = sess.input(bytes.clone()) {
-                                p.message = Some(error.into());
-                                p.session = None;
-                            } else {
-                                p.terminal.record_input_with_policy(&bytes, false);
+                            match sess.input(bytes.clone()) {
+                                Ok(()) => {
+                                    p.terminal.record_input_with_policy(&bytes, false);
+                                }
+                                Err(crate::session::SessionInputError::QueueFull) => {
+                                    p.message = Some(
+                                        "Input queue full (backpressure) — please wait."
+                                            .to_string(),
+                                    );
+                                }
+                                Err(err) => {
+                                    p.message = Some(err.to_string());
+                                    p.session = None;
+                                }
                             }
                         }
                     }
@@ -241,17 +250,25 @@ impl Shellumi {
                 let should_send = if idx == active_pane_idx {
                     true
                 } else {
-                    broadcast && !self.broadcast_manager.is_pane_excluded(idx)
+                    broadcast && !self.broadcast_manager.is_pane_excluded(p.id)
                 };
                 if should_send {
                     let target_bytes = key_bytes_for_modes(&event.keystroke, p.terminal.modes())
                         .unwrap_or_else(|| bytes.clone());
                     if let Some(sess) = &p.session {
-                        if let Err(error) = sess.input(target_bytes.clone()) {
-                            p.message = Some(error.into());
-                            p.session = None;
-                        } else {
-                            p.terminal.record_input_with_policy(&target_bytes, false);
+                        match sess.input(target_bytes.clone()) {
+                            Ok(()) => {
+                                p.terminal.record_input_with_policy(&target_bytes, false);
+                            }
+                            Err(crate::session::SessionInputError::QueueFull) => {
+                                p.message = Some(
+                                    "Input queue full (backpressure) — please wait.".to_string(),
+                                );
+                            }
+                            Err(err) => {
+                                p.message = Some(err.to_string());
+                                p.session = None;
+                            }
                         }
                     }
                 }

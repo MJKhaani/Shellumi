@@ -196,13 +196,27 @@ mod tests {
     }
 
     #[test]
-    fn native_cpal_audio_smoke_test() {
+    fn bell_audio_service_handles_missing_device_gracefully() {
+        let mut svc = BellAudioService::new();
+        // Zero volume mutes cleanly without hitting audio hardware.
+        assert!(!svc.trigger(1, 0.0));
+    }
+
+    #[test]
+    fn native_cpal_audio_device_playback_test() {
+        use cpal::traits::HostTrait;
+        let host = cpal::default_host();
+        if host.default_output_device().is_none() {
+            // No audio output device in headless CI; verify play_chime_cpal reports an explicit error.
+            let err = play_chime_cpal(0.2).unwrap_err();
+            assert!(!err.is_empty());
+            return;
+        }
         match play_chime_cpal(0.2) {
             Ok(device_name) => {
                 assert!(!device_name.is_empty());
             }
             Err(err) => {
-                // On headless CI without an audio device, cpal returns a clean error without panicking.
                 assert!(!err.is_empty());
             }
         }

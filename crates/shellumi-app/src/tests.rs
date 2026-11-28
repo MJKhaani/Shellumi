@@ -1615,12 +1615,22 @@ fn verifies_session_replay_modal_and_recording_integration() {
     term.start_recording(Some("CI Production Audit".to_string()));
     assert!(term.is_recording());
 
+    // Input capture is disabled by default
+    term.record_input(b"__DISABLED_INPUT_SHOULD_NOT_APPEAR__\r");
+    // Opt-in enables non-sensitive input capture
+    term.set_recording_input_enabled(true);
     term.record_input(b"uname -a\r");
+    // Sensitive input must still be suppressed even when input capture is enabled
+    term.record_input_with_policy(b"__SENSITIVE_SECRET_INPUT__\r", true);
+    // Disabling capture again prevents subsequent input from being recorded
+    term.set_recording_input_enabled(false);
+    term.record_input(b"__RE_DISABLED_INPUT__\r");
+
     term.process_bytes(b"Linux prod-node 6.8.0 #1 SMP\r\n");
     term.process_bytes(b"export SECRET=super_classified_val\r\n");
     term.resize(30, 100);
 
-    assert!(term.recording_event_count() >= 3);
+    assert!(term.recording_event_count() >= 4);
     let recording = term.stop_recording().expect("should return recording");
     assert!(!term.is_recording());
     assert_eq!(
@@ -1632,7 +1642,18 @@ fn verifies_session_replay_modal_and_recording_integration() {
         .to_asciicast_v2()
         .expect("should serialize asciicast");
     assert!(raw_cast.contains("\"version\":2"));
-    assert!(raw_cast.contains("uname -a"));
+    let parsed_raw = shellumi_terminal::SessionRecording::parse_asciicast_v2(&raw_cast)
+        .expect("should parse raw cast");
+    let input_events: Vec<&str> = parsed_raw
+        .events
+        .iter()
+        .filter(|e| e.event_type == shellumi_terminal::CastEventType::Input)
+        .map(|e| e.data.as_str())
+        .collect();
+    assert_eq!(input_events, vec!["uname -a\r"]);
+    assert!(!raw_cast.contains("__DISABLED_INPUT_SHOULD_NOT_APPEAR__"));
+    assert!(!raw_cast.contains("__SENSITIVE_SECRET_INPUT__"));
+    assert!(!raw_cast.contains("__RE_DISABLED_INPUT__"));
 
     // 3. Verify automated sensitive data redaction on recording
     let clean_cast = SessionRedactor::redact_asciicast_v2(&raw_cast).expect("should redact");
@@ -1655,6 +1676,7 @@ fn verifies_session_replay_modal_and_recording_integration() {
     }
 
     let mut modal = SessionReplayModalState {
+        modal_instance_id: 1,
         active_tab: SessionReplayTab::RecordingsList,
         recordings: vec![SessionRecordingSummary {
             id: "rec-test-1".to_string(),
@@ -3660,13 +3682,24 @@ fn term_rec_t01_t02_t03_recording_lifecycle_uuids_and_recovery() {
     // 1. Real PTY session + Terminal + SessionRecorder + SessionRedactor + RecoveryJournal + Turso DB
     let mut term1 = shellumi_terminal::Terminal::new(24, 80);
     term1.start_recording(Some("PTY Recording 1".into()));
-    let sess =
-        Session::start(shellumi_terminal::TerminalCommand::new("/bin/echo").arg("pty-rec-ok"));
+    #[cfg(windows)]
+    let cmd = shellumi_terminal::TerminalCommand::new("cmd").args(["/C", "echo pty-rec-ok"]);
+    #[cfg(not(windows))]
+    let cmd = shellumi_terminal::TerminalCommand::new("/bin/echo").arg("pty-rec-ok");
+    let sess = Session::start(cmd);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match sess.events.recv_blocking().unwrap() {
-            SessionEvent::Output(bytes) => term1.process_bytes(&bytes),
-            SessionEvent::Closed => break,
-            SessionEvent::Error(e) => panic!("{e}"),
+        if std::time::Instant::now() > deadline {
+            panic!("Timed out waiting for PTY session output");
+        }
+        match sess.events.try_recv() {
+            Ok(SessionEvent::Output(bytes)) => term1.process_bytes(&bytes),
+            Ok(SessionEvent::Closed) => break,
+            Ok(SessionEvent::Error(e)) => panic!("{e}"),
+            Err(async_channel::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(async_channel::TryRecvError::Closed) => break,
         }
     }
     let rec1 = term1.stop_recording().unwrap();
@@ -3829,4 +3862,30 @@ fn term_play_t01_isolated_replay_and_side_effect_suppression() {
     assert_eq!(term.grid().rows(), 15);
     assert!(term.screen_to_string().contains("Hello World"));
     assert!(term.drain_events().is_empty());
+}
+
+#[test]
+fn term_layout_t01_recursive_split_tree_and_broadcast_u64() {
+    let mut tree = super::SplitNode::Leaf(10);
+    assert!(tree.split_leaf(10, 20, super::SplitDirection::Vertical));
+    assert!(tree.split_leaf(20, 30, super::SplitDirection::Horizontal));
+    // Closing leaf 20 collapses only its inner Horizontal split, keeping 10 | 30 Vertical.
+    let collapsed = tree.remove_leaf(20).expect("tree must survive");
+    assert_eq!(
+        collapsed,
+        super::SplitNode::Split {
+            direction: super::SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(super::SplitNode::Leaf(10)),
+            second: Box::new(super::SplitNode::Leaf(30)),
+        }
+    );
+
+    // Broadcast exclusions track stable u64 pane IDs across closes.
+    let mut bm = shellumi_core::BroadcastManager::new(3);
+    bm.enable();
+    bm.exclude_pane(30);
+    bm.retain_panes(&[10, 30]);
+    assert!(!bm.is_pane_excluded(10));
+    assert!(bm.is_pane_excluded(30));
 }

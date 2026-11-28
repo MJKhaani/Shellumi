@@ -696,7 +696,15 @@ impl Shellumi {
                         .flex_col()
                         .gap_1();
 
-                    if modal.screen_output_buffer.is_empty() {
+                    if let Some(ref replay_term) = modal.replay_terminal {
+                        let rows = replay_term.grid().rows();
+                        for r in 0..rows {
+                            if let Some(spans) = replay_term.row_spans(r) {
+                                screen_div =
+                                    screen_div.child(crate::render_terminal_spans(spans, 18.0));
+                            }
+                        }
+                    } else if modal.screen_output_buffer.is_empty() {
                         screen_div = screen_div.child(
                             div()
                                 .text_xs()

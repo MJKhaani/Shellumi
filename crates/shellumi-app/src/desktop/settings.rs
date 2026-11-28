@@ -146,6 +146,105 @@ impl Shellumi {
                         )
                         .into_any_element(),
                     ))
+                    .child(row(
+                        "Cursor shape",
+                        "Choose block, underline, or beam cursor.".into(),
+                        button("cursor-shape-pref", prefs.cursor_shape.clone())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.change_preference("cursor_shape", 0, cx)
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "Cursor blink",
+                        "Enable or disable cursor blinking.".into(),
+                        button(
+                            "cursor-blink-pref",
+                            if prefs.cursor_blink { "On" } else { "Off" },
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.change_preference("cursor_blink", 0, cx)
+                        }))
+                        .into_any_element(),
+                    ))
+                    .child(row(
+                        "Terminal bell",
+                        "Configure audible and visual bell notifications.".into(),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                button("bell-mode-pref", prefs.bell_mode.clone()).on_click(
+                                    cx.listener(|app, _, _, cx| {
+                                        app.change_preference("bell_mode", 0, cx)
+                                    }),
+                                ),
+                            )
+                            .child(self.preference_stepper(
+                                "bell_volume",
+                                format!("{}%", prefs.bell_volume),
+                                10,
+                                cx,
+                            ))
+                            .child(button("bell-preview-btn", "Test").on_click(cx.listener(
+                                |app, _, _, _cx| {
+                                    let vol = f32::from(app.desktop.preferences.bell_volume) / 100.0;
+                                    let _ = app.bell_audio.trigger(0, vol);
+                                },
+                            )))
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "Copy on select",
+                        "Automatically copy selected terminal text to the clipboard.".into(),
+                        button(
+                            "copy-on-select-pref",
+                            if prefs.copy_on_select { "On" } else { "Off" },
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.change_preference("copy_on_select", 0, cx)
+                        }))
+                        .into_any_element(),
+                    ))
+                    .child(row(
+                        "Record input (opt-in)",
+                        "Disabled by default. Sensitive credential inputs are still suppressed."
+                            .into(),
+                        button(
+                            "record-input-pref",
+                            if prefs.record_input_enabled {
+                                "On"
+                            } else {
+                                "Off"
+                            },
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.change_preference("record_input", 0, cx)
+                        }))
+                        .into_any_element(),
+                    ))
+                    .child(row(
+                        "Font ligatures",
+                        "Enable programming font ligatures in terminal panes.".into(),
+                        button(
+                            "font-ligatures-pref",
+                            if prefs.font_ligatures { "On" } else { "Off" },
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.change_preference("font_ligatures", 0, cx)
+                        }))
+                        .into_any_element(),
+                    ))
+                    .child(row(
+                        "OSC 52 clipboard policy",
+                        "Controls remote escape-sequence clipboard writes (reads are always denied)."
+                            .into(),
+                        button("osc52-pref", prefs.osc52_policy.clone()).on_click(cx.listener(
+                            |app, _, _, cx| app.change_preference("osc52", 0, cx),
+                        ))
+                        .into_any_element(),
+                    ))
                     .child(
                         button(
                             "open-integration-settings",

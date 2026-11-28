@@ -225,6 +225,7 @@ impl Shellumi {
                         app.load_vault_list(cx);
                         app.start_storage(false, cx);
                         app.load_team_members(cx);
+                        app.recover_pending_journals_for_active_vault(cx);
                     }
                     Err(err) => {
                         if let Some(m) = &mut app.unlock_vault_modal {
@@ -260,8 +261,12 @@ impl Shellumi {
             self.finalize_pane_recording(pid, "Vault locked", cx);
         }
 
-        // 1. Evict from active in-memory keys
+        // 1. Evict from active in-memory keys and clear decrypted recovery/replay state for this vault
         let _ = self.active_vault_keys.remove(&vault_id);
+        self.failed_recordings.retain(|f| f.vault_id != vault_id);
+        if is_active {
+            self.session_replay_modal = None;
+        }
 
         // 2. Evict from OS Keychain when explicitly locked
         if let Ok(vid) = VaultId::new(&vault_id) {

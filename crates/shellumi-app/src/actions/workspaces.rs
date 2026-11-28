@@ -111,7 +111,7 @@ impl Shellumi {
                     startup_command: None,
                     working_directory: None,
                     pane_index: idx,
-                    excluded_from_broadcast: self.broadcast_manager.is_pane_excluded(idx),
+                    excluded_from_broadcast: self.broadcast_manager.is_pane_excluded(pane.id),
                 }
             })
             .collect();
@@ -501,15 +501,20 @@ impl Shellumi {
                 host_id: sess.host_id,
                 recording_id: None,
                 recording_started_at: None,
+                recording_durable_seq: 0,
+                recording_flush_generation: 0,
                 recording_state: shellumi_core::RecordingLifecycleState::Idle,
                 focus_handle: cx.focus_handle(),
                 bell_flash_until: None,
                 has_unread_bell: false,
                 selection: None,
+                viewport_geometry: None,
+                pressed_mouse_button: None,
+                is_selecting: false,
             };
 
             if sess.excluded_from_broadcast {
-                self.broadcast_manager.exclude_pane(idx);
+                self.broadcast_manager.exclude_pane(pane_id);
             }
             panes.push(pane);
             if let Some(events) = events {
@@ -524,6 +529,8 @@ impl Shellumi {
             WorkspaceLayout::Single => None,
         };
 
+        let pane_ids: Vec<u64> = panes.iter().map(|p| p.id).collect();
+        let layout_tree = SplitNode::from_panes(&pane_ids, split);
         let tab = SessionTab {
             id: tab_id,
             name: ws.name,
@@ -531,6 +538,7 @@ impl Shellumi {
             panes,
             active_pane_idx: 0,
             split,
+            layout_tree,
             sftp_state: None,
             remote_desktop_state: first_rd_state,
             multiplayer: None,

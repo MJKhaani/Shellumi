@@ -17,6 +17,13 @@ The following preferences are stored per vault database in `database.with_extens
 | **Scrollback Lines** | `5000` | `100..=50000` | New / active terminal buffers |
 | **Show Hidden Files (SFTP)** | `false` | `true` / `false` | SFTP local/remote panes |
 | **Startup Overview** | `false` | `true` / `false` | Next launch |
+| **Bell Mode** | `"both"` | `"off"` / `"audible"` / `"visual"` / `"both"` | Immediate |
+| **Bell Volume** | `70` | `0..=100` | Immediate |
+| **Cursor Shape** | `"block"` | `"block"` / `"underline"` / `"beam"` | Immediate on open terminals |
+| **Cursor Blink** | `true` | `true` / `false` | Immediate on open terminals |
+| **Copy on Select** | `false` | `true` / `false` | Immediate |
+| **Record Input (opt-in)** | `false` | `true` / `false` | New / active recordings |
+| **OSC 52 Clipboard Policy** | `"deny"` | `"deny"` / `"prompt"` / `"allow_write"` | Immediate (reads always denied) |
 
 ## Settings Sections
 

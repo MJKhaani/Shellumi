@@ -83,17 +83,68 @@ impl Shellumi {
                                                     }
                                                 }
                                                 shellumi_terminal::TerminalEvent::Bell => {
-                                                    pane.bell_flash_until = Some(
-                                                        std::time::Instant::now()
-                                                            + std::time::Duration::from_millis(160),
-                                                    );
+                                                    let bell_mode =
+                                                        app.desktop.preferences.bell_mode.as_str();
+                                                    if bell_mode == "visual" || bell_mode == "both"
+                                                    {
+                                                        pane.bell_flash_until = Some(
+                                                            std::time::Instant::now()
+                                                                + std::time::Duration::from_millis(
+                                                                    160,
+                                                                ),
+                                                        );
+                                                        cx.spawn(async move |app, cx| {
+                                                            cx.background_executor()
+                                                                .timer(std::time::Duration::from_millis(170))
+                                                                .await;
+                                                            let _ = app.update(cx, |_, cx| cx.notify());
+                                                        })
+                                                        .detach();
+                                                    }
                                                     let is_active_pane = active_tab_id
                                                         == Some(tab_id)
                                                         && active_pane_id == Some(pane_id);
-                                                    if !is_active_pane {
+                                                    if !is_active_pane && bell_mode != "off" {
                                                         pane.has_unread_bell = true;
                                                     }
-                                                    let _ = app.bell_audio.trigger(pane_id, 0.7);
+                                                    if bell_mode == "audible" || bell_mode == "both"
+                                                    {
+                                                        let vol = f32::from(
+                                                            app.desktop.preferences.bell_volume,
+                                                        ) / 100.0;
+                                                        let _ =
+                                                            app.bell_audio.trigger(pane_id, vol);
+                                                    }
+                                                }
+                                                shellumi_terminal::TerminalEvent::PromptMark(
+                                                    shellumi_terminal::PromptSemanticMark::CommandFinished {
+                                                        exit_code,
+                                                    },
+                                                ) => {
+                                                    let is_active_pane = active_tab_id
+                                                        == Some(tab_id)
+                                                        && active_pane_id == Some(pane_id);
+                                                    if !is_active_pane
+                                                        && app.desktop.preferences.bell_mode != "off"
+                                                    {
+                                                        pane.has_unread_bell = true;
+                                                    }
+                                                    tracing::debug!(
+                                                        pane_id,
+                                                        ?exit_code,
+                                                        "Command finished semantic prompt mark"
+                                                    );
+                                                }
+                                                shellumi_terminal::TerminalEvent::ClipboardWriteRequest(text) => {
+                                                    match app.desktop.preferences.osc52_policy.as_str() {
+                                                        "allow_write" => {
+                                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                                        }
+                                                        "prompt" => {
+                                                            pane.message = Some("Remote requested OSC 52 clipboard write (blocked by prompt policy).".to_string());
+                                                        }
+                                                        _ => {}
+                                                    }
                                                 }
                                                 shellumi_terminal::TerminalEvent::TitleChanged(
                                                     Some(title),
@@ -119,7 +170,11 @@ impl Shellumi {
                                                 pane.search_matches = matches;
                                             }
                                         }
+                                        let unflushed = pane.terminal.recording_unflushed_bytes();
                                         app.broadcast_collab_output(tab_id, &bytes, cx);
+                                        if unflushed >= 64 * 1024 {
+                                            app.flush_pane_recording_chunk(pane_id, cx);
+                                        }
                                     }
                                     SessionEvent::Error(error) => {
                                         pane.message = Some(format!("Session error: {error}"));
@@ -222,11 +277,16 @@ impl Shellumi {
             host_id: None,
             recording_id: None,
             recording_started_at: None,
+            recording_durable_seq: 0,
+            recording_flush_generation: 0,
             recording_state: shellumi_core::RecordingLifecycleState::Idle,
             focus_handle: cx.focus_handle(),
             bell_flash_until: None,
             has_unread_bell: false,
             selection: None,
+            viewport_geometry: None,
+            pressed_mouse_button: None,
+            is_selecting: false,
         };
 
         let sftp_state = if kind == SessionKind::Sftp {
@@ -267,6 +327,7 @@ impl Shellumi {
             panes: vec![pane],
             active_pane_idx: 0,
             split: None,
+            layout_tree: Some(SplitNode::Leaf(pane_id)),
             sftp_state,
             remote_desktop_state: None,
             multiplayer: None,
@@ -328,15 +389,35 @@ impl Shellumi {
             host_id: None,
             recording_id: None,
             recording_started_at: None,
+            recording_durable_seq: 0,
+            recording_flush_generation: 0,
             recording_state: shellumi_core::RecordingLifecycleState::Idle,
             focus_handle: cx.focus_handle(),
             bell_flash_until: None,
             has_unread_bell: false,
             selection: None,
+            viewport_geometry: None,
+            pressed_mouse_button: None,
+            is_selecting: false,
         };
 
+        let target_pane_id = tab
+            .panes
+            .get(tab.active_pane_idx.min(tab.panes.len().saturating_sub(1)))
+            .map(|p| p.id);
         tab.panes.push(pane);
         tab.split = Some(direction);
+        if let Some(ref mut tree) = tab.layout_tree {
+            if let Some(target_id) = target_pane_id {
+                if !tree.split_leaf(target_id, pane_id, direction) {
+                    let ids: Vec<u64> = tab.panes.iter().map(|p| p.id).collect();
+                    tab.layout_tree = SplitNode::from_panes(&ids, tab.split);
+                }
+            }
+        } else {
+            let ids: Vec<u64> = tab.panes.iter().map(|p| p.id).collect();
+            tab.layout_tree = SplitNode::from_panes(&ids, tab.split);
+        }
         tab.active_pane_idx = tab.panes.len() - 1;
         window.focus(&self.focus);
         cx.notify();
@@ -354,8 +435,19 @@ impl Shellumi {
         };
         if tab.panes.len() > 1 {
             tab.panes.retain(|p| p.id != pane_id);
-            tab.split = None;
-            tab.active_pane_idx = 0;
+            tab.layout_tree = tab
+                .layout_tree
+                .take()
+                .and_then(|tree| tree.remove_leaf(pane_id))
+                .or_else(|| {
+                    let ids: Vec<u64> = tab.panes.iter().map(|p| p.id).collect();
+                    SplitNode::from_panes(&ids, tab.split)
+                });
+            if tab.panes.len() <= 1 {
+                tab.split = None;
+            }
+            tab.active_pane_idx = tab.active_pane_idx.min(tab.panes.len().saturating_sub(1));
+            self.broadcast_manager.include_pane(pane_id);
             window.focus(&self.focus);
             cx.notify();
         } else {

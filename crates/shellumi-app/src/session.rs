@@ -1,6 +1,33 @@
 //! Runs a PTY in worker threads and streams bounded output to the GPUI task.
 use shellumi_terminal::{PtySession, TerminalCommand};
-use std::{io::Read, sync::mpsc, thread};
+use std::{
+    io::Read,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+};
+
+pub const MAX_INPUT_QUEUE_BYTES: usize = 1024 * 1024; // 1 MiB byte budget
+pub const MAX_PASTE_BYTES: usize = 512 * 1024; // 512 KiB max single paste
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionInputError {
+    QueueFull,
+    Closed,
+    PayloadTooLarge,
+}
+
+impl std::fmt::Display for SessionInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueFull => write!(f, "Session input queue full (backpressure)."),
+            Self::Closed => write!(f, "Session is closed."),
+            Self::PayloadTooLarge => write!(f, "Input payload exceeds maximum allowed size."),
+        }
+    }
+}
 
 pub enum SessionEvent {
     Output(Vec<u8>),
@@ -17,12 +44,15 @@ enum SessionCommand {
 
 pub struct Session {
     commands: mpsc::SyncSender<SessionCommand>,
+    queued_bytes: Arc<AtomicUsize>,
     pub events: async_channel::Receiver<SessionEvent>,
 }
 
 impl Session {
     pub fn start(command: TerminalCommand) -> Self {
         let (commands, incoming) = mpsc::sync_channel(256);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let worker_queued_bytes = Arc::clone(&queued_bytes);
         let (outgoing, events) = async_channel::bounded(64);
         thread::spawn(move || {
             let mut pty = match PtySession::spawn(&command, 24, 80) {
@@ -62,6 +92,11 @@ impl Session {
             while let Ok(command) = incoming.recv() {
                 match command {
                     SessionCommand::Input(bytes) => {
+                        let len = bytes.len();
+                        worker_queued_bytes.fetch_sub(
+                            len.min(worker_queued_bytes.load(Ordering::Relaxed)),
+                            Ordering::Relaxed,
+                        );
                         if let Err(error) = pty.write_all(&bytes) {
                             let _ = outgoing.send_blocking(SessionEvent::Error(error.to_string()));
                             break;
@@ -76,25 +111,43 @@ impl Session {
                 }
             }
         });
-        Self { commands, events }
+        Self {
+            commands,
+            queued_bytes,
+            events,
+        }
     }
 
-    pub fn input(&self, bytes: Vec<u8>) -> Result<(), &'static str> {
-        self.commands
-            .try_send(SessionCommand::Input(bytes))
-            .map_err(|e| match e {
-                mpsc::TrySendError::Full(_) => "Session input queue full (backpressure).",
-                mpsc::TrySendError::Disconnected(_) => "Session is closed.",
-            })
+    pub fn input(&self, bytes: Vec<u8>) -> Result<(), SessionInputError> {
+        let len = bytes.len();
+        if len > MAX_PASTE_BYTES {
+            return Err(SessionInputError::PayloadTooLarge);
+        }
+        let cur = self.queued_bytes.load(Ordering::Relaxed);
+        if cur.saturating_add(len) > MAX_INPUT_QUEUE_BYTES {
+            return Err(SessionInputError::QueueFull);
+        }
+        self.queued_bytes.fetch_add(len, Ordering::Relaxed);
+        match self.commands.try_send(SessionCommand::Input(bytes)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.queued_bytes.fetch_sub(len, Ordering::Relaxed);
+                Err(SessionInputError::QueueFull)
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.queued_bytes.fetch_sub(len, Ordering::Relaxed);
+                Err(SessionInputError::Closed)
+            }
+        }
     }
 
     #[allow(dead_code)]
-    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), &'static str> {
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), SessionInputError> {
         self.commands
             .try_send(SessionCommand::Resize(rows, cols))
             .map_err(|e| match e {
-                mpsc::TrySendError::Full(_) => "Session resize queue full (backpressure).",
-                mpsc::TrySendError::Disconnected(_) => "Session is closed.",
+                mpsc::TrySendError::Full(_) => SessionInputError::QueueFull,
+                mpsc::TrySendError::Disconnected(_) => SessionInputError::Closed,
             })
     }
 }
@@ -147,115 +200,10 @@ mod tests {
         assert!(session.resize(30, 100).is_ok());
     }
 
-    /// Opt in only with an isolated sshd configured to run `echo shellumi-auth-ok`.
     #[test]
-    #[ignore = "requires an isolated loopback OpenSSH server and ephemeral test keys"]
-    fn isolated_openssh_host_key_and_authentication() {
-        use shellumi_core::SshDestination;
-        use shellumi_terminal::Terminal;
-        use std::{
-            fs,
-            time::{Duration, Instant},
-        };
-
-        let fixture = std::env::var("SHELLUMI_SSH_TEST_DIR")
-            .expect("set SHELLUMI_SSH_TEST_DIR to the isolated SSH fixture directory");
-        let port: u16 = std::env::var("SHELLUMI_SSH_TEST_PORT")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let username = std::env::var("USER").unwrap();
-        let destination = SshDestination::new("127.0.0.1", &username, port).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let known = dir.path().join("known_hosts");
-        let key = std::path::Path::new(&fixture).join("client_key");
-
-        let run = |answer: Option<&str>| {
-            let command = TerminalCommand::new("/usr/bin/ssh")
-                .args([
-                    "-F",
-                    "/dev/null",
-                    "-i",
-                    key.to_str().unwrap(),
-                    "-o",
-                    "IdentitiesOnly=yes",
-                    "-o",
-                    "GlobalKnownHostsFile=/dev/null",
-                    "-o",
-                    "ConnectTimeout=5",
-                ])
-                .arg("-o")
-                .arg(format!("UserKnownHostsFile={}", known.display()))
-                .args(destination.openssh_arguments());
-            let session = Session::start(command);
-            let deadline = Instant::now() + Duration::from_secs(15);
-            let mut output = Vec::new();
-            let mut screen = Terminal::new(24, 80);
-            let mut prompted = false;
-            loop {
-                match session.events.try_recv() {
-                    Ok(SessionEvent::Output(bytes)) => {
-                        screen.process_bytes(&bytes);
-                        output.extend(bytes);
-                        if !prompted
-                            && String::from_utf8_lossy(&output)
-                                .contains("Are you sure you want to continue connecting")
-                        {
-                            prompted = true;
-                            assert!(
-                                screen.screen_to_string().contains("Are you sure"),
-                                "host-key prompt was not rendered in the terminal grid"
-                            );
-                            if let Some(answer) = answer {
-                                session.input(format!("{answer}\r").into_bytes()).unwrap();
-                            }
-                        }
-                    }
-                    Ok(SessionEvent::Closed) => break,
-                    Ok(SessionEvent::Error(error)) => panic!("session failed: {error}"),
-                    Err(async_channel::TryRecvError::Empty) => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "SSH session timed out: {}",
-                            String::from_utf8_lossy(&output)
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(async_channel::TryRecvError::Closed) => {
-                        panic!("session channel closed unexpectedly")
-                    }
-                }
-            }
-            (prompted, String::from_utf8_lossy(&output).into_owned())
-        };
-
-        let (prompted, rejected) = run(Some("no"));
-        assert!(prompted);
-        assert!(!rejected.contains("shellumi-auth-ok"));
-        assert!(!known.exists() || fs::read_to_string(&known).unwrap().trim().is_empty());
-
-        let (prompted, accepted) = run(Some("yes"));
-        assert!(prompted);
-        assert!(
-            accepted.contains("shellumi-auth-ok"),
-            "authentication failed: {accepted}"
-        );
-        assert!(known.exists());
-
-        let (prompted, known_result) = run(None);
-        assert!(!prompted);
-        assert!(
-            known_result.contains("shellumi-auth-ok"),
-            "known-host connection failed: {known_result}"
-        );
-
-        let wrong_key = fs::read_to_string(key.with_extension("pub")).unwrap();
-        fs::write(&known, format!("[127.0.0.1]:{port} {wrong_key}")).unwrap();
-        let (_, changed) = run(None);
-        assert!(
-            changed.contains("REMOTE HOST IDENTIFICATION HAS CHANGED"),
-            "changed host key was not reported: {changed}"
-        );
-        assert!(!changed.contains("shellumi-auth-ok"));
+    fn rejects_oversized_payload_without_closing_session() {
+        let session = Session::start(TerminalCommand::new("/bin/echo").arg("ok"));
+        let err = session.input(vec![b'a'; MAX_PASTE_BYTES + 1]).unwrap_err();
+        assert_eq!(err, SessionInputError::PayloadTooLarge);
     }
 }

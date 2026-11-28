@@ -170,6 +170,50 @@ impl Terminal {
         self.recorder.as_ref().is_some_and(|r| r.is_active())
     }
 
+    pub fn pause_recording(&mut self) {
+        if let Some(ref mut rec) = self.recorder {
+            rec.pause();
+        }
+    }
+
+    pub fn resume_recording(&mut self) {
+        if let Some(ref mut rec) = self.recorder {
+            rec.resume();
+        }
+    }
+
+    pub fn is_recording_paused(&self) -> bool {
+        self.recorder.as_ref().is_some_and(|r| r.is_paused())
+    }
+
+    pub fn is_recording_truncated(&self) -> bool {
+        self.recorder.as_ref().is_some_and(|r| r.is_truncated())
+    }
+
+    pub fn recording_header(&self) -> Option<AsciicastHeader> {
+        self.recorder.as_ref().map(|r| r.header().clone())
+    }
+
+    pub fn recording_byte_count(&self) -> usize {
+        self.recorder.as_ref().map_or(0, |r| r.byte_count())
+    }
+
+    pub fn recording_unflushed_bytes(&self) -> usize {
+        self.recorder.as_ref().map_or(0, |r| r.unflushed_bytes())
+    }
+
+    pub fn peek_unflushed_recording_events(&self) -> (usize, Vec<CastEvent>) {
+        self.recorder
+            .as_ref()
+            .map_or((0, Vec::new()), |r| r.peek_unflushed_events())
+    }
+
+    pub fn mark_recording_events_flushed(&mut self, count: usize) {
+        if let Some(ref mut rec) = self.recorder {
+            rec.mark_events_flushed(count);
+        }
+    }
+
     /// Records user keystroke input sent to the terminal PTY.
     pub fn record_input(&mut self, bytes: &[u8]) {
         if let Some(ref mut rec) = self.recorder {
@@ -189,6 +233,13 @@ impl Terminal {
         if let Some(ref mut rec) = self.recorder {
             rec.set_input_recording_enabled(enabled);
         }
+    }
+
+    /// Returns whether input capture is enabled for the active recorder.
+    pub fn is_recording_input_enabled(&self) -> bool {
+        self.recorder
+            .as_ref()
+            .is_some_and(|r| r.input_recording_enabled())
     }
 
     /// Returns the number of events recorded in the active session.
