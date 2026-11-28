@@ -946,7 +946,7 @@ async fn p0_01_migration_succeeds_with_reordered_snippets_columns_from_alter_tab
         .await
         .unwrap();
     raw.connection
-        .execute("DROP TABLE IF EXISTS hosts", ())
+        .execute("PRAGMA foreign_keys = OFF", ())
         .await
         .unwrap();
     raw.connection
@@ -977,26 +977,7 @@ async fn p0_01_migration_succeeds_with_reordered_snippets_columns_from_alter_tab
         .await
         .unwrap();
     raw.connection
-        .execute(
-            "CREATE TABLE hosts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL CHECK(length(name) > 0),
-                hostname TEXT NOT NULL CHECK(length(hostname) > 0),
-                username TEXT NOT NULL CHECK(length(username) > 0),
-                port INTEGER NOT NULL DEFAULT 22 CHECK(port >= 1 AND port <= 65535),
-                identity_id INTEGER,
-                group_id INTEGER,
-                tags TEXT NOT NULL DEFAULT '',
-                notes TEXT,
-                is_favorite INTEGER NOT NULL DEFAULT 0 CHECK(is_favorite IN (0, 1)),
-                jump_host_id INTEGER,
-                startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL,
-                vault_id TEXT NOT NULL DEFAULT 'legacy-local',
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )",
-            (),
-        )
+        .execute("PRAGMA foreign_keys = ON", ())
         .await
         .unwrap();
     raw.connection
