@@ -34,6 +34,7 @@ mod data_path;
 mod desktop;
 mod embedded_icons;
 mod hosts_view;
+mod migration_worker;
 #[allow(unexpected_cfgs)]
 mod native_clipboard;
 pub mod session;
@@ -4329,6 +4330,9 @@ impl Shellumi {
 }
 
 pub fn run_app() {
+    if let Some(exit_code) = migration_worker::maybe_run_migration_worker() {
+        std::process::exit(exit_code);
+    }
     let askpass_mode = std::env::var("SHELLUMI_ASKPASS_MODE").as_deref() == Ok("1");
     let mut logging = shellumi_core::logging::LoggingConfig::for_app();
     if askpass_mode {

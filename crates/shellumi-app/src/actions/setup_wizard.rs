@@ -197,8 +197,35 @@ impl Shellumi {
         } else {
             data_path::default_data_dir().unwrap_or_else(|_| PathBuf::from("."))
         };
-        let _ =
-            crate::ui::setup_wizard_window::SetupWizardView::open_window(base_dir, true, None, cx);
+        let app_handle = cx.entity().clone();
+        let wizard_handle_cell = std::sync::Arc::new(std::sync::Mutex::new(
+            None::<gpui::WindowHandle<crate::ui::setup_wizard_window::SetupWizardView>>,
+        ));
+        let wizard_handle_cb = wizard_handle_cell.clone();
+        let handle = crate::ui::setup_wizard_window::SetupWizardView::open_window(
+            base_dir,
+            true,
+            Some(Box::new(move |keys, cx| {
+                app_handle.update(cx, |app, cx| {
+                    for (k, v) in keys {
+                        app.active_vault_keys.insert(k, v);
+                    }
+                    app.load_vault_list(cx);
+                    app.start_storage(false, cx);
+                });
+                if let Ok(mut guard) = wizard_handle_cb.lock() {
+                    if let Some(wh) = guard.take() {
+                        let _: Result<(), _> = wh.update(cx, |_, window, _| {
+                            window.remove_window();
+                        });
+                    }
+                }
+            })),
+            cx,
+        );
+        if let Ok(mut guard) = wizard_handle_cell.lock() {
+            *guard = handle;
+        };
     }
 
     /// Legacy modal state initializer retained for internal unit tests.

@@ -1401,6 +1401,10 @@ impl ShellumiAssetSource {
 
 impl AssetSource for ShellumiAssetSource {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        // Reject path traversal or absolute paths
+        if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+            return Ok(None);
+        }
         if let Some(root) = resolve_icon_pack_root() {
             let disk_path = root.join(path);
             if disk_path.exists() {
@@ -1410,9 +1414,9 @@ impl AssetSource for ShellumiAssetSource {
             }
         }
 
-        // Parse path: "icons/{size}/{state}/{name}.png"
+        // Parse canonical key: "icons/{size}/{state}/{name}.png"
         let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() >= 4 && parts[0] == "icons" {
+        if parts.len() == 4 && parts[0] == "icons" {
             let size_px: u32 = parts[1].parse().unwrap_or(48);
             let is_hover = parts[2] == "hover";
             let name = parts[3].trim_end_matches(".png");

@@ -187,6 +187,8 @@ pub struct SetupState {
     pub google_drive_skipped: bool,
     #[serde(default)]
     pub additional_vaults_skipped: bool,
+    #[serde(default)]
+    pub confirmed_recovery_vaults: Vec<String>,
 }
 
 impl Default for SetupState {
@@ -219,6 +221,7 @@ impl SetupState {
             discard_completed_at: None,
             google_drive_skipped: false,
             additional_vaults_skipped: false,
+            confirmed_recovery_vaults: Vec::new(),
         }
     }
 

@@ -10,7 +10,8 @@ pub use discard::{
     DiscardResumeOutcome, LegacyDiscardEngine,
 };
 pub use migration::{
-    LegacyMigrationPreview, MigrationCredentials, MigrationEngine, MigrationReport,
+    LegacyMigrationPreview, MigrationCredentials, MigrationEngine, MigrationProgressEvent,
+    MigrationReport,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 pub use server_sync::{

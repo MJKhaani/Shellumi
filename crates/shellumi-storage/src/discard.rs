@@ -335,6 +335,26 @@ fn verify_modern_vault_absent(base: &Path) -> Result<(), StorageError> {
 pub struct LegacyDiscardEngine;
 
 impl LegacyDiscardEngine {
+    /// Computes SHA-256 fingerprints of `shellumi.db` and its scoped sidecars for confirmation binding.
+    pub fn compute_source_fingerprints(
+        base_dir: &Path,
+    ) -> Result<BTreeMap<String, String>, StorageError> {
+        let base = io_err(base_dir.canonicalize(), "Locate Shellumi data directory")?;
+        no_symlink(&base)?;
+        let mut fps = BTreeMap::new();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let src = base.join(format!("shellumi.db{suffix}"));
+            no_symlink(&src)?;
+            if src.exists() {
+                fps.insert(suffix.to_string(), sha256_file(&src)?);
+            }
+        }
+        if !fps.contains_key("") {
+            return Err(failure("Legacy shellumi.db is absent"));
+        }
+        Ok(fps)
+    }
+
     /// Read-only inspection of `vaults/.legacy_discard` and completion marker.
     pub fn inspect_state(base_dir: &Path) -> DiscardInventoryStatus {
         let root = base_dir.join(DISCARD_ROOT);

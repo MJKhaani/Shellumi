@@ -21,9 +21,10 @@ Shellumi separates observed filesystem/credential metadata (`InstallationInvento
 When upgrading from legacy single-file `shellumi.db` installations:
 
 1. **Detection & Backup:** Creates verified private backups (`vaults/.migration_staging/backup/`) of `shellumi.db`, `-wal`, and `-shm` files under `0700`/`0600` Unix permissions.
-2. **Versioned Staging Journal:** Tracks progress in `vaults/.migration_staging/migration_journal.json` under an exclusive `.migration.lock`.
-3. **Separate Source & Destination Credentials:** Decrypts encrypted legacy sources with the source key (while unencrypted SQLite sources open without a key), and provisions fresh independent 256-bit DEKs, Argon2id `VaultManifest` files, and 8-word recovery codes for each newly created vault. Onboarding requires verified portable manifests (`require_portable_manifests = true`).
-4. **Atomic Activation:** Publishes staged databases and manifests via create-only hard links (refusing to overwrite existing destinations), verifies ciphertext digests and reopen with the password-derived key, and records `vaults/.migration_complete`. The original `shellumi.db` is retained intact.
+2. **Isolated Migration Worker (`--migration-worker`):** Runs legacy schema parsing, Turso I/O, and Argon2id key derivation in a supervised child process (`shellumi-app --migration-worker --root <dir>`) communicating over private stdin/stdout IPC (no secrets in CLI args or environment), isolating the GPUI/Metal process from native crashes and streaming live `MigrationProgressEvent` updates.
+3. **Versioned Staging Journal:** Tracks progress in `vaults/.migration_staging/migration_journal.json` under an exclusive `.migration.lock`.
+4. **Separate Source & Destination Credentials:** Decrypts encrypted legacy sources with the source key (while unencrypted SQLite sources open without a key), and provisions fresh independent 256-bit DEKs, Argon2id `VaultManifest` files, and 8-word recovery codes for each newly created vault. Onboarding requires verified portable manifests (`require_portable_manifests = true`).
+5. **Atomic Activation:** Publishes staged databases and manifests via create-only hard links (refusing to overwrite existing destinations), verifies ciphertext digests and reopen with the password-derived key, and records `vaults/.migration_complete`. The original `shellumi.db` is retained intact.
 
 ---
 

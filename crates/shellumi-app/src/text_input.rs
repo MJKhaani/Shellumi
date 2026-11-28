@@ -634,12 +634,18 @@ impl Element for TextElement {
             .shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
+        let avail_w = bounds.size.width.max(px(1.0));
+        let scroll_x = if cursor_pos > avail_w - px(4.0) {
+            cursor_pos - (avail_w - px(4.0))
+        } else {
+            px(0.0)
+        };
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(bounds.left() + cursor_pos - scroll_x, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
                     gpui::blue(),
@@ -650,11 +656,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.left() + line.x_for_index(selected_range.start) - scroll_x,
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.left() + line.x_for_index(selected_range.end) - scroll_x,
                             bounds.bottom(),
                         ),
                     ),
@@ -691,18 +697,37 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
+        let cursor_offset_x = {
+            let input = self.input.read(cx);
+            let cursor_idx = input.content_byte_to_display_byte(input.cursor_offset());
+            let cursor_pos = line.x_for_index(cursor_idx);
+            let avail_w = bounds.size.width.max(px(1.0));
+            if cursor_pos > avail_w - px(4.0) {
+                cursor_pos - (avail_w - px(4.0))
+            } else {
+                px(0.0)
+            }
+        };
+
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            line.paint(
+                point(bounds.origin.x - cursor_offset_x, bounds.origin.y),
+                window.line_height(),
+                window,
+                cx,
+            )
             .unwrap();
 
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+            if focus_handle.is_focused(window) {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
             }
-        }
+        });
 
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);

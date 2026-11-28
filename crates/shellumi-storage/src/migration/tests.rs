@@ -861,3 +861,75 @@ async fn enrollment_journal_upgrade_preserves_legacy_rows_and_scoped_intents() {
         }
     }
 }
+
+#[tokio::test]
+async fn migrates_small_main_db_with_100_uncheckpointed_wal_frames() {
+    let temp = tempfile::tempdir().unwrap();
+    let legacy_path = temp.path().join("shellumi.db");
+    let store = HostStore::open(legacy_path.to_str().unwrap())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute("PRAGMA wal_autocheckpoint = 0", ())
+        .await
+        .unwrap();
+    for i in 1..=110 {
+        store
+            .connection
+            .execute(
+                "INSERT INTO hosts(id, name, hostname, username, port) VALUES (?1, ?2, ?3, 'admin', 22)",
+                (i, format!("wal-host-{i}"), format!("10.0.0.{}", (i % 250) + 1)),
+            )
+            .await
+            .unwrap();
+    }
+    drop(store);
+
+    let wal_path = temp.path().join("shellumi.db-wal");
+    assert!(
+        wal_path.exists(),
+        "WAL file should exist with uncommitted frames"
+    );
+    let original_main = fs::read(&legacy_path).unwrap();
+    let original_wal = fs::read(&wal_path).unwrap();
+
+    let creds = MigrationCredentials {
+        default_password: Some("WalFixture#Pass2026!".to_string()),
+        default_recovery_code: Some(VaultKey::generate_recovery_code().unwrap()),
+        require_portable_manifests: true,
+        remember_in_keychain: false,
+        ..Default::default()
+    };
+    let secrets = EphemeralCredentialStore::new();
+    let report = MigrationEngine::migrate_legacy_database_with_credentials(
+        temp.path(),
+        None,
+        Some(&creds),
+        &secrets,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.default_records_migrated, 110);
+    // Original source & WAL must remain untouched
+    assert_eq!(fs::read(&legacy_path).unwrap(), original_main);
+    assert_eq!(fs::read(&wal_path).unwrap(), original_wal);
+
+    // Verify reopened default.db has all 110 hosts
+    let manifest = VaultManifest::load_from_path(
+        &temp
+            .path()
+            .join("vault_manifests/legacy-local.manifest.json"),
+    )
+    .unwrap();
+    let vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+    let key = manifest.unlock("WalFixture#Pass2026!").unwrap();
+    let target = HostStore::open_existing_with_key(
+        temp.path().join("vaults/default.db").to_str().unwrap(),
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    assert_eq!(target.list().await.unwrap().len(), 110);
+    let _ = vid;
+}

@@ -57,7 +57,7 @@ pub fn form_field(
     error: Option<impl Into<SharedString>>,
     helper: Option<impl Into<SharedString>>,
 ) -> Div {
-    let mut field = div().flex().flex_col().gap_1();
+    let mut field = div().w_full().min_w_0().flex().flex_col().gap_1();
 
     let mut label_row = div()
         .flex()
@@ -145,9 +145,22 @@ pub fn toggle_switch(
         )
 }
 
-/// An inline error notice with error styling.
+/// An inline error notice with distinct danger styling.
 pub fn error_notice(message: impl Into<SharedString>) -> Div {
-    inline_notice(None, message, false)
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
+        .p_2p5()
+        .rounded(px(MacTheme::CONTROL_RADIUS))
+        .bg(gpui::rgba(0xff453a1a))
+        .border_1()
+        .border_color(danger())
+        .text_xs()
+        .text_color(danger())
+        .child(message.into())
 }
 
 /// An inline notice or warning card within an inspector or form.

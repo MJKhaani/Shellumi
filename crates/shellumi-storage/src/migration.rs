@@ -22,6 +22,31 @@ const ROOT: &str = "vaults/.migration_staging";
 const MARKER: &str = "vaults/.migration_complete";
 const JOURNAL: &str = "migration_journal.json";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MigrationProgressEvent {
+    Inspection,
+    Backup,
+    SourceOpen,
+    SchemaRead,
+    Plan {
+        vault_count: usize,
+    },
+    Copy {
+        vault_id: String,
+        table: String,
+        done: usize,
+        total: usize,
+    },
+    Encryption {
+        vault_id: String,
+    },
+    Verification {
+        vault_id: String,
+    },
+    Activation,
+    Completion,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationReport {
     pub legacy_db_found: bool,
@@ -1145,6 +1170,11 @@ impl MigrationEngine {
         }
     }
 
+    /// Returns true if a staged manifest for vault index 0 already exists in migration staging.
+    pub fn inspect_staged_manifest_exists(base_dir: &Path) -> bool {
+        base_dir.join(ROOT).join("manifests/0.json").is_file()
+    }
+
     /// Safely rolls back an uncommitted migration transaction without touching finalized active vaults.
     /// Returns `Ok(true)` if an uncommitted migration was rolled back, `Ok(false)` if none existed.
     pub fn rollback_if_uncommitted(base_dir: &Path) -> Result<bool, StorageError> {
@@ -1230,22 +1260,68 @@ impl MigrationEngine {
         credentials: Option<&MigrationCredentials>,
         store: &dyn CredentialStore,
     ) -> Result<MigrationReport, StorageError> {
+        Self::migrate_legacy_database_with_progress(
+            base_dir,
+            default_dek,
+            credentials,
+            store,
+            &mut |_| {},
+        )
+        .await
+    }
+
+    pub async fn migrate_legacy_database_with_progress(
+        base_dir: &Path,
+        default_dek: Option<&VaultKey>,
+        credentials: Option<&MigrationCredentials>,
+        store: &dyn CredentialStore,
+        progress: &mut (dyn FnMut(MigrationProgressEvent) + Send),
+    ) -> Result<MigrationReport, StorageError> {
         let source_key = credentials
             .and_then(|c| c.source_key.as_ref())
             .or(default_dek);
-        let result = Self::run(base_dir, source_key, credentials, store, &mut |_| Ok(())).await;
+        progress(MigrationProgressEvent::Inspection);
+        let result = Self::run_with_progress(
+            base_dir,
+            source_key,
+            credentials,
+            store,
+            &mut |_| Ok(()),
+            progress,
+        )
+        .await;
         if let Err(error) = &result {
             tracing::error!(error = %error, "Legacy migration requires attention");
         }
         result
     }
 
+    #[cfg(test)]
     async fn run(
         base_dir: &Path,
         default_dek: Option<&VaultKey>,
         credentials: Option<&MigrationCredentials>,
         store: &dyn CredentialStore,
         fault: &mut Fault<'_>,
+    ) -> Result<MigrationReport, StorageError> {
+        Self::run_with_progress(
+            base_dir,
+            default_dek,
+            credentials,
+            store,
+            fault,
+            &mut |_| {},
+        )
+        .await
+    }
+
+    async fn run_with_progress(
+        base_dir: &Path,
+        default_dek: Option<&VaultKey>,
+        credentials: Option<&MigrationCredentials>,
+        store: &dyn CredentialStore,
+        fault: &mut Fault<'_>,
+        progress: &mut (dyn FnMut(MigrationProgressEvent) + Send),
     ) -> Result<MigrationReport, StorageError> {
         let base = io(base_dir.canonicalize(), "Locate migration source directory")?;
         if !base.join("shellumi.db").exists() && !base.join(ROOT).exists() {
@@ -1352,6 +1428,7 @@ impl MigrationEngine {
             return Err(failure("Migration was rolled back; source and backup are intact. Resolve the reported conflict and preserve this recovery directory before starting a new migration"));
         }
         if journal.phase == Phase::Created {
+            progress(MigrationProgressEvent::Backup);
             let current = source_fingerprints(&base)?;
             if current != journal.source_files {
                 return Err(failure("Legacy database changed during backup; close other clients and preserve recovery data before retrying"));
@@ -1381,6 +1458,7 @@ impl MigrationEngine {
             fault("backed_up")?;
         }
         if journal.phase == Phase::BackedUp {
+            progress(MigrationProgressEvent::SourceOpen);
             // Only the unverified working source may be recreated. The immutable
             // backup and every previously verified vault remain untouched.
             let source_dir = root.join("source");
@@ -1406,7 +1484,11 @@ impl MigrationEngine {
             }
             let source_path = source_dir.join("source.db");
             let source = open_source(&root, &journal, default_dek, store).await?;
+            progress(MigrationProgressEvent::SchemaRead);
             Self::plan(&base, &source, &mut journal).await?;
+            progress(MigrationProgressEvent::Plan {
+                vault_count: journal.vaults.len(),
+            });
             checkpoint(&source).await?;
             drop(source);
             io(
@@ -1435,6 +1517,9 @@ impl MigrationEngine {
             }
             let source = open_source(&root, &journal, default_dek, store).await?;
             for index in 0..journal.vaults.len() {
+                progress(MigrationProgressEvent::Verification {
+                    vault_id: journal.vaults[index].id.clone(),
+                });
                 let key = vault_key(
                     &base,
                     &root,
@@ -1463,12 +1548,21 @@ impl MigrationEngine {
                 }
                 directory(&work)?;
                 let path = staged_db(&root, index);
+                progress(MigrationProgressEvent::Encryption {
+                    vault_id: journal.vaults[index].id.clone(),
+                });
                 let target = HostStore::open_with_key(
                     path.to_str()
                         .ok_or_else(|| failure("Invalid staged path"))?,
                     Some(&key),
                 )
                 .await?;
+                progress(MigrationProgressEvent::Copy {
+                    vault_id: journal.vaults[index].id.clone(),
+                    table: "all".to_string(),
+                    done: index + 1,
+                    total: journal.vaults.len(),
+                });
                 copy_tables(&source, &target, &journal, index, store, fault).await?;
                 drop(target);
                 fault(&format!("staging_committed:{index}"))?;
@@ -1491,6 +1585,9 @@ impl MigrationEngine {
                 fault(&format!("staged:{index}"))?;
             }
             for index in 0..journal.vaults.len() {
+                progress(MigrationProgressEvent::Verification {
+                    vault_id: journal.vaults[index].id.clone(),
+                });
                 let key = vault_key(
                     &base,
                     &root,
@@ -1540,6 +1637,7 @@ impl MigrationEngine {
             fault("verified")?;
         }
         if matches!(journal.phase, Phase::Verified | Phase::Activating) {
+            progress(MigrationProgressEvent::Activation);
             if source_fingerprints(&base)? != journal.source_files {
                 rollback(&base, &root, &mut journal, fault)?;
                 return Err(failure("Legacy database changed after backup; activation rolled back; close other clients before migration"));
@@ -1619,6 +1717,9 @@ impl MigrationEngine {
             verify_seals(&base, &root, &journal)?;
             let remember_keys = credentials.is_none_or(|c| c.remember_in_keychain);
             for index in 0..journal.vaults.len() {
+                progress(MigrationProgressEvent::Verification {
+                    vault_id: journal.vaults[index].id.clone(),
+                });
                 let key = vault_key(
                     &base,
                     &root,
@@ -1679,6 +1780,7 @@ impl MigrationEngine {
             fault("completion_marker")?;
             journal.phase = Phase::Complete;
             save(&root, &journal)?;
+            progress(MigrationProgressEvent::Completion);
             // Clean up transaction-scoped temporary keys after durable completion.
             let service = key_service(&journal);
             let _ = store.delete_secret(&service, "source-key");

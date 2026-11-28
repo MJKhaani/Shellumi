@@ -793,7 +793,12 @@ pub fn resolve_onboarding_route(
     );
     let recovery_confirmed = matches!(
         &inventory.setup_checkpoint,
-        SetupCheckpointStatus::Valid(state) if state.recovery_code_confirmed
+        SetupCheckpointStatus::Valid(state)
+            if state.recovery_code_confirmed
+                || state
+                    .confirmed_recovery_vaults
+                    .iter()
+                    .any(|v| v == "legacy-local")
     );
 
     // 3. Valid active DB + matching manifest.
