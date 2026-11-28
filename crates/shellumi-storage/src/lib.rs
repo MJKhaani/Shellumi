@@ -1,10 +1,17 @@
 //! Local Turso storage. Credentials are never stored in this database.
 pub mod desktop;
+pub mod discard;
 mod drive_revisions;
 pub mod migration;
 pub mod server_sync;
 use base64::Engine;
-pub use migration::{MigrationCredentials, MigrationEngine, MigrationReport};
+pub use discard::{
+    DiscardBackupReport, DiscardConfirmation, DiscardJournal, DiscardPhase, DiscardReport,
+    DiscardResumeOutcome, LegacyDiscardEngine,
+};
+pub use migration::{
+    LegacyMigrationPreview, MigrationCredentials, MigrationEngine, MigrationReport,
+};
 use ring::rand::{SecureRandom, SystemRandom};
 pub use server_sync::{
     PendingMutationRecord, ServerSyncEngine, ServerSyncReport, VaultServerConnectionRecord,
@@ -1359,6 +1366,33 @@ impl HostStore {
     /// Open a local database path, or `:memory:` for an ephemeral database.
     pub async fn open(path: &str) -> Result<Self, StorageError> {
         Self::open_with_key(path, None).await
+    }
+
+    /// Opens an existing local database without creating a missing file.
+    pub async fn open_existing_with_key(
+        path: &str,
+        key: Option<&shellumi_core::VaultKey>,
+    ) -> Result<Self, StorageError> {
+        if path == ":memory:" {
+            return Err(StorageError::ItemNotFound(
+                "Cannot open :memory: as an existing database".to_string(),
+            ));
+        }
+        let p = std::path::Path::new(path);
+        let meta = std::fs::symlink_metadata(p).map_err(|e| {
+            StorageError::ItemNotFound(format!("Database does not exist at {path}: {e}"))
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(StorageError::ItemNotFound(format!(
+                "Refusing to open symbolic link database at {path}"
+            )));
+        }
+        if !meta.is_file() || meta.len() == 0 {
+            return Err(StorageError::ItemNotFound(format!(
+                "Database file at {path} is missing or empty"
+            )));
+        }
+        Self::open_with_key(path, key).await
     }
 
     /// Open a database path with optional Data Encryption Key (DEK).
@@ -13261,6 +13295,7 @@ mod tests {
             default_recovery_code: Some(rec_code),
             secondary_passwords: sec_passwords,
             secondary_recovery_codes: std::collections::HashMap::new(),
+            ..Default::default()
         };
         let report = MigrationEngine::migrate_legacy_database_with_credentials(
             base_dir,
@@ -13417,6 +13452,7 @@ mod tests {
             default_recovery_code: Some(rec_code),
             secondary_passwords: std::collections::HashMap::new(),
             secondary_recovery_codes: std::collections::HashMap::new(),
+            ..Default::default()
         };
 
         let result = MigrationEngine::migrate_legacy_database_with_credentials(
@@ -13865,6 +13901,7 @@ mod tests {
             default_recovery_code: None,
             secondary_passwords: std::collections::HashMap::new(), // Missing corp-ops password!
             secondary_recovery_codes: std::collections::HashMap::new(),
+            ..Default::default()
         };
 
         let result = MigrationEngine::migrate_legacy_database_with_credentials(

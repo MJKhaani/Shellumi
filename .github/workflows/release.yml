@@ -83,6 +83,9 @@ jobs:
             [[ "$crate_version" == "$SHELLUMI_VERSION" ]] || { echo "Version mismatch in $manifest: $crate_version != $SHELLUMI_VERSION"; exit 1; }
           done
       - name: Build release binaries
+        env:
+          SHELLUMI_GOOGLE_OAUTH_CLIENT_ID: ${{ vars.SHELLUMI_GOOGLE_OAUTH_CLIENT_ID }}
+          SHELLUMI_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.SHELLUMI_GOOGLE_OAUTH_CLIENT_SECRET }}
         run: cargo build --locked --release -p shellumi-app -p shellumi-cli --target ${{ matrix.target }}
       - name: Package Linux assets
         if: runner.os == 'Linux'

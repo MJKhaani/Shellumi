@@ -26,6 +26,7 @@ pub(crate) mod remote_desktop_canvas;
 mod remote_desktop_session;
 mod session_replay_modal;
 pub(crate) mod setup_wizard_modal;
+pub(crate) mod setup_wizard_window;
 mod shell_integration_modal;
 mod snippet_modal;
 mod team_modal;

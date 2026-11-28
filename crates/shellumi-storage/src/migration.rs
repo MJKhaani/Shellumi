@@ -32,12 +32,63 @@ pub struct MigrationReport {
     pub server_credentials_migrated: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub struct MigrationCredentials {
+    pub source_key: Option<VaultKey>,
     pub default_password: Option<String>,
     pub default_recovery_code: Option<String>,
     pub secondary_passwords: std::collections::HashMap<String, String>,
     pub secondary_recovery_codes: std::collections::HashMap<String, String>,
+    pub require_portable_manifests: bool,
+    pub remember_in_keychain: bool,
+}
+
+impl std::fmt::Debug for MigrationCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MigrationCredentials")
+            .field("has_source_key", &self.source_key.is_some())
+            .field("has_default_password", &self.default_password.is_some())
+            .field(
+                "has_default_recovery_code",
+                &self.default_recovery_code.is_some(),
+            )
+            .field("secondary_vault_count", &self.secondary_passwords.len())
+            .field(
+                "require_portable_manifests",
+                &self.require_portable_manifests,
+            )
+            .field("remember_in_keychain", &self.remember_in_keychain)
+            .finish()
+    }
+}
+
+impl Default for MigrationCredentials {
+    fn default() -> Self {
+        Self {
+            source_key: None,
+            default_password: None,
+            default_recovery_code: None,
+            secondary_passwords: std::collections::HashMap::new(),
+            secondary_recovery_codes: std::collections::HashMap::new(),
+            require_portable_manifests: false,
+            remember_in_keychain: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyVaultPreview {
+    pub id: String,
+    pub name: String,
+    pub record_count: usize,
+    pub has_existing_manifest: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyMigrationPreview {
+    pub source_encrypted: bool,
+    pub vaults: Vec<LegacyVaultPreview>,
+    pub server_connections: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -573,12 +624,13 @@ fn ensure_manifest(
             .map(|pwd| key.wrap_with_password(&vid, pwd))
             .transpose()
             .map_err(|e| failure(e.to_string()))?;
+        let remember = credentials.is_none_or(|c| c.remember_in_keychain);
         let manifest = VaultManifest::new(
             vault.id.clone(),
             vault.name.clone(),
             primary,
             recovery,
-            true,
+            remember,
         );
         atomic_write(
             &staged_manifest(root, index),
@@ -587,9 +639,15 @@ fn ensure_manifest(
                 .map_err(|e| failure(e.to_string()))?
                 .as_bytes(),
         )?;
+        return Ok(());
     }
-    // An explicitly supplied/remembered DEK can predate portable manifests. It
-    // remains recoverable through the original and migration credential accounts.
+    if credentials.is_some_and(|c| c.require_portable_manifests) {
+        return Err(failure(format!(
+            "MigrationRequired: onboarding requires a password and portable manifest for vault '{}'",
+            vault.id
+        )));
+    }
+    // Compatibility callers with retained keys may predate portable manifests.
     Ok(())
 }
 
@@ -725,6 +783,17 @@ fn secure_rows(
     Ok(())
 }
 
+fn is_sqlite_plaintext_header(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    &header == b"SQLite format 3\0"
+}
+
 async fn open_source(
     root: &Path,
     journal: &MigrationJournal,
@@ -736,7 +805,7 @@ async fn open_source(
     let path_str = path
         .to_str()
         .ok_or_else(|| failure("Invalid source path"))?;
-    if !crate::is_protected_vault_path(path_str) {
+    if !crate::is_protected_vault_path(path_str) && is_sqlite_plaintext_header(&path) {
         return HostStore::open(path_str).await;
     }
     let service = key_service(journal);
@@ -991,6 +1060,113 @@ fn rollback(
 }
 
 impl MigrationEngine {
+    /// Read-only inspection of `vaults/.migration_staging` and `vaults/.migration_complete`.
+    /// Never creates files, acquires write locks, or mutates Keychain.
+    pub fn inspect_state(base_dir: &Path) -> shellumi_core::MigrationInventoryStatus {
+        let canonical = match base_dir.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                if !base_dir.join(ROOT).exists() && !base_dir.join(MARKER).exists() {
+                    return shellumi_core::MigrationInventoryStatus::Absent;
+                }
+                base_dir.to_path_buf()
+            }
+        };
+        let base = canonical.as_path();
+        let root = base.join(ROOT);
+        let marker = base.join(MARKER);
+
+        if let Err(e) = no_symlink(&root) {
+            return shellumi_core::MigrationInventoryStatus::InvalidOrCorrupt {
+                reason: e.to_string(),
+            };
+        }
+        if let Err(e) = no_symlink(&marker) {
+            return shellumi_core::MigrationInventoryStatus::InvalidOrCorrupt {
+                reason: e.to_string(),
+            };
+        }
+
+        if !root.exists() {
+            if marker.exists() {
+                return shellumi_core::MigrationInventoryStatus::InvalidOrCorrupt {
+                    reason: "Completion marker exists without migration staging journal"
+                        .to_string(),
+                };
+            }
+            return shellumi_core::MigrationInventoryStatus::Absent;
+        }
+
+        match load(&root) {
+            Ok(journal) => {
+                let receipt_verified = Self::receipt_matches(base, &journal);
+                let vaults_present = !journal.vaults.is_empty()
+                    && journal.vaults.iter().all(|v| {
+                        destination(base, v, false).is_file()
+                            && ((v.manifest_digest.is_none()
+                                && v.existing_manifest_digest.is_none())
+                                || destination(base, v, true).is_file())
+                    });
+                if journal.phase == Phase::Complete && receipt_verified {
+                    return shellumi_core::MigrationInventoryStatus::Complete {
+                        transaction_id: journal.transaction,
+                        receipt_verified,
+                        vaults_present,
+                    };
+                }
+                let has_backup = journal
+                    .source_files
+                    .keys()
+                    .all(|suffix| root.join(format!("backup/source.db{suffix}")).is_file());
+                let source_matches_journal = source_fingerprints(base)
+                    .ok()
+                    .map(|fps| fps == journal.source_files);
+                let can_rollback = !matches!(journal.phase, Phase::Complete | Phase::Finalized);
+                let details = vec![
+                    format!("Transaction ID: {}", journal.transaction),
+                    format!("Last durable phase: {:?}", journal.phase),
+                    format!("Backup verified: {}", if has_backup { "yes" } else { "no" }),
+                    format!("Discovered vaults: {}", journal.vaults.len()),
+                ];
+                shellumi_core::MigrationInventoryStatus::InProgress {
+                    transaction_id: journal.transaction,
+                    phase: format!("{:?}", journal.phase),
+                    has_backup,
+                    staged_vault_count: journal.vaults.len(),
+                    receipt_present: marker.exists(),
+                    source_matches_journal,
+                    can_rollback,
+                    details,
+                }
+            }
+            Err(e) => shellumi_core::MigrationInventoryStatus::InvalidOrCorrupt {
+                reason: e.to_string(),
+            },
+        }
+    }
+
+    /// Safely rolls back an uncommitted migration transaction without touching finalized active vaults.
+    /// Returns `Ok(true)` if an uncommitted migration was rolled back, `Ok(false)` if none existed.
+    pub fn rollback_if_uncommitted(base_dir: &Path) -> Result<bool, StorageError> {
+        let base = io(base_dir.canonicalize(), "Locate migration base directory")?;
+        let root = base.join(ROOT);
+        no_symlink(&root)?;
+        if !root.exists() {
+            return Ok(false);
+        }
+        let mut journal = load(&root)?;
+        if matches!(journal.phase, Phase::Complete | Phase::Finalized)
+            && Self::receipt_matches(&base, &journal)
+        {
+            return Err(failure(
+                "Migration has already completed; refusing automatic rollback",
+            ));
+        }
+        rollback(&base, &root, &mut journal, &mut |_| Ok(()))?;
+        let _ = fs::remove_dir_all(&root);
+        Ok(true)
+    }
+
     pub fn is_migration_needed(base_dir: &Path) -> bool {
         let canonical = match base_dir.canonicalize() {
             Ok(path) => path,
@@ -1054,7 +1230,10 @@ impl MigrationEngine {
         credentials: Option<&MigrationCredentials>,
         store: &dyn CredentialStore,
     ) -> Result<MigrationReport, StorageError> {
-        let result = Self::run(base_dir, default_dek, credentials, store, &mut |_| Ok(())).await;
+        let source_key = credentials
+            .and_then(|c| c.source_key.as_ref())
+            .or(default_dek);
+        let result = Self::run(base_dir, source_key, credentials, store, &mut |_| Ok(())).await;
         if let Err(error) = &result {
             tracing::error!(error = %error, "Legacy migration requires attention");
         }
@@ -1438,6 +1617,7 @@ impl MigrationEngine {
         }
         if journal.phase == Phase::Activated {
             verify_seals(&base, &root, &journal)?;
+            let remember_keys = credentials.is_none_or(|c| c.remember_in_keychain);
             for index in 0..journal.vaults.len() {
                 let key = vault_key(
                     &base,
@@ -1456,7 +1636,7 @@ impl MigrationEngine {
                     if existing.expose_bytes() != key.expose_bytes() {
                         return Err(failure("An existing vault key changed during migration; key was not overwritten"));
                     }
-                } else {
+                } else if remember_keys {
                     VaultKeyManager::provision_key(store, &vid, &key)
                         .map_err(|e| failure(format!("Remember migrated vault key: {e}")))?;
                     let saved = VaultKeyManager::retrieve_key(store, &vid)
@@ -1499,6 +1679,12 @@ impl MigrationEngine {
             fault("completion_marker")?;
             journal.phase = Phase::Complete;
             save(&root, &journal)?;
+            // Clean up transaction-scoped temporary keys after durable completion.
+            let service = key_service(&journal);
+            let _ = store.delete_secret(&service, "source-key");
+            for index in 0..journal.vaults.len() {
+                let _ = store.delete_secret(&service, &format!("key-{index}"));
+            }
             tracing::info!(
                 vaults = journal.vaults.len(),
                 "Legacy migration activated and verified; original and recovery artifacts retained"

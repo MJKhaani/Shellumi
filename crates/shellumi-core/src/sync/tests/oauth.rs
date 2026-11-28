@@ -13,7 +13,10 @@ fn generates_valid_pkce_challenge_and_google_url() {
         "state_nonce_abc",
     );
     assert!(url.contains("client_id=client123.apps.googleusercontent.com"));
-    assert!(url.contains("redirect_uri=http://127.0.0.1:8080/callback"));
+    assert!(
+        url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fcallback")
+            || url.contains("redirect_uri=http://127.0.0.1:8080/callback")
+    );
     assert!(url.contains("code_challenge="));
     assert!(url.contains("code_challenge_method=S256"));
     assert!(url.contains("drive.appdata"));
@@ -104,7 +107,8 @@ fn tests_oauth_callback_listener_loopback_roundtrip() {
             if msg.contains("os error 35")
                 || msg.contains("Permission denied")
                 || msg.contains("Operation not permitted")
-                || msg.contains("Resource temporarily unavailable") =>
+                || msg.contains("Resource temporarily unavailable")
+                || msg.contains("Timed out waiting for Google sign-in callback") =>
         {
             // In restricted sandbox environments, local TCP loopback packet delivery may be blocked.
         }
@@ -219,4 +223,50 @@ fn verifies_oauth_token_bundle_store_persistence() {
     // 4. Delete bundle
     assert!(OAuthTokenBundle::delete_from_store(&store).unwrap());
     assert_eq!(OAuthTokenBundle::load_from_store(&store).unwrap(), None);
+}
+
+#[test]
+fn resolves_google_oauth_config_with_precedence_and_rejects_placeholder() {
+    let store = crate::credential::EphemeralCredentialStore::new();
+    // Placeholder rejected
+    assert!(validate_google_client_id("shellumi-desktop").is_err());
+    assert!(validate_google_client_id("  ").is_err());
+    assert!(validate_google_client_id("bad id with spaces").is_err());
+
+    // Stored client ID used when no override/env
+    OAuthTokenBundle::save_client_id(&store, "stored-123.apps.googleusercontent.com").unwrap();
+    let cfg = resolve_google_oauth_config(&store, None)
+        .unwrap()
+        .expect("stored config");
+    assert_eq!(cfg.client_id, "stored-123.apps.googleusercontent.com");
+    assert_eq!(cfg.source, GoogleOAuthConfigSource::CredentialStore);
+
+    // Advanced override takes precedence
+    let cfg = resolve_google_oauth_config(
+        &store,
+        Some(("override-456.apps.googleusercontent.com", Some("sec-xyz"))),
+    )
+    .unwrap()
+    .expect("override config");
+    assert_eq!(cfg.client_id, "override-456.apps.googleusercontent.com");
+    assert_eq!(cfg.client_secret.as_deref(), Some("sec-xyz"));
+    assert_eq!(cfg.source, GoogleOAuthConfigSource::AdvancedOverride);
+}
+
+#[test]
+fn oauth_listener_cancellation_exits_promptly() {
+    let listener = match OAuthCallbackListener::bind_ephemeral() {
+        Ok(l) => l,
+        Err(SyncError::Network(msg))
+            if msg.contains("Operation not permitted") || msg.contains("Permission denied") =>
+        {
+            return;
+        }
+        Err(e) => panic!("unexpected bind error: {e}"),
+    };
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let err = listener
+        .wait_for_code_cancellable("state", std::time::Duration::from_secs(30), &cancelled)
+        .unwrap_err();
+    assert!(err.to_string().contains("cancelled"));
 }

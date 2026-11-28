@@ -33,10 +33,16 @@ sequenceDiagram
 
 ## OAuth 2.0 PKCE & Configuration
 
-- **Protocol:** OAuth 2.0 Authorization Code Flow with PKCE (`RFC 7636`, 32-byte random verifier, SHA-256 challenge) and loopback callback (`OAuthCallbackListener` on `127.0.0.1`).
+- **Protocol:** OAuth 2.0 Authorization Code Flow with PKCE (`RFC 7636`, 32-byte random verifier, SHA-256 challenge) and cancellable loopback callback (`OAuthCallbackListener::wait_for_code_cancellable` on `127.0.0.1`).
+- **Configuration Precedence (`resolve_google_oauth_config`):**
+  1. **Advanced Developer / Self-Build Override:** Optional explicit Client ID (and optional Client Secret) entered in the Setup Wizard or Settings.
+  2. **Packaged Release Configuration:** Build-time `SHELLUMI_GOOGLE_OAUTH_CLIENT_ID` (and optional `SHELLUMI_GOOGLE_OAUTH_CLIENT_SECRET`) injected by `.github/workflows/release.yml` via `option_env!`.
+  3. **Development Environment Variable:** `SHELLUMI_GOOGLE_CLIENT_ID` (and optional `SHELLUMI_GOOGLE_CLIENT_SECRET`).
+  4. **Credential Store:** Account-scoped Client ID persisted in the OS credential store.
+  - Placeholder IDs (such as `shellumi-desktop`) are rejected. Unconfigured self-builds remain fully functional local-first and surface an **Advanced OAuth Configuration** panel rather than failing silently.
 - **Required Settings:**
-  - Explicit vault opt-in in **Settings → Synchronization** (stored in the encrypted default registry).
-  - Google OAuth Client ID (`SHELLUMI_GOOGLE_CLIENT_ID` when configuring OAuth) and valid OAuth token (`OAuthTokenBundle` in credential store or `SHELLUMI_GDRIVE_TOKEN` for CLI/automation).
+  - Explicit vault opt-in in **Settings → Synchronization** or Setup Wizard (stored in the encrypted default registry).
+  - Valid OAuth token (`OAuthTokenBundle` in OS credential store or `SHELLUMI_GDRIVE_TOKEN` for CLI/automation).
   - Vault passphrase (`SHELLUMI_VAULT_PASSPHRASE` for CLI/background sync).
 - **Transport:** Uses `SystemHttpTransport` (`curl` subprocess with stdin headers/body to avoid exposing bearer tokens in `ps` arguments).
 

@@ -1,6 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod actions;
+pub use actions::setup_wizard_controller::inspect_onboarding;
+pub use shellumi_core::{
+    OnboardingRoute, OperationPhase, OperationState, SetupState, SetupStep, SetupWizardMode,
+    WizardPage,
+};
+pub use shellumi_storage::LegacyDiscardEngine;
+pub use ui::setup_wizard_window::SetupWizardView;
 
 pub(crate) struct CreatedInvite {
     pub(crate) scope: InviteScope,
@@ -4436,20 +4443,14 @@ pub fn run_app() {
     }
     let should_run_wizard = force_wizard || {
         if let Some(ref db_path) = database {
-            let base_path = std::path::Path::new(db_path);
-            let base_dir = if base_path.is_dir() {
-                base_path
-            } else if let Some(parent) = base_path.parent() {
-                if parent.file_name() == Some(std::ffi::OsStr::new("vaults")) {
-                    parent.parent().unwrap_or(parent)
-                } else {
-                    parent
-                }
-            } else {
-                std::path::Path::new(".")
-            };
-
-            !shellumi_core::setup::SetupState::is_setup_completed(base_dir)
+            let base_dir = data_path::resolve_root_dir(std::path::Path::new(db_path));
+            let (_, resolution) =
+                actions::setup_wizard_controller::inspect_onboarding(&base_dir, false);
+            !matches!(
+                resolution.route,
+                shellumi_core::onboarding::OnboardingRoute::ExistingVault
+            ) || resolution.reconcile_checkpoint
+                || resolution.needs_recovery_confirmation
         } else {
             false
         }
@@ -4631,26 +4632,89 @@ pub fn run_app() {
                 KeyBinding::new("ctrl-shift-p", GoToPortForwarding, None),
                 KeyBinding::new("ctrl-shift-n", OpenVaultInNewWindow, None),
             ]);
-            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-            cx.open_window(
-                ui::window_chrome::shellumi_window_options("Shellumi — Personal", bounds),
-                |window, cx| {
-                    let view = cx.new(|cx| Shellumi::new(database, window, cx));
-                    view.update(cx, |app, cx| {
-                        app.pending_rotation_recoveries = pending_rotation_recoveries.clone();
-                        if let Some(error) = startup_error {
-                            app.hosts = HostState::Error(error);
-                            cx.notify();
-                        } else if should_run_wizard {
-                            app.open_setup_wizard(cx);
-                        } else {
-                            app.start_storage(create_parent, cx);
-                        }
+            let open_main_window =
+                move |database: Option<String>,
+                      startup_error: Option<String>,
+                      pending_rotation_recoveries: Vec<
+                    crate::vault_rotation::PendingRotationRecovery,
+                >,
+                      create_parent: bool,
+                      vault_keys: std::collections::HashMap<String, shellumi_core::VaultKey>,
+                      cx: &mut App| {
+                    let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+                    cx.open_window(
+                        ui::window_chrome::shellumi_window_options("Shellumi — Personal", bounds),
+                        |window, cx| {
+                            let view = cx.new(|cx| Shellumi::new(database, window, cx));
+                            view.update(cx, |app, cx| {
+                                app.pending_rotation_recoveries =
+                                    pending_rotation_recoveries.clone();
+                                for (k, v) in vault_keys {
+                                    app.active_vault_keys.insert(k, v);
+                                }
+                                if let Some(error) = startup_error {
+                                    app.hosts = HostState::Error(error);
+                                    cx.notify();
+                                } else {
+                                    app.start_storage(create_parent, cx);
+                                }
+                            });
+                            view
+                        },
+                    )
+                    .expect("failed to open Shellumi window");
+                };
+
+            if should_run_wizard && startup_error.is_none() {
+                let wizard_base_dir = database
+                    .as_deref()
+                    .map(|s| data_path::resolve_root_dir(std::path::Path::new(s)))
+                    .unwrap_or_else(|| {
+                        data_path::default_data_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
                     });
-                    view
-                },
-            )
-            .expect("failed to open Shellumi window");
+                let db_for_main = database.clone();
+                let err_for_main = startup_error.clone();
+                let rot_for_main = pending_rotation_recoveries.clone();
+                let wizard_handle_cell = std::sync::Arc::new(std::sync::Mutex::new(
+                    None::<gpui::WindowHandle<ui::setup_wizard_window::SetupWizardView>>,
+                ));
+                let wizard_handle_for_cb = wizard_handle_cell.clone();
+                let handle = ui::setup_wizard_window::SetupWizardView::open_window(
+                    wizard_base_dir,
+                    force_wizard,
+                    Some(Box::new(move |keys, cx| {
+                        open_main_window(
+                            db_for_main,
+                            err_for_main,
+                            rot_for_main,
+                            create_parent,
+                            keys,
+                            cx,
+                        );
+                        if let Ok(mut guard) = wizard_handle_for_cb.lock() {
+                            if let Some(wh) = guard.take() {
+                                let _: Result<(), _> = wh.update(cx, |_, window, _| {
+                                    window.remove_window();
+                                });
+                            }
+                        }
+                    })),
+                    cx,
+                );
+                if let Ok(mut guard) = wizard_handle_cell.lock() {
+                    *guard = handle;
+                };
+            } else {
+                open_main_window(
+                    database,
+                    startup_error,
+                    pending_rotation_recoveries,
+                    create_parent,
+                    Default::default(),
+                    cx,
+                );
+            }
             cx.activate(true);
         });
 }

@@ -657,26 +657,29 @@ pub fn generate_pkce_challenge() -> Result<PkceChallenge, SyncError> {
     })
 }
 
-/// Constructs a Google OAuth 2.0 authorization URL for the restricted Google Drive Application Data folder.
+/// Builds an authorization URL for the Google Drive `appDataFolder` scope with PKCE.
 pub fn build_google_drive_auth_url(
     client_id: &str,
     redirect_uri: &str,
     pkce: &PkceChallenge,
     state: &str,
 ) -> String {
-    let scope = "https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.appdata";
+    let scope = url_encode("https://www.googleapis.com/auth/drive.appdata");
     format!(
         "https://accounts.google.com/o/oauth2/v2/auth?\
-        client_id={client_id}&\
-        redirect_uri={redirect_uri}&\
+        client_id={}&\
+        redirect_uri={}&\
         response_type=code&\
         scope={scope}&\
         code_challenge={}&\
         code_challenge_method=S256&\
-        state={state}&\
+        state={}&\
         access_type=offline&\
         prompt=consent",
-        pkce.code_challenge
+        url_encode(client_id),
+        url_encode(redirect_uri),
+        url_encode(&pkce.code_challenge),
+        url_encode(state),
     )
 }
 
@@ -793,35 +796,78 @@ impl OAuthCallbackListener {
         expected_state: &str,
         timeout: std::time::Duration,
     ) -> Result<String, SyncError> {
+        let never = std::sync::atomic::AtomicBool::new(false);
+        self.wait_for_code_cancellable(expected_state, timeout, &never)
+    }
+
+    /// Waits for an incoming OAuth redirect while supporting cancellation and ignoring `/favicon.ico`.
+    pub fn wait_for_code_cancellable(
+        self,
+        expected_state: &str,
+        timeout: std::time::Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<String, SyncError> {
         use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
 
-        let (mut stream, _) = self
-            .listener
-            .accept()
+        self.listener
+            .set_nonblocking(true)
             .map_err(|e| SyncError::Network(e.to_string()))?;
-        let _ = stream.set_nonblocking(false);
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(|e| SyncError::Network(e.to_string()))?;
+        let deadline = std::time::Instant::now() + timeout;
 
-        let mut buf = [0u8; 4096];
-        let n = stream
-            .read(&mut buf)
-            .map_err(|e| SyncError::Network(e.to_string()))?;
-        let request = String::from_utf8_lossy(&buf[..n]);
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(SyncError::Api("Google sign-in was cancelled.".into()));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(SyncError::Network(
+                    "Timed out waiting for Google sign-in callback.".into(),
+                ));
+            }
+            match self.listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    let _ = stream
+                        .set_read_timeout(Some(remaining.min(std::time::Duration::from_secs(5))));
 
-        let first_line = request.lines().next().unwrap_or_default();
-        let result = parse_oauth_callback_request(first_line, expected_state);
+                    let mut buf = [0u8; 8192];
+                    let n = match stream.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    if n == 0 {
+                        continue;
+                    }
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = request.lines().next().unwrap_or_default();
 
-        let response = match &result {
-            Ok(_) => build_oauth_callback_response(true, None),
-            Err(e) => build_oauth_callback_response(false, Some(&e.to_string())),
-        };
+                    // Ignore browser automatic favicon requests without aborting the attempt.
+                    if first_line.starts_with("GET /favicon.ico") {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        let _ = stream.flush();
+                        continue;
+                    }
 
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
+                    let result = parse_oauth_callback_request(first_line, expected_state);
+                    let response = match &result {
+                        Ok(_) => build_oauth_callback_response(true, None),
+                        Err(e) => build_oauth_callback_response(false, Some(&e.to_string())),
+                    };
 
-        result
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+
+                    return result;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+                Err(e) => return Err(SyncError::Network(e.to_string())),
+            }
+        }
     }
 }
 
@@ -987,6 +1033,10 @@ impl OAuthTokenBundle {
         client: &GoogleDriveSyncClient<T>,
         current_time: u64,
     ) -> Result<String, SyncError> {
+        static REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = REFRESH_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(bundle) = Self::load_from_store(store)? {
             if bundle.is_expired(current_time) {
                 if let Some(ref _refresh) = bundle.refresh_token {
@@ -1052,6 +1102,127 @@ impl OAuthTokenBundle {
             "Google Drive OAuth token not found. Please authenticate with Google Drive in the Setup Wizard or Settings.".into(),
         ))
     }
+}
+
+/// Source of resolved Google OAuth configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoogleOAuthConfigSource {
+    AdvancedOverride,
+    CredentialStore,
+    PackagedBuild,
+    Environment,
+}
+
+/// Validated Google OAuth desktop client configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GoogleOAuthConfig {
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub source: GoogleOAuthConfigSource,
+}
+
+impl fmt::Debug for GoogleOAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoogleOAuthConfig")
+            .field("client_id", &self.client_id)
+            .field("has_client_secret", &self.client_secret.is_some())
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// Validates a Google OAuth Client ID, rejecting empty values, whitespace, and placeholder IDs.
+pub fn validate_google_client_id(raw: &str) -> Result<String, SyncError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(SyncError::Api(
+            "Google OAuth Client ID cannot be empty.".into(),
+        ));
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(SyncError::Api(
+            "Google OAuth Client ID must not contain whitespace.".into(),
+        ));
+    }
+    if trimmed.eq_ignore_ascii_case("shellumi-desktop") {
+        return Err(SyncError::Api(
+            "Placeholder client ID 'shellumi-desktop' is not permitted.".into(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Canonical Google OAuth configuration resolver shared by wizard, Settings, restore, sync, and refresh.
+///
+/// Precedence:
+/// 1. Explicit advanced developer/self-build override (`advanced_override`)
+/// 2. Packaged application configuration (`SHELLUMI_GOOGLE_OAUTH_CLIENT_ID` at build time)
+/// 3. Documented development environment variable (`SHELLUMI_GOOGLE_CLIENT_ID`)
+/// 4. Account-scoped client ID saved in the OS credential store
+pub fn resolve_google_oauth_config(
+    store: &dyn crate::credential::CredentialStore,
+    advanced_override: Option<(&str, Option<&str>)>,
+) -> Result<Option<GoogleOAuthConfig>, SyncError> {
+    if let Some((raw_id, raw_secret)) = advanced_override {
+        let trimmed = raw_id.trim();
+        if !trimmed.is_empty() {
+            let client_id = validate_google_client_id(trimmed)?;
+            let client_secret = raw_secret
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            return Ok(Some(GoogleOAuthConfig {
+                client_id,
+                client_secret,
+                source: GoogleOAuthConfigSource::AdvancedOverride,
+            }));
+        }
+    }
+
+    if let Some(pkg_id) = option_env!("SHELLUMI_GOOGLE_OAUTH_CLIENT_ID") {
+        let trimmed = pkg_id.trim();
+        if !trimmed.is_empty() {
+            if let Ok(client_id) = validate_google_client_id(trimmed) {
+                let client_secret = option_env!("SHELLUMI_GOOGLE_OAUTH_CLIENT_SECRET")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                return Ok(Some(GoogleOAuthConfig {
+                    client_id,
+                    client_secret,
+                    source: GoogleOAuthConfigSource::PackagedBuild,
+                }));
+            }
+        }
+    }
+
+    if let Ok(env_id) = std::env::var("SHELLUMI_GOOGLE_CLIENT_ID") {
+        let trimmed = env_id.trim();
+        if !trimmed.is_empty() {
+            let client_id = validate_google_client_id(trimmed)?;
+            let client_secret = std::env::var("SHELLUMI_GOOGLE_CLIENT_SECRET")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            return Ok(Some(GoogleOAuthConfig {
+                client_id,
+                client_secret,
+                source: GoogleOAuthConfigSource::Environment,
+            }));
+        }
+    }
+
+    if let Ok(Some(stored_id)) = OAuthTokenBundle::load_client_id(store) {
+        if let Ok(client_id) = validate_google_client_id(&stored_id) {
+            return Ok(Some(GoogleOAuthConfig {
+                client_id,
+                client_secret: None,
+                source: GoogleOAuthConfigSource::CredentialStore,
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Service name used when storing OAuth token bundles in the platform credential store.
@@ -1740,13 +1911,27 @@ pub fn build_token_exchange_request(
     code_verifier: &str,
     redirect_uri: &str,
 ) -> HttpRequest {
-    let form_body = format!(
+    build_token_exchange_request_with_secret(client_id, None, code, code_verifier, redirect_uri)
+}
+
+/// Builds an HTTP POST request to exchange an OAuth authorization code for tokens, with optional desktop client secret.
+pub fn build_token_exchange_request_with_secret(
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> HttpRequest {
+    let mut form_body = format!(
         "client_id={}&code={}&code_verifier={}&redirect_uri={}&grant_type=authorization_code",
         url_encode(client_id),
         url_encode(code),
         url_encode(code_verifier),
         url_encode(redirect_uri),
     );
+    if let Some(secret) = client_secret.filter(|s| !s.trim().is_empty()) {
+        form_body.push_str(&format!("&client_secret={}", url_encode(secret.trim())));
+    }
     HttpRequest::post(
         "https://oauth2.googleapis.com/token",
         form_body.into_bytes(),
@@ -1788,11 +1973,23 @@ pub fn parse_token_exchange_response(
 
 /// Builds an HTTP POST request to refresh an expired access token using a refresh token.
 pub fn build_token_refresh_request(client_id: &str, refresh_token: &str) -> HttpRequest {
-    let form_body = format!(
+    build_token_refresh_request_with_secret(client_id, None, refresh_token)
+}
+
+/// Builds an HTTP POST request to refresh an expired access token, with optional desktop client secret.
+pub fn build_token_refresh_request_with_secret(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> HttpRequest {
+    let mut form_body = format!(
         "client_id={}&refresh_token={}&grant_type=refresh_token",
         url_encode(client_id),
         url_encode(refresh_token),
     );
+    if let Some(secret) = client_secret.filter(|s| !s.trim().is_empty()) {
+        form_body.push_str(&format!("&client_secret={}", url_encode(secret.trim())));
+    }
     HttpRequest::post(
         "https://oauth2.googleapis.com/token",
         form_body.into_bytes(),
@@ -2314,6 +2511,7 @@ pub fn execute_sync_cycle(
 pub struct GoogleDriveSyncClient<T: HttpTransport> {
     transport: T,
     client_id: String,
+    client_secret: Option<String>,
 }
 
 impl<T: HttpTransport> GoogleDriveSyncClient<T> {
@@ -2321,7 +2519,13 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
         Self {
             transport,
             client_id: client_id.into(),
+            client_secret: None,
         }
+    }
+
+    pub fn with_client_secret(mut self, secret: Option<String>) -> Self {
+        self.client_secret = secret.filter(|s| !s.trim().is_empty());
+        self
     }
 
     pub fn transport(&self) -> &T {
@@ -2339,7 +2543,13 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
         redirect_uri: &str,
         current_time: u64,
     ) -> Result<OAuthTokenBundle, SyncError> {
-        let req = build_token_exchange_request(&self.client_id, code, code_verifier, redirect_uri);
+        let req = build_token_exchange_request_with_secret(
+            &self.client_id,
+            self.client_secret.as_deref(),
+            code,
+            code_verifier,
+            redirect_uri,
+        );
         let resp = self.transport.send(req)?;
         parse_token_exchange_response(&resp, current_time)
     }
@@ -2352,7 +2562,11 @@ impl<T: HttpTransport> GoogleDriveSyncClient<T> {
         let Some(refresh_token) = &token_bundle.refresh_token else {
             return Err(SyncError::MissingAuthCode);
         };
-        let req = build_token_refresh_request(&self.client_id, refresh_token);
+        let req = build_token_refresh_request_with_secret(
+            &self.client_id,
+            self.client_secret.as_deref(),
+            refresh_token,
+        );
         let resp = self.transport.send(req)?;
         parse_token_refresh_response(&resp, current_time, token_bundle.refresh_token.clone())
     }

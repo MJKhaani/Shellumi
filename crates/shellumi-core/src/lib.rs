@@ -18,6 +18,7 @@ pub mod infrastructure;
 pub mod known_hosts;
 pub mod logging;
 pub mod mobile;
+pub mod onboarding;
 pub mod palette;
 pub mod process;
 pub mod protocol;
@@ -136,6 +137,13 @@ pub use protocol::{
 pub fn discover_serial_ports() -> Vec<String> {
     SerialConfig::discover_serial_ports()
 }
+pub use onboarding::{
+    resolve_onboarding_route, ArtifactState, DiscardInventoryStatus, InstallationInventory,
+    LegacySourceStatus, ManifestLayout, MigrationInventoryStatus, OnboardingController,
+    OnboardingOperationId, OnboardingRoute, OperationPhase, OperationState,
+    PendingTransactionArtifact, PendingTransactionKind, RouteResolution, SetupCheckpointStatus,
+    SidecarArtifact, UserFacingError, VaultArtifactStatus, WizardPage,
+};
 pub use recording::{
     format_duration_hms, format_rfc3339_utc, CastPlaybackEngine, JournalCastEvent, PlaybackFrame,
     PlaybackSpeed, PlaybackStatus, RecordingCheckpoint, RecordingJournalManifest,

@@ -189,8 +189,21 @@ impl SetupWizardModalState {
 }
 
 impl Shellumi {
-    /// Opens the native GPUI first-run setup wizard.
+    /// Opens the native GPUI onboarding window in explicit re-entry mode without disturbing open sessions.
     pub(crate) fn open_setup_wizard(&mut self, cx: &mut Context<Self>) {
+        let base_dir = if let Some(base_str) = self.database.as_deref() {
+            let p = Path::new(base_str);
+            data_path::resolve_root_dir(p)
+        } else {
+            data_path::default_data_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+        let _ =
+            crate::ui::setup_wizard_window::SetupWizardView::open_window(base_dir, true, None, cx);
+    }
+
+    /// Legacy modal state initializer retained for internal unit tests.
+    #[allow(dead_code)]
+    pub(crate) fn open_setup_wizard_modal_legacy(&mut self, cx: &mut Context<Self>) {
         let base_dir = if let Some(base_str) = self.database.as_deref() {
             let p = Path::new(base_str);
             data_path::resolve_root_dir(p)

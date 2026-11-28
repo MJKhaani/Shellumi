@@ -28,5 +28,6 @@ mod vault_lock;
 mod workspaces;
 
 pub(crate) mod setup_wizard;
+pub(crate) mod setup_wizard_controller;
 
 pub(crate) use server_sync::VaultContextSummary;

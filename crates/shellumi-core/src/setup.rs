@@ -136,6 +136,7 @@ pub enum SetupError {
     Serialization(String),
     Deserialization(String),
     CorruptedState(String),
+    UnsupportedVersion(u32),
     VerificationFailed(String),
 }
 
@@ -146,6 +147,7 @@ impl fmt::Display for SetupError {
             Self::Serialization(msg) => write!(f, "Setup serialization error: {msg}"),
             Self::Deserialization(msg) => write!(f, "Setup deserialization error: {msg}"),
             Self::CorruptedState(msg) => write!(f, "Corrupted setup state: {msg}"),
+            Self::UnsupportedVersion(v) => write!(f, "Unsupported setup state version: {v}"),
             Self::VerificationFailed(msg) => write!(f, "Setup verification failed: {msg}"),
         }
     }
@@ -175,6 +177,16 @@ pub struct SetupState {
     pub completed: bool,
     pub completed_at: Option<u64>,
     pub active_vault_id: String,
+    #[serde(default)]
+    pub selected_route: Option<String>,
+    #[serde(default)]
+    pub last_transaction_id: Option<String>,
+    #[serde(default)]
+    pub discard_completed_at: Option<u64>,
+    #[serde(default)]
+    pub google_drive_skipped: bool,
+    #[serde(default)]
+    pub additional_vaults_skipped: bool,
 }
 
 impl Default for SetupState {
@@ -184,7 +196,7 @@ impl Default for SetupState {
 }
 
 impl SetupState {
-    pub const CURRENT_VERSION: u32 = 1;
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Initializes a fresh setup state starting at the Welcome step.
     pub fn new() -> Self {
@@ -202,6 +214,11 @@ impl SetupState {
             completed: false,
             completed_at: None,
             active_vault_id: "legacy-local".to_string(),
+            selected_route: None,
+            last_transaction_id: None,
+            discard_completed_at: None,
+            google_drive_skipped: false,
+            additional_vaults_skipped: false,
         }
     }
 
@@ -214,7 +231,11 @@ impl SetupState {
         let content = fs::read_to_string(&state_path).map_err(|e| SetupError::Io(e.to_string()))?;
         let state: Self = serde_json::from_str(&content)
             .map_err(|e| SetupError::Deserialization(e.to_string()))?;
+        if state.version == 0 || state.version > Self::CURRENT_VERSION {
+            return Err(SetupError::UnsupportedVersion(state.version));
+        }
         tracing::debug!(
+            version = state.version,
             step = %state.current_step,
             completed = state.completed,
             mode = %state.mode,
@@ -243,6 +264,11 @@ impl SetupState {
         }
 
         fs::rename(&tmp_path, &target_path).map_err(|e| SetupError::Io(e.to_string()))?;
+
+        #[cfg(unix)]
+        if let Ok(dir) = fs::File::open(base_dir) {
+            let _ = dir.sync_all();
+        }
 
         tracing::debug!(
             step = %self.current_step,
@@ -282,36 +308,11 @@ impl SetupState {
     }
 
     /// Detects the installation status of the given base directory.
+    ///
+    /// Checks real storage artifacts (modern vaults, migration staging, legacy database)
+    /// before consulting `.setup_state.json` so stale checkpoints never mask a legacy DB
+    /// or interrupted migration.
     pub fn detect_installation(base_dir: &Path) -> InstallationStatus {
-        // 1. Check for incomplete setup state first
-        match Self::load(base_dir) {
-            Ok(Some(state)) => {
-                if !state.completed {
-                    return InstallationStatus::IncompleteSetup {
-                        last_step: state.current_step,
-                        default_vault_created: state.default_vault_created,
-                    };
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Corrupted setup state encountered in detect_installation");
-            }
-            Ok(None) => {}
-        }
-
-        // 2. Check for legacy unmigrated database
-        let legacy_db = base_dir.join("shellumi.db");
-        if legacy_db.exists() {
-            if let Ok(meta) = fs::metadata(&legacy_db) {
-                if meta.len() > 0 {
-                    return InstallationStatus::LegacyDatabase {
-                        path: legacy_db.to_string_lossy().to_string(),
-                    };
-                }
-            }
-        }
-
-        // 3. Check for existing encrypted vaults
         let vaults_dir = base_dir.join("vaults");
         let default_db = vaults_dir.join("default.db");
         let manifests_dir = if base_dir.join("vault_manifests").exists() {
@@ -340,6 +341,36 @@ impl SetupState {
             }
         }
 
+        // 1. Check for legacy unmigrated database when no valid modern default vault is active
+        let legacy_db = base_dir.join("shellumi.db");
+        if legacy_db.exists()
+            && fs::metadata(&legacy_db)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+            && !(default_db_exists && manifest_exists)
+        {
+            return InstallationStatus::LegacyDatabase {
+                path: legacy_db.to_string_lossy().to_string(),
+            };
+        }
+
+        // 2. Check for incomplete setup state
+        match Self::load(base_dir) {
+            Ok(Some(state)) => {
+                if !state.completed {
+                    return InstallationStatus::IncompleteSetup {
+                        last_step: state.current_step,
+                        default_vault_created: state.default_vault_created,
+                    };
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Corrupted setup state encountered in detect_installation");
+            }
+            Ok(None) => {}
+        }
+
+        // 3. Check for existing encrypted vaults
         if default_db_exists || manifest_exists || vault_count > 0 {
             return InstallationStatus::ExistingVaults {
                 default_db_exists,

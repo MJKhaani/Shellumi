@@ -2,6 +2,12 @@
 
 ## 0.0.8-alpha
 
+### First-Run Onboarding Redesign, Migration Recovery & Google Drive OAuth
+- **Typed Onboarding Inventory & Route Resolver (`shellumi-core::onboarding`):** Replaced conflated installation detection with `InstallationInventory`, `resolve_onboarding_route`, `OnboardingController`, `OperationState`, and versioned v2 `SetupState` checkpoints so interrupted migrations or stale checkpoints never fall through to a missing-manifest unlock prompt.
+- **Dedicated GPUI `SetupWizardView` Window (`shellumi-app`):** Replaced the full-window 1440×900 modal overlay with a responsive 920×640 (min 760×540) native window featuring platform-safe macOS traffic-light insets, a collapsible sidebar, single `OperationState` feedback, and clean handoff to the main workspace on completion.
+- **Legacy Migration & Crash-Safe `LegacyDiscardEngine` (`shellumi-storage`):** Separated source and destination credentials in `MigrationEngine`, enforced portable manifest creation for onboarding, added `HostStore::open_existing_with_key` (never creating missing DBs during unlock), and implemented `LegacyDiscardEngine` with explicit `DELETE` confirmation, verified offline backup, and crash-safe quarantine/purge journaling.
+- **Google Drive OAuth Lifecycle (`shellumi-core::sync` & `.github/workflows/release.yml`):** Added `resolve_google_oauth_config` (supporting packaged build-time credentials, dev env vars, and advanced self-build overrides without `shellumi-desktop` fallback), cancellable loopback callback handling, browser-launch error fallback with copyable sign-in URL, and optional desktop client secret support.
+
 ### Remote desktop P0 safety work (partial)
 - Preserve runtime clipboard restrictions across RDP and VNC reconnects. Apply RDP clipboard policy before backend registration and retain view-only drive and microphone revocations across attempts.
 - Allocate recovery tickets in the coordinator, reject stale identities and unexpected input epochs, preserve queued commands on duplicate coordinator binding, and close a saturated transport rather than creating an untracked policy recovery epoch.

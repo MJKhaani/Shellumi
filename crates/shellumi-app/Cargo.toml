@@ -40,3 +40,7 @@ harness = false
 [[test]]
 name = "gpui_sftp_harness"
 harness = false
+
+[[test]]
+name = "gpui_onboarding_harness"
+harness = false

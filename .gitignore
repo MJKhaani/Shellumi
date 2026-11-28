@@ -26,3 +26,6 @@ pinned/
 
 # Docs validation Node dependencies
 scripts/docs-tools/node_modules/
+
+# Local fast macOS .app build script
+/build-local-app.sh
