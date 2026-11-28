@@ -48,13 +48,24 @@ fn main() {
                     window_min_size: Some(size(px(760.0), px(540.0))),
                     ..Default::default()
                 };
-                let wh = cx
-                    .open_window(opts, |_, cx| {
-                        cx.new(|cx| {
-                            SetupWizardView::new(fresh_dir.path().to_path_buf(), false, None, cx)
-                        })
+                let wh = match cx.open_window(opts, |_, cx| {
+                    cx.new(|cx| {
+                        SetupWizardView::new(fresh_dir.path().to_path_buf(), false, None, cx)
                     })
-                    .unwrap();
+                }) {
+                    Ok(wh) => wh,
+                    Err(e)
+                        if cfg!(target_os = "linux")
+                            && e.to_string().contains("neither DISPLAY nor WAYLAND_DISPLAY") =>
+                    {
+                        println!(
+                            "gpui_onboarding_harness: window creation skipped on headless Linux without DISPLAY/WAYLAND_DISPLAY"
+                        );
+                        cx.quit();
+                        return;
+                    }
+                    Err(e) => panic!("open_window failed: {e}"),
+                };
                 wh.update(cx, |view, window, cx| {
                     let wb = window.bounds();
                     assert!(f32::from(wb.size.width) >= 760.0);
