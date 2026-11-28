@@ -189,6 +189,12 @@ fn run_worker_sync(base_dir: &std::path::Path, req: &WorkerRequest) -> i32 {
         } else {
             false
         };
+        if !recovery_matches {
+            return Err(
+                "Activated manifest recovery code verification failed; the staged or activated recovery envelope does not match the displayed recovery code."
+                    .to_string(),
+            );
+        }
 
         let db_path = base_dir.join("vaults/default.db");
         let db_str = db_path

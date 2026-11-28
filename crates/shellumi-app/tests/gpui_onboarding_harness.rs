@@ -178,6 +178,28 @@ fn main() {
                         .try_start_operation(OperationPhase::BackingUp, false)
                         .is_none());
                     assert!(view.controller.finish_operation_ok(gen, op, "ok"));
+
+                    // 5. Failed MigrationProgress allows Back -> VaultPassword and exposes failure state
+                    view.controller.route = OnboardingRoute::LegacyMigration;
+                    view.controller.current_page = WizardPage::MigrationProgress;
+                    let (fgen, fop) = view
+                        .controller
+                        .try_start_operation(OperationPhase::Verifying, false)
+                        .unwrap();
+                    assert!(!view.controller.can_go_back());
+                    assert!(view.controller.finish_operation_err(
+                        fgen,
+                        fop,
+                        shellumi_core::onboarding::UserFacingError::new(
+                            "Migration stopped safely",
+                            "Verification failed for vault legacy-local, table snippets: row_count_mismatch",
+                            "E_MIGRATION",
+                        ),
+                        true,
+                    ));
+                    assert!(view.controller.can_go_back());
+                    assert!(view.controller.go_back());
+                    assert_eq!(view.controller.current_page, WizardPage::VaultPassword);
                     let _ = store.get_secret("svc", "acc").ok();
                 })
                 .unwrap();

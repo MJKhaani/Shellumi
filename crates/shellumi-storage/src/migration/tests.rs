@@ -933,3 +933,255 @@ async fn migrates_small_main_db_with_100_uncheckpointed_wal_frames() {
     assert_eq!(target.list().await.unwrap().len(), 110);
     let _ = vid;
 }
+
+#[tokio::test]
+async fn p0_01_migration_succeeds_with_reordered_snippets_columns_from_alter_table() {
+    let temp = tempfile::tempdir().unwrap();
+    let legacy_path = temp.path().join("shellumi.db");
+
+    // Create a historical database where `snippets` was created without `vault_id`,
+    // then upgraded via `ALTER TABLE snippets ADD COLUMN vault_id` so `vault_id`
+    // is at the end (column index 8) instead of index 6 as in fresh schemas.
+    let raw = HostStore::open_with_key(legacy_path.to_str().unwrap(), None)
+        .await
+        .unwrap();
+    raw.connection
+        .execute("DROP TABLE IF EXISTS hosts", ())
+        .await
+        .unwrap();
+    raw.connection
+        .execute("DROP TABLE IF EXISTS snippets", ())
+        .await
+        .unwrap();
+    raw.connection
+        .execute(
+            "CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL CHECK(length(name) > 0),
+                command TEXT NOT NULL CHECK(length(command) > 0),
+                description TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                variables TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+    raw.connection
+        .execute(
+            "ALTER TABLE snippets ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'legacy-local'",
+            (),
+        )
+        .await
+        .unwrap();
+    raw.connection
+        .execute(
+            "CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL CHECK(length(name) > 0),
+                hostname TEXT NOT NULL CHECK(length(hostname) > 0),
+                username TEXT NOT NULL CHECK(length(username) > 0),
+                port INTEGER NOT NULL DEFAULT 22 CHECK(port >= 1 AND port <= 65535),
+                identity_id INTEGER,
+                group_id INTEGER,
+                tags TEXT NOT NULL DEFAULT '',
+                notes TEXT,
+                is_favorite INTEGER NOT NULL DEFAULT 0 CHECK(is_favorite IN (0, 1)),
+                jump_host_id INTEGER,
+                startup_snippet_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL,
+                vault_id TEXT NOT NULL DEFAULT 'legacy-local',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+    raw.connection
+        .execute(
+            "INSERT INTO snippets(id, name, command, description, tags, variables, vault_id) VALUES (1, 'df', 'df -h', NULL, 'ops', '[]', 'legacy-local')",
+            (),
+        )
+        .await
+        .unwrap();
+    raw.connection
+        .execute(
+            "INSERT INTO hosts(id, name, hostname, username, port, startup_snippet_id, vault_id) VALUES (1, 'prod-1', '10.1.2.3', 'ubuntu', 22, 1, 'legacy-local')",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(raw);
+
+    let creds = MigrationCredentials {
+        default_password: Some("Reordered#Cols2026!".to_string()),
+        default_recovery_code: Some(VaultKey::generate_recovery_code().unwrap()),
+        require_portable_manifests: true,
+        remember_in_keychain: false,
+        ..Default::default()
+    };
+    let secrets = EphemeralCredentialStore::new();
+    let report = MigrationEngine::migrate_legacy_database_with_credentials(
+        temp.path(),
+        None,
+        Some(&creds),
+        &secrets,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.default_records_migrated, 2);
+
+    let manifest = VaultManifest::load_from_path(
+        &temp
+            .path()
+            .join("vault_manifests/legacy-local.manifest.json"),
+    )
+    .unwrap();
+    let key = manifest.unlock("Reordered#Cols2026!").unwrap();
+    let target = HostStore::open_existing_with_key(
+        temp.path().join("vaults/default.db").to_str().unwrap(),
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    let hosts = target.list().await.unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].startup_snippet_id, Some(1));
+}
+
+#[tokio::test]
+async fn p0_01_compare_table_rows_rejects_actual_value_and_row_mismatches() {
+    let cols = vec!["id".to_string(), "name".to_string()];
+    let pk = vec!["id".to_string()];
+    let expected = TableRows {
+        columns: cols.clone(),
+        values: vec![vec![Value::Integer(1), Value::Text("alpha".into())]],
+    };
+    let wrong_val = TableRows {
+        columns: cols.clone(),
+        values: vec![vec![Value::Integer(1), Value::Text("beta".into())]],
+    };
+    let err = compare_table_rows("legacy-local", "snippets", &pk, &expected, &wrong_val)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("row_value_mismatch"), "got: {err}");
+    assert!(err.contains("name"), "got: {err}");
+    assert!(
+        !err.contains("alpha") && !err.contains("beta"),
+        "must not leak raw values: {err}"
+    );
+
+    let missing_row = TableRows {
+        columns: cols,
+        values: Vec::new(),
+    };
+    let err_count = compare_table_rows("legacy-local", "snippets", &pk, &expected, &missing_row)
+        .unwrap_err()
+        .to_string();
+    assert!(err_count.contains("row_count_mismatch"), "got: {err_count}");
+}
+
+#[tokio::test]
+async fn p0_02_resume_after_manifest_seal_rewraps_recovery_code_and_rejects_wrong_password() {
+    let temp = tempfile::tempdir().unwrap();
+    let legacy_path = temp.path().join("shellumi.db");
+    let raw = HostStore::open_with_key(legacy_path.to_str().unwrap(), None)
+        .await
+        .unwrap();
+    raw.connection
+        .execute(
+            "INSERT INTO hosts(id, name, hostname, username, port) VALUES (1, 'edge', '192.0.2.1', 'root', 22)",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(raw);
+
+    let secrets = EphemeralCredentialStore::new();
+    let first_rec = VaultKey::generate_recovery_code().unwrap();
+    let first_creds = MigrationCredentials {
+        default_password: Some("Resume#Pass2026!".to_string()),
+        default_recovery_code: Some(first_rec.clone()),
+        require_portable_manifests: true,
+        remember_in_keychain: false,
+        ..Default::default()
+    };
+
+    // Simulate failure right after staged manifest is sealed in Phase::Planned
+    let err = MigrationEngine::run(
+        temp.path(),
+        None,
+        Some(&first_creds),
+        &secrets,
+        &mut |point| {
+            if point == "key:0" {
+                Err(failure("Simulated failure after manifest seal"))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("Simulated failure"));
+
+    // Wrong password on retry must fail without mutating the staged manifest
+    let wrong_creds = MigrationCredentials {
+        default_password: Some("Wrong#Pass2026!".to_string()),
+        default_recovery_code: Some(VaultKey::generate_recovery_code().unwrap()),
+        require_portable_manifests: true,
+        remember_in_keychain: false,
+        ..Default::default()
+    };
+    let wrong_err = MigrationEngine::migrate_legacy_database_with_credentials(
+        temp.path(),
+        None,
+        Some(&wrong_creds),
+        &secrets,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        wrong_err.contains("cannot unlock staged vault"),
+        "expected unlock rejection, got: {wrong_err}"
+    );
+
+    // Retry with correct password and a NEW recovery code must succeed and rewrap recovery envelope
+    let second_rec = VaultKey::generate_recovery_code().unwrap();
+    assert_ne!(first_rec, second_rec);
+    let retry_creds = MigrationCredentials {
+        default_password: Some("Resume#Pass2026!".to_string()),
+        default_recovery_code: Some(second_rec.clone()),
+        require_portable_manifests: true,
+        remember_in_keychain: false,
+        ..Default::default()
+    };
+    let report = MigrationEngine::migrate_legacy_database_with_credentials(
+        temp.path(),
+        None,
+        Some(&retry_creds),
+        &secrets,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.default_records_migrated, 1);
+
+    let manifest = VaultManifest::load_from_path(
+        &temp
+            .path()
+            .join("vault_manifests/legacy-local.manifest.json"),
+    )
+    .unwrap();
+    let vid = VaultId::new(LEGACY_LOCAL_VAULT_ID).unwrap();
+    let key_pwd = manifest.unlock("Resume#Pass2026!").unwrap();
+    let key_rec = VaultKey::recover(
+        &vid,
+        &second_rec,
+        manifest.recovery_envelope.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(key_pwd.expose_bytes(), key_rec.expose_bytes());
+}

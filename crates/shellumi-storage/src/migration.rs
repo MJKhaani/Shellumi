@@ -472,6 +472,16 @@ fn password<'a>(credentials: Option<&'a MigrationCredentials>, id: &str) -> Opti
     })
 }
 
+fn recovery_code<'a>(credentials: Option<&'a MigrationCredentials>, id: &str) -> Option<&'a str> {
+    credentials.and_then(|c| {
+        if id == LEGACY_LOCAL_VAULT_ID {
+            c.default_recovery_code.as_deref()
+        } else {
+            c.secondary_recovery_codes.get(id).map(String::as_str)
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn vault_key(
     base: &Path,
@@ -496,7 +506,27 @@ fn vault_key(
         let bytes: [u8; 32] = data
             .try_into()
             .map_err(|_| failure("Staged vault key has invalid length"))?;
-        return Ok(VaultKey::from_bytes(bytes));
+        let key = VaultKey::from_bytes(bytes);
+        if staged_manifest(root, index).exists() {
+            if let Some(pwd) = password(credentials, &vault.id) {
+                let manifest_path = staged_manifest(root, index);
+                no_symlink(&manifest_path)?;
+                let manifest = VaultManifest::load_from_path(&manifest_path)
+                    .map_err(|e| failure(format!("Read staged manifest: {e}")))?;
+                let unlocked = manifest.unlock(pwd).map_err(|_| {
+                    failure(format!(
+                        "MigrationRequired: password cannot unlock staged vault '{}'",
+                        vault.id
+                    ))
+                })?;
+                if manifest.vault_id != vault.id || unlocked.expose_bytes() != key.expose_bytes() {
+                    return Err(failure(
+                        "Interrupted staged manifest key does not match migration key",
+                    ));
+                }
+            }
+        }
+        return Ok(key);
     }
     let supplied = if vault.id == LEGACY_LOCAL_VAULT_ID {
         if let Some(key) = default_dek {
@@ -610,18 +640,61 @@ fn ensure_manifest(
         return Ok(());
     }
     if staged_manifest(root, index).exists() {
-        if vault.manifest_digest.is_none() {
-            let manifest = VaultManifest::load_from_path(&staged_manifest(root, index))
-                .map_err(|e| failure(format!("Read unsealed staged manifest: {e}")))?;
-            let pwd = password(credentials, &vault.id).ok_or_else(|| failure("MigrationRequired: provide the vault password to verify an interrupted manifest write"))?;
+        let manifest_path = staged_manifest(root, index);
+        no_symlink(&manifest_path)?;
+        let manifest = VaultManifest::load_from_path(&manifest_path)
+            .map_err(|e| failure(format!("Read staged manifest: {e}")))?;
+        if let Some(pwd) = password(credentials, &vault.id) {
             let recovered = manifest.unlock(pwd).map_err(|_| {
-                failure("Interrupted staged manifest cannot be unlocked; original preserved")
+                failure(format!(
+                    "MigrationRequired: password cannot unlock staged vault '{}'; original preserved",
+                    vault.id
+                ))
             })?;
             if manifest.vault_id != vault.id || recovered.expose_bytes() != key.expose_bytes() {
                 return Err(failure(
                     "Interrupted staged manifest key does not match migration key",
                 ));
             }
+            if let Some(rec_code) = recovery_code(credentials, &vault.id) {
+                let vid = VaultId::new(&vault.id).map_err(|e| failure(e.to_string()))?;
+                let matches_existing = manifest
+                    .recovery_envelope
+                    .as_ref()
+                    .and_then(|env| VaultKey::recover(&vid, rec_code, env).ok())
+                    .is_some_and(|k| k.expose_bytes() == key.expose_bytes());
+                if !matches_existing {
+                    let new_recovery = key
+                        .wrap_with_password(&vid, rec_code)
+                        .map_err(|e| failure(e.to_string()))?;
+                    let verified = VaultKey::recover(&vid, rec_code, &new_recovery)
+                        .map_err(|e| failure(format!("Verify rewrapped recovery envelope: {e}")))?;
+                    if verified.expose_bytes() != key.expose_bytes() {
+                        return Err(failure(
+                            "Rewrapped recovery envelope failed DEK verification",
+                        ));
+                    }
+                    let remember = credentials.is_none_or(|c| c.remember_in_keychain);
+                    let updated = VaultManifest::new(
+                        manifest.vault_id,
+                        manifest.name,
+                        manifest.primary_envelope,
+                        Some(new_recovery),
+                        remember,
+                    );
+                    atomic_write(
+                        &manifest_path,
+                        updated
+                            .to_json()
+                            .map_err(|e| failure(e.to_string()))?
+                            .as_bytes(),
+                    )?;
+                }
+            }
+        } else if vault.manifest_digest.is_none() {
+            return Err(failure(
+                "MigrationRequired: provide the vault password to verify an interrupted manifest write",
+            ));
         }
         return Ok(());
     }
@@ -737,20 +810,117 @@ struct TableRows {
     values: Vec<Vec<Value>>,
 }
 
+struct TableSchema {
+    columns: Vec<String>,
+    pk_columns: Vec<String>,
+}
+
+async fn table_schema(store: &HostStore, table: &str) -> Result<TableSchema, StorageError> {
+    let escaped = table.replace('"', "\"\"");
+    let mut rows = store
+        .connection
+        .query(format!("PRAGMA table_info(\"{escaped}\")"), ())
+        .await?;
+    let mut columns = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut pks: Vec<(i64, String)> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(1)?;
+        let pk: i64 = row.get(5)?;
+        if !seen.insert(name.clone()) {
+            return Err(failure(format!(
+                "Duplicate column '{name}' reported in table '{table}'"
+            )));
+        }
+        if pk > 0 {
+            pks.push((pk, name.clone()));
+        }
+        columns.push(name);
+    }
+    pks.sort_by_key(|(pk, _)| *pk);
+    let mut pk_columns: Vec<String> = pks.into_iter().map(|(_, name)| name).collect();
+    if table == "sqlite_sequence" && pk_columns.is_empty() && seen.contains("name") {
+        pk_columns.push("name".to_string());
+    }
+    Ok(TableSchema {
+        columns,
+        pk_columns,
+    })
+}
+
+fn canonical_column_projection(
+    table: &str,
+    source: &TableSchema,
+    target: &TableSchema,
+    vault_id: &str,
+) -> Result<Vec<String>, StorageError> {
+    let source_set: BTreeSet<&str> = source.columns.iter().map(String::as_str).collect();
+    let target_set: BTreeSet<&str> = target.columns.iter().map(String::as_str).collect();
+    let missing_in_target: Vec<&str> = source_set.difference(&target_set).copied().collect();
+    let extra_in_target: Vec<&str> = target_set.difference(&source_set).copied().collect();
+    if !missing_in_target.is_empty() || !extra_in_target.is_empty() {
+        return Err(failure(format!(
+            "Verification failed for vault {vault_id}, table {table}: schema_mismatch (missing_in_target={missing_in_target:?}, extra_in_target={extra_in_target:?})"
+        )));
+    }
+    if source.pk_columns != target.pk_columns {
+        return Err(failure(format!(
+            "Verification failed for vault {vault_id}, table {table}: primary_key_mismatch (source_pk={:?}, target_pk={:?})",
+            source.pk_columns, target.pk_columns
+        )));
+    }
+    Ok(target.columns.clone())
+}
+
+fn value_sort_key(value: &Value) -> (u8, Vec<u8>) {
+    match value {
+        Value::Null => (0, Vec::new()),
+        Value::Integer(i) => (1, i.to_be_bytes().to_vec()),
+        Value::Real(f) => (2, f.to_bits().to_be_bytes().to_vec()),
+        Value::Text(s) => (3, s.as_bytes().to_vec()),
+        Value::Blob(b) => (4, b.clone()),
+    }
+}
+
+fn row_sort_key(row: &[Value]) -> Vec<(u8, Vec<u8>)> {
+    row.iter().map(value_sort_key).collect()
+}
+
 async fn read_rows(
     store: &HostStore,
     table: &str,
     id: &str,
     all: bool,
 ) -> Result<TableRows, StorageError> {
+    let schema = table_schema(store, table).await?;
+    read_rows_projected(store, table, &schema.columns, id, all).await
+}
+
+async fn read_rows_projected(
+    store: &HostStore,
+    table: &str,
+    columns: &[String],
+    id: &str,
+    all: bool,
+) -> Result<TableRows, StorageError> {
+    if columns.is_empty() {
+        return Ok(TableRows {
+            columns: Vec::new(),
+            values: Vec::new(),
+        });
+    }
     let predicate = if all {
         "1 = 1 AND ?1 IS NOT NULL"
     } else {
         filter(table, id == LEGACY_LOCAL_VAULT_ID)
     };
-    let sql = format!("SELECT * FROM {table} WHERE {predicate} ORDER BY rowid");
+    let projection = columns
+        .iter()
+        .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {projection} FROM {table} WHERE {predicate} ORDER BY rowid");
     let mut rows = store.connection.query(sql, (id,)).await?;
-    let columns = rows.column_names();
     let mut values = Vec::new();
     while let Some(row) = rows.next().await? {
         values.push(
@@ -759,7 +929,10 @@ async fn read_rows(
                 .collect::<Result<_, _>>()?,
         );
     }
-    Ok(TableRows { columns, values })
+    Ok(TableRows {
+        columns: columns.to_vec(),
+        values,
+    })
 }
 
 fn secure_rows(
@@ -900,6 +1073,107 @@ async fn foreign_keys(store: &HostStore) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn compare_table_rows(
+    vault_id: &str,
+    table: &str,
+    pk_columns: &[String],
+    expected: &TableRows,
+    actual: &TableRows,
+) -> Result<(), StorageError> {
+    if expected.columns != actual.columns {
+        return Err(failure(format!(
+            "Verification failed for vault {vault_id}, table {table}: column_projection_mismatch"
+        )));
+    }
+    if expected.values.len() != actual.values.len() {
+        return Err(failure(format!(
+            "Verification failed for vault {vault_id}, table {table}: row_count_mismatch (expected_rows={}, actual_rows={})",
+            expected.values.len(),
+            actual.values.len()
+        )));
+    }
+    if pk_columns.is_empty() {
+        let mut exp_sorted: Vec<&Vec<Value>> = expected.values.iter().collect();
+        let mut act_sorted: Vec<&Vec<Value>> = actual.values.iter().collect();
+        exp_sorted.sort_by_cached_key(|row| row_sort_key(row));
+        act_sorted.sort_by_cached_key(|row| row_sort_key(row));
+        for (exp_row, act_row) in exp_sorted.into_iter().zip(act_sorted) {
+            if exp_row != act_row {
+                let differing: Vec<&str> = expected
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, col)| (exp_row[i] != act_row[i]).then_some(col.as_str()))
+                    .collect();
+                return Err(failure(format!(
+                    "Verification failed for vault {vault_id}, table {table}: row_value_mismatch (rows={}, differing_columns={differing:?})",
+                    expected.values.len()
+                )));
+            }
+        }
+        return Ok(());
+    }
+
+    let pk_indices: Vec<usize> = pk_columns
+        .iter()
+        .map(|pk| {
+            expected
+                .columns
+                .iter()
+                .position(|c| c == pk)
+                .ok_or_else(|| failure(format!("Missing primary key column '{pk}' in {table}")))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let key_for = |row: &[Value]| -> Vec<(u8, Vec<u8>)> {
+        pk_indices
+            .iter()
+            .map(|&idx| value_sort_key(&row[idx]))
+            .collect()
+    };
+
+    let mut expected_by_pk: BTreeMap<Vec<(u8, Vec<u8>)>, &Vec<Value>> = BTreeMap::new();
+    for row in &expected.values {
+        if expected_by_pk.insert(key_for(row), row).is_some() {
+            return Err(failure(format!(
+                "Verification failed for vault {vault_id}, table {table}: duplicate_source_primary_key"
+            )));
+        }
+    }
+
+    let mut actual_by_pk: BTreeMap<Vec<(u8, Vec<u8>)>, &Vec<Value>> = BTreeMap::new();
+    for row in &actual.values {
+        if actual_by_pk.insert(key_for(row), row).is_some() {
+            return Err(failure(format!(
+                "Verification failed for vault {vault_id}, table {table}: duplicate_target_primary_key"
+            )));
+        }
+    }
+
+    for (pk, exp_row) in &expected_by_pk {
+        let Some(act_row) = actual_by_pk.get(pk) else {
+            return Err(failure(format!(
+                "Verification failed for vault {vault_id}, table {table}: missing_target_row (expected_rows={}, actual_rows={})",
+                expected.values.len(),
+                actual.values.len()
+            )));
+        };
+        if exp_row != act_row {
+            let differing: Vec<&str> = expected
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(i, col)| (exp_row[i] != act_row[i]).then_some(col.as_str()))
+                .collect();
+            return Err(failure(format!(
+                "Verification failed for vault {vault_id}, table {table}: row_value_mismatch (rows={}, differing_columns={differing:?})",
+                expected.values.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn verify_tables(
     source: &HostStore,
     target: &HostStore,
@@ -909,14 +1183,15 @@ async fn verify_tables(
 ) -> Result<(), StorageError> {
     let id = &journal.vaults[index].id;
     for table in TABLES {
-        let mut expected = read_rows(source, table, id, false).await?;
+        let source_schema = table_schema(source, table).await?;
+        let target_schema = table_schema(target, table).await?;
+        let projection = canonical_column_projection(table, &source_schema, &target_schema, id)?;
+        let mut expected = read_rows_projected(source, table, &projection, id, false).await?;
         if *table == "vault_server_connections" {
             secure_rows(&mut expected, journal, credentials)?;
         }
-        let actual = read_rows(target, table, id, true).await?;
-        if expected.columns != actual.columns || expected.values != actual.values {
-            return Err(failure(format!("Verification failed: migration changed rows, identifiers, relationships or metadata in {table} for vault {id}")));
-        }
+        let actual = read_rows_projected(target, table, &projection, id, true).await?;
+        compare_table_rows(id, table, &target_schema.pk_columns, &expected, &actual)?;
     }
     foreign_keys(target).await
 }
@@ -944,7 +1219,10 @@ async fn copy_tables(
             .await?;
     }
     for table in TABLES {
-        let mut data = read_rows(source, table, id, false).await?;
+        let source_schema = table_schema(source, table).await?;
+        let target_schema = table_schema(target, table).await?;
+        let projection = canonical_column_projection(table, &source_schema, &target_schema, id)?;
+        let mut data = read_rows_projected(source, table, &projection, id, false).await?;
         if *table == "vault_server_connections" {
             secure_rows(&mut data, journal, credentials)?;
         }
@@ -1635,6 +1913,28 @@ impl MigrationEngine {
             journal.phase = Phase::Verified;
             save(&root, &journal)?;
             fault("verified")?;
+        }
+        if journal.phase == Phase::Verified {
+            for index in 0..journal.vaults.len() {
+                if staged_manifest(&root, index).exists()
+                    && (password(credentials, &journal.vaults[index].id).is_some()
+                        || recovery_code(credentials, &journal.vaults[index].id).is_some())
+                {
+                    let key = vault_key(
+                        &base,
+                        &root,
+                        &journal,
+                        index,
+                        default_dek,
+                        credentials,
+                        store,
+                    )?;
+                    ensure_manifest(&root, &journal, index, &key, credentials)?;
+                    journal.vaults[index].manifest_digest =
+                        Some(digest(&staged_manifest(&root, index))?);
+                    save(&root, &journal)?;
+                }
+            }
         }
         if matches!(journal.phase, Phase::Verified | Phase::Activating) {
             progress(MigrationProgressEvent::Activation);

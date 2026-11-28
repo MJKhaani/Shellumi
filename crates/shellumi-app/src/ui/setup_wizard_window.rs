@@ -269,9 +269,19 @@ impl SetupWizardView {
     }
 
     fn render_sidebar(&self, steps: &[(WizardPage, &'static str)]) -> Stateful<Div> {
+        let active_step_page = match self.controller.current_page {
+            WizardPage::MigrationProgress => {
+                if steps.iter().any(|(p, _)| *p == WizardPage::VaultPassword) {
+                    WizardPage::VaultPassword
+                } else {
+                    WizardPage::InterruptedMigration
+                }
+            }
+            other => other,
+        };
         let current_idx = steps
             .iter()
-            .position(|(p, _)| *p == self.controller.current_page)
+            .position(|(p, _)| *p == active_step_page)
             .unwrap_or(0);
 
         let mut list = div().w_full().flex().flex_col().gap_2();
@@ -1123,6 +1133,41 @@ impl SetupWizardView {
     }
 
     fn render_migration_progress(&self) -> Div {
+        let is_failed = matches!(self.controller.operation, OperationState::Failed { .. });
+        let heading = if is_failed {
+            "Migration could not finish"
+        } else {
+            "Migrating your data"
+        };
+        let subtitle = if is_failed {
+            "The isolated migration worker stopped before completing. Your original database and verified backup remain intact."
+        } else {
+            "Shellumi is backing up your legacy database, encrypting your vaults in an isolated worker, and verifying integrity. Your original database remains intact."
+        };
+        let status_notice = if is_failed {
+            let status_detail = match &self.inventory.migration {
+                shellumi_core::MigrationInventoryStatus::InProgress {
+                    phase,
+                    can_rollback,
+                    ..
+                } => {
+                    if *can_rollback {
+                        format!(
+                            "Staging state: {phase}. You can retry migration, go back to adjust credentials, or roll back safely."
+                        )
+                    } else {
+                        format!(
+                            "Staging state: {phase}. You can retry migration or go back to adjust credentials."
+                        )
+                    }
+                }
+                _ => "Original legacy database remains untouched. You can retry migration or go back.".to_string(),
+            };
+            inline_notice(None, status_detail, true)
+        } else {
+            inline_notice(None, self.migration_progress_label.clone(), false)
+        };
+
         div()
             .w_full()
             .min_w_0()
@@ -1131,22 +1176,22 @@ impl SetupWizardView {
             .gap_4()
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .text_2xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .child("Migrating your data"),
+                    .child(heading),
             )
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child("Shellumi is backing up your legacy database, encrypting your vaults in an isolated worker, and verifying integrity. Your original database remains intact."),
+                    .child(subtitle),
             )
-            .child(inline_notice(
-                None,
-                self.migration_progress_label.clone(),
-                false,
-            ))
+            .child(status_notice)
     }
 
     fn render_local_unlock(&self, cx: &mut Context<Self>) -> Div {
@@ -1812,6 +1857,37 @@ impl SetupWizardView {
                     })),
                 ));
             }
+            WizardPage::MigrationProgress => {
+                if !is_busy && matches!(self.controller.operation, OperationState::Failed { .. }) {
+                    let can_rollback = matches!(
+                        self.inventory.migration,
+                        shellumi_core::MigrationInventoryStatus::InProgress {
+                            can_rollback: true,
+                            ..
+                        }
+                    );
+                    if can_rollback {
+                        right = right.child(btn_or_disabled(
+                            "wizard-migration-rollback-btn",
+                            "Roll Back Safely",
+                            ButtonVariant::Secondary,
+                            true,
+                            Box::new(cx.listener(|this, _, _, cx| {
+                                this.start_rollback_interrupted_migration(cx);
+                            })),
+                        ));
+                    }
+                    right = right.child(btn_or_disabled(
+                        "wizard-migration-retry-btn",
+                        "Retry Migration",
+                        ButtonVariant::Primary,
+                        true,
+                        Box::new(cx.listener(|this, _, _, cx| {
+                            this.start_legacy_migration(cx);
+                        })),
+                    ));
+                }
+            }
             WizardPage::RecoveryCode => {
                 right = right.child(btn_or_disabled(
                     "wizard-recovery-next-btn",
@@ -1912,8 +1988,7 @@ impl SetupWizardView {
             WizardPage::DiscardConfirm
             | WizardPage::InterruptedMigration
             | WizardPage::InterruptedDiscard
-            | WizardPage::InconsistentInstallation
-            | WizardPage::MigrationProgress => {}
+            | WizardPage::InconsistentInstallation => {}
         }
 
         div()

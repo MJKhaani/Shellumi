@@ -1305,7 +1305,6 @@ impl OnboardingController {
                 | WizardPage::InterruptedMigration
                 | WizardPage::InterruptedDiscard
                 | WizardPage::InconsistentInstallation
-                | WizardPage::MigrationProgress
         )
     }
 
@@ -1315,8 +1314,10 @@ impl OnboardingController {
         }
         let prev = match self.current_page {
             WizardPage::DiscardConfirm | WizardPage::MigrationReview => WizardPage::LegacyDecision,
+            WizardPage::MigrationProgress => WizardPage::VaultPassword,
             WizardPage::VaultPassword => match self.route {
                 OnboardingRoute::LegacyMigration => WizardPage::LegacyDecision,
+                OnboardingRoute::InterruptedMigration => WizardPage::InterruptedMigration,
                 _ => WizardPage::FreshWelcome,
             },
             WizardPage::RecoveryCode => WizardPage::VaultPassword,

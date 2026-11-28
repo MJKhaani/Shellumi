@@ -151,16 +151,21 @@ pub fn error_notice(message: impl Into<SharedString>) -> Div {
         .w_full()
         .min_w_0()
         .flex()
-        .items_center()
-        .gap_2()
+        .flex_col()
+        .gap_1()
         .p_2p5()
         .rounded(px(MacTheme::CONTROL_RADIUS))
         .bg(gpui::rgba(0xff453a1a))
         .border_1()
         .border_color(danger())
-        .text_xs()
-        .text_color(danger())
-        .child(message.into())
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_xs()
+                .text_color(danger())
+                .child(message.into()),
+        )
 }
 
 /// An inline notice or warning card within an inspector or form.
@@ -175,21 +180,37 @@ pub fn inline_notice(
         (input_bg(), rgb(MacTheme::SEPARATOR), text_secondary())
     };
 
-    let mut el = div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .p_2p5()
-        .rounded(px(MacTheme::CONTROL_RADIUS))
-        .bg(bg)
-        .border_1()
-        .border_color(border)
+    let msg = div()
+        .min_w_0()
         .text_xs()
-        .text_color(fg);
+        .text_color(fg)
+        .child(message.into());
 
     if let Some(i) = icon {
-        el = el.child(i);
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_start()
+            .gap_2()
+            .p_2p5()
+            .rounded(px(MacTheme::CONTROL_RADIUS))
+            .bg(bg)
+            .border_1()
+            .border_color(border)
+            .child(i)
+            .child(msg.flex_1())
+    } else {
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .p_2p5()
+            .rounded(px(MacTheme::CONTROL_RADIUS))
+            .bg(bg)
+            .border_1()
+            .border_color(border)
+            .child(msg.w_full())
     }
-
-    el.child(message.into())
 }
