@@ -145,6 +145,19 @@ impl Shellumi {
             )
         };
 
+        let scope = self.current_vault_scope();
+        let Ok(lease) = self.sftp_controller.register_lease(&scope) else {
+            if let Some(sftp) = self
+                .tabs
+                .get_mut(tab_idx)
+                .and_then(|t| t.sftp_state.as_mut())
+            {
+                sftp.loading = false;
+                sftp.error = Some("Vault is locked or inactive.".into());
+            }
+            cx.notify();
+            return;
+        };
         let connection_options = self
             .tabs
             .get(tab_idx)
@@ -152,12 +165,15 @@ impl Shellumi {
             .map(|browser| browser.connection_options.clone())
             .unwrap_or_default();
         let task = cx.background_executor().spawn(async move {
+            let _lease = lease;
+            _lease.check()?;
             let mut opts = connection_options;
             opts.port = Some(dest.port().get());
             if let Some(jump) = jump_host {
                 opts.extra_ssh_options.push(("ProxyJump".to_string(), jump));
             }
-            let mut client = SftpClient::connect(&dest, &opts)?;
+            let mut client = SftpClient::connect_with_control(&dest, &opts, &_lease.control)?;
+            _lease.check()?;
             let mut entries = client.list_remote_directory(&remote_path)?;
             if !show_hidden {
                 entries.retain(|e| !e.is_hidden());

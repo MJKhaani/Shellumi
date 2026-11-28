@@ -622,6 +622,13 @@ impl Shellumi {
             .map(|inp| inp.read(cx).value().trim().to_lowercase())
             .unwrap_or_default();
 
+        let visible_names: Vec<String> = pane
+            .entries
+            .iter()
+            .filter(|e| filter_query.is_empty() || e.name.to_lowercase().contains(&filter_query))
+            .map(|e| e.name.clone())
+            .collect();
+
         for (entry_idx, entry) in pane.entries.iter().enumerate() {
             if !filter_query.is_empty() && !entry.name.to_lowercase().contains(&filter_query) {
                 continue;
@@ -734,6 +741,7 @@ impl Shellumi {
                     cx.listener({
                         let entry_name = entry_name.clone();
                         let entry_path = entry_path.clone();
+                        let visible_names = visible_names.clone();
                         move |app, event: &gpui::MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             let p = if is_left {
@@ -747,10 +755,27 @@ impl Shellumi {
                                 } else {
                                     app.sftp_open_in_editor(is_left, entry_path.clone(), cx);
                                 }
-                            } else if event.modifiers.shift
-                                || event.modifiers.platform
-                                || event.modifiers.control
-                            {
+                            } else if event.modifiers.shift {
+                                let anchor = p
+                                    .selection_anchor
+                                    .clone()
+                                    .or_else(|| p.selected_file.clone())
+                                    .unwrap_or_else(|| entry_name.clone());
+                                let pos_a = visible_names.iter().position(|n| n == &anchor);
+                                let pos_b = visible_names.iter().position(|n| n == &entry_name);
+                                p.selected_files.clear();
+                                if let (Some(ia), Some(ib)) = (pos_a, pos_b) {
+                                    let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
+                                    for name in &visible_names[lo..=hi] {
+                                        p.selected_files.insert(name.clone());
+                                    }
+                                } else {
+                                    p.selected_files.insert(entry_name.clone());
+                                }
+                                p.selected_file = Some(entry_name.clone());
+                                app.sftp_context_menu = None;
+                                cx.notify();
+                            } else if event.modifiers.platform || event.modifiers.control {
                                 if p.selected_files.contains(&entry_name) {
                                     p.selected_files.remove(&entry_name);
                                     if p.selected_file.as_deref() == Some(&entry_name) {
@@ -760,12 +785,14 @@ impl Shellumi {
                                     p.selected_files.insert(entry_name.clone());
                                     p.selected_file = Some(entry_name.clone());
                                 }
+                                p.selection_anchor = Some(entry_name.clone());
                                 app.sftp_context_menu = None;
                                 cx.notify();
                             } else {
                                 p.selected_files.clear();
                                 p.selected_files.insert(entry_name.clone());
                                 p.selected_file = Some(entry_name.clone());
+                                p.selection_anchor = Some(entry_name.clone());
                                 app.sftp_context_menu = None;
                                 cx.notify();
                             }

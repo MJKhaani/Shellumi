@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// Thread-safe, race-free authorization gate shared across UI, controller, and workers.
 /// Revocation/switch updates this gate atomically so in-flight or racing operations
 /// cannot enqueue, commit, or apply stale callbacks across vault boundaries.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct VaultAuthGate {
     active: Arc<RwLock<Option<VaultScope>>>,
 }

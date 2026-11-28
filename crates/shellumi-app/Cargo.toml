@@ -36,3 +36,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 [[test]]
 name = "gpui_terminal_harness"
 harness = false
+
+[[test]]
+name = "gpui_sftp_harness"
+harness = false

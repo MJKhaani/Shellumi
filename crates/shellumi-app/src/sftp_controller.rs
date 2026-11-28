@@ -11,6 +11,30 @@ use shellumi_core::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// RAII operation lease guaranteeing `complete_op` is called on all normal,
+/// early-return, cancellation, or unwind paths.
+pub(crate) struct OperationLease {
+    controller: SftpController,
+    pub scope: VaultScope,
+    pub op_id: OperationId,
+    pub control: TransferControl,
+}
+
+impl OperationLease {
+    pub fn check(&self) -> Result<(), SftpError> {
+        if !self.controller.is_op_authorized(self.op_id, &self.scope) {
+            return Err(SftpError::Cancelled);
+        }
+        self.control.check()
+    }
+}
+
+impl Drop for OperationLease {
+    fn drop(&mut self) {
+        self.controller.complete_op(self.op_id);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SftpController {
     pub auth_gate: VaultAuthGate,
@@ -52,6 +76,17 @@ impl SftpController {
             guard.insert(op_id, (scope.clone(), ctrl.clone()));
         }
         Ok((op_id, ctrl))
+    }
+
+    /// Register an RAII [`OperationLease`] that automatically unregisters on drop.
+    pub fn register_lease(&self, scope: &VaultScope) -> Result<OperationLease, SftpError> {
+        let (op_id, control) = self.register_op(scope)?;
+        Ok(OperationLease {
+            controller: self.clone(),
+            scope: scope.clone(),
+            op_id,
+            control,
+        })
     }
 
     pub fn complete_op(&self, op_id: OperationId) {
@@ -113,13 +148,25 @@ impl SftpController {
                 "open_worker_client requires a remote endpoint".into(),
             ));
         };
-        if let Some(sess_arc) = self.connections.get_session(remote.endpoint_id) {
+        let sess_arc = self.connections.get_session(remote.endpoint_id);
+        if let Some(sess_arc) = sess_arc {
             // Clone options/session without holding the session mutex during SSH connect!
             let sess_clone_res = sess_arc.lock().map(|s| s.open_worker_client(control));
+            if !self.auth_gate.is_authorized(scope) {
+                return Err(SftpError::PermissionDenied(
+                    "Vault scope revoked before worker connect".into(),
+                ));
+            }
             if let Ok(res) = sess_clone_res {
                 return res;
             }
         }
+        if !self.auth_gate.is_authorized(scope) {
+            return Err(SftpError::PermissionDenied(
+                "Vault scope revoked before fallback connect".into(),
+            ));
+        }
+        control.check()?;
         let opts = fallback_opts.cloned().unwrap_or_default();
         super::connect_saved_sftp(
             remote.database_path.clone(),

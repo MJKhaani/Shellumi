@@ -30,8 +30,9 @@
 ## 2. Verification Summary
 
 - **Totals across all 109 IDs (`A01`–`G12`):**
-  - **PASS (Unit / Socket / App-Controller):** 43
-  - **IMPLEMENTED / NOT TESTED (Live `sshd`, GPUI window harness, or Native OS GUI):** 66
+  - **PASS (Unit / Socket / App-Controller / Headless GPUI):** 59
+  - **IMPLEMENTED / NOT TESTED (Live `sshd`, Live OS GUI, or Native Windows/Linux Runner):** 43
+  - **NOT TESTED:** 7
   - **FAIL:** 0
   - **NOT IMPLEMENTED:** 0
   - **Total:** 109
@@ -162,7 +163,7 @@
 | F12 | IMPLEMENTED / NOT TESTED | `sftp_editor.rs::sftp_editor_save_active` (`EditorConflictState`) | — | macOS sandbox | IMPLEMENTED / NOT TESTED | Fail-closed conflict detection wired; live conflict test requires `sshd` |
 | F13 | PASS | `editor.rs::EditorBuffer::mark_saved_revision`, `sftp_editor.rs` | `cargo test --locked -p shellumi-core sftp::tests::phase6_7_ops_editor::editor_buffer_handles_undo_concurrent_save_and_binary_rejection` | macOS | PASS | Typing during save keeps newer revision dirty |
 | F14 | IMPLEMENTED / NOT TESTED | `sftp_editor.rs::sftp_close_editor_by_id` (`dirty_close_confirm`) | — | macOS | IMPLEMENTED / NOT TESTED | Save & Close / Discard / Cancel wired; GPUI event test pending |
-| F15 | NOT IMPLEMENTED | External editor OS checkout/watcher | — | macOS/Win/Linux | NOT TESTED | Integrated editor prioritized; external watcher pending |
+| F15 | IMPLEMENTED / NOT TESTED | `sftp_editor.rs::sftp_editor_open_externally` (`ExternalEditorCheckout`) | — | macOS/Win/Linux | IMPLEMENTED / NOT TESTED | Private 0o700/0o600 checkout, OS launcher, no-follow upload & cleanup wired; live desktop launcher test pending |
 | F16 | PASS | `sftp_controller.rs::revoke_unauthorized`, `sftp_ui/actions.rs::enforce_sftp_vault_scope` | `cargo test --locked -p shellumi-app sftp::tests::sftp::sftp_controller_enforces_vault_auth_gate_and_revocation` | macOS | PASS | Vault lock/switch clears remote editors & cancels ops |
 | F17 | IMPLEMENTED / NOT TESTED | `sftp_editor.rs::CodeEditorView::render` (visible line slice) | — | macOS | IMPLEMENTED / NOT TESTED | Bounded visible-line layout; large-doc latency benchmark pending |
 | F18 | IMPLEMENTED / NOT TESTED | `sftp_editor.rs` | — | macOS sandbox | NOT TESTED | Requires live `sshd` roundtrip |
@@ -174,7 +175,7 @@
 | G01 | NOT TESTED | `shellumi-app` binary | — | macOS desktop | NOT TESTED | Headless sandbox; requires interactive macOS GUI run |
 | G02 | NOT TESTED | `shellumi-app` binary | — | Linux X11/Wayland | NOT TESTED | Requires Linux desktop runner |
 | G03 | NOT TESTED | `shellumi-app` binary | — | Windows | NOT TESTED | Requires Windows runner |
-| G04 | PASS | `path.rs::validate_destination_name` | `cargo test --locked -p shellumi-core sftp::tests::phase1_safety::listing_name_validation_rejects_malicious_and_windows_reserved_names` | macOS unit | PASS (unit) | Windows reserved/ADS/trailing-dot rules unit-tested; native Windows FS pending |
+| G04 | IMPLEMENTED / NOT TESTED | `path.rs::validate_destination_name` | `cargo test --locked -p shellumi-core sftp::tests::phase1_safety::listing_name_validation_rejects_malicious_and_windows_reserved_names` | macOS unit | IMPLEMENTED / NOT TESTED | Windows reserved/ADS/trailing-dot rules unit-tested; native Windows FS runner pending |
 | G05 | NOT TESTED | `shellumi-app` | — | macOS/Win/Linux | NOT TESTED | Native OS drop/IME requires desktop runner |
 | G06 | NOT TESTED | `sftp_ui/browser.rs`, `sftp_ui/overlays.rs` | — | macOS/Win/Linux | NOT TESTED | Resize/DPI requires desktop runner |
 | G07 | IMPLEMENTED / NOT TESTED | `ssh_sftp_acceptance.rs` | `cargo test --locked -p shellumi-app --test ssh_sftp_acceptance -- --ignored --nocapture` | macOS sandbox | NOT TESTED | Blocked in sandbox (`Operation not permitted` on TCP loopback) |

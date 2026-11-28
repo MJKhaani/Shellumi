@@ -207,14 +207,34 @@ impl Shellumi {
                             .child(format!("Transfer Queue ({})", snapshots.len()))
                             .child(
                                 div()
-                                    .id("sftp-close-drawer")
-                                    .cursor_pointer()
-                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.sftp_transfer_drawer_open = false;
-                                        cx.notify();
-                                    }))
-                                    .child("Hide"),
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .id("sftp-clear-drawer-history")
+                                            .cursor_pointer()
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                let scope = app.current_vault_scope();
+                                                app.sftp_controller
+                                                    .transfers
+                                                    .clear_terminal_history(&scope);
+                                                cx.notify();
+                                            }))
+                                            .child("Clear Done"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("sftp-close-drawer")
+                                            .cursor_pointer()
+                                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.sftp_transfer_drawer_open = false;
+                                                cx.notify();
+                                            }))
+                                            .child("Hide"),
+                                    ),
                             ),
                     )
                     .child(
@@ -252,18 +272,81 @@ impl Shellumi {
                                     .when(snap.state.is_active(), |row| {
                                         row.child(
                                             div()
-                                                .id(("sftp-drawer-cancel", i))
-                                                .cursor_pointer()
-                                                .text_color(rgb(MacTheme::DANGER))
-                                                .on_click(cx.listener(move |app, _, _, cx| {
-                                                    app.sftp_controller
-                                                        .transfers
-                                                        .cancel_job(job_id);
-                                                    cx.notify();
-                                                }))
-                                                .child("Cancel"),
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .id(("sftp-drawer-pause", i))
+                                                        .cursor_pointer()
+                                                        .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                                        .on_click(cx.listener(
+                                                            move |app, _, _, cx| {
+                                                                app.sftp_controller
+                                                                    .transfers
+                                                                    .pause_job(job_id);
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .child("Pause"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(("sftp-drawer-cancel", i))
+                                                        .cursor_pointer()
+                                                        .text_color(rgb(MacTheme::DANGER))
+                                                        .on_click(cx.listener(
+                                                            move |app, _, _, cx| {
+                                                                app.sftp_controller
+                                                                    .transfers
+                                                                    .cancel_job(job_id);
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .child("Cancel"),
+                                                ),
                                         )
                                     })
+                                    .when(
+                                        snap.state == shellumi_core::TransferJobState::Paused,
+                                        |row| {
+                                            row.child(
+                                                div()
+                                                    .id(("sftp-drawer-resume", i))
+                                                    .cursor_pointer()
+                                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        let scope = app.current_vault_scope();
+                                                        if app
+                                                            .sftp_controller
+                                                            .transfers
+                                                            .resume_job(job_id, &scope)
+                                                            .is_ok()
+                                                        {
+                                                            app.sftp_pump_transfers(cx);
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                                    .child("Resume"),
+                                            )
+                                        },
+                                    )
+                                    .when(
+                                        snap.state
+                                            == shellumi_core::TransferJobState::AwaitingConflict,
+                                        |row| {
+                                            row.child(
+                                                div()
+                                                    .id(("sftp-drawer-resolve", i))
+                                                    .cursor_pointer()
+                                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        app.sftp_surface_next_conflict(cx);
+                                                    }))
+                                                    .child("Resolve"),
+                                            )
+                                        },
+                                    )
                                     .when(
                                         matches!(
                                             snap.state,

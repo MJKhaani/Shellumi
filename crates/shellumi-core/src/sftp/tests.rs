@@ -324,17 +324,27 @@ fn verifies_remote_editor_workspace_dirty_tracking_and_save() {
         server_side.write_all(&handle_pkt.encode()).unwrap();
         server_side.flush().unwrap();
 
-        // 4. Read Data
-        server_side.read_exact(&mut len_buf).unwrap();
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut payload = vec![0u8; len];
-        server_side.read_exact(&mut payload).unwrap();
-        let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
-            .unwrap()
-            .unwrap();
-        let id = match pkt {
-            SftpPacket::Read { id, .. } => id,
-            other => panic!("unexpected: {other:?}"),
+        // 4. Optional Fstat followed by Read Data
+        let id = loop {
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            match pkt {
+                SftpPacket::Fstat { id, .. } => {
+                    let fattrs_pkt = SftpPacket::Attrs {
+                        id,
+                        attrs: FileAttributes::new().with_size(12),
+                    };
+                    server_side.write_all(&fattrs_pkt.encode()).unwrap();
+                    server_side.flush().unwrap();
+                }
+                SftpPacket::Read { id, .. } => break id,
+                other => panic!("unexpected: {other:?}"),
+            }
         };
         let data_pkt = SftpPacket::Data {
             id,
@@ -343,39 +353,31 @@ fn verifies_remote_editor_workspace_dirty_tracking_and_save() {
         server_side.write_all(&data_pkt.encode()).unwrap();
         server_side.flush().unwrap();
 
-        // 5. Read EOF
-        server_side.read_exact(&mut len_buf).unwrap();
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut payload = vec![0u8; len];
-        server_side.read_exact(&mut payload).unwrap();
-        let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
-            .unwrap()
-            .unwrap();
-        let id = match pkt {
-            SftpPacket::Read { id, .. } => id,
-            other => panic!("unexpected: {other:?}"),
+        // 5-6. Optional Read EOF followed by Close read handle
+        let close_id = loop {
+            server_side.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; len];
+            server_side.read_exact(&mut payload).unwrap();
+            let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
+                .unwrap()
+                .unwrap();
+            match pkt {
+                SftpPacket::Read { id, .. } => {
+                    let eof_pkt = SftpPacket::Status {
+                        id,
+                        code: StatusCode::Eof,
+                        message: "".into(),
+                        tag: "".into(),
+                    };
+                    server_side.write_all(&eof_pkt.encode()).unwrap();
+                    server_side.flush().unwrap();
+                }
+                SftpPacket::Close { id, .. } => break id,
+                other => panic!("unexpected: {other:?}"),
+            }
         };
-        let eof_pkt = SftpPacket::Status {
-            id,
-            code: StatusCode::Eof,
-            message: "".into(),
-            tag: "".into(),
-        };
-        server_side.write_all(&eof_pkt.encode()).unwrap();
-        server_side.flush().unwrap();
-
-        // 6. Close read handle
-        server_side.read_exact(&mut len_buf).unwrap();
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut payload = vec![0u8; len];
-        server_side.read_exact(&mut payload).unwrap();
-        let (pkt, _) = SftpPacket::decode(&[&len_buf[..], &payload[..]].concat())
-            .unwrap()
-            .unwrap();
-        let id = match pkt {
-            SftpPacket::Close { id, .. } => id,
-            other => panic!("unexpected: {other:?}"),
-        };
+        let id = close_id;
         let ok_pkt = SftpPacket::Status {
             id,
             code: StatusCode::Ok,

@@ -113,11 +113,15 @@ fn cancellation_preserves_download_and_removes_local_staging() {
             attrs: FileAttributes::new().with_size(7),
         },
         handle(2),
-        SftpPacket::Data {
+        SftpPacket::Attrs {
             id: 3,
+            attrs: FileAttributes::new().with_size(7),
+        },
+        SftpPacket::Data {
+            id: 4,
             data: b"payload".to_vec(),
         },
-        status(4, StatusCode::Ok),
+        status(5, StatusCode::Ok),
     ])
     .download_file_with_control(
         "/remote",
@@ -127,7 +131,10 @@ fn cancellation_preserves_download_and_removes_local_staging() {
             assert!(control.cancel());
         }),
     );
-    assert!(matches!(result, Err(SftpError::Cancelled)));
+    assert!(
+        matches!(result, Err(SftpError::Cancelled)),
+        "expected Err(SftpError::Cancelled), got: {result:?}"
+    );
     assert_eq!(std::fs::read(&target).unwrap(), b"original");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
@@ -170,7 +177,10 @@ fn cancelled_upload_closes_and_cleans_staging_without_publish() {
             assert!(control.cancel());
         }),
     );
-    assert!(matches!(result, Err(SftpError::Cancelled)));
+    assert!(
+        matches!(result, Err(SftpError::Cancelled)),
+        "expected Err(SftpError::Cancelled), got: {result:?}"
+    );
 }
 #[test]
 fn legacy_rename_failure_only_removes_staging_and_never_deletes_target() {

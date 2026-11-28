@@ -47,8 +47,9 @@ pub use path::{
     ListingNameKind, PathSemantics, PathValidationError, RemotePath, ValidatedChildName,
 };
 pub use planner::{
-    delete_local_recursive, delete_remote_recursive, plan_local_tree, plan_remote_tree,
-    staged_local_copy_file, validate_non_overlapping_local_copy,
+    delete_local_recursive, delete_remote_recursive, ensure_local_dir_no_follow,
+    ensure_remote_dir_no_follow, plan_local_tree, plan_remote_tree, staged_local_copy_file,
+    staged_local_copy_file_with_policy, validate_non_overlapping_local_copy,
     validate_non_overlapping_same_endpoint_remote, ConflictAction, ConflictContext,
     ConflictDecision, ConflictPolicy, DestinationReservationRegistry, LocalTreePlan, PlanLimits,
     PlannedRemoteItem, PlannedTransferItem, RemoteTreePlan, ReservationGuard, SymlinkPolicy,
@@ -57,7 +58,7 @@ pub use protocol::{
     ListingLimits, RemoteStatVfs, ServerCapabilities, ServerLimits, TransferTuning,
 };
 pub use queue::{TransferQueue, TransferQueueSummary};
-pub use transfer::TransferControl;
+pub use transfer::{JobCancellation, PublicationPolicy, TransferControl};
 pub use wire::{
     FileAttributes, NameEntry, OpenFlags, SftpPacket, SftpProtocolError, StatusCode, WireReader,
     SSH_FILEXFER_ATTR_ACMODTIME, SSH_FILEXFER_ATTR_EXTENDED, SSH_FILEXFER_ATTR_PERMISSIONS,
@@ -427,6 +428,29 @@ pub fn list_local_directory(
     Ok(entries)
 }
 
+/// Reason a file transfer or save requires an explicit conflict decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConflictReason {
+    TargetExists,
+    TypeMismatch,
+    TargetChanged,
+    TargetDisappeared,
+    UnsupportedReplace,
+}
+
+/// Typed conflict context returned instead of untyped string errors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictDetails {
+    pub source_path: String,
+    pub destination_path: String,
+    pub relative_path: String,
+    pub item_kind: FileKind,
+    pub source_size: Option<u64>,
+    pub destination_size: Option<u64>,
+    pub destination_mtime: Option<u64>,
+    pub reason: ConflictReason,
+}
+
 /// Comprehensive errors for the SFTP client transport engine.
 #[derive(Debug)]
 pub enum SftpError {
@@ -441,8 +465,10 @@ pub enum SftpError {
     FileNotFound(String),
     PermissionDenied(String),
     Cancelled,
+    Paused,
     CleanupFailed { path: String, message: String },
     OutcomeUnknown { path: String, message: String },
+    ConflictRequired(Box<ConflictDetails>),
 }
 
 impl fmt::Display for SftpError {
@@ -465,11 +491,19 @@ impl fmt::Display for SftpError {
             Self::FileNotFound(path) => write!(f, "remote file or directory not found: {path}"),
             Self::PermissionDenied(path) => write!(f, "permission denied for path: {path}"),
             Self::Cancelled => f.write_str("SFTP operation cancelled"),
+            Self::Paused => f.write_str("SFTP transfer paused"),
             Self::CleanupFailed { path, message } => {
                 write!(f, "{message}; temporary remote file may remain at {path}")
             }
             Self::OutcomeUnknown { path, message } => {
                 write!(f, "transfer commit outcome unknown for {path}: {message}")
+            }
+            Self::ConflictRequired(details) => {
+                write!(
+                    f,
+                    "conflict at '{}' ({:?})",
+                    details.destination_path, details.reason
+                )
             }
         }
     }
@@ -1156,8 +1190,30 @@ impl SftpClient {
     where
         F: Fn(u64, u64),
     {
+        self.download_file_with_policy(
+            remote_path,
+            local_path,
+            control,
+            &PublicationPolicy::ReplaceConfirmed {
+                expected_len: None,
+                expected_mtime: None,
+            },
+            callback,
+        )
+    }
+    pub fn download_file_with_policy<F>(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        control: &TransferControl,
+        policy: &PublicationPolicy,
+        callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
         self.controlled(control, |client| {
-            client.download_file_controlled(remote_path, local_path, control, callback)
+            client.download_file_controlled(remote_path, local_path, control, policy, callback)
         })
     }
     fn download_file_controlled<F>(
@@ -1165,6 +1221,7 @@ impl SftpClient {
         remote_path: &str,
         local_path: &Path,
         control: &TransferControl,
+        policy: &PublicationPolicy,
         callback: Option<F>,
     ) -> Result<u64, SftpError>
     where
@@ -1354,7 +1411,7 @@ impl SftpClient {
         };
         let bytes = transferred?;
         closed?;
-        staging.publish(local_path, control)?;
+        staging.publish_with_policy(local_path, control, policy)?;
         Ok(bytes)
     }
 
@@ -1385,8 +1442,30 @@ impl SftpClient {
     where
         F: Fn(u64, u64),
     {
+        self.upload_file_with_policy(
+            local_path,
+            remote_path,
+            control,
+            &PublicationPolicy::ReplaceConfirmed {
+                expected_len: None,
+                expected_mtime: None,
+            },
+            callback,
+        )
+    }
+    pub fn upload_file_with_policy<F>(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        control: &TransferControl,
+        policy: &PublicationPolicy,
+        callback: Option<F>,
+    ) -> Result<u64, SftpError>
+    where
+        F: Fn(u64, u64),
+    {
         self.controlled(control, |client| {
-            client.upload_file_controlled(local_path, remote_path, control, callback)
+            client.upload_file_controlled(local_path, remote_path, control, policy, callback)
         })
     }
     fn upload_file_controlled<F>(
@@ -1394,6 +1473,7 @@ impl SftpClient {
         local_path: &Path,
         remote_path: &str,
         control: &TransferControl,
+        policy: &PublicationPolicy,
         callback: Option<F>,
     ) -> Result<u64, SftpError>
     where
@@ -1553,8 +1633,77 @@ impl SftpClient {
             }
         };
 
+        if let PublicationPolicy::ReplaceConfirmed {
+            expected_len,
+            expected_mtime,
+        } = policy
+        {
+            if expected_len.is_some() || expected_mtime.is_some() {
+                match self.lstat(remote_path) {
+                    Ok(attrs) => {
+                        if attrs.is_symlink() || !attrs.is_file() {
+                            return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                                source_path: local_path.display().to_string(),
+                                destination_path: remote_path.to_string(),
+                                relative_path: remote_path
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                item_kind: if attrs.is_symlink() {
+                                    FileKind::Symlink { target: None }
+                                } else {
+                                    FileKind::Directory
+                                },
+                                source_size: Some(size),
+                                destination_size: attrs.size,
+                                destination_mtime: attrs.mtime.map(u64::from),
+                                reason: ConflictReason::TypeMismatch,
+                            })));
+                        }
+                        let actual_mtime = attrs.mtime.map(u64::from);
+                        if expected_len.is_some_and(|exp| Some(exp) != attrs.size)
+                            || expected_mtime.is_some_and(|exp| Some(exp) != actual_mtime)
+                        {
+                            return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                                source_path: local_path.display().to_string(),
+                                destination_path: remote_path.to_string(),
+                                relative_path: remote_path
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                item_kind: FileKind::File,
+                                source_size: Some(size),
+                                destination_size: attrs.size,
+                                destination_mtime: actual_mtime,
+                                reason: ConflictReason::TargetChanged,
+                            })));
+                        }
+                    }
+                    Err(SftpError::FileNotFound(_)) => {
+                        return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                            source_path: local_path.display().to_string(),
+                            destination_path: remote_path.to_string(),
+                            relative_path: remote_path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string(),
+                            item_kind: FileKind::File,
+                            source_size: Some(size),
+                            destination_size: None,
+                            destination_mtime: None,
+                            reason: ConflictReason::TargetDisappeared,
+                        })));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
         control.begin_commit()?;
-        match self.publish_upload(&staging, remote_path) {
+        match self.publish_upload_with_policy(&staging, remote_path, policy) {
             Ok(()) => Ok(bytes),
             Err(SftpError::Io(err)) => Err(SftpError::OutcomeUnknown {
                 path: remote_path.to_string(),
@@ -1585,21 +1734,34 @@ impl SftpClient {
             }
         }
     }
-    fn publish_upload(&mut self, staging: &str, destination: &str) -> Result<(), SftpError> {
-        if !self.capabilities.posix_rename {
-            // SFTP v3 rename refuses existing targets. Never emulate replace by deleting them.
-            return self.rename(staging, destination);
+    fn publish_upload_with_policy(
+        &mut self,
+        staging: &str,
+        destination: &str,
+        policy: &PublicationPolicy,
+    ) -> Result<(), SftpError> {
+        match policy {
+            PublicationPolicy::NoReplace => {
+                // SFTP v3 standard RENAME refuses existing targets; never send posix-rename for NoReplace.
+                self.rename(staging, destination)
+            }
+            PublicationPolicy::ReplaceConfirmed { .. } => {
+                if !self.capabilities.posix_rename {
+                    // SFTP v3 rename refuses existing targets. Never emulate replace by deleting them.
+                    return self.rename(staging, destination);
+                }
+                let id = self.next_id();
+                let mut data = Vec::new();
+                write_string(&mut data, staging);
+                write_string(&mut data, destination);
+                self.send_packet(&SftpPacket::Extended {
+                    id,
+                    request: "posix-rename@openssh.com".into(),
+                    data,
+                })?;
+                self.expect_status(id, Some(destination))
+            }
         }
-        let id = self.next_id();
-        let mut data = Vec::new();
-        write_string(&mut data, staging);
-        write_string(&mut data, destination);
-        self.send_packet(&SftpPacket::Extended {
-            id,
-            request: "posix-rename@openssh.com".into(),
-            data,
-        })?;
-        self.expect_status(id, Some(destination))
     }
 
     /// Query remote file attributes (follows symlinks).

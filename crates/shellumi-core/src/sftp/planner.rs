@@ -6,7 +6,8 @@ use super::path::{
     classify_listing_name, is_protected_local_root, validate_destination_name, CanonicalDestKey,
     ListingNameKind, PathSemantics, RemotePath,
 };
-use super::{FileKind, SftpError, TransferControl};
+use super::transfer::{LocalStaging, PublicationPolicy};
+use super::{FileKind, SftpClient, SftpError, TransferControl};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -54,6 +55,7 @@ pub struct ConflictContext {
     pub source_kind: FileKind,
     pub destination_kind: FileKind,
     pub is_type_mismatch: bool,
+    pub relative_path: Option<String>,
 }
 
 /// How symlinks are handled during recursive enumeration.
@@ -431,12 +433,142 @@ pub fn plan_local_tree(
     Ok(plan)
 }
 
-/// Safe local-to-local file copy using exclusive sibling staging and atomic rename.
+/// Walk `relative_components` from `root`, verifying each component is a genuine
+/// non-symlink directory and creating missing subdirectories one by one.
+pub fn ensure_local_dir_no_follow(
+    root: &Path,
+    relative_components: &[String],
+) -> Result<PathBuf, SftpError> {
+    match fs::symlink_metadata(root) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                return Err(SftpError::UnexpectedResponse(format!(
+                    "Destination root '{}' is not a genuine directory",
+                    root.display()
+                )));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(root)?;
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    let mut cur = root.to_path_buf();
+    for comp in relative_components {
+        cur.push(comp);
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Refusing to traverse symlinked destination directory '{}'",
+                        cur.display()
+                    )));
+                }
+                if !meta.file_type().is_dir() {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Destination ancestor '{}' is not a directory",
+                        cur.display()
+                    )));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(&cur) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let meta = fs::symlink_metadata(&cur)?;
+                    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                        return Err(SftpError::UnexpectedResponse(format!(
+                            "Destination ancestor '{}' is not a genuine directory",
+                            cur.display()
+                        )));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            },
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(cur)
+}
+
+/// Walk `relative_components` from `root` over SFTP using `LSTAT` (never following
+/// symlinks), verifying each component is a genuine directory and creating missing
+/// directories one by one.
+pub fn ensure_remote_dir_no_follow(
+    client: &mut SftpClient,
+    root: &str,
+    relative_components: &[String],
+    control: &TransferControl,
+) -> Result<String, SftpError> {
+    control.check()?;
+    let verify_or_mkdir = |client: &mut SftpClient, path: &str| -> Result<(), SftpError> {
+        match client.lstat(path) {
+            Ok(attrs) => {
+                if attrs.is_symlink() {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Refusing to traverse remote symlinked directory '{path}'"
+                    )));
+                }
+                if !attrs.is_dir() {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Remote destination ancestor '{path}' is not a directory"
+                    )));
+                }
+                Ok(())
+            }
+            Err(SftpError::FileNotFound(_)) => {
+                client.mkdir(path)?;
+                let attrs = client.lstat(path)?;
+                if attrs.is_symlink() || !attrs.is_dir() {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Created remote path '{path}' is not a genuine directory"
+                    )));
+                }
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    };
+
+    verify_or_mkdir(client, root)?;
+    let mut cur = RemotePath::from_posix_str(root);
+    for comp in relative_components {
+        control.check()?;
+        cur = cur
+            .join_child_str(comp)
+            .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+        verify_or_mkdir(client, cur.display())?;
+    }
+    Ok(cur.display().to_string())
+}
+
+/// Safe local-to-local file copy using exclusive sibling staging and policy-aware
+/// atomic publication (`NoReplace` via hard-link or `ReplaceConfirmed` via rename).
 /// Never overwrites `dst` directly with `std::fs::copy`.
 pub fn staged_local_copy_file(
     src: &Path,
     dst: &Path,
     overwrite: bool,
+    control: &TransferControl,
+    on_progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<u64, SftpError> {
+    let policy = if overwrite {
+        PublicationPolicy::ReplaceConfirmed {
+            expected_len: None,
+            expected_mtime: None,
+        }
+    } else {
+        PublicationPolicy::NoReplace
+    };
+    staged_local_copy_file_with_policy(src, dst, &policy, control, on_progress)
+}
+
+/// Safe local-to-local file copy with explicit [`PublicationPolicy`] and no-follow
+/// source/destination checks.
+pub fn staged_local_copy_file_with_policy(
+    src: &Path,
+    dst: &Path,
+    policy: &PublicationPolicy,
     control: &TransferControl,
     mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Result<u64, SftpError> {
@@ -444,7 +576,7 @@ pub fn staged_local_copy_file(
     validate_non_overlapping_local_copy(src, dst)?;
 
     let src_meta = fs::symlink_metadata(src)?;
-    if !src_meta.file_type().is_file() {
+    if src_meta.file_type().is_symlink() || !src_meta.file_type().is_file() {
         return Err(SftpError::UnexpectedResponse(format!(
             "Source '{}' is not a regular file",
             src.display()
@@ -455,38 +587,33 @@ pub fn staged_local_copy_file(
     let parent = dst.parent().ok_or_else(|| {
         SftpError::UnexpectedResponse("Destination has no parent directory".into())
     })?;
-    if !parent.exists() {
-        fs::create_dir_all(parent)?;
-    }
+    ensure_local_dir_no_follow(parent, &[])?;
 
-    // Refuse writing through an existing destination symlink when overwrite is false,
-    // or verify destination parent isn't redirecting.
-    if !overwrite && fs::symlink_metadata(dst).is_ok() {
+    if matches!(policy, PublicationPolicy::NoReplace) && fs::symlink_metadata(dst).is_ok() {
         return Err(SftpError::Io(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("Destination '{}' already exists", dst.display()),
         )));
     }
 
-    let staging_name = format!(".shellumi.part.{}", uuid::Uuid::new_v4().simple());
-    let staging_path = parent.join(staging_name);
-
     let mut src_file = fs::File::open(src)?;
-    let mut dst_file = {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        opts.open(&staging_path)?
-    };
+    let opened_meta = src_file.metadata()?;
+    if opened_meta.len() != total_size {
+        return Err(SftpError::UnexpectedResponse(format!(
+            "Source '{}' changed during open",
+            src.display()
+        )));
+    }
 
+    let mut staging = LocalStaging::new(dst)?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut copied: u64 = 0;
 
-    let copy_result = (|| -> Result<(), SftpError> {
+    {
+        let dst_file = staging
+            .file
+            .as_mut()
+            .ok_or_else(|| SftpError::UnexpectedResponse("Missing local staging handle".into()))?;
         loop {
             control.check()?;
             let n = src_file.read(&mut buf)?;
@@ -499,36 +626,19 @@ pub fn staged_local_copy_file(
                 cb(copied, total_size);
             }
         }
-        dst_file.sync_all()?;
-        Ok(())
-    })();
+    }
 
-    drop(dst_file);
-
-    if let Err(err) = copy_result {
-        let _ = fs::remove_file(&staging_path);
-        return Err(err);
+    let post_meta = src_file.metadata()?;
+    if post_meta.len() != total_size || post_meta.modified().ok() != opened_meta.modified().ok() {
+        return Err(SftpError::UnexpectedResponse(format!(
+            "Source '{}' was modified during transfer",
+            src.display()
+        )));
     }
 
     // Preserve permissions if available.
-    let _ = fs::set_permissions(&staging_path, src_meta.permissions());
-
-    if !overwrite {
-        // Atomic no-clobber check before rename.
-        if fs::symlink_metadata(dst).is_ok() {
-            let _ = fs::remove_file(&staging_path);
-            return Err(SftpError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("Destination '{}' appeared before commit", dst.display()),
-            )));
-        }
-    }
-
-    if let Err(err) = fs::rename(&staging_path, dst) {
-        let _ = fs::remove_file(&staging_path);
-        return Err(err.into());
-    }
-
+    let _ = fs::set_permissions(staging.path(), src_meta.permissions());
+    staging.publish_with_policy(dst, control, policy)?;
     Ok(copied)
 }
 

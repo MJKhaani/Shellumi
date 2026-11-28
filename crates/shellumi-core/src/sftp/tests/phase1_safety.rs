@@ -175,18 +175,18 @@ fn staged_local_copy_and_no_clobber_work() {
     let dst = dir.path().join("dst.txt");
     fs::write(&src, b"payload-123").unwrap();
 
-    let ctrl = TransferControl::default();
-    let copied = staged_local_copy_file(&src, &dst, false, &ctrl, None).unwrap();
+    let copied =
+        staged_local_copy_file(&src, &dst, false, &TransferControl::default(), None).unwrap();
     assert_eq!(copied, 11);
     assert_eq!(fs::read(&dst).unwrap(), b"payload-123");
 
     // No-clobber refuses overwrite when overwrite == false
     fs::write(&src, b"new-payload").unwrap();
-    assert!(staged_local_copy_file(&src, &dst, false, &ctrl, None).is_err());
+    assert!(staged_local_copy_file(&src, &dst, false, &TransferControl::default(), None).is_err());
     assert_eq!(fs::read(&dst).unwrap(), b"payload-123");
 
     // Explicit overwrite succeeds
-    staged_local_copy_file(&src, &dst, true, &ctrl, None).unwrap();
+    staged_local_copy_file(&src, &dst, true, &TransferControl::default(), None).unwrap();
     assert_eq!(fs::read(&dst).unwrap(), b"new-payload");
 }
 

@@ -195,6 +195,18 @@ impl FileAttributes {
         self
     }
 
+    pub fn is_symlink(&self) -> bool {
+        self.permissions.is_some_and(|m| (m & 0o170000) == 0o120000)
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.permissions.is_some_and(|m| (m & 0o170000) == 0o040000)
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.permissions.is_some_and(|m| (m & 0o170000) == 0o100000)
+    }
+
     pub fn encode(&self, buf: &mut Vec<u8>) {
         let mut flags: u32 = 0;
         if self.size.is_some() {

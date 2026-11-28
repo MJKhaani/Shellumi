@@ -42,10 +42,14 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --workspace
 
-      - name: Run SFTP unit and protocol tests
+      - name: Run SFTP unit, protocol, and GPUI harness tests
         run: |
-          cargo test --locked -p shellumi-core sftp::tests::phase
+          cargo test --locked -p shellumi-core sftp
           cargo test --locked -p shellumi-app sftp
+          cargo test --locked -p shellumi-app --test gpui_sftp_harness
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo test --locked -p shellumi-app --test ssh_sftp_acceptance -- --ignored --nocapture
+          fi
 
       - name: Build release binaries
         run: |
@@ -98,10 +102,14 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --workspace
 
-      - name: Run SFTP unit and protocol tests
+      - name: Run SFTP unit, protocol, and GPUI harness tests
         run: |
-          cargo test --locked -p shellumi-core sftp::tests::phase
+          cargo test --locked -p shellumi-core sftp
           cargo test --locked -p shellumi-app sftp
+          cargo test --locked -p shellumi-app --test gpui_sftp_harness
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo test --locked -p shellumi-app --test ssh_sftp_acceptance -- --ignored --nocapture
+          fi
 
       - name: Build release binaries
         run: |
@@ -141,10 +149,14 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --workspace
 
-      - name: Run SFTP unit and protocol tests
+      - name: Run SFTP unit, protocol, and GPUI harness tests
         run: |
-          cargo test --locked -p shellumi-core sftp::tests::phase
+          cargo test --locked -p shellumi-core sftp
           cargo test --locked -p shellumi-app sftp
+          cargo test --locked -p shellumi-app --test gpui_sftp_harness
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo test --locked -p shellumi-app --test ssh_sftp_acceptance -- --ignored --nocapture
+          fi
 
       - name: Build release binaries and verify PE subsystems
         shell: pwsh

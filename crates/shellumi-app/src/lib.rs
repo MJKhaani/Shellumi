@@ -32,6 +32,9 @@ mod native_clipboard;
 pub mod session;
 mod sftp_controller;
 mod sftp_editor;
+pub use sftp_editor::{
+    byte_to_utf16, range_from_utf16, range_to_utf16, utf16_to_byte, CodeEditorView,
+};
 mod sftp_transfer;
 mod sftp_ui;
 mod text_input;
@@ -238,6 +241,7 @@ struct SftpPaneView {
     entries: Vec<FileEntry>,
     selected_file: Option<String>,
     selected_files: std::collections::HashSet<String>,
+    selection_anchor: Option<String>,
     filter: String,
     filter_active: bool,
     filter_input: Option<Entity<TextInput>>,
@@ -267,6 +271,7 @@ impl Default for SftpPaneView {
             entries: Vec::new(),
             selected_file: None,
             selected_files: std::collections::HashSet::new(),
+            selection_anchor: None,
             filter: String::new(),
             filter_active: false,
             filter_input: None,

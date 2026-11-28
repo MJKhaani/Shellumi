@@ -232,3 +232,30 @@ fn sftp_controller_enforces_vault_auth_gate_and_revocation() {
     controller.revoke_unauthorized(None);
     assert!(controller.register_op(&v2).is_err());
 }
+
+#[test]
+fn operation_lease_cleans_up_on_drop_and_utf16_roundtrip_is_safe() {
+    use super::super::sftp_controller::SftpController;
+    use super::super::sftp_editor::{
+        byte_to_utf16, range_from_utf16, range_to_utf16, utf16_to_byte,
+    };
+    use shellumi_core::VaultScope;
+
+    let v1 = VaultScope::new("vault-lease", 1);
+    let controller = SftpController::new(v1.clone());
+    let op_id = {
+        let lease = controller.register_lease(&v1).unwrap();
+        assert!(controller.is_op_authorized(lease.op_id, &v1));
+        lease.op_id
+    };
+    // Dropped lease must immediately unregister from active_ops
+    assert!(!controller.is_op_authorized(op_id, &v1));
+
+    let s = "Aé中🙂سلام";
+    for (byte_idx, _) in s.char_indices() {
+        let u16_idx = byte_to_utf16(s, byte_idx);
+        assert_eq!(utf16_to_byte(s, u16_idx), byte_idx);
+    }
+    let full = range_to_utf16(s, 0..s.len());
+    assert_eq!(range_from_utf16(s, &full), 0..s.len());
+}

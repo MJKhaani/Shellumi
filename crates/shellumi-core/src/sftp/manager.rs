@@ -5,17 +5,20 @@
 use super::endpoint::{AttemptId, BatchId, EndpointKind, JobId, TransferRoute, VaultScope};
 use super::path::{CanonicalDestKey, PathSemantics, RemotePath};
 use super::planner::{
-    delete_local_recursive, delete_remote_recursive, plan_local_tree, plan_remote_tree,
-    staged_local_copy_file, validate_non_overlapping_local_copy,
+    ensure_local_dir_no_follow, ensure_remote_dir_no_follow, plan_local_tree, plan_remote_tree,
+    staged_local_copy_file_with_policy, validate_non_overlapping_local_copy,
     validate_non_overlapping_same_endpoint_remote, ConflictAction, ConflictContext,
     ConflictDecision, ConflictPolicy, DestinationReservationRegistry, PlanLimits, SymlinkPolicy,
 };
-use super::{FileKind, SftpClient, SftpConnectOptions, SftpError, TransferControl};
+use super::{
+    ConflictDetails, ConflictReason, FileKind, JobCancellation, PublicationPolicy, SftpClient,
+    SftpConnectOptions, SftpError, TransferControl,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 
 /// Full lifecycle state machine for a unified transfer job.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +140,30 @@ pub fn relay_remote_to_remote(
     control: &TransferControl,
     on_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<u64, SftpError> {
+    relay_remote_to_remote_with_policy(
+        src_client,
+        src_path,
+        dst_client,
+        dst_path,
+        control,
+        &PublicationPolicy::ReplaceConfirmed {
+            expected_len: None,
+            expected_mtime: None,
+        },
+        on_progress,
+    )
+}
+
+/// Bounded remote-to-remote streaming relay with explicit [`PublicationPolicy`].
+pub fn relay_remote_to_remote_with_policy(
+    src_client: &mut SftpClient,
+    src_path: &str,
+    dst_client: &mut SftpClient,
+    dst_path: &str,
+    control: &TransferControl,
+    policy: &PublicationPolicy,
+    on_progress: Option<&dyn Fn(u64, u64)>,
+) -> Result<u64, SftpError> {
     control.check()?;
     src_client.controlled(control, |src_client| {
         dst_client.controlled(control, |dst_client| {
@@ -146,6 +173,7 @@ pub fn relay_remote_to_remote(
                 dst_client,
                 dst_path,
                 control,
+                policy,
                 on_progress,
             )
         })
@@ -158,6 +186,7 @@ fn relay_remote_to_remote_controlled(
     dst_client: &mut SftpClient,
     dst_path: &str,
     control: &TransferControl,
+    policy: &PublicationPolicy,
     on_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<u64, SftpError> {
     use super::transfer;
@@ -282,8 +311,73 @@ fn relay_remote_to_remote_controlled(
         }
     };
 
+    if let PublicationPolicy::ReplaceConfirmed {
+        expected_len,
+        expected_mtime,
+    } = policy
+    {
+        if expected_len.is_some() || expected_mtime.is_some() {
+            match dst_client.lstat(dst_path) {
+                Ok(attrs) => {
+                    if attrs.is_symlink() || !attrs.is_file() {
+                        return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                            source_path: src_path.to_string(),
+                            destination_path: dst_path.to_string(),
+                            relative_path: dst_path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string(),
+                            item_kind: if attrs.is_symlink() {
+                                FileKind::Symlink { target: None }
+                            } else {
+                                FileKind::Directory
+                            },
+                            source_size: initial_size,
+                            destination_size: attrs.size,
+                            destination_mtime: attrs.mtime.map(u64::from),
+                            reason: ConflictReason::TypeMismatch,
+                        })));
+                    }
+                    let actual_mtime = attrs.mtime.map(u64::from);
+                    if expected_len.is_some_and(|exp| Some(exp) != attrs.size)
+                        || expected_mtime.is_some_and(|exp| Some(exp) != actual_mtime)
+                    {
+                        return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                            source_path: src_path.to_string(),
+                            destination_path: dst_path.to_string(),
+                            relative_path: dst_path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string(),
+                            item_kind: FileKind::File,
+                            source_size: initial_size,
+                            destination_size: attrs.size,
+                            destination_mtime: actual_mtime,
+                            reason: ConflictReason::TargetChanged,
+                        })));
+                    }
+                }
+                Err(SftpError::FileNotFound(_)) => {
+                    return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                        source_path: src_path.to_string(),
+                        destination_path: dst_path.to_string(),
+                        relative_path: dst_path.rsplit('/').next().unwrap_or_default().to_string(),
+                        item_kind: FileKind::File,
+                        source_size: initial_size,
+                        destination_size: None,
+                        destination_mtime: None,
+                        reason: ConflictReason::TargetDisappeared,
+                    })));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     control.begin_commit()?;
-    match dst_client.publish_upload(&staging, dst_path) {
+    match dst_client.publish_upload_with_policy(&staging, dst_path, policy) {
         Ok(()) => Ok(bytes),
         Err(SftpError::Io(e)) => Err(SftpError::OutcomeUnknown {
             path: dst_path.to_string(),
@@ -302,11 +396,39 @@ fn relay_remote_to_remote_controlled(
 
 /// Unified transfer scheduler enforcing bounded global concurrency, destination
 /// reservations, attempt isolation, pause/resume/cancel/retry, and vault scoping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ItemOutcome {
+    CommittedLocal {
+        source_path: PathBuf,
+        source_len: u64,
+        source_mtime: Option<u64>,
+    },
+    CommittedRemote {
+        source_path: String,
+        source_len: u64,
+        source_mtime: Option<u64>,
+    },
+    Skipped,
+}
+
+#[derive(Clone, Debug, Default)]
+struct JobExecutionCursor {
+    outcomes: HashMap<String, ItemOutcome>,
+    per_item_decisions: HashMap<String, ConflictPolicy>,
+    committed_bytes: u64,
+    had_skipped_or_uncommitted: bool,
+    paused: bool,
+    dir_order_local: Vec<PathBuf>,
+    dir_order_remote: Vec<String>,
+}
+
 pub struct UnifiedTransferManager {
     max_concurrent: usize,
     reservations: DestinationReservationRegistry,
     jobs: Arc<Mutex<HashMap<JobId, TransferJobSnapshot>>>,
     controls: Arc<Mutex<HashMap<AttemptId, TransferControl>>>,
+    job_cancellations: Arc<Mutex<HashMap<AttemptId, JobCancellation>>>,
+    cursors: Arc<Mutex<HashMap<JobId, JobExecutionCursor>>>,
     queue: Arc<Mutex<VecDeque<JobId>>>,
     last_progress_emit: Arc<Mutex<HashMap<AttemptId, Instant>>>,
 }
@@ -324,9 +446,20 @@ impl UnifiedTransferManager {
             reservations: DestinationReservationRegistry::new(),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             controls: Arc::new(Mutex::new(HashMap::new())),
+            job_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            cursors: Arc::new(Mutex::new(HashMap::new())),
             queue: Arc::new(Mutex::new(VecDeque::new())),
             last_progress_emit: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Return (or create) the [`JobCancellation`] handle for `attempt_id`.
+    pub fn job_cancellation_for(&self, attempt_id: AttemptId) -> JobCancellation {
+        let mut guard = self
+            .job_cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.entry(attempt_id).or_default().clone()
     }
 
     pub fn reservations(&self) -> &DestinationReservationRegistry {
@@ -408,7 +541,8 @@ impl UnifiedTransferManager {
                 continue;
             }
             let attempt_id = AttemptId::new();
-            let control = TransferControl::default();
+            let job_cancel = self.job_cancellation_for(attempt_id);
+            let control = job_cancel.new_item_control().unwrap_or_default();
             job.attempt_id = attempt_id;
             job.state = TransferJobState::Connecting;
             if let Ok(mut ctrls) = self.controls.lock() {
@@ -485,18 +619,113 @@ impl UnifiedTransferManager {
         if job.state == TransferJobState::Queued || job.state == TransferJobState::AwaitingConflict
         {
             job.state = TransferJobState::Cancelled;
+            job.conflict = None;
             return true;
         }
         let attempt_id = job.attempt_id;
-        if let Ok(ctrls) = self.controls.lock() {
-            if let Some(ctrl) = ctrls.get(&attempt_id) {
-                if ctrl.cancel() {
-                    job.state = TransferJobState::Cancelling;
-                    return true;
-                }
+        let mut accepted = false;
+        if let Ok(jcs) = self.job_cancellations.lock() {
+            if let Some(jc) = jcs.get(&attempt_id) {
+                accepted |= jc.cancel();
             }
         }
-        false
+        if let Ok(ctrls) = self.controls.lock() {
+            if let Some(ctrl) = ctrls.get(&attempt_id) {
+                accepted |= ctrl.cancel();
+            }
+        }
+        if accepted {
+            job.state = TransferJobState::Cancelling;
+        }
+        accepted
+    }
+
+    /// Request cooperative pause at the next pre-publication item boundary.
+    pub fn pause_job(&self, job_id: JobId) -> bool {
+        let Ok(mut jobs) = self.jobs.lock() else {
+            return false;
+        };
+        let Some(job) = jobs.get_mut(&job_id) else {
+            return false;
+        };
+        if job.state.is_terminal() || job.state == TransferJobState::Paused {
+            return false;
+        }
+        if let Ok(mut cursors) = self.cursors.lock() {
+            cursors.entry(job_id).or_default().paused = true;
+        }
+        if job.state == TransferJobState::Queued || job.state == TransferJobState::AwaitingConflict
+        {
+            job.state = TransferJobState::Paused;
+        } else {
+            job.state = TransferJobState::Pausing;
+        }
+        true
+    }
+
+    /// Resume a paused job under `active_vault`, preserving already-committed items.
+    pub fn resume_job(
+        &self,
+        job_id: JobId,
+        active_vault: &VaultScope,
+    ) -> Result<AttemptId, SftpError> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| SftpError::UnexpectedResponse("transfer manager lock poisoned".into()))?;
+        let job = jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| SftpError::FileNotFound(format!("transfer job {}", job_id.0)))?;
+        if job.state != TransferJobState::Paused {
+            return Err(SftpError::UnexpectedResponse("Job is not paused".into()));
+        }
+        if !job.intent.vault_scope.is_authorized_under(active_vault) {
+            return Err(SftpError::PermissionDenied(
+                "Vault scope changed before resume".into(),
+            ));
+        }
+        if let Ok(mut cursors) = self.cursors.lock() {
+            if let Some(cur) = cursors.get_mut(&job_id) {
+                cur.paused = false;
+            }
+        }
+        let new_attempt = AttemptId::new();
+        job.attempt_id = new_attempt;
+        job.state = TransferJobState::Queued;
+        job.error = None;
+        if let Ok(mut q) = self.queue.lock() {
+            q.push_back(job_id);
+        }
+        Ok(new_attempt)
+    }
+
+    pub fn is_job_paused(&self, job_id: JobId) -> bool {
+        self.cursors
+            .lock()
+            .ok()
+            .is_some_and(|c| c.get(&job_id).is_some_and(|cur| cur.paused))
+    }
+
+    /// Remove terminal jobs belonging to `active_vault` without touching active/paused/recovery jobs.
+    pub fn clear_terminal_history(&self, active_vault: &VaultScope) -> usize {
+        let mut removed = 0usize;
+        if let Ok(mut jobs) = self.jobs.lock() {
+            let to_remove: Vec<JobId> = jobs
+                .iter()
+                .filter(|(_, j)| {
+                    j.state.is_terminal() && j.intent.vault_scope.is_authorized_under(active_vault)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in to_remove {
+                jobs.remove(&id);
+                if let Ok(mut cursors) = self.cursors.lock() {
+                    cursors.remove(&id);
+                }
+                removed += 1;
+            }
+        }
+        removed
     }
 
     /// Retry a failed or cancelled job with a fresh `AttemptId` and `TransferControl`.
@@ -568,6 +797,9 @@ impl UnifiedTransferManager {
             Err(SftpError::Cancelled) => {
                 job.state = TransferJobState::Cancelled;
             }
+            Err(SftpError::Paused) => {
+                job.state = TransferJobState::Paused;
+            }
             Err(SftpError::OutcomeUnknown { path, message }) => {
                 job.state = TransferJobState::OutcomeUnknown;
                 job.error = Some(format!("Outcome unknown for {path}: {message}"));
@@ -637,13 +869,14 @@ impl UnifiedTransferManager {
         }
 
         let batch_id = job.intent.batch_id;
+        let conflict_rel_key = job
+            .conflict
+            .as_ref()
+            .and_then(|c| c.relative_path.clone())
+            .unwrap_or_default();
         let new_policy = match decision.action {
             ConflictAction::Overwrite => ConflictPolicy::Overwrite,
-            ConflictAction::Skip => {
-                job.state = TransferJobState::Skipped;
-                job.conflict = None;
-                return Ok(());
-            }
+            ConflictAction::Skip => ConflictPolicy::Skip,
             ConflictAction::KeepBoth => ConflictPolicy::KeepBoth,
             ConflictAction::Cancel => {
                 job.state = TransferJobState::Cancelled;
@@ -652,20 +885,67 @@ impl UnifiedTransferManager {
             }
         };
 
-        job.intent.conflict_policy = new_policy;
-        job.conflict = None;
-        job.state = TransferJobState::Queued;
-        if let Ok(mut q) = self.queue.lock() {
-            q.push_back(job_id);
+        if decision.apply_to_all {
+            job.intent.conflict_policy = new_policy;
+        } else if !conflict_rel_key.is_empty() {
+            if let Ok(mut cursors) = self.cursors.lock() {
+                cursors
+                    .entry(job_id)
+                    .or_default()
+                    .per_item_decisions
+                    .insert(conflict_rel_key, new_policy);
+            }
+        }
+
+        let is_root_only_skip = new_policy == ConflictPolicy::Skip
+            && !decision.apply_to_all
+            && self
+                .cursors
+                .lock()
+                .ok()
+                .and_then(|c| c.get(&job_id).map(|cur| cur.outcomes.is_empty()))
+                .unwrap_or(true)
+            && !matches!(
+                job.conflict.as_ref().map(|c| c.source_kind.is_dir()),
+                Some(true)
+            );
+
+        if is_root_only_skip
+            && job.intent.source_path.display()
+                == job
+                    .conflict
+                    .as_ref()
+                    .map(|c| c.source_display.as_str())
+                    .unwrap_or("")
+        {
+            job.state = TransferJobState::Skipped;
+            job.conflict = None;
+        } else {
+            job.conflict = None;
+            job.state = TransferJobState::Queued;
+            if let Ok(mut q) = self.queue.lock() {
+                q.push_back(job_id);
+            }
         }
 
         if decision.apply_to_all {
+            let mut requeue_ids = Vec::new();
             for other in jobs.values_mut() {
                 if other.intent.batch_id == batch_id
                     && other.intent.job_id != job_id
                     && other.intent.conflict_policy == ConflictPolicy::Ask
                 {
                     other.intent.conflict_policy = new_policy;
+                    if other.state == TransferJobState::AwaitingConflict {
+                        other.conflict = None;
+                        other.state = TransferJobState::Queued;
+                        requeue_ids.push(other.intent.job_id);
+                    }
+                }
+            }
+            if let Ok(mut q) = self.queue.lock() {
+                for id in requeue_ids {
+                    q.push_back(id);
                 }
             }
         }
@@ -718,6 +998,280 @@ impl UnifiedTransferManager {
         RemotePath::from_posix_str(&format!("{dir}/{stem}.{}", uuid::Uuid::new_v4().simple()))
     }
 
+    fn effective_policy_for_item(
+        &self,
+        job_id: JobId,
+        rel_key: &str,
+        default_policy: ConflictPolicy,
+    ) -> ConflictPolicy {
+        self.cursors
+            .lock()
+            .ok()
+            .and_then(|c| {
+                c.get(&job_id)
+                    .and_then(|cur| cur.per_item_decisions.get(rel_key).copied())
+            })
+            .unwrap_or(default_policy)
+    }
+
+    fn item_already_done(&self, job_id: JobId, rel_key: &str) -> bool {
+        self.cursors.lock().ok().is_some_and(|c| {
+            c.get(&job_id)
+                .is_some_and(|cur| cur.outcomes.contains_key(rel_key))
+        })
+    }
+
+    fn record_outcome(&self, job_id: JobId, rel_key: String, outcome: ItemOutcome, bytes: u64) {
+        if let Ok(mut cursors) = self.cursors.lock() {
+            let cur = cursors.entry(job_id).or_default();
+            if matches!(outcome, ItemOutcome::Skipped) {
+                cur.had_skipped_or_uncommitted = true;
+            }
+            cur.committed_bytes = cur.committed_bytes.saturating_add(bytes);
+            cur.outcomes.insert(rel_key, outcome);
+        }
+    }
+
+    fn decide_local_target(
+        &self,
+        job_id: JobId,
+        rel_key: &str,
+        default_policy: ConflictPolicy,
+        src_display: &str,
+        src_len: u64,
+        target: &std::path::Path,
+    ) -> Result<Option<(std::path::PathBuf, PublicationPolicy)>, SftpError> {
+        let policy = self.effective_policy_for_item(job_id, rel_key, default_policy);
+        match std::fs::symlink_metadata(target) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Some((target.to_path_buf(), PublicationPolicy::NoReplace)))
+            }
+            Err(err) => Err(err.into()),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || meta.file_type().is_dir() {
+                    return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                        source_path: src_display.to_string(),
+                        destination_path: target.display().to_string(),
+                        relative_path: rel_key.to_string(),
+                        item_kind: if meta.file_type().is_symlink() {
+                            FileKind::Symlink { target: None }
+                        } else {
+                            FileKind::Directory
+                        },
+                        source_size: Some(src_len),
+                        destination_size: Some(meta.len()),
+                        destination_mtime: meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs()),
+                        reason: ConflictReason::TypeMismatch,
+                    })));
+                }
+                match policy {
+                    ConflictPolicy::Skip => Ok(None),
+                    ConflictPolicy::Cancel => Err(SftpError::Cancelled),
+                    ConflictPolicy::KeepBoth => Ok(Some((
+                        Self::keep_both_local_path(target),
+                        PublicationPolicy::NoReplace,
+                    ))),
+                    ConflictPolicy::Ask => {
+                        Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                            source_path: src_display.to_string(),
+                            destination_path: target.display().to_string(),
+                            relative_path: rel_key.to_string(),
+                            item_kind: FileKind::File,
+                            source_size: Some(src_len),
+                            destination_size: Some(meta.len()),
+                            destination_mtime: meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs()),
+                            reason: ConflictReason::TargetExists,
+                        })))
+                    }
+                    ConflictPolicy::Overwrite => Ok(Some((
+                        target.to_path_buf(),
+                        PublicationPolicy::ReplaceConfirmed {
+                            expected_len: Some(meta.len()),
+                            expected_mtime: meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs()),
+                        },
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn decide_remote_target(
+        &self,
+        intent: &TransferIntent,
+        rel_key: &str,
+        src_display: &str,
+        src_len: u64,
+        client: &mut SftpClient,
+        target: &RemotePath,
+    ) -> Result<Option<(RemotePath, PublicationPolicy)>, SftpError> {
+        let policy = self.effective_policy_for_item(intent.job_id, rel_key, intent.conflict_policy);
+        match client.lstat(target.display()) {
+            Err(SftpError::FileNotFound(_)) => {
+                Ok(Some((target.clone(), PublicationPolicy::NoReplace)))
+            }
+            Err(err) => Err(err),
+            Ok(attrs) => {
+                if attrs.is_symlink() || attrs.is_dir() {
+                    return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                        source_path: src_display.to_string(),
+                        destination_path: target.display().to_string(),
+                        relative_path: rel_key.to_string(),
+                        item_kind: if attrs.is_symlink() {
+                            FileKind::Symlink { target: None }
+                        } else {
+                            FileKind::Directory
+                        },
+                        source_size: Some(src_len),
+                        destination_size: attrs.size,
+                        destination_mtime: attrs.mtime.map(u64::from),
+                        reason: ConflictReason::TypeMismatch,
+                    })));
+                }
+                match policy {
+                    ConflictPolicy::Skip => Ok(None),
+                    ConflictPolicy::Cancel => Err(SftpError::Cancelled),
+                    ConflictPolicy::KeepBoth => Ok(Some((
+                        Self::keep_both_remote_path(client, target),
+                        PublicationPolicy::NoReplace,
+                    ))),
+                    ConflictPolicy::Ask => {
+                        Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                            source_path: src_display.to_string(),
+                            destination_path: target.display().to_string(),
+                            relative_path: rel_key.to_string(),
+                            item_kind: FileKind::File,
+                            source_size: Some(src_len),
+                            destination_size: attrs.size,
+                            destination_mtime: attrs.mtime.map(u64::from),
+                            reason: ConflictReason::TargetExists,
+                        })))
+                    }
+                    ConflictPolicy::Overwrite => {
+                        if !client.capabilities().posix_rename {
+                            return Err(SftpError::ConflictRequired(Box::new(ConflictDetails {
+                                source_path: src_display.to_string(),
+                                destination_path: target.display().to_string(),
+                                relative_path: rel_key.to_string(),
+                                item_kind: FileKind::File,
+                                source_size: Some(src_len),
+                                destination_size: attrs.size,
+                                destination_mtime: attrs.mtime.map(u64::from),
+                                reason: ConflictReason::UnsupportedReplace,
+                            })));
+                        }
+                        Ok(Some((
+                            target.clone(),
+                            PublicationPolicy::ReplaceConfirmed {
+                                expected_len: attrs.size,
+                                expected_mtime: attrs.mtime.map(u64::from),
+                            },
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    fn delete_committed_local_sources(
+        &self,
+        job_id: JobId,
+        control: &JobCancellation,
+    ) -> Result<(), SftpError> {
+        let cursor = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&job_id).cloned())
+            .unwrap_or_default();
+        for outcome in cursor.outcomes.values() {
+            control.check()?;
+            if let ItemOutcome::CommittedLocal {
+                source_path,
+                source_len,
+                source_mtime,
+            } = outcome
+            {
+                let meta = std::fs::symlink_metadata(source_path)?;
+                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                    continue;
+                }
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                if meta.len() != *source_len || mtime != *source_mtime {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Source '{}' changed after copy; retained",
+                        source_path.display()
+                    )));
+                }
+                std::fs::remove_file(source_path)?;
+            }
+        }
+        if !cursor.had_skipped_or_uncommitted {
+            for dir in cursor.dir_order_local.iter().rev() {
+                control.check()?;
+                // Only remove if genuinely empty (unexpected new files cause remove_dir to fail safely).
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_committed_remote_sources(
+        &self,
+        job_id: JobId,
+        client: &mut SftpClient,
+        control: &JobCancellation,
+    ) -> Result<(), SftpError> {
+        let cursor = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&job_id).cloned())
+            .unwrap_or_default();
+        for outcome in cursor.outcomes.values() {
+            control.check()?;
+            if let ItemOutcome::CommittedRemote {
+                source_path,
+                source_len,
+                source_mtime,
+            } = outcome
+            {
+                let attrs = client.lstat(source_path)?;
+                if attrs.is_symlink() || !attrs.is_file() {
+                    continue;
+                }
+                if attrs.size != Some(*source_len) || attrs.mtime.map(u64::from) != *source_mtime {
+                    return Err(SftpError::UnexpectedResponse(format!(
+                        "Remote source '{source_path}' changed after copy; retained"
+                    )));
+                }
+                client.remove_file(source_path)?;
+            }
+        }
+        if !cursor.had_skipped_or_uncommitted {
+            for dir in cursor.dir_order_remote.iter().rev() {
+                control.check()?;
+                let _ = client.rmdir(dir);
+            }
+        }
+        Ok(())
+    }
+
     /// Execute a `LocalToLocal` job (single file or recursive directory tree) with
     /// destination reservation, conflict policy, empty directory preservation, and safe move.
     pub fn execute_local_to_local(
@@ -737,6 +1291,10 @@ impl UnifiedTransferManager {
             .reservations
             .reserve(intent.canonical_destination_key(), intent.job_id)?;
 
+        let job_cancel = self.job_cancellation_for(attempt_id);
+        if control.is_cancelled() {
+            job_cancel.cancel();
+        }
         let plan = plan_local_tree(
             src,
             PathSemantics::local_native(),
@@ -746,38 +1304,70 @@ impl UnifiedTransferManager {
             None,
         )?;
         let total_bytes = plan.total_bytes;
-        let mut copied_total = 0u64;
+        let mut copied_total = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&intent.job_id).map(|cur| cur.committed_bytes))
+            .unwrap_or(0);
         let started = Instant::now();
 
         for item in &plan.items {
-            control.check()?;
-            let mut target = dst.clone();
-            for comp in &item.relative_components {
-                target = target.join(comp);
+            if self.is_job_paused(intent.job_id) {
+                return Err(SftpError::Paused);
             }
+            job_cancel.check()?;
+            let rel_key = item.relative_components.join("/");
+            if self.item_already_done(intent.job_id, &rel_key) {
+                continue;
+            }
+            let item_ctrl = job_cancel.new_item_control()?;
             match item.kind {
                 FileKind::Directory => {
-                    std::fs::create_dir_all(&target)?;
+                    ensure_local_dir_no_follow(dst, &item.relative_components)?;
+                    if let Ok(mut cursors) = self.cursors.lock() {
+                        cursors
+                            .entry(intent.job_id)
+                            .or_default()
+                            .dir_order_local
+                            .push(item.source_path.clone());
+                    }
                 }
                 FileKind::File => {
-                    let exists = std::fs::symlink_metadata(&target).is_ok();
-                    if exists {
-                        match intent.conflict_policy {
-                            ConflictPolicy::Skip => continue,
-                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
-                            ConflictPolicy::KeepBoth => {
-                                target = Self::keep_both_local_path(&target);
-                            }
-                            ConflictPolicy::Ask => {
-                                return Err(SftpError::UnexpectedResponse(format!(
-                                    "Destination '{}' already exists (conflict decision required)",
-                                    target.display()
-                                )));
-                            }
-                            ConflictPolicy::Overwrite => {}
-                        }
-                    }
-                    let overwrite = matches!(intent.conflict_policy, ConflictPolicy::Overwrite);
+                    let target = if item.relative_components.is_empty() {
+                        let parent = dst.parent().ok_or_else(|| {
+                            SftpError::UnexpectedResponse("Destination has no parent".into())
+                        })?;
+                        ensure_local_dir_no_follow(parent, &[])?;
+                        dst.clone()
+                    } else {
+                        let parent_rel =
+                            &item.relative_components[..item.relative_components.len() - 1];
+                        let parent_dir = ensure_local_dir_no_follow(dst, parent_rel)?;
+                        let leaf = &item.relative_components[item.relative_components.len() - 1];
+                        parent_dir.join(leaf)
+                    };
+                    let src_display = item.source_path.display().to_string();
+                    let Some((effective_target, pub_policy)) = self.decide_local_target(
+                        intent.job_id,
+                        &rel_key,
+                        intent.conflict_policy,
+                        &src_display,
+                        item.size,
+                        &target,
+                    )?
+                    else {
+                        self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                        continue;
+                    };
+
+                    let src_meta = std::fs::symlink_metadata(&item.source_path)?;
+                    let src_mtime = src_meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+
                     let base_offset = copied_total;
                     let mut cb = |bytes: u64, _item_total: u64| {
                         self.update_progress(
@@ -788,21 +1378,33 @@ impl UnifiedTransferManager {
                             started.elapsed(),
                         );
                     };
-                    let n = staged_local_copy_file(
+                    let n = staged_local_copy_file_with_policy(
                         &item.source_path,
-                        &target,
-                        overwrite,
-                        control,
+                        &effective_target,
+                        &pub_policy,
+                        &item_ctrl,
                         Some(&mut cb),
                     )?;
                     copied_total = copied_total.saturating_add(n);
+                    self.record_outcome(
+                        intent.job_id,
+                        rel_key,
+                        ItemOutcome::CommittedLocal {
+                            source_path: item.source_path.clone(),
+                            source_len: src_meta.len(),
+                            source_mtime: src_mtime,
+                        },
+                        n,
+                    );
                 }
-                _ => {}
+                _ => {
+                    self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                }
             }
         }
 
         if intent.delete_source_after_commit {
-            delete_local_recursive(src, control)?;
+            self.delete_committed_local_sources(intent.job_id, &job_cancel)?;
         }
         Ok(copied_total)
     }
@@ -826,6 +1428,10 @@ impl UnifiedTransferManager {
             .reservations
             .reserve(intent.canonical_destination_key(), intent.job_id)?;
 
+        let job_cancel = self.job_cancellation_for(attempt_id);
+        if control.is_cancelled() {
+            job_cancel.cancel();
+        }
         let plan = plan_local_tree(
             src,
             dst.semantics(),
@@ -835,59 +1441,87 @@ impl UnifiedTransferManager {
             None,
         )?;
         let total_bytes = plan.total_bytes;
-        let mut uploaded_total = 0u64;
+        let mut uploaded_total = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&intent.job_id).map(|cur| cur.committed_bytes))
+            .unwrap_or(0);
         let started = Instant::now();
 
         for item in &plan.items {
-            control.check()?;
-            let mut target = dst.clone();
-            for comp in &item.relative_components {
-                target = target
-                    .join_child_str(comp)
-                    .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+            if self.is_job_paused(intent.job_id) {
+                return Err(SftpError::Paused);
             }
+            job_cancel.check()?;
+            let rel_comps = &item.relative_components;
+            let rel_key = rel_comps.join("/");
+            if self.item_already_done(intent.job_id, &rel_key) {
+                continue;
+            }
+            let item_ctrl = job_cancel.new_item_control()?;
             match item.kind {
-                FileKind::Directory => match client.lstat(target.display()) {
-                    Ok(_) => {}
-                    Err(SftpError::FileNotFound(_)) => client.mkdir(target.display())?,
-                    Err(err) => return Err(err),
-                },
-                FileKind::File => {
-                    let exists = match client.lstat(target.display()) {
-                        Ok(_) => true,
-                        Err(SftpError::FileNotFound(_)) => false,
-                        Err(err) => return Err(err),
-                    };
-                    if exists {
-                        match intent.conflict_policy {
-                            ConflictPolicy::Skip => continue,
-                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
-                            ConflictPolicy::KeepBoth => {
-                                target = Self::keep_both_remote_path(client, &target);
-                            }
-                            ConflictPolicy::Ask => {
-                                return Err(SftpError::UnexpectedResponse(format!(
-                                    "Remote destination '{}' already exists (conflict decision required)",
-                                    target.display()
-                                )));
-                            }
-                            ConflictPolicy::Overwrite => {
-                                if !client.capabilities().posix_rename {
-                                    return Err(SftpError::UnexpectedResponse(format!(
-                                        "Server does not support atomic overwrite (posix-rename@openssh.com) for '{}'; choose Keep Both or Skip.",
-                                        target.display()
-                                    )));
-                                }
-                            }
-                        }
+                FileKind::Directory => {
+                    ensure_remote_dir_no_follow(client, dst.display(), rel_comps, &item_ctrl)?;
+                    if let Ok(mut cursors) = self.cursors.lock() {
+                        cursors
+                            .entry(intent.job_id)
+                            .or_default()
+                            .dir_order_local
+                            .push(item.source_path.clone());
                     }
+                }
+                FileKind::File => {
+                    let target = if rel_comps.is_empty() {
+                        let parent_str = dst
+                            .display()
+                            .rsplit_once('/')
+                            .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                            .unwrap_or("/");
+                        ensure_remote_dir_no_follow(client, parent_str, &[], &item_ctrl)?;
+                        dst.clone()
+                    } else {
+                        let parent_rel = &rel_comps[..rel_comps.len() - 1];
+                        let parent_remote = ensure_remote_dir_no_follow(
+                            client,
+                            dst.display(),
+                            parent_rel,
+                            &item_ctrl,
+                        )?;
+                        let leaf = &rel_comps[rel_comps.len() - 1];
+                        RemotePath::from_posix_str(&parent_remote)
+                            .join_child_str(leaf)
+                            .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?
+                    };
+                    let src_display = item.source_path.display().to_string();
+                    let Some((effective_target, pub_policy)) = self.decide_remote_target(
+                        intent,
+                        &rel_key,
+                        &src_display,
+                        item.size,
+                        client,
+                        &target,
+                    )?
+                    else {
+                        self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                        continue;
+                    };
+
+                    let src_meta = std::fs::symlink_metadata(&item.source_path)?;
+                    let src_mtime = src_meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+
                     let base_offset = uploaded_total;
                     let mgr = self;
                     let job_id = intent.job_id;
-                    let n = client.upload_file_with_control(
+                    let n = client.upload_file_with_policy(
                         &item.source_path,
-                        target.display(),
-                        control,
+                        effective_target.display(),
+                        &item_ctrl,
+                        &pub_policy,
                         Some(|bytes: u64, _item_total: u64| {
                             mgr.update_progress(
                                 job_id,
@@ -899,13 +1533,25 @@ impl UnifiedTransferManager {
                         }),
                     )?;
                     uploaded_total = uploaded_total.saturating_add(n);
+                    self.record_outcome(
+                        intent.job_id,
+                        rel_key,
+                        ItemOutcome::CommittedLocal {
+                            source_path: item.source_path.clone(),
+                            source_len: src_meta.len(),
+                            source_mtime: src_mtime,
+                        },
+                        n,
+                    );
                 }
-                _ => {}
+                _ => {
+                    self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                }
             }
         }
 
         if intent.delete_source_after_commit {
-            delete_local_recursive(src, control)?;
+            self.delete_committed_local_sources(intent.job_id, &job_cancel)?;
         }
         Ok(uploaded_total)
     }
@@ -929,6 +1575,10 @@ impl UnifiedTransferManager {
             .reservations
             .reserve(intent.canonical_destination_key(), intent.job_id)?;
 
+        let job_cancel = self.job_cancellation_for(attempt_id);
+        if control.is_cancelled() {
+            job_cancel.cancel();
+        }
         let plan = plan_remote_tree(
             client,
             src,
@@ -938,44 +1588,75 @@ impl UnifiedTransferManager {
             control,
         )?;
         let total_bytes = plan.total_bytes;
-        let mut downloaded_total = 0u64;
+        let mut downloaded_total = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&intent.job_id).map(|cur| cur.committed_bytes))
+            .unwrap_or(0);
         let started = Instant::now();
 
         for item in &plan.items {
-            control.check()?;
-            let mut target = dst.clone();
-            for comp in &item.relative_components {
-                target = target.join(comp);
+            if self.is_job_paused(intent.job_id) {
+                return Err(SftpError::Paused);
             }
+            job_cancel.check()?;
+            let rel_key = item.relative_components.join("/");
+            if self.item_already_done(intent.job_id, &rel_key) {
+                continue;
+            }
+            let item_ctrl = job_cancel.new_item_control()?;
             match item.kind {
                 FileKind::Directory => {
-                    std::fs::create_dir_all(&target)?;
+                    ensure_local_dir_no_follow(dst, &item.relative_components)?;
+                    if let Ok(mut cursors) = self.cursors.lock() {
+                        cursors
+                            .entry(intent.job_id)
+                            .or_default()
+                            .dir_order_remote
+                            .push(item.source_path.display().to_string());
+                    }
                 }
                 FileKind::File => {
-                    let exists = std::fs::symlink_metadata(&target).is_ok();
-                    if exists {
-                        match intent.conflict_policy {
-                            ConflictPolicy::Skip => continue,
-                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
-                            ConflictPolicy::KeepBoth => {
-                                target = Self::keep_both_local_path(&target);
-                            }
-                            ConflictPolicy::Ask => {
-                                return Err(SftpError::UnexpectedResponse(format!(
-                                    "Destination '{}' already exists (conflict decision required)",
-                                    target.display()
-                                )));
-                            }
-                            ConflictPolicy::Overwrite => {}
-                        }
-                    }
+                    let target = if item.relative_components.is_empty() {
+                        let parent = dst.parent().ok_or_else(|| {
+                            SftpError::UnexpectedResponse("Destination has no parent".into())
+                        })?;
+                        ensure_local_dir_no_follow(parent, &[])?;
+                        dst.clone()
+                    } else {
+                        let parent_rel =
+                            &item.relative_components[..item.relative_components.len() - 1];
+                        let parent_dir = ensure_local_dir_no_follow(dst, parent_rel)?;
+                        let leaf = &item.relative_components[item.relative_components.len() - 1];
+                        parent_dir.join(leaf)
+                    };
+                    let src_display = item.source_path.display().to_string();
+                    let Some((effective_target, pub_policy)) = self.decide_local_target(
+                        intent.job_id,
+                        &rel_key,
+                        intent.conflict_policy,
+                        &src_display,
+                        item.size,
+                        &target,
+                    )?
+                    else {
+                        self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                        continue;
+                    };
+
+                    let src_attrs = client.lstat(&src_display)?;
+                    let src_len = src_attrs.size.unwrap_or(item.size);
+                    let src_mtime = src_attrs.mtime.map(u64::from);
+
                     let base_offset = downloaded_total;
                     let mgr = self;
                     let job_id = intent.job_id;
-                    let n = client.download_file_with_control(
-                        item.source_path.display(),
-                        &target,
-                        control,
+                    let n = client.download_file_with_policy(
+                        &src_display,
+                        &effective_target,
+                        &item_ctrl,
+                        &pub_policy,
                         Some(|bytes: u64, _item_total: u64| {
                             mgr.update_progress(
                                 job_id,
@@ -987,13 +1668,25 @@ impl UnifiedTransferManager {
                         }),
                     )?;
                     downloaded_total = downloaded_total.saturating_add(n);
+                    self.record_outcome(
+                        intent.job_id,
+                        rel_key,
+                        ItemOutcome::CommittedRemote {
+                            source_path: src_display,
+                            source_len: src_len,
+                            source_mtime: src_mtime,
+                        },
+                        n,
+                    );
                 }
-                _ => {}
+                _ => {
+                    self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                }
             }
         }
 
         if intent.delete_source_after_commit {
-            delete_remote_recursive(client, src, control)?;
+            self.delete_committed_remote_sources(intent.job_id, client, &job_cancel)?;
         }
         Ok(downloaded_total)
     }
@@ -1018,6 +1711,10 @@ impl UnifiedTransferManager {
             .reservations
             .reserve(intent.canonical_destination_key(), intent.job_id)?;
 
+        let job_cancel = self.job_cancellation_for(attempt_id);
+        if control.is_cancelled() {
+            job_cancel.cancel();
+        }
         let plan = plan_remote_tree(
             src_client,
             src,
@@ -1027,52 +1724,76 @@ impl UnifiedTransferManager {
             control,
         )?;
         let total_bytes = plan.total_bytes;
-        let mut relayed_total = 0u64;
+        let mut relayed_total = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&intent.job_id).map(|cur| cur.committed_bytes))
+            .unwrap_or(0);
         let started = Instant::now();
 
         for item in &plan.items {
-            control.check()?;
-            let mut target = dst.clone();
-            for comp in &item.relative_components {
-                target = target
-                    .join_child_str(comp)
-                    .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+            if self.is_job_paused(intent.job_id) {
+                return Err(SftpError::Paused);
             }
+            job_cancel.check()?;
+            let rel_comps = &item.relative_components;
+            let rel_key = rel_comps.join("/");
+            if self.item_already_done(intent.job_id, &rel_key) {
+                continue;
+            }
+            let item_ctrl = job_cancel.new_item_control()?;
             match item.kind {
-                FileKind::Directory => match dst_client.lstat(target.display()) {
-                    Ok(_) => {}
-                    Err(SftpError::FileNotFound(_)) => dst_client.mkdir(target.display())?,
-                    Err(err) => return Err(err),
-                },
-                FileKind::File => {
-                    let exists = match dst_client.lstat(target.display()) {
-                        Ok(_) => true,
-                        Err(SftpError::FileNotFound(_)) => false,
-                        Err(err) => return Err(err),
-                    };
-                    if exists {
-                        match intent.conflict_policy {
-                            ConflictPolicy::Skip => continue,
-                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
-                            ConflictPolicy::KeepBoth => {
-                                target = Self::keep_both_remote_path(dst_client, &target);
-                            }
-                            ConflictPolicy::Ask => {
-                                return Err(SftpError::UnexpectedResponse(format!(
-                                    "Remote destination '{}' already exists (conflict decision required)",
-                                    target.display()
-                                )));
-                            }
-                            ConflictPolicy::Overwrite => {
-                                if !dst_client.capabilities().posix_rename {
-                                    return Err(SftpError::UnexpectedResponse(format!(
-                                        "Destination server does not support atomic overwrite for '{}'",
-                                        target.display()
-                                    )));
-                                }
-                            }
-                        }
+                FileKind::Directory => {
+                    ensure_remote_dir_no_follow(dst_client, dst.display(), rel_comps, &item_ctrl)?;
+                    if let Ok(mut cursors) = self.cursors.lock() {
+                        cursors
+                            .entry(intent.job_id)
+                            .or_default()
+                            .dir_order_remote
+                            .push(item.source_path.display().to_string());
                     }
+                }
+                FileKind::File => {
+                    let target = if rel_comps.is_empty() {
+                        let parent_str = dst
+                            .display()
+                            .rsplit_once('/')
+                            .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                            .unwrap_or("/");
+                        ensure_remote_dir_no_follow(dst_client, parent_str, &[], &item_ctrl)?;
+                        dst.clone()
+                    } else {
+                        let parent_rel = &rel_comps[..rel_comps.len() - 1];
+                        let parent_remote = ensure_remote_dir_no_follow(
+                            dst_client,
+                            dst.display(),
+                            parent_rel,
+                            &item_ctrl,
+                        )?;
+                        let leaf = &rel_comps[rel_comps.len() - 1];
+                        RemotePath::from_posix_str(&parent_remote)
+                            .join_child_str(leaf)
+                            .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?
+                    };
+                    let src_display = item.source_path.display().to_string();
+                    let Some((effective_target, pub_policy)) = self.decide_remote_target(
+                        intent,
+                        &rel_key,
+                        &src_display,
+                        item.size,
+                        dst_client,
+                        &target,
+                    )?
+                    else {
+                        self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                        continue;
+                    };
+
+                    let src_attrs = src_client.lstat(&src_display)?;
+                    let src_len = src_attrs.size.unwrap_or(item.size);
+                    let src_mtime = src_attrs.mtime.map(u64::from);
+
                     let base_offset = relayed_total;
                     let mgr = self;
                     let job_id = intent.job_id;
@@ -1085,22 +1806,35 @@ impl UnifiedTransferManager {
                             started.elapsed(),
                         );
                     };
-                    let n = relay_remote_to_remote(
+                    let n = relay_remote_to_remote_with_policy(
                         src_client,
-                        item.source_path.display(),
+                        &src_display,
                         dst_client,
-                        target.display(),
-                        control,
+                        effective_target.display(),
+                        &item_ctrl,
+                        &pub_policy,
                         Some(&cb),
                     )?;
                     relayed_total = relayed_total.saturating_add(n);
+                    self.record_outcome(
+                        intent.job_id,
+                        rel_key,
+                        ItemOutcome::CommittedRemote {
+                            source_path: src_display,
+                            source_len: src_len,
+                            source_mtime: src_mtime,
+                        },
+                        n,
+                    );
                 }
-                _ => {}
+                _ => {
+                    self.record_outcome(intent.job_id, rel_key, ItemOutcome::Skipped, 0);
+                }
             }
         }
 
         if intent.delete_source_after_commit {
-            delete_remote_recursive(src_client, src, control)?;
+            self.delete_committed_remote_sources(intent.job_id, src_client, &job_cancel)?;
         }
         Ok(relayed_total)
     }
@@ -1116,13 +1850,21 @@ impl UnifiedTransferManager {
             }
             let ok = active_vault.is_some_and(|v| job.intent.vault_scope.is_authorized_under(v));
             if !ok {
+                if let Ok(jcs) = self.job_cancellations.lock() {
+                    if let Some(jc) = jcs.get(&job.attempt_id) {
+                        jc.cancel();
+                    }
+                }
                 if let Ok(ctrls) = self.controls.lock() {
                     if let Some(ctrl) = ctrls.get(&job.attempt_id) {
                         ctrl.cancel();
                     }
                 }
-                if job.state == TransferJobState::Queued {
+                if job.state == TransferJobState::Queued
+                    || job.state == TransferJobState::AwaitingConflict
+                {
                     job.state = TransferJobState::Cancelled;
+                    job.conflict = None;
                 } else {
                     job.state = TransferJobState::Cancelling;
                 }
