@@ -7,6 +7,7 @@ pub use shellumi_core::{
     WizardPage,
 };
 pub use shellumi_storage::LegacyDiscardEngine;
+pub use ui::icon::ShellumiAssetSource;
 pub use ui::setup_wizard_window::SetupWizardView;
 
 pub(crate) struct CreatedInvite {
@@ -4347,6 +4348,13 @@ pub fn run_app() {
         }
         eprintln!("Warning: Failed to initialize application logging: {e}");
     }
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_sha = option_env!("SHELLUMI_GIT_SHA").unwrap_or("unknown"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "Shellumi desktop application started"
+    );
 
     if askpass_mode {
         tracing::debug!("Running OpenSSH credential helper");

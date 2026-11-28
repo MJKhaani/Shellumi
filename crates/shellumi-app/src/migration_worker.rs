@@ -17,7 +17,6 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
-#[allow(dead_code)]
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Deserialize)]
@@ -222,7 +221,6 @@ fn run_worker_sync(base_dir: &std::path::Path, req: &WorkerRequest) -> i32 {
 }
 
 /// Supervises the out-of-process migration worker from the GPUI controller.
-#[allow(dead_code)]
 pub(crate) fn run_supervised_migration_worker(
     base_dir: &std::path::Path,
     req: &WorkerRequest,
@@ -268,23 +266,67 @@ pub(crate) fn run_supervised_migration_worker(
             .map_err(|e| format!("Failed to write request to migration worker: {e}"))?;
     }
 
+    // Drain stderr concurrently with bounded capacity to prevent pipe deadlock.
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            let mut line = String::new();
+            while buf.len() < 16 * 1024 {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let remaining = (16 * 1024usize).saturating_sub(buf.len());
+                        if line.len() <= remaining {
+                            buf.push_str(&line);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            buf
+        })
+    });
+
     let mut completed: Option<(MigrationReport, bool)> = None;
     let mut failure_msg: Option<String> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let mut timed_out = false;
 
     if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if let Ok(ev) = serde_json::from_str::<WorkerEvent>(&line) {
-                match ev {
-                    WorkerEvent::Progress(p) => on_progress(p),
-                    WorkerEvent::Completed {
-                        report,
-                        recovery_code_matches,
-                    } => {
-                        completed = Some((report, recovery_code_matches));
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            if std::time::Instant::now() >= deadline {
+                timed_out = true;
+                let _ = child.kill();
+                break;
+            }
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if line.len() > 64 * 1024 {
+                        failure_msg =
+                            Some("Migration worker emitted oversized IPC message.".into());
+                        let _ = child.kill();
+                        break;
                     }
-                    WorkerEvent::Failed(msg) => {
-                        failure_msg = Some(msg);
+                    if let Ok(ev) = serde_json::from_str::<WorkerEvent>(&line) {
+                        match ev {
+                            WorkerEvent::Progress(p) => on_progress(p),
+                            WorkerEvent::Completed {
+                                report,
+                                recovery_code_matches,
+                            } => {
+                                completed = Some((report, recovery_code_matches));
+                            }
+                            WorkerEvent::Failed(msg) => {
+                                failure_msg = Some(msg);
+                            }
+                        }
                     }
                 }
             }
@@ -294,7 +336,16 @@ pub(crate) fn run_supervised_migration_worker(
     let status = child
         .wait()
         .map_err(|e| format!("Failed waiting on migration worker: {e}"))?;
+    let _stderr_out = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
 
+    if timed_out {
+        return Err(
+            "Migration worker timed out and was terminated; your original database and migration journal were preserved."
+                .to_string(),
+        );
+    }
     if let Some(msg) = failure_msg {
         return Err(msg);
     }

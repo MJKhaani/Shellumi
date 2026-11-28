@@ -1,6 +1,18 @@
 fn main() {
     println!("cargo:rerun-if-changed=../../resources/shellumi.ico");
     println!("cargo:rerun-if-changed=../../resources/icon_pack/manifest.json");
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+    {
+        if output.status.success() {
+            let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !sha.is_empty() {
+                println!("cargo:rustc-env=SHELLUMI_GIT_SHA={sha}");
+            }
+        }
+    }
     #[cfg(windows)]
     {
         use std::path::Path;

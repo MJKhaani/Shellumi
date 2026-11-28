@@ -1369,6 +1369,14 @@ impl HostStore {
         Self::open_with_key(path, None).await
     }
 
+    /// Checkpoints any pending WAL frames into the main database file before publication.
+    pub async fn checkpoint_wal(&self) -> Result<(), StorageError> {
+        self.connection
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await?;
+        Ok(())
+    }
+
     /// Opens an existing local database without creating a missing file.
     pub async fn open_existing_with_key(
         path: &str,

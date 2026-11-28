@@ -1,8 +1,8 @@
 //! Dedicated native GPUI onboarding window (`SetupWizardView`).
 //!
-//! Replaces the full-window 1440x900 modal overlay with a focused, responsive
-//! 920x640 (min 760x540) onboarding window using platform-safe chrome insets,
-//! shared design-system controls, and route-specific pages driven by `OnboardingController`.
+//! Focused, responsive 920x640 (min 760x540) onboarding window using platform-safe
+//! chrome insets, typed `IconName` assets, definite column widths, shared design-system
+//! controls, and route-specific pages driven by `OnboardingController`.
 
 use crate::actions::setup_wizard_controller::{inspect_onboarding, wizard_window_bounds};
 use crate::text_input::TextInput;
@@ -11,11 +11,11 @@ use crate::ui::components::{
     error_notice, inline_notice, toggle_switch, AppButton, ButtonSize, ButtonVariant,
     PasswordField, TextField,
 };
+use crate::ui::icon::{Icon, IconName};
 use crate::ui::window_chrome::{shellumi_titlebar, ChromeMetrics};
 use gpui::{
-    div, img, prelude::*, px, rgb, rgba, size, AnyElement, App, ClipboardItem, Context, Div,
-    Entity, FontWeight, Render, SharedString, Stateful, Styled, Window, WindowBounds,
-    WindowOptions,
+    div, prelude::*, px, rgb, rgba, size, AnyElement, App, ClipboardItem, Context, Div, Entity,
+    FontWeight, Render, SharedString, Stateful, Styled, Window, WindowBounds, WindowOptions,
 };
 use shellumi_core::onboarding::{
     InstallationInventory, LegacySourceStatus, OnboardingController, OnboardingRoute,
@@ -24,7 +24,7 @@ use shellumi_core::onboarding::{
 use shellumi_core::setup::{SetupVerificationReport, SetupWizardMode};
 use shellumi_core::sync::resolve_google_oauth_config;
 use shellumi_core::{CloudVaultSummary, VaultKey};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -47,6 +47,7 @@ pub struct SetupWizardView {
     pub(crate) legacy_password_input: Entity<TextInput>,
     pub(crate) remember_in_keychain: bool,
     pub(crate) default_recovery_code: Option<String>,
+    pub(crate) migration_progress_label: String,
 
     // Existing vault unlock
     pub(crate) existing_unlock_input: Entity<TextInput>,
@@ -56,15 +57,31 @@ pub struct SetupWizardView {
     pub(crate) legacy_choice_migrate: bool,
     pub(crate) discard_token_entity: Entity<TextInput>,
     pub(crate) discard_backup_path: Option<PathBuf>,
+    pub(crate) discard_expected_fingerprints: Option<BTreeMap<String, String>>,
 
     // Google Drive OAuth & restore
     pub(crate) google_client_id_input: Entity<TextInput>,
     pub(crate) google_client_secret_input: Entity<TextInput>,
     pub(crate) show_advanced_oauth: bool,
     pub(crate) google_auth_url: Option<String>,
+    pub(crate) browser_launch_warning: Option<String>,
+    pub(crate) google_discovery_error: Option<String>,
     pub(crate) oauth_cancel_flag: Option<Arc<AtomicBool>>,
     pub(crate) cloud_vaults: Vec<CloudVaultSummary>,
+    pub(crate) selected_cloud_vault_id: Option<String>,
+    pub(crate) cloud_vault_password_input: Entity<TextInput>,
     pub(crate) sync_default_opt_in: bool,
+
+    // Additional vaults & server enrollment
+    pub(crate) additional_tab_server: bool,
+    pub(crate) sec_vault_name_input: Entity<TextInput>,
+    pub(crate) sec_vault_password_input: Entity<TextInput>,
+    pub(crate) sec_vault_password_confirm_input: Entity<TextInput>,
+    pub(crate) sec_vault_keychain: bool,
+    pub(crate) server_url_input: Entity<TextInput>,
+    pub(crate) server_user_input: Entity<TextInput>,
+    pub(crate) server_pass_input: Entity<TextInput>,
+    pub(crate) server_device_name_input: Entity<TextInput>,
 
     // Verification report
     pub(crate) verification_report: Option<SetupVerificationReport>,
@@ -80,29 +97,42 @@ impl SetupWizardView {
         let (inventory, resolution) = inspect_onboarding(&base_dir, explicit_reentry);
         let controller = OnboardingController::from_resolution(&resolution);
 
-        let default_password_input = cx.new(|cx| {
-            TextInput::new(cx, "", "Minimum 8 chars (upper, lower, digit, symbol)").masked()
-        });
+        let default_password_input =
+            cx.new(|cx| TextInput::new(cx, "", "Enter a strong password").masked());
         let default_password_confirm_input =
             cx.new(|cx| TextInput::new(cx, "", "Re-enter password").masked());
-        let legacy_password_input = cx.new(|cx| {
-            TextInput::new(
-                cx,
-                "",
-                "Existing legacy password (leave blank if unencrypted)",
-            )
-            .masked()
-        });
+        let legacy_password_input =
+            cx.new(|cx| TextInput::new(cx, "", "Existing legacy password").masked());
         let existing_unlock_input =
             cx.new(|cx| TextInput::new(cx, "", "Enter vault password").masked());
         let discard_token_entity = cx.new(|cx| TextInput::new(cx, "", "Type DELETE to confirm"));
 
-        let google_client_id_input =
-            cx.new(|cx| TextInput::new(cx, "", "Google OAuth Client ID (optional override)"));
-        let google_client_secret_input = cx
-            .new(|cx| TextInput::new(cx, "", "Google OAuth Client Secret (if required)").masked());
+        let google_client_id_input = cx.new(|cx| TextInput::new(cx, "", "Google OAuth Client ID"));
+        let google_client_secret_input =
+            cx.new(|cx| TextInput::new(cx, "", "Google OAuth Client Secret (optional)").masked());
+        let cloud_vault_password_input =
+            cx.new(|cx| TextInput::new(cx, "", "Password for selected cloud vault").masked());
 
-        // Observe discard token text input so the destructive button updates reactively.
+        let sec_vault_name_input = cx.new(|cx| TextInput::new(cx, "", "Vault name (e.g. Work)"));
+        let sec_vault_password_input =
+            cx.new(|cx| TextInput::new(cx, "", "Secondary vault password").masked());
+        let sec_vault_password_confirm_input =
+            cx.new(|cx| TextInput::new(cx, "", "Confirm secondary password").masked());
+        let server_url_input = cx.new(|cx| {
+            TextInput::new(
+                cx,
+                "https://ssh.example.com:8443",
+                "https://ssh.example.com:8443",
+            )
+        });
+        let server_user_input = cx.new(|cx| TextInput::new(cx, "", "Username or email"));
+        let server_pass_input = cx.new(|cx| TextInput::new(cx, "", "Account password").masked());
+        let default_device = std::env::var("USER")
+            .map(|u| format!("{u}-desktop"))
+            .unwrap_or_else(|_| "Desktop-Client".to_string());
+        let server_device_name_input =
+            cx.new(|cx| TextInput::new(cx, &default_device, "Friendly device name"));
+
         cx.observe(&discard_token_entity, |this, entity, cx| {
             this.controller.discard_token_input = entity.read(cx).value().to_string();
             cx.notify();
@@ -122,18 +152,33 @@ impl SetupWizardView {
             legacy_password_input,
             remember_in_keychain: false,
             default_recovery_code: None,
+            migration_progress_label: "Preparing migration…".to_string(),
             existing_unlock_input,
             unlock_with_recovery_code: false,
             legacy_choice_migrate: true,
             discard_token_entity,
             discard_backup_path: None,
+            discard_expected_fingerprints: None,
             google_client_id_input,
             google_client_secret_input,
             show_advanced_oauth: false,
             google_auth_url: None,
+            browser_launch_warning: None,
+            google_discovery_error: None,
             oauth_cancel_flag: None,
             cloud_vaults: Vec::new(),
+            selected_cloud_vault_id: None,
+            cloud_vault_password_input,
             sync_default_opt_in: false,
+            additional_tab_server: false,
+            sec_vault_name_input,
+            sec_vault_password_input,
+            sec_vault_password_confirm_input,
+            sec_vault_keychain: false,
+            server_url_input,
+            server_user_input,
+            server_pass_input,
+            server_device_name_input,
             verification_report: None,
         }
     }
@@ -173,12 +218,14 @@ impl SetupWizardView {
                 (WizardPage::VaultPassword, "Secure Vault"),
                 (WizardPage::RecoveryCode, "Recovery Code"),
                 (WizardPage::GoogleDrive, "Google Drive"),
+                (WizardPage::AdditionalVaults, "More Vaults"),
                 (WizardPage::ReviewAndFinish, "Finish"),
             ],
             OnboardingRoute::InterruptedMigration => vec![
                 (WizardPage::InterruptedMigration, "Resume Migration"),
                 (WizardPage::RecoveryCode, "Recovery Code"),
                 (WizardPage::GoogleDrive, "Google Drive"),
+                (WizardPage::AdditionalVaults, "More Vaults"),
                 (WizardPage::ReviewAndFinish, "Finish"),
             ],
             OnboardingRoute::InterruptedDiscard => vec![
@@ -195,15 +242,29 @@ impl SetupWizardView {
             | OnboardingRoute::ExplicitReentry => vec![
                 (WizardPage::LocalUnlock, "Unlock Vault"),
                 (WizardPage::GoogleDrive, "Google Drive"),
+                (WizardPage::AdditionalVaults, "More Vaults"),
                 (WizardPage::ReviewAndFinish, "Finish"),
             ],
-            _ => vec![
-                (WizardPage::FreshWelcome, "Welcome"),
-                (WizardPage::VaultPassword, "Secure Vault"),
-                (WizardPage::RecoveryCode, "Recovery Code"),
-                (WizardPage::GoogleDrive, "Google Drive"),
-                (WizardPage::ReviewAndFinish, "Finish"),
-            ],
+            _ => {
+                if self.controller.mode == SetupWizardMode::RestoreSetup {
+                    vec![
+                        (WizardPage::FreshWelcome, "Welcome"),
+                        (WizardPage::GoogleDrive, "Google Drive"),
+                        (WizardPage::CloudRestore, "Restore Backup"),
+                        (WizardPage::AdditionalVaults, "More Vaults"),
+                        (WizardPage::ReviewAndFinish, "Finish"),
+                    ]
+                } else {
+                    vec![
+                        (WizardPage::FreshWelcome, "Welcome"),
+                        (WizardPage::VaultPassword, "Secure Vault"),
+                        (WizardPage::RecoveryCode, "Recovery Code"),
+                        (WizardPage::GoogleDrive, "Google Drive"),
+                        (WizardPage::AdditionalVaults, "More Vaults"),
+                        (WizardPage::ReviewAndFinish, "Finish"),
+                    ]
+                }
+            }
         }
     }
 
@@ -213,7 +274,7 @@ impl SetupWizardView {
             .position(|(p, _)| *p == self.controller.current_page)
             .unwrap_or(0);
 
-        let mut list = div().flex().flex_col().gap_2();
+        let mut list = div().w_full().flex().flex_col().gap_2();
         for (idx, (_, label)) in steps.iter().enumerate() {
             let is_current = idx == current_idx;
             let is_done = idx < current_idx;
@@ -234,6 +295,7 @@ impl SetupWizardView {
 
             list = list.child(
                 div()
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -244,6 +306,8 @@ impl SetupWizardView {
                     .child(div().text_xs().text_color(color).child(marker))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_xs()
                             .font_weight(if is_current {
                                 FontWeight::SEMIBOLD
@@ -270,6 +334,7 @@ impl SetupWizardView {
             .justify_between()
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_5()
@@ -278,11 +343,7 @@ impl SetupWizardView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                img("icon_pack/icons/48/regular/shellumi_logo.png")
-                                    .w(px(28.0))
-                                    .h(px(28.0)),
-                            )
+                            .child(Icon::new(IconName::ShellumiLogo).size(28.0))
                             .child(
                                 div()
                                     .text_sm()
@@ -309,6 +370,8 @@ impl SetupWizardView {
             } => Some(
                 div()
                     .id("wizard-op-running")
+                    .w_full()
+                    .min_w_0()
                     .p_3()
                     .rounded_md()
                     .bg(rgba(0x0a84ff14))
@@ -320,6 +383,8 @@ impl SetupWizardView {
                     .gap_3()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_xs()
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
                             .child(phase.to_string()),
@@ -339,13 +404,19 @@ impl SetupWizardView {
                     })
                     .into_any_element(),
             ),
-            OperationState::Succeeded { summary, .. } => {
-                Some(inline_notice(None, summary.clone(), false).into_any_element())
-            }
+            OperationState::Succeeded { summary, .. } => Some(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(inline_notice(None, summary.clone(), false))
+                    .into_any_element(),
+            ),
             OperationState::Failed { error, .. } => {
                 let diag = self.build_sanitized_diagnostics();
                 Some(
                     div()
+                        .w_full()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -371,12 +442,15 @@ impl SetupWizardView {
                 )
             }
             OperationState::Cancelled { .. } => Some(
-                inline_notice(
-                    None,
-                    "Operation cancelled. No changes were committed.",
-                    false,
-                )
-                .into_any_element(),
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(inline_notice(
+                        None,
+                        "Operation cancelled. No changes were committed.",
+                        false,
+                    ))
+                    .into_any_element(),
             ),
         }
     }
@@ -391,22 +465,26 @@ impl SetupWizardView {
             WizardPage::InconsistentInstallation => self.render_inconsistent(cx),
             WizardPage::VaultPassword => self.render_vault_password(cx),
             WizardPage::RecoveryCode => self.render_recovery_code(cx),
+            WizardPage::MigrationReview => self.render_legacy_decision(cx),
             WizardPage::MigrationProgress => self.render_migration_progress(),
             WizardPage::LocalUnlock => self.render_local_unlock(cx),
             WizardPage::GoogleDrive => self.render_google_drive(cx),
             WizardPage::CloudRestore => self.render_cloud_restore(cx),
+            WizardPage::AdditionalVaults => self.render_additional_vaults(cx),
             WizardPage::ReviewAndFinish => self.render_review_and_finish(cx),
-            _ => self.render_fresh_welcome(cx),
         }
     }
 
     fn render_fresh_welcome(&self, cx: &mut Context<Self>) -> Div {
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
             .child(
                 div()
+                    .w_full()
                     .text_2xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
@@ -414,6 +492,7 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("Your SSH hosts, credentials, and infrastructure stay encrypted locally on your device. No account is required."),
@@ -440,37 +519,53 @@ impl SetupWizardView {
             ))
     }
 
-    fn render_legacy_decision(&self, cx: &mut Context<Self>) -> Div {
-        let (path_str, size_str, sidecar_count) = match &self.inventory.legacy {
+    fn legacy_summary_text(&self) -> (String, String, usize, u64) {
+        match &self.inventory.legacy {
             LegacySourceStatus::Present {
                 path,
                 size_bytes,
                 sidecars,
                 ..
-            } => (
-                path.display().to_string(),
-                format!("{} KB", (*size_bytes).max(1024) / 1024),
-                sidecars.len(),
-            ),
-            _ => ("shellumi.db".to_string(), "Unknown".to_string(), 0),
-        };
+            } => {
+                let sidecar_bytes: u64 = sidecars.iter().map(|s| s.size_bytes).sum();
+                let total_bytes = size_bytes.saturating_add(sidecar_bytes);
+                let total_kb = (total_bytes / 1024).max(1);
+                (
+                    path.display().to_string(),
+                    format!("{total_kb} KB total ({} sidecar file(s))", sidecars.len()),
+                    sidecars.len(),
+                    total_bytes,
+                )
+            }
+            _ => ("shellumi.db".to_string(), "Unknown size".to_string(), 0, 0),
+        }
+    }
+
+    fn render_legacy_decision(&self, cx: &mut Context<Self>) -> Div {
+        let (path_str, size_desc, _, _) = self.legacy_summary_text();
+        let path_for_copy = path_str.clone();
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_3()
                     .child(
-                        img("icon_pack/icons/48/regular/vault_encryption.png")
-                            .w(px(36.0))
-                            .h(px(36.0)),
+                        div()
+                            .flex_shrink_0()
+                            .child(Icon::new(IconName::VaultEncryption).size(36.0)),
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_2xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
@@ -479,22 +574,60 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("We found an existing local database from an earlier version of Shellumi. Choose how to proceed:"),
             )
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .p_3()
                     .rounded_md()
                     .bg(rgb(MacTheme::WINDOW_BG))
                     .border_1()
                     .border_color(rgb(MacTheme::SEPARATOR))
-                    .text_xs()
-                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child(format!(
-                        "Database: {path_str} ({size_str}, {sidecar_count} sidecar file(s))"
-                    )),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child(format!("shellumi.db — {size_desc}")),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                    .child(path_str),
+                            )
+                            .child(
+                                AppButton::sized(
+                                    "legacy-copy-path",
+                                    "Copy Path",
+                                    ButtonVariant::Ghost,
+                                    ButtonSize::Sm,
+                                )
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        path_for_copy.clone(),
+                                    ));
+                                })),
+                            ),
+                    ),
             )
             .child(self.choice_card(
                 "legacy-choice-migrate",
@@ -519,43 +652,18 @@ impl SetupWizardView {
     }
 
     fn render_discard_confirm(&self, cx: &mut Context<Self>) -> Div {
-        let (path_str, size_str, sidecar_desc) = match &self.inventory.legacy {
-            LegacySourceStatus::Present {
-                path,
-                size_bytes,
-                sidecars,
-                ..
-            } => {
-                let sc = if sidecars.is_empty() {
-                    "none".to_string()
-                } else {
-                    sidecars
-                        .iter()
-                        .map(|s| format!("shellumi.db{}", s.suffix))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                (
-                    path.display().to_string(),
-                    format!("{} bytes", size_bytes),
-                    sc,
-                )
-            }
-            _ => (
-                "shellumi.db".to_string(),
-                "0 bytes".to_string(),
-                "none".to_string(),
-            ),
-        };
-
+        let (path_str, size_desc, _, total_bytes) = self.legacy_summary_text();
         let can_remove = self.controller.can_confirm_legacy_discard();
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_3()
             .child(
                 div()
+                    .w_full()
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(MacTheme::DANGER))
@@ -563,18 +671,22 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .text_xs()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child("Shellumi found data from an earlier installation. Continuing will permanently remove the existing local database and its related local database files. Your saved hosts, credentials, groups, snippets and any other data stored only in this database will no longer be available. This action cannot be undone by Shellumi after deletion completes."),
             )
             .child(
                 div()
+                    .w_full()
                     .text_xs()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child("We recommend creating a backup before continuing. Backups you create, other independent vaults, and Google Drive backups are not deleted by this operation."),
+                    .child("We recommend creating a backup before continuing. Backups you create, other independent vaults, and Google Drive backups are not deleted by this operation. Local file removal does not guarantee forensic erasure from SSDs or OS snapshots."),
             )
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .p_3()
                     .rounded_md()
                     .bg(rgb(MacTheme::WINDOW_BG))
@@ -582,10 +694,13 @@ impl SetupWizardView {
                     .border_color(rgb(MacTheme::SEPARATOR))
                     .text_xs()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child(format!("Target: {path_str} ({size_str}) | Sidecars: {sidecar_desc}")),
+                    .child(format!(
+                        "Target: {path_str}\nTotal size: {total_bytes} bytes ({size_desc})"
+                    )),
             )
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -602,16 +717,18 @@ impl SetupWizardView {
                     )
                     .when(!self.controller.discard_backup_completed, |d| {
                         d.child(
-                            toggle_switch(
-                                "discard-skip-backup",
-                                self.controller.discard_proceed_without_backup,
-                                "Proceed without backup",
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.controller.discard_proceed_without_backup =
-                                    !this.controller.discard_proceed_without_backup;
-                                cx.notify();
-                            })),
+                            div().flex_1().min_w_0().child(
+                                toggle_switch(
+                                    "discard-skip-backup",
+                                    self.controller.discard_proceed_without_backup,
+                                    "Proceed without backup",
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.controller.discard_proceed_without_backup =
+                                        !this.controller.discard_proceed_without_backup;
+                                    cx.notify();
+                                })),
+                            ),
                         )
                     }),
             )
@@ -623,15 +740,18 @@ impl SetupWizardView {
                 ))
             })
             .child(
-                toggle_switch(
-                    "discard-ack-checkbox",
-                    self.controller.discard_acknowledged,
-                    "I understand that my existing local database will be permanently removed.",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.controller.discard_acknowledged = !this.controller.discard_acknowledged;
-                    cx.notify();
-                })),
+                div().w_full().min_w_0().child(
+                    toggle_switch(
+                        "discard-ack-checkbox",
+                        self.controller.discard_acknowledged,
+                        "I understand that my existing local database will be permanently removed.",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.controller.discard_acknowledged =
+                            !this.controller.discard_acknowledged;
+                        cx.notify();
+                    })),
+                ),
             )
             .child(TextField::new(
                 "Type DELETE to confirm permanent removal",
@@ -639,6 +759,7 @@ impl SetupWizardView {
             ))
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .items_center()
                     .justify_end()
@@ -671,6 +792,8 @@ impl SetupWizardView {
     fn render_interrupted_migration(&self, cx: &mut Context<Self>) -> Div {
         let details = self.resolution.diagnostics.join(" • ");
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -689,6 +812,7 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .p_3()
                     .rounded_md()
                     .bg(rgb(MacTheme::WINDOW_BG))
@@ -730,6 +854,8 @@ impl SetupWizardView {
     fn render_interrupted_discard(&self, cx: &mut Context<Self>) -> Div {
         let details = self.resolution.diagnostics.join(" • ");
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -748,6 +874,7 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .p_3()
                     .rounded_md()
                     .bg(rgb(MacTheme::WINDOW_BG))
@@ -779,6 +906,8 @@ impl SetupWizardView {
         let diag = self.build_sanitized_diagnostics();
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -798,6 +927,7 @@ impl SetupWizardView {
             .when(!details.is_empty(), |d| {
                 d.child(
                     div()
+                        .w_full()
                         .p_3()
                         .rounded_md()
                         .bg(rgb(MacTheme::WINDOW_BG))
@@ -854,6 +984,8 @@ impl SetupWizardView {
         );
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -872,7 +1004,7 @@ impl SetupWizardView {
                 div()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child("Each vault is encrypted with its own independent key. Choose a strong password (at least 8 characters with uppercase, lowercase, number, and symbol)."),
+                    .child("Each vault is encrypted with its own independent key."),
             )
             .when(is_migration && legacy_encrypted, |d| {
                 d.child(PasswordField::new(
@@ -882,7 +1014,10 @@ impl SetupWizardView {
             })
             .child(
                 PasswordField::new("Vault password", self.default_password_input.clone())
-                    .required(true),
+                    .required(true)
+                    .helper(Some(
+                        "Minimum 8 characters with uppercase, lowercase, number, and symbol.",
+                    )),
             )
             .child(
                 PasswordField::new(
@@ -892,26 +1027,26 @@ impl SetupWizardView {
                 .required(true),
             )
             .child(
-                toggle_switch(
-                    "vault-remember-keychain",
-                    self.remember_in_keychain,
-                    "Remember unlock key in OS Keychain",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.remember_in_keychain = !this.remember_in_keychain;
-                    cx.notify();
-                })),
+                div().w_full().min_w_0().child(
+                    toggle_switch(
+                        "vault-remember-keychain",
+                        self.remember_in_keychain,
+                        "Remember unlock key in OS Keychain",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.remember_in_keychain = !this.remember_in_keychain;
+                        cx.notify();
+                    })),
+                ),
             )
     }
 
     fn render_recovery_code(&self, cx: &mut Context<Self>) -> Div {
-        let code = self
-            .default_recovery_code
-            .clone()
-            .unwrap_or_else(|| "Recovery code unavailable".to_string());
-        let code_for_copy = code.clone();
+        let maybe_code = self.default_recovery_code.clone();
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -930,6 +1065,7 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .p_4()
                     .rounded_md()
                     .bg(rgb(MacTheme::WINDOW_BG))
@@ -943,43 +1079,53 @@ impl SetupWizardView {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                            .child(code),
+                            .child(
+                                maybe_code
+                                    .clone()
+                                    .unwrap_or_else(|| "Recovery code is already sealed on this vault.".to_string()),
+                            ),
                     )
-                    .child(
-                        div().flex().gap_2().child(
-                            AppButton::sized(
-                                "recovery-copy-btn",
-                                "Copy Recovery Code",
-                                ButtonVariant::Secondary,
-                                ButtonSize::Sm,
-                            )
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    code_for_copy.clone(),
-                                ));
-                            })),
-                        ),
-                    ),
+                    .when_some(maybe_code, |d, code_for_copy| {
+                        d.child(
+                            div().flex().gap_2().child(
+                                AppButton::sized(
+                                    "recovery-copy-btn",
+                                    "Copy Recovery Code",
+                                    ButtonVariant::Secondary,
+                                    ButtonSize::Sm,
+                                )
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        code_for_copy.clone(),
+                                    ));
+                                })),
+                            ),
+                        )
+                    }),
             )
             .child(
-                toggle_switch(
-                    "recovery-confirm-toggle",
-                    self.controller.recovery_confirmed,
-                    "I have saved my recovery code in a safe place.",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.controller.recovery_confirmed = !this.controller.recovery_confirmed;
-                    let confirmed = this.controller.recovery_confirmed;
-                    let _ = this.persist_checkpoint(|s| {
-                        s.recovery_code_confirmed = confirmed;
-                    });
-                    cx.notify();
-                })),
+                div().w_full().min_w_0().child(
+                    toggle_switch(
+                        "recovery-confirm-toggle",
+                        self.controller.recovery_confirmed,
+                        "I have saved my recovery code in a safe place.",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.controller.recovery_confirmed = !this.controller.recovery_confirmed;
+                        let confirmed = this.controller.recovery_confirmed;
+                        let _ = this.persist_checkpoint(|s| {
+                            s.recovery_code_confirmed = confirmed;
+                        });
+                        cx.notify();
+                    })),
+                ),
             )
     }
 
     fn render_migration_progress(&self) -> Div {
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -994,12 +1140,19 @@ impl SetupWizardView {
                 div()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child("Shellumi is backing up your legacy database, encrypting your vaults, and verifying integrity. Your original database will remain intact."),
+                    .child("Shellumi is backing up your legacy database, encrypting your vaults in an isolated worker, and verifying integrity. Your original database remains intact."),
             )
+            .child(inline_notice(
+                None,
+                self.migration_progress_label.clone(),
+                false,
+            ))
     }
 
     fn render_local_unlock(&self, cx: &mut Context<Self>) -> Div {
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -1074,21 +1227,26 @@ impl SetupWizardView {
         let connected = self.checkpoint_google_connected();
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_3()
                     .child(
-                        img("icon_pack/icons/48/regular/google_drive.png")
-                            .w(px(36.0))
-                            .h(px(36.0)),
+                        div()
+                            .flex_shrink_0()
+                            .child(Icon::new(IconName::GoogleDrive).size(36.0)),
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_2xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(MacTheme::TEXT_PRIMARY))
@@ -1105,6 +1263,13 @@ impl SetupWizardView {
                 d.child(inline_notice(
                     None,
                     "Google Drive OAuth is not preconfigured in this self-build. You can skip Google Drive or enter a Client ID under Advanced OAuth Configuration.",
+                    true,
+                ))
+            })
+            .when_some(self.browser_launch_warning.as_ref(), |d, warn| {
+                d.child(inline_notice(
+                    None,
+                    format!("{warn}. Copy the sign-in link below to complete sign-in in your browser."),
                     true,
                 ))
             })
@@ -1170,6 +1335,19 @@ impl SetupWizardView {
                             ),
                             false,
                         ))
+                        .when(self.google_discovery_error.is_some(), |d2| {
+                            d2.child(
+                                AppButton::sized(
+                                    "google-retry-scan",
+                                    "Retry Scan",
+                                    ButtonVariant::Secondary,
+                                    ButtonSize::Sm,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.fetch_cloud_vaults(cx);
+                                })),
+                            )
+                        })
                         .child(
                             AppButton::sized(
                                 "google-disconnect-btn",
@@ -1185,19 +1363,22 @@ impl SetupWizardView {
             )
             .when(connected, |d| {
                 d.child(
-                    toggle_switch(
-                        "google-sync-opt-in",
-                        self.sync_default_opt_in,
-                        "Enable encrypted Google Drive sync for Default Vault",
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sync_default_opt_in = !this.sync_default_opt_in;
-                        cx.notify();
-                    })),
+                    div().w_full().min_w_0().child(
+                        toggle_switch(
+                            "google-sync-opt-in",
+                            self.sync_default_opt_in,
+                            "Enable encrypted Google Drive sync for Default Vault",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sync_default_opt_in = !this.sync_default_opt_in;
+                            cx.notify();
+                        })),
+                    ),
                 )
             })
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -1230,8 +1411,123 @@ impl SetupWizardView {
             )
     }
 
-    fn render_cloud_restore(&self, _cx: &mut Context<Self>) -> Div {
+    fn render_cloud_restore(&self, cx: &mut Context<Self>) -> Div {
+        let selected_id = self.selected_cloud_vault_id.clone();
+        let mut list = div().w_full().flex().flex_col().gap_2();
+        for v in &self.cloud_vaults {
+            let vid = v.id.clone();
+            let is_sel = selected_id.as_deref() == Some(vid.as_str());
+            let title = format!("{} ({})", v.name, v.id);
+            let desc = format!(
+                "{} • {} records",
+                if v.is_default {
+                    "Default Vault"
+                } else {
+                    "Secondary Vault"
+                },
+                v.record_count
+            );
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("cloud-vault-{}", v.id)))
+                    .w_full()
+                    .p_3()
+                    .rounded_md()
+                    .bg(if is_sel {
+                        rgba(0x0a84ff18)
+                    } else {
+                        rgb(MacTheme::WINDOW_BG)
+                    })
+                    .border_1()
+                    .border_color(if is_sel {
+                        rgb(MacTheme::ACCENT_BLUE)
+                    } else {
+                        rgb(MacTheme::SEPARATOR)
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected_cloud_vault_id = Some(vid.clone());
+                        cx.notify();
+                    }))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                            .child(desc),
+                    ),
+            );
+        }
+
         div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                            .child("Restore from Google Drive"),
+                    )
+                    .child(
+                        AppButton::sized(
+                            "cloud-refresh-btn",
+                            "Refresh",
+                            ButtonVariant::Secondary,
+                            ButtonSize::Sm,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.fetch_cloud_vaults(cx);
+                        })),
+                    ),
+            )
+            .when(self.cloud_vaults.is_empty(), |d| {
+                d.child(inline_notice(
+                    None,
+                    "No encrypted vault backups were found in Google Drive AppData.",
+                    false,
+                ))
+            })
+            .child(list)
+            .when_some(selected_id, |d, vid| {
+                d.child(PasswordField::new(
+                    "Vault password for restoration",
+                    self.cloud_vault_password_input.clone(),
+                ))
+                .child(
+                    AppButton::new(
+                        "cloud-restore-selected-btn",
+                        "Restore Selected Vault",
+                        ButtonVariant::Primary,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.restore_selected_cloud_vault(vid.clone(), cx);
+                    })),
+                )
+            })
+    }
+
+    fn render_additional_vaults(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -1240,17 +1536,100 @@ impl SetupWizardView {
                     .text_2xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
-                    .child("Restore from Google Drive"),
+                    .child("Additional Vaults (Optional)"),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
-                    .child(format!(
-                        "Discovered {} encrypted vault snapshot(s) in your Google Drive AppData folder.",
-                        self.cloud_vaults.len()
-                    )),
+                    .child("Create an independent local vault or connect to a Shellumi Server."),
             )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        AppButton::sized(
+                            "add-tab-local",
+                            "Create Local Vault",
+                            if !self.additional_tab_server {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            },
+                            ButtonSize::Sm,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.additional_tab_server = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        AppButton::sized(
+                            "add-tab-server",
+                            "Connect Shellumi Server",
+                            if self.additional_tab_server {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            },
+                            ButtonSize::Sm,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.additional_tab_server = true;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .when(!self.additional_tab_server, |d| {
+                d.child(TextField::new(
+                    "Vault name",
+                    self.sec_vault_name_input.clone(),
+                ))
+                .child(PasswordField::new(
+                    "Secondary vault password",
+                    self.sec_vault_password_input.clone(),
+                ))
+                .child(PasswordField::new(
+                    "Confirm secondary password",
+                    self.sec_vault_password_confirm_input.clone(),
+                ))
+                .child(
+                    AppButton::new(
+                        "sec-vault-create-btn",
+                        "Create Secondary Vault",
+                        ButtonVariant::Secondary,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_create_secondary_vault(cx);
+                    })),
+                )
+            })
+            .when(self.additional_tab_server, |d| {
+                d.child(TextField::new("Server URL", self.server_url_input.clone()))
+                    .child(TextField::new(
+                        "Username or email",
+                        self.server_user_input.clone(),
+                    ))
+                    .child(PasswordField::new(
+                        "Password",
+                        self.server_pass_input.clone(),
+                    ))
+                    .child(TextField::new(
+                        "Device name",
+                        self.server_device_name_input.clone(),
+                    ))
+                    .child(
+                        AppButton::new(
+                            "server-connect-btn",
+                            "Connect & Enroll Device",
+                            ButtonVariant::Secondary,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_connect_server(cx);
+                        })),
+                    )
+            })
     }
 
     fn render_review_and_finish(&self, _cx: &mut Context<Self>) -> Div {
@@ -1262,6 +1641,8 @@ impl SetupWizardView {
         };
 
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -1274,6 +1655,7 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .p_4()
                     .rounded_md()
                     .bg(rgb(MacTheme::WINDOW_BG))
@@ -1300,7 +1682,8 @@ impl SetupWizardView {
                             "Not confirmed"
                         }
                     ))
-                    .child(format!("Google Drive Sync: {sync_label}")),
+                    .child(format!("Google Drive Sync: {sync_label}"))
+                    .child(format!("Total Vaults: {}", self.inventory.vaults.len())),
             )
     }
 
@@ -1311,9 +1694,11 @@ impl SetupWizardView {
         desc: &'static str,
         selected: bool,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> gpui::Stateful<Div> {
+    ) -> Stateful<Div> {
         div()
             .id(id)
+            .w_full()
+            .min_w_0()
             .p_4()
             .rounded_lg()
             .bg(if selected {
@@ -1335,6 +1720,7 @@ impl SetupWizardView {
             .gap_1()
             .child(
                 div()
+                    .w_full()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(MacTheme::TEXT_PRIMARY))
@@ -1342,6 +1728,7 @@ impl SetupWizardView {
             )
             .child(
                 div()
+                    .w_full()
                     .text_xs()
                     .text_color(rgb(MacTheme::TEXT_SECONDARY))
                     .child(desc),
@@ -1385,7 +1772,7 @@ impl SetupWizardView {
                     })),
                 ));
             }
-            WizardPage::LegacyDecision => {
+            WizardPage::LegacyDecision | WizardPage::MigrationReview => {
                 right = right.child(btn_or_disabled(
                     "wizard-next-btn",
                     "Continue",
@@ -1395,6 +1782,7 @@ impl SetupWizardView {
                         if this.legacy_choice_migrate {
                             this.controller.navigate_to(WizardPage::VaultPassword);
                         } else {
+                            this.prepare_discard_confirmation(cx);
                             this.controller.navigate_to(WizardPage::DiscardConfirm);
                         }
                         cx.notify();
@@ -1448,19 +1836,24 @@ impl SetupWizardView {
                 ));
             }
             WizardPage::GoogleDrive => {
+                let is_restore = self.controller.mode == SetupWizardMode::RestoreSetup
+                    && !self.inventory.has_valid_default_vault();
                 right = right
                     .child(btn_or_disabled(
                         "wizard-skip-drive",
                         "Skip",
                         ButtonVariant::Secondary,
-                        !is_busy,
+                        !is_busy && !is_restore,
                         Box::new(cx.listener(|this, _, _, cx| {
                             this.controller.google_drive_skipped = true;
-                            let _ = this.persist_checkpoint(|s| {
+                            if let Err(e) = this.persist_checkpoint(|s| {
                                 s.google_drive_skipped = true;
                                 s.google_drive_sync_enabled = false;
-                            });
-                            this.controller.navigate_to(WizardPage::ReviewAndFinish);
+                            }) {
+                                this.set_local_validation_error(&e, cx);
+                                return;
+                            }
+                            this.controller.navigate_to(WizardPage::AdditionalVaults);
                             cx.notify();
                         })),
                     ))
@@ -1470,27 +1863,62 @@ impl SetupWizardView {
                         ButtonVariant::Primary,
                         !is_busy,
                         Box::new(cx.listener(|this, _, _, cx| {
-                            this.controller.navigate_to(WizardPage::ReviewAndFinish);
+                            if this.controller.mode == SetupWizardMode::RestoreSetup
+                                && !this.inventory.has_valid_default_vault()
+                            {
+                                this.controller.navigate_to(WizardPage::CloudRestore);
+                            } else {
+                                this.controller.navigate_to(WizardPage::AdditionalVaults);
+                            }
                             cx.notify();
                         })),
                     ));
+            }
+            WizardPage::CloudRestore => {
+                right = right.child(btn_or_disabled(
+                    "wizard-cloud-next",
+                    "Continue",
+                    ButtonVariant::Primary,
+                    !is_busy && self.inventory.has_valid_default_vault(),
+                    Box::new(cx.listener(|this, _, _, cx| {
+                        this.controller.navigate_to(WizardPage::AdditionalVaults);
+                        cx.notify();
+                    })),
+                ));
+            }
+            WizardPage::AdditionalVaults => {
+                right = right.child(btn_or_disabled(
+                    "wizard-add-next",
+                    "Continue",
+                    ButtonVariant::Primary,
+                    !is_busy,
+                    Box::new(cx.listener(|this, _, _, cx| {
+                        this.controller.navigate_to(WizardPage::ReviewAndFinish);
+                        cx.notify();
+                    })),
+                ));
             }
             WizardPage::ReviewAndFinish => {
                 right = right.child(btn_or_disabled(
                     "wizard-launch-btn",
                     "Launch Shellumi",
                     ButtonVariant::Primary,
-                    !is_busy,
+                    !is_busy && self.inventory.has_valid_default_vault(),
                     Box::new(cx.listener(|this, _, _, cx| {
                         this.finish_and_launch(cx);
                     })),
                 ));
             }
-            _ => {}
+            WizardPage::DiscardConfirm
+            | WizardPage::InterruptedMigration
+            | WizardPage::InterruptedDiscard
+            | WizardPage::InconsistentInstallation
+            | WizardPage::MigrationProgress => {}
         }
 
         div()
             .id("wizard-footer")
+            .w_full()
             .flex_shrink_0()
             .px_6()
             .py_4()
@@ -1519,10 +1947,17 @@ impl Render for SetupWizardView {
         let chrome = ChromeMetrics::from_window(window);
         let viewport_w = f32::from(window.bounds().size.width);
         let show_sidebar = viewport_w >= 820.0;
+        let main_w = if show_sidebar {
+            (viewport_w - 220.0).max(320.0)
+        } else {
+            viewport_w.max(320.0)
+        };
+        let col_w = (main_w - 48.0).clamp(280.0, 520.0);
         let steps = self.route_steps();
 
         let top_chrome = div()
             .id("wizard-titlebar")
+            .w_full()
             .h(px(38.0))
             .flex_shrink_0()
             .pl(px(chrome.left_reserved_width))
@@ -1557,9 +1992,7 @@ impl Render for SetupWizardView {
             });
 
         let mut content_col = div()
-            .w_full()
-            .max_w(px(520.0))
-            .mx_auto()
+            .w(px(col_w))
             .py_6()
             .px_6()
             .flex()
@@ -1574,7 +2007,7 @@ impl Render for SetupWizardView {
         let main_pane = div()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .flex()
             .flex_col()
             .bg(rgb(MacTheme::SURFACE))
@@ -1583,7 +2016,10 @@ impl Render for SetupWizardView {
                     .id("wizard-scroll-body")
                     .flex_1()
                     .min_h_0()
+                    .w_full()
                     .overflow_y_scroll()
+                    .flex()
+                    .justify_center()
                     .child(content_col),
             )
             .child(self.render_footer(cx));
@@ -1600,6 +2036,8 @@ impl Render for SetupWizardView {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
+                    .w_full()
                     .flex()
                     .flex_row()
                     .when(show_sidebar, |d| d.child(self.render_sidebar(&steps)))
