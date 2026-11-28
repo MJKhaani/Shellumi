@@ -7,8 +7,42 @@ use super::protocol::ServerCapabilities;
 use super::{SftpClient, SftpConnectOptions, SftpError, StatusCode, TransferControl};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+/// Thread-safe, race-free authorization gate shared across UI, controller, and workers.
+/// Revocation/switch updates this gate atomically so in-flight or racing operations
+/// cannot enqueue, commit, or apply stale callbacks across vault boundaries.
+#[derive(Clone, Default)]
+pub struct VaultAuthGate {
+    active: Arc<RwLock<Option<VaultScope>>>,
+}
+
+impl VaultAuthGate {
+    pub fn new(initial: Option<VaultScope>) -> Self {
+        Self {
+            active: Arc::new(RwLock::new(initial)),
+        }
+    }
+
+    pub fn set_active(&self, scope: Option<VaultScope>) {
+        if let Ok(mut guard) = self.active.write() {
+            *guard = scope;
+        }
+    }
+
+    pub fn current(&self) -> Option<VaultScope> {
+        self.active.read().ok().and_then(|g| g.clone())
+    }
+
+    pub fn is_authorized(&self, scope: &VaultScope) -> bool {
+        self.active
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|active| scope.is_authorized_under(active)))
+            .unwrap_or(false)
+    }
+}
 
 /// Classified SSH/SFTP error categories for UI diagnostics and retry policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

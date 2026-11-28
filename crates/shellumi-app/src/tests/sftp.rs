@@ -208,3 +208,27 @@ fn app_sftp_unified_transfer_and_editor_engine_integration() {
     let buf = EditorBuffer::from_bytes(content.as_bytes()).unwrap();
     assert!(!buf.is_dirty());
 }
+
+#[test]
+fn sftp_controller_enforces_vault_auth_gate_and_revocation() {
+    use super::super::sftp_controller::SftpController;
+    use shellumi_core::VaultScope;
+
+    let v1 = VaultScope::new("vault-a", 1);
+    let v2 = VaultScope::new("vault-b", 1);
+    let controller = SftpController::new(v1.clone());
+
+    let (op1, ctrl1) = controller.register_op(&v1).unwrap();
+    assert!(controller.is_op_authorized(op1, &v1));
+    assert!(controller.register_op(&v2).is_err());
+
+    // Switch vault -> op1 must be cancelled and unauthorized
+    controller.revoke_unauthorized(Some(&v2));
+    assert!(ctrl1.is_cancelled());
+    assert!(!controller.is_op_authorized(op1, &v1));
+    assert!(controller.register_op(&v1).is_err());
+
+    // Lock vault -> nothing authorized
+    controller.revoke_unauthorized(None);
+    assert!(controller.register_op(&v2).is_err());
+}

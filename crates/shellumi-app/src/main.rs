@@ -30,6 +30,7 @@ mod hosts_view;
 #[allow(unexpected_cfgs)]
 mod native_clipboard;
 mod session;
+mod sftp_controller;
 mod sftp_editor;
 mod sftp_transfer;
 mod sftp_ui;
@@ -200,6 +201,12 @@ enum SftpModalAction {
         permissions: String,
         sha256: Option<String>,
     },
+    Conflict {
+        job_id: shellumi_core::JobId,
+        source_display: String,
+        destination_display: String,
+        apply_to_all: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -233,6 +240,10 @@ struct SftpPaneView {
     selected_files: std::collections::HashSet<String>,
     filter: String,
     filter_active: bool,
+    filter_input: Option<Entity<TextInput>>,
+    address_editing: bool,
+    address_input: Option<Entity<TextInput>>,
+    host_search_input: Option<Entity<TextInput>>,
     show_hidden: bool,
     sort_field: SftpSortField,
     sort_ascending: bool,
@@ -258,6 +269,10 @@ impl Default for SftpPaneView {
             selected_files: std::collections::HashSet::new(),
             filter: String::new(),
             filter_active: false,
+            filter_input: None,
+            address_editing: false,
+            address_input: None,
+            host_search_input: None,
             show_hidden: false,
             sort_field: SftpSortField::Name,
             sort_ascending: true,
@@ -879,8 +894,7 @@ struct Shellumi {
     available_vaults: Vec<actions::VaultContextSummary>,
     sftp_left_pane: SftpPaneView,
     sftp_right_pane: SftpPaneView,
-    sftp_connection_manager: std::sync::Arc<shellumi_core::SftpConnectionManager>,
-    sftp_transfer_manager: std::sync::Arc<shellumi_core::UnifiedTransferManager>,
+    sftp_controller: sftp_controller::SftpController,
     sftp_transfer_drawer_open: bool,
     sftp_split_ratio: f32,
     sftp_narrow_active_left: bool,
@@ -2240,7 +2254,7 @@ impl Shellumi {
             server_ws_status: None,
             active_ws_client: None,
             available_vaults: vec![actions::VaultContextSummary {
-                id: vault_id,
+                id: vault_id.clone(),
                 name: vault_name,
                 is_remote: false,
                 server_url: None,
@@ -2262,11 +2276,8 @@ impl Shellumi {
                 }
             },
             sftp_right_pane: SftpPaneView::default(),
-            sftp_connection_manager: std::sync::Arc::new(
-                shellumi_core::SftpConnectionManager::new(),
-            ),
-            sftp_transfer_manager: std::sync::Arc::new(shellumi_core::UnifiedTransferManager::new(
-                3,
+            sftp_controller: sftp_controller::SftpController::new(shellumi_core::VaultScope::new(
+                vault_id, 0,
             )),
             sftp_transfer_drawer_open: false,
             sftp_split_ratio: 0.5,

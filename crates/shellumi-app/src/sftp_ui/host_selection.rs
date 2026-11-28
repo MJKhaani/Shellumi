@@ -84,6 +84,10 @@ impl Shellumi {
                             &mut app.sftp_right_pane
                         };
                         pane.is_selecting_host = true;
+                        if pane.host_search_input.is_none() {
+                            pane.host_search_input =
+                                Some(cx.new(|cx| TextInput::new(cx, "", "Search SSH hosts…")));
+                        }
                         cx.notify();
                     }))
                     .child("Select host"),
@@ -214,10 +218,26 @@ impl Shellumi {
                         Icon::new(IconName::Search).size(16.0).into_any_element()
                     })
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MacTheme::TEXT_TERTIARY))
-                            .child("Search"),
+                        if let Some(inp) = self
+                            .sftp_left_pane
+                            .host_search_input
+                            .as_ref()
+                            .filter(|_| is_left)
+                            .or_else(|| {
+                                self.sftp_right_pane
+                                    .host_search_input
+                                    .as_ref()
+                                    .filter(|_| !is_left)
+                            })
+                        {
+                            div().flex_1().child(inp.clone()).into_any_element()
+                        } else {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                                .child("Search SSH hosts…")
+                                .into_any_element()
+                        },
                     ),
             )
             .child(
@@ -376,8 +396,37 @@ impl Shellumi {
                 .child("Hosts"),
         );
 
-        let hosts = match &self.hosts {
-            HostState::Loaded(h) => h.clone(),
+        let host_query = if is_left {
+            &self.sftp_left_pane.host_search_input
+        } else {
+            &self.sftp_right_pane.host_search_input
+        }
+        .as_ref()
+        .map(|inp| inp.read(cx).value().trim().to_lowercase())
+        .unwrap_or_default();
+
+        let hosts: Vec<_> = match &self.hosts {
+            HostState::Loaded(h) => h
+                .iter()
+                .filter(|host| {
+                    let is_ssh =
+                        host.protocol.is_empty() || host.protocol.eq_ignore_ascii_case("ssh");
+                    if !is_ssh {
+                        return false;
+                    }
+                    if host_query.is_empty() {
+                        return true;
+                    }
+                    host.name.to_lowercase().contains(&host_query)
+                        || host.destination.host().to_lowercase().contains(&host_query)
+                        || host
+                            .destination
+                            .username()
+                            .to_lowercase()
+                            .contains(&host_query)
+                })
+                .cloned()
+                .collect(),
             _ => Vec::new(),
         };
 

@@ -20,7 +20,7 @@ mod transport;
 mod wire;
 pub use connection::{
     classify_ssh_error, is_allowed_ssh_option, merge_connect_options, PersistentSftpSession,
-    SftpConnectionManager, SftpConnectionState, SftpErrorKind,
+    SftpConnectionManager, SftpConnectionState, SftpErrorKind, VaultAuthGate,
 };
 pub use editor::{
     detect_language, format_document, highlight_line, EditorBuffer, EditorLanguage,
@@ -47,11 +47,11 @@ pub use path::{
     ListingNameKind, PathSemantics, PathValidationError, RemotePath, ValidatedChildName,
 };
 pub use planner::{
-    delete_local_recursive, plan_local_tree, staged_local_copy_file,
-    validate_non_overlapping_local_copy, validate_non_overlapping_same_endpoint_remote,
-    ConflictAction, ConflictContext, ConflictDecision, ConflictPolicy,
-    DestinationReservationRegistry, LocalTreePlan, PlanLimits, PlannedTransferItem,
-    ReservationGuard, SymlinkPolicy,
+    delete_local_recursive, delete_remote_recursive, plan_local_tree, plan_remote_tree,
+    staged_local_copy_file, validate_non_overlapping_local_copy,
+    validate_non_overlapping_same_endpoint_remote, ConflictAction, ConflictContext,
+    ConflictDecision, ConflictPolicy, DestinationReservationRegistry, LocalTreePlan, PlanLimits,
+    PlannedRemoteItem, PlannedTransferItem, RemoteTreePlan, ReservationGuard, SymlinkPolicy,
 };
 pub use protocol::{
     ListingLimits, RemoteStatVfs, ServerCapabilities, ServerLimits, TransferTuning,

@@ -24,8 +24,9 @@ impl Shellumi {
         } else {
             120.0 + (ctx_menu.target_idx as f32 * 36.0).min(380.0)
         };
+        let viewport_w = self.measured_workspace_width.unwrap_or(1200.0);
         let placement = crate::ui::components::popover::place_context_menu(
-            raw_x, raw_y, 220.0, 260.0, 1200.0, 720.0,
+            raw_x, raw_y, 220.0, 260.0, viewport_w, 720.0,
         );
         let left_offset = px(placement.left);
         let top_offset = px(placement.top);
@@ -432,6 +433,101 @@ impl Shellumi {
                     }),
                 "Close",
                 false,
+            ),
+            SftpModalAction::Conflict {
+                job_id,
+                source_display,
+                destination_display,
+                apply_to_all,
+            } => (
+                "Destination Already Exists".to_string(),
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                    .child(format!("Source: {source_display}"))
+                    .child(format!("Destination: {destination_display}"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pt_1()
+                            .child(
+                                div()
+                                    .id("sftp-conflict-keep-both")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::ACCENT_BLUE))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener({
+                                        let job_id = *job_id;
+                                        let apply_to_all = *apply_to_all;
+                                        move |app, _, _, cx| {
+                                            app.sftp_resolve_conflict(
+                                                job_id,
+                                                shellumi_core::ConflictAction::KeepBoth,
+                                                apply_to_all,
+                                                cx,
+                                            );
+                                        }
+                                    }))
+                                    .child("Keep Both"),
+                            )
+                            .child(
+                                div()
+                                    .id("sftp-conflict-skip")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::SURFACE_HOVER))
+                                    .text_color(rgb(MacTheme::TEXT_PRIMARY))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener({
+                                        let job_id = *job_id;
+                                        let apply_to_all = *apply_to_all;
+                                        move |app, _, _, cx| {
+                                            app.sftp_resolve_conflict(
+                                                job_id,
+                                                shellumi_core::ConflictAction::Skip,
+                                                apply_to_all,
+                                                cx,
+                                            );
+                                        }
+                                    }))
+                                    .child("Skip"),
+                            )
+                            .child(
+                                div()
+                                    .id("sftp-conflict-overwrite")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(MacTheme::DANGER))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener({
+                                        let job_id = *job_id;
+                                        let apply_to_all = *apply_to_all;
+                                        move |app, _, _, cx| {
+                                            app.sftp_resolve_conflict(
+                                                job_id,
+                                                shellumi_core::ConflictAction::Overwrite,
+                                                apply_to_all,
+                                                cx,
+                                            );
+                                        }
+                                    }))
+                                    .child("Overwrite"),
+                            ),
+                    ),
+                "Cancel Transfer",
+                true,
             ),
             SftpModalAction::EditPermissions {
                 entry_name, input, ..

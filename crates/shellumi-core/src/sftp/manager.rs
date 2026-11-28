@@ -3,13 +3,14 @@
 //! bounded concurrency, destination reservations, pause/resume/cancel/retry, and vault isolation.
 
 use super::endpoint::{AttemptId, BatchId, EndpointKind, JobId, TransferRoute, VaultScope};
-use super::path::{CanonicalDestKey, RemotePath};
+use super::path::{CanonicalDestKey, PathSemantics, RemotePath};
 use super::planner::{
+    delete_local_recursive, delete_remote_recursive, plan_local_tree, plan_remote_tree,
     staged_local_copy_file, validate_non_overlapping_local_copy,
-    validate_non_overlapping_same_endpoint_remote, ConflictPolicy, DestinationReservationRegistry,
-    SymlinkPolicy,
+    validate_non_overlapping_same_endpoint_remote, ConflictAction, ConflictContext,
+    ConflictDecision, ConflictPolicy, DestinationReservationRegistry, PlanLimits, SymlinkPolicy,
 };
-use super::{SftpClient, SftpConnectOptions, SftpError, TransferControl};
+use super::{FileKind, SftpClient, SftpConnectOptions, SftpError, TransferControl};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -122,12 +123,36 @@ pub struct TransferJobSnapshot {
     pub eta_seconds: Option<u64>,
     pub error: Option<String>,
     pub cleanup_warning: Option<String>,
+    pub conflict: Option<ConflictContext>,
 }
 
 /// Bounded streaming relay between two authorized remote SFTP channels.
 /// Uses a bounded 16-chunk (512 KiB) buffer with backpressure — never spools
 /// the entire file to plaintext local disk.
 pub fn relay_remote_to_remote(
+    src_client: &mut SftpClient,
+    src_path: &str,
+    dst_client: &mut SftpClient,
+    dst_path: &str,
+    control: &TransferControl,
+    on_progress: Option<&dyn Fn(u64, u64)>,
+) -> Result<u64, SftpError> {
+    control.check()?;
+    src_client.controlled(control, |src_client| {
+        dst_client.controlled(control, |dst_client| {
+            relay_remote_to_remote_controlled(
+                src_client,
+                src_path,
+                dst_client,
+                dst_path,
+                control,
+                on_progress,
+            )
+        })
+    })
+}
+
+fn relay_remote_to_remote_controlled(
     src_client: &mut SftpClient,
     src_path: &str,
     dst_client: &mut SftpClient,
@@ -337,6 +362,7 @@ impl UnifiedTransferManager {
             eta_seconds: None,
             error: None,
             cleanup_warning: None,
+            conflict: None,
         };
 
         if let Ok(mut jobs) = self.jobs.lock() {
@@ -562,7 +588,138 @@ impl UnifiedTransferManager {
         }
     }
 
-    /// Execute a `LocalToLocal` job synchronously on a worker thread with destination reservation.
+    /// Transition a job into `AwaitingConflict` with captured immutable conflict metadata.
+    pub fn mark_awaiting_conflict(
+        &self,
+        job_id: JobId,
+        attempt_id: AttemptId,
+        conflict: ConflictContext,
+    ) {
+        if let Ok(mut ctrls) = self.controls.lock() {
+            ctrls.remove(&attempt_id);
+        }
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get_mut(&job_id) {
+                if job.attempt_id == attempt_id && !job.state.is_terminal() {
+                    job.state = TransferJobState::AwaitingConflict;
+                    job.conflict = Some(conflict);
+                }
+            }
+        }
+    }
+
+    /// Resolve a pending conflict decision for `job_id`, either cancelling/skipping
+    /// or updating the job's policy and re-queuing it for execution.
+    pub fn resolve_conflict(
+        &self,
+        job_id: JobId,
+        decision: ConflictDecision,
+        active_vault: &VaultScope,
+    ) -> Result<(), SftpError> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| SftpError::UnexpectedResponse("transfer manager lock poisoned".into()))?;
+        let job = jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| SftpError::FileNotFound(format!("transfer job {}", job_id.0)))?;
+        if job.state != TransferJobState::AwaitingConflict {
+            return Err(SftpError::UnexpectedResponse(
+                "Job is not awaiting conflict resolution".into(),
+            ));
+        }
+        if !job.intent.vault_scope.is_authorized_under(active_vault) {
+            job.state = TransferJobState::Cancelled;
+            job.conflict = None;
+            return Err(SftpError::PermissionDenied(
+                "Vault scope changed before conflict resolution".into(),
+            ));
+        }
+
+        let batch_id = job.intent.batch_id;
+        let new_policy = match decision.action {
+            ConflictAction::Overwrite => ConflictPolicy::Overwrite,
+            ConflictAction::Skip => {
+                job.state = TransferJobState::Skipped;
+                job.conflict = None;
+                return Ok(());
+            }
+            ConflictAction::KeepBoth => ConflictPolicy::KeepBoth,
+            ConflictAction::Cancel => {
+                job.state = TransferJobState::Cancelled;
+                job.conflict = None;
+                return Ok(());
+            }
+        };
+
+        job.intent.conflict_policy = new_policy;
+        job.conflict = None;
+        job.state = TransferJobState::Queued;
+        if let Ok(mut q) = self.queue.lock() {
+            q.push_back(job_id);
+        }
+
+        if decision.apply_to_all {
+            for other in jobs.values_mut() {
+                if other.intent.batch_id == batch_id
+                    && other.intent.job_id != job_id
+                    && other.intent.conflict_policy == ConflictPolicy::Ask
+                {
+                    other.intent.conflict_policy = new_policy;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate a unique sibling local path for `ConflictPolicy::KeepBoth`.
+    fn keep_both_local_path(dst: &std::path::Path) -> std::path::PathBuf {
+        let parent = dst.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let stem = dst.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+        let ext = dst.extension().and_then(|e| e.to_str());
+        for idx in 1..10_000 {
+            let candidate_name = match ext {
+                Some(e) => format!("{stem} ({idx}).{e}"),
+                None => format!("{stem} ({idx})"),
+            };
+            let candidate = parent.join(candidate_name);
+            if std::fs::symlink_metadata(&candidate).is_err() {
+                return candidate;
+            }
+        }
+        parent.join(format!("{stem}.{}", uuid::Uuid::new_v4().simple()))
+    }
+
+    /// Generate a unique sibling remote path for `ConflictPolicy::KeepBoth`.
+    fn keep_both_remote_path(client: &mut SftpClient, dst: &RemotePath) -> RemotePath {
+        let display = dst.display();
+        let (dir, base) = match display.rsplit_once('/') {
+            Some((d, b)) => (d, b),
+            None => ("", display),
+        };
+        let (stem, ext) = match base.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s, Some(e)),
+            _ => (base, None),
+        };
+        for idx in 1..10_000 {
+            let name = match ext {
+                Some(e) => format!("{stem} ({idx}).{e}"),
+                None => format!("{stem} ({idx})"),
+            };
+            let candidate = if dir.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("{dir}/{name}")
+            };
+            if matches!(client.lstat(&candidate), Err(SftpError::FileNotFound(_))) {
+                return RemotePath::from_posix_str(&candidate);
+            }
+        }
+        RemotePath::from_posix_str(&format!("{dir}/{stem}.{}", uuid::Uuid::new_v4().simple()))
+    }
+
+    /// Execute a `LocalToLocal` job (single file or recursive directory tree) with
+    /// destination reservation, conflict policy, empty directory preservation, and safe move.
     pub fn execute_local_to_local(
         &self,
         intent: &TransferIntent,
@@ -579,18 +736,373 @@ impl UnifiedTransferManager {
         let _guard = self
             .reservations
             .reserve(intent.canonical_destination_key(), intent.job_id)?;
-        let overwrite = matches!(intent.conflict_policy, ConflictPolicy::Overwrite);
+
+        let plan = plan_local_tree(
+            src,
+            PathSemantics::local_native(),
+            intent.symlink_policy,
+            PlanLimits::default(),
+            control,
+            None,
+        )?;
+        let total_bytes = plan.total_bytes;
+        let mut copied_total = 0u64;
         let started = Instant::now();
-        let mut progress_cb = |bytes: u64, total: u64| {
-            self.update_progress(
-                intent.job_id,
-                attempt_id,
-                bytes,
-                Some(total),
-                started.elapsed(),
-            );
+
+        for item in &plan.items {
+            control.check()?;
+            let mut target = dst.clone();
+            for comp in &item.relative_components {
+                target = target.join(comp);
+            }
+            match item.kind {
+                FileKind::Directory => {
+                    std::fs::create_dir_all(&target)?;
+                }
+                FileKind::File => {
+                    let exists = std::fs::symlink_metadata(&target).is_ok();
+                    if exists {
+                        match intent.conflict_policy {
+                            ConflictPolicy::Skip => continue,
+                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
+                            ConflictPolicy::KeepBoth => {
+                                target = Self::keep_both_local_path(&target);
+                            }
+                            ConflictPolicy::Ask => {
+                                return Err(SftpError::UnexpectedResponse(format!(
+                                    "Destination '{}' already exists (conflict decision required)",
+                                    target.display()
+                                )));
+                            }
+                            ConflictPolicy::Overwrite => {}
+                        }
+                    }
+                    let overwrite = matches!(intent.conflict_policy, ConflictPolicy::Overwrite);
+                    let base_offset = copied_total;
+                    let mut cb = |bytes: u64, _item_total: u64| {
+                        self.update_progress(
+                            intent.job_id,
+                            attempt_id,
+                            base_offset.saturating_add(bytes),
+                            Some(total_bytes),
+                            started.elapsed(),
+                        );
+                    };
+                    let n = staged_local_copy_file(
+                        &item.source_path,
+                        &target,
+                        overwrite,
+                        control,
+                        Some(&mut cb),
+                    )?;
+                    copied_total = copied_total.saturating_add(n);
+                }
+                _ => {}
+            }
+        }
+
+        if intent.delete_source_after_commit {
+            delete_local_recursive(src, control)?;
+        }
+        Ok(copied_total)
+    }
+
+    /// Execute a `LocalToRemote` job (single file or recursive directory tree) via `SftpClient`.
+    pub fn execute_local_to_remote(
+        &self,
+        intent: &TransferIntent,
+        attempt_id: AttemptId,
+        client: &mut SftpClient,
+        control: &TransferControl,
+    ) -> Result<u64, SftpError> {
+        let (EndpointPath::Local(src), EndpointPath::Remote(dst)) =
+            (&intent.source_path, &intent.destination_path)
+        else {
+            return Err(SftpError::UnexpectedResponse(
+                "execute_local_to_remote requires local source and remote destination".into(),
+            ));
         };
-        staged_local_copy_file(src, dst, overwrite, control, Some(&mut progress_cb))
+        let _guard = self
+            .reservations
+            .reserve(intent.canonical_destination_key(), intent.job_id)?;
+
+        let plan = plan_local_tree(
+            src,
+            dst.semantics(),
+            intent.symlink_policy,
+            PlanLimits::default(),
+            control,
+            None,
+        )?;
+        let total_bytes = plan.total_bytes;
+        let mut uploaded_total = 0u64;
+        let started = Instant::now();
+
+        for item in &plan.items {
+            control.check()?;
+            let mut target = dst.clone();
+            for comp in &item.relative_components {
+                target = target
+                    .join_child_str(comp)
+                    .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+            }
+            match item.kind {
+                FileKind::Directory => match client.lstat(target.display()) {
+                    Ok(_) => {}
+                    Err(SftpError::FileNotFound(_)) => client.mkdir(target.display())?,
+                    Err(err) => return Err(err),
+                },
+                FileKind::File => {
+                    let exists = match client.lstat(target.display()) {
+                        Ok(_) => true,
+                        Err(SftpError::FileNotFound(_)) => false,
+                        Err(err) => return Err(err),
+                    };
+                    if exists {
+                        match intent.conflict_policy {
+                            ConflictPolicy::Skip => continue,
+                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
+                            ConflictPolicy::KeepBoth => {
+                                target = Self::keep_both_remote_path(client, &target);
+                            }
+                            ConflictPolicy::Ask => {
+                                return Err(SftpError::UnexpectedResponse(format!(
+                                    "Remote destination '{}' already exists (conflict decision required)",
+                                    target.display()
+                                )));
+                            }
+                            ConflictPolicy::Overwrite => {
+                                if !client.capabilities().posix_rename {
+                                    return Err(SftpError::UnexpectedResponse(format!(
+                                        "Server does not support atomic overwrite (posix-rename@openssh.com) for '{}'; choose Keep Both or Skip.",
+                                        target.display()
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    let base_offset = uploaded_total;
+                    let mgr = self;
+                    let job_id = intent.job_id;
+                    let n = client.upload_file_with_control(
+                        &item.source_path,
+                        target.display(),
+                        control,
+                        Some(|bytes: u64, _item_total: u64| {
+                            mgr.update_progress(
+                                job_id,
+                                attempt_id,
+                                base_offset.saturating_add(bytes),
+                                Some(total_bytes),
+                                started.elapsed(),
+                            );
+                        }),
+                    )?;
+                    uploaded_total = uploaded_total.saturating_add(n);
+                }
+                _ => {}
+            }
+        }
+
+        if intent.delete_source_after_commit {
+            delete_local_recursive(src, control)?;
+        }
+        Ok(uploaded_total)
+    }
+
+    /// Execute a `RemoteToLocal` job (single file or recursive directory tree) via `SftpClient`.
+    pub fn execute_remote_to_local(
+        &self,
+        intent: &TransferIntent,
+        attempt_id: AttemptId,
+        client: &mut SftpClient,
+        control: &TransferControl,
+    ) -> Result<u64, SftpError> {
+        let (EndpointPath::Remote(src), EndpointPath::Local(dst)) =
+            (&intent.source_path, &intent.destination_path)
+        else {
+            return Err(SftpError::UnexpectedResponse(
+                "execute_remote_to_local requires remote source and local destination".into(),
+            ));
+        };
+        let _guard = self
+            .reservations
+            .reserve(intent.canonical_destination_key(), intent.job_id)?;
+
+        let plan = plan_remote_tree(
+            client,
+            src,
+            PathSemantics::local_native(),
+            intent.symlink_policy,
+            PlanLimits::default(),
+            control,
+        )?;
+        let total_bytes = plan.total_bytes;
+        let mut downloaded_total = 0u64;
+        let started = Instant::now();
+
+        for item in &plan.items {
+            control.check()?;
+            let mut target = dst.clone();
+            for comp in &item.relative_components {
+                target = target.join(comp);
+            }
+            match item.kind {
+                FileKind::Directory => {
+                    std::fs::create_dir_all(&target)?;
+                }
+                FileKind::File => {
+                    let exists = std::fs::symlink_metadata(&target).is_ok();
+                    if exists {
+                        match intent.conflict_policy {
+                            ConflictPolicy::Skip => continue,
+                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
+                            ConflictPolicy::KeepBoth => {
+                                target = Self::keep_both_local_path(&target);
+                            }
+                            ConflictPolicy::Ask => {
+                                return Err(SftpError::UnexpectedResponse(format!(
+                                    "Destination '{}' already exists (conflict decision required)",
+                                    target.display()
+                                )));
+                            }
+                            ConflictPolicy::Overwrite => {}
+                        }
+                    }
+                    let base_offset = downloaded_total;
+                    let mgr = self;
+                    let job_id = intent.job_id;
+                    let n = client.download_file_with_control(
+                        item.source_path.display(),
+                        &target,
+                        control,
+                        Some(|bytes: u64, _item_total: u64| {
+                            mgr.update_progress(
+                                job_id,
+                                attempt_id,
+                                base_offset.saturating_add(bytes),
+                                Some(total_bytes),
+                                started.elapsed(),
+                            );
+                        }),
+                    )?;
+                    downloaded_total = downloaded_total.saturating_add(n);
+                }
+                _ => {}
+            }
+        }
+
+        if intent.delete_source_after_commit {
+            delete_remote_recursive(client, src, control)?;
+        }
+        Ok(downloaded_total)
+    }
+
+    /// Execute a `RemoteToRemote` job (single file or recursive directory tree) via bounded relay.
+    pub fn execute_remote_to_remote(
+        &self,
+        intent: &TransferIntent,
+        attempt_id: AttemptId,
+        src_client: &mut SftpClient,
+        dst_client: &mut SftpClient,
+        control: &TransferControl,
+    ) -> Result<u64, SftpError> {
+        let (EndpointPath::Remote(src), EndpointPath::Remote(dst)) =
+            (&intent.source_path, &intent.destination_path)
+        else {
+            return Err(SftpError::UnexpectedResponse(
+                "execute_remote_to_remote requires remote source and remote destination".into(),
+            ));
+        };
+        let _guard = self
+            .reservations
+            .reserve(intent.canonical_destination_key(), intent.job_id)?;
+
+        let plan = plan_remote_tree(
+            src_client,
+            src,
+            dst.semantics(),
+            intent.symlink_policy,
+            PlanLimits::default(),
+            control,
+        )?;
+        let total_bytes = plan.total_bytes;
+        let mut relayed_total = 0u64;
+        let started = Instant::now();
+
+        for item in &plan.items {
+            control.check()?;
+            let mut target = dst.clone();
+            for comp in &item.relative_components {
+                target = target
+                    .join_child_str(comp)
+                    .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+            }
+            match item.kind {
+                FileKind::Directory => match dst_client.lstat(target.display()) {
+                    Ok(_) => {}
+                    Err(SftpError::FileNotFound(_)) => dst_client.mkdir(target.display())?,
+                    Err(err) => return Err(err),
+                },
+                FileKind::File => {
+                    let exists = match dst_client.lstat(target.display()) {
+                        Ok(_) => true,
+                        Err(SftpError::FileNotFound(_)) => false,
+                        Err(err) => return Err(err),
+                    };
+                    if exists {
+                        match intent.conflict_policy {
+                            ConflictPolicy::Skip => continue,
+                            ConflictPolicy::Cancel => return Err(SftpError::Cancelled),
+                            ConflictPolicy::KeepBoth => {
+                                target = Self::keep_both_remote_path(dst_client, &target);
+                            }
+                            ConflictPolicy::Ask => {
+                                return Err(SftpError::UnexpectedResponse(format!(
+                                    "Remote destination '{}' already exists (conflict decision required)",
+                                    target.display()
+                                )));
+                            }
+                            ConflictPolicy::Overwrite => {
+                                if !dst_client.capabilities().posix_rename {
+                                    return Err(SftpError::UnexpectedResponse(format!(
+                                        "Destination server does not support atomic overwrite for '{}'",
+                                        target.display()
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    let base_offset = relayed_total;
+                    let mgr = self;
+                    let job_id = intent.job_id;
+                    let cb = |bytes: u64, _item_total: u64| {
+                        mgr.update_progress(
+                            job_id,
+                            attempt_id,
+                            base_offset.saturating_add(bytes),
+                            Some(total_bytes),
+                            started.elapsed(),
+                        );
+                    };
+                    let n = relay_remote_to_remote(
+                        src_client,
+                        item.source_path.display(),
+                        dst_client,
+                        target.display(),
+                        control,
+                        Some(&cb),
+                    )?;
+                    relayed_total = relayed_total.saturating_add(n);
+                }
+                _ => {}
+            }
+        }
+
+        if intent.delete_source_after_commit {
+            delete_remote_recursive(src_client, src, control)?;
+        }
+        Ok(relayed_total)
     }
 
     /// Cancel all jobs belonging to vaults that are no longer authorized.

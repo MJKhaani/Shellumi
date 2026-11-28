@@ -309,3 +309,103 @@ fn remote_to_remote_relay_streams_between_two_servers() {
     src_thread.join().unwrap();
     dst_thread.join().unwrap();
 }
+
+#[test]
+fn recursive_local_transfer_preserves_empty_dirs_and_handles_conflict_decisions() {
+    let dir = TempDir::new().unwrap();
+    let src_tree = dir.path().join("src_tree");
+    let empty_sub = src_tree.join("empty_sub");
+    let nested = src_tree.join("nested");
+    fs::create_dir_all(&empty_sub).unwrap();
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join(".hidden"), b"secret").unwrap();
+    fs::write(nested.join("data.txt"), b"v2").unwrap();
+
+    let dst_tree = dir.path().join("dst_tree");
+    fs::create_dir_all(dst_tree.join("nested")).unwrap();
+    fs::write(dst_tree.join("nested/data.txt"), b"v1-original").unwrap();
+
+    let scope = VaultScope::new("v1", 1);
+    let mgr = UnifiedTransferManager::new(2);
+    let job_id = JobId::new();
+    let intent = TransferIntent {
+        job_id,
+        batch_id: BatchId::new(),
+        vault_scope: scope.clone(),
+        route: TransferRoute::LocalToLocal,
+        source_endpoint: EndpointKind::local(scope.clone()),
+        destination_endpoint: EndpointKind::local(scope.clone()),
+        source_path: EndpointPath::Local(src_tree),
+        destination_path: EndpointPath::Local(dst_tree.clone()),
+        source_options: None,
+        destination_options: None,
+        conflict_policy: ConflictPolicy::Ask,
+        symlink_policy: SymlinkPolicy::Skip,
+        preserve_metadata: true,
+        delete_source_after_commit: false,
+        expected_bytes: None,
+    };
+
+    mgr.enqueue(intent).unwrap();
+    let ready = mgr.dispatch_ready(&scope);
+    let (dispatched, attempt_id, ctrl) = &ready[0];
+    let res = mgr.execute_local_to_local(dispatched, *attempt_id, ctrl);
+    assert!(res.is_err());
+
+    // Original destination bytes must be untouched!
+    assert_eq!(
+        fs::read(dst_tree.join("nested/data.txt")).unwrap(),
+        b"v1-original"
+    );
+    // Empty directory & hidden file were still created/copied
+    assert!(dst_tree.join("empty_sub").is_dir());
+    assert_eq!(
+        fs::read(dst_tree.join("nested/.hidden")).unwrap(),
+        b"secret"
+    );
+
+    // Transition to AwaitingConflict, resolve with KeepBoth, and re-run
+    mgr.mark_awaiting_conflict(
+        job_id,
+        *attempt_id,
+        ConflictContext {
+            job_id,
+            route: TransferRoute::LocalToLocal,
+            source_display: "data.txt".into(),
+            destination_display: "data.txt".into(),
+            source_size: Some(2),
+            destination_size: Some(11),
+            source_modified: None,
+            destination_modified: None,
+            source_kind: FileKind::File,
+            destination_kind: FileKind::File,
+            is_type_mismatch: false,
+        },
+    );
+    mgr.resolve_conflict(
+        job_id,
+        ConflictDecision {
+            action: ConflictAction::KeepBoth,
+            apply_to_all: false,
+        },
+        &scope,
+    )
+    .unwrap();
+    let ready2 = mgr.dispatch_ready(&scope);
+    let (dispatched2, attempt_id2, ctrl2) = &ready2[0];
+    let res2 = mgr.execute_local_to_local(dispatched2, *attempt_id2, ctrl2);
+    mgr.complete_attempt(job_id, *attempt_id2, res2);
+    assert_eq!(
+        mgr.snapshot(job_id).unwrap().state,
+        TransferJobState::Completed
+    );
+    // Original preserved AND Keep Both created sibling
+    assert_eq!(
+        fs::read(dst_tree.join("nested/data.txt")).unwrap(),
+        b"v1-original"
+    );
+    assert_eq!(
+        fs::read(dst_tree.join("nested/data (1).txt")).unwrap(),
+        b"v2"
+    );
+}

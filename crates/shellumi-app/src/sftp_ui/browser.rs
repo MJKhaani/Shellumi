@@ -10,11 +10,11 @@ impl Shellumi {
             .flex_col()
             .bg(rgb(MacTheme::CONTENT_BG));
 
-        // Top bar when editor tabs or transfer drawer toggle are present
-        if !self.sftp_editors.is_empty() || self.sftp_transfer_drawer_open {
+        // Always render SFTP workspace bar so Transfer Drawer & Editor tabs remain reachable.
+        {
             let active_ed = self.active_sftp_editor_idx;
-            let jobs_count = self.sftp_transfer_manager.all_snapshots().len();
-            let mut bar = div()
+            let jobs_count = self.sftp_controller.authorized_snapshots().len();
+            let bar = div()
                 .h(px(32.0))
                 .px_3()
                 .border_b_1()
@@ -67,7 +67,7 @@ impl Shellumi {
                                     app.active_sftp_editor_idx = Some(idx);
                                     cx.notify();
                                 }))
-                                .child(ed.title())
+                                .child(ed.title(cx))
                         })),
                 )
                 .child(
@@ -86,7 +86,6 @@ impl Shellumi {
                         }))
                         .child(format!("Transfers ({jobs_count})")),
                 );
-            let _ = &mut bar;
             root = root.child(bar);
         }
 
@@ -182,9 +181,9 @@ impl Shellumi {
 
         root = root.child(main_area);
 
-        // Collapsible Transfer Drawer
+        // Collapsible Transfer Drawer (vault-scoped via SftpController)
         if self.sftp_transfer_drawer_open {
-            let snapshots = self.sftp_transfer_manager.all_snapshots();
+            let snapshots = self.sftp_controller.authorized_snapshots();
             root = root.child(
                 div()
                     .h(px(150.0))
@@ -257,12 +256,42 @@ impl Shellumi {
                                                 .cursor_pointer()
                                                 .text_color(rgb(MacTheme::DANGER))
                                                 .on_click(cx.listener(move |app, _, _, cx| {
-                                                    app.sftp_transfer_manager.cancel_job(job_id);
+                                                    app.sftp_controller
+                                                        .transfers
+                                                        .cancel_job(job_id);
                                                     cx.notify();
                                                 }))
                                                 .child("Cancel"),
                                         )
                                     })
+                                    .when(
+                                        matches!(
+                                            snap.state,
+                                            shellumi_core::TransferJobState::Failed
+                                                | shellumi_core::TransferJobState::Cancelled
+                                        ),
+                                        |row| {
+                                            row.child(
+                                                div()
+                                                    .id(("sftp-drawer-retry", i))
+                                                    .cursor_pointer()
+                                                    .text_color(rgb(MacTheme::ACCENT_BLUE))
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        let scope = app.current_vault_scope();
+                                                        if app
+                                                            .sftp_controller
+                                                            .transfers
+                                                            .retry_job(job_id, &scope)
+                                                            .is_ok()
+                                                        {
+                                                            app.sftp_pump_transfers(cx);
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                                    .child("Retry"),
+                                            )
+                                        },
+                                    )
                             })),
                     ),
             );

@@ -595,3 +595,222 @@ fn extract_permissions(meta: &fs::Metadata) -> Option<u32> {
 fn extract_permissions(_meta: &fs::Metadata) -> Option<u32> {
     None
 }
+
+/// A single item in a planned remote recursive transfer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedRemoteItem {
+    pub relative_components: Vec<String>,
+    pub source_path: RemotePath,
+    pub kind: FileKind,
+    pub size: u64,
+    pub modified: Option<u64>,
+    pub permissions: Option<u32>,
+    pub symlink_target: Option<String>,
+}
+
+/// Output of planning a remote SFTP directory or file tree using `LSTAT`.
+#[derive(Clone, Debug, Default)]
+pub struct RemoteTreePlan {
+    pub items: Vec<PlannedRemoteItem>,
+    pub skipped_symlinks: Vec<(String, String)>,
+    pub skipped_special_files: Vec<(String, String)>,
+    pub total_bytes: u64,
+    pub total_files: usize,
+    pub total_dirs: usize,
+}
+
+fn file_kind_from_mode(mode: Option<u32>) -> FileKind {
+    match mode.map(|m| m & 0o170000) {
+        Some(0o040000) => FileKind::Directory,
+        Some(0o120000) => FileKind::Symlink { target: None },
+        Some(0o100000) | None => FileKind::File,
+        _ => FileKind::Other,
+    }
+}
+
+/// Plan a remote SFTP tree iteratively using `LSTAT` (never `OPENDIR` failure as a file-type test).
+pub fn plan_remote_tree(
+    client: &mut super::SftpClient,
+    root: &RemotePath,
+    dest_semantics: PathSemantics,
+    symlink_policy: SymlinkPolicy,
+    limits: PlanLimits,
+    control: &TransferControl,
+) -> Result<RemoteTreePlan, SftpError> {
+    control.check()?;
+    let mut plan = RemoteTreePlan::default();
+    let mut visited_dirs: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(RemotePath, Vec<String>, usize)> = VecDeque::new();
+    queue.push_back((root.clone(), Vec::new(), 0));
+
+    while let Some((current_path, rel_parts, depth)) = queue.pop_front() {
+        control.check()?;
+        if depth > limits.max_depth {
+            return Err(SftpError::UnexpectedResponse(format!(
+                "Remote traversal exceeded maximum depth ({})",
+                limits.max_depth
+            )));
+        }
+        if plan.items.len() >= limits.max_entries {
+            return Err(SftpError::UnexpectedResponse(format!(
+                "Remote traversal exceeded maximum entry limit ({})",
+                limits.max_entries
+            )));
+        }
+
+        let attrs = if symlink_policy == SymlinkPolicy::Dereference {
+            client.stat(current_path.display())?
+        } else {
+            client.lstat(current_path.display())?
+        };
+        let kind = file_kind_from_mode(attrs.permissions);
+
+        match kind {
+            FileKind::Symlink { .. } => {
+                let target = client.readlink(current_path.display()).ok();
+                match symlink_policy {
+                    SymlinkPolicy::Skip => {
+                        plan.skipped_symlinks.push((
+                            current_path.display().to_string(),
+                            "symlink skipped by policy".into(),
+                        ));
+                    }
+                    SymlinkPolicy::Preserve => {
+                        plan.items.push(PlannedRemoteItem {
+                            relative_components: rel_parts,
+                            source_path: current_path,
+                            kind: FileKind::Symlink {
+                                target: target.clone(),
+                            },
+                            size: 0,
+                            modified: attrs.mtime.map(|m| m as u64),
+                            permissions: attrs.permissions,
+                            symlink_target: target,
+                        });
+                    }
+                    SymlinkPolicy::Dereference => {}
+                }
+            }
+            FileKind::Directory => {
+                if let Ok(canon) = client.realpath(current_path.display()) {
+                    if !visited_dirs.insert(canon) {
+                        plan.skipped_symlinks.push((
+                            current_path.display().to_string(),
+                            "symlink cycle detected".into(),
+                        ));
+                        continue;
+                    }
+                }
+                plan.total_dirs += 1;
+                plan.items.push(PlannedRemoteItem {
+                    relative_components: rel_parts.clone(),
+                    source_path: current_path.clone(),
+                    kind: FileKind::Directory,
+                    size: 0,
+                    modified: attrs.mtime.map(|m| m as u64),
+                    permissions: attrs.permissions,
+                    symlink_target: None,
+                });
+
+                let children = client.list_remote_directory(current_path.display())?;
+                for child in children {
+                    control.check()?;
+                    match classify_listing_name(child.name.as_bytes(), PathSemantics::Posix) {
+                        Ok(ListingNameKind::Dot | ListingNameKind::DotDot) => continue,
+                        Ok(ListingNameKind::Child(validated)) => {
+                            validate_destination_name(validated.raw_bytes(), dest_semantics)
+                                .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+                            let child_path = current_path
+                                .join_child(&validated)
+                                .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+                            let mut next_rel = rel_parts.clone();
+                            next_rel.push(validated.display().to_string());
+                            queue.push_back((child_path, next_rel, depth + 1));
+                        }
+                        Err(e) => {
+                            return Err(SftpError::UnexpectedResponse(format!(
+                                "Unsafe remote filename in {}: {e}",
+                                current_path.display()
+                            )));
+                        }
+                    }
+                }
+            }
+            FileKind::File => {
+                let size = attrs.size.unwrap_or(0);
+                plan.total_files += 1;
+                plan.total_bytes = plan.total_bytes.saturating_add(size);
+                plan.items.push(PlannedRemoteItem {
+                    relative_components: rel_parts,
+                    source_path: current_path,
+                    kind: FileKind::File,
+                    size,
+                    modified: attrs.mtime.map(|m| m as u64),
+                    permissions: attrs.permissions,
+                    symlink_target: None,
+                });
+            }
+            FileKind::Other => {
+                plan.skipped_special_files.push((
+                    current_path.display().to_string(),
+                    "special remote file skipped".into(),
+                ));
+            }
+        }
+    }
+
+    Ok(plan)
+}
+
+/// Safe iterative post-order remote deletion using `LSTAT` (never follows symlinks, protects `/`).
+pub fn delete_remote_recursive(
+    client: &mut super::SftpClient,
+    target: &RemotePath,
+    control: &TransferControl,
+) -> Result<usize, SftpError> {
+    control.check()?;
+    if target.is_root() {
+        return Err(SftpError::UnexpectedResponse(format!(
+            "Refusing to delete protected remote root '{}'",
+            target.display()
+        )));
+    }
+
+    let attrs = client.lstat(target.display())?;
+    let kind = file_kind_from_mode(attrs.permissions);
+    if !kind.is_dir() {
+        client.remove_file(target.display())?;
+        return Ok(1);
+    }
+
+    let mut stack: Vec<(RemotePath, bool)> = vec![(target.clone(), false)];
+    let mut deleted = 0usize;
+
+    while let Some((path, expanded)) = stack.pop() {
+        control.check()?;
+        if expanded {
+            client.rmdir(path.display())?;
+            deleted += 1;
+            continue;
+        }
+        let m = client.lstat(path.display())?;
+        if !file_kind_from_mode(m.permissions).is_dir() {
+            client.remove_file(path.display())?;
+            deleted += 1;
+            continue;
+        }
+        stack.push((path.clone(), true));
+        for child in client.list_remote_directory(path.display())? {
+            if let Ok(ListingNameKind::Child(validated)) =
+                classify_listing_name(child.name.as_bytes(), PathSemantics::Posix)
+            {
+                let child_path = path
+                    .join_child(&validated)
+                    .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
+                stack.push((child_path, false));
+            }
+        }
+    }
+
+    Ok(deleted)
+}

@@ -100,6 +100,13 @@ impl Shellumi {
                                     &mut app.sftp_right_pane
                                 };
                                 p.filter_active = !p.filter_active;
+                                if p.filter_active && p.filter_input.is_none() {
+                                    let initial = p.filter.clone();
+                                    p.filter_input =
+                                        Some(cx.new(|cx| {
+                                            TextInput::new(cx, &initial, "Filter files…")
+                                        }));
+                                }
                                 cx.notify();
                             }))
                             .flex()
@@ -252,6 +259,75 @@ impl Shellumi {
                 breadcrumb_row =
                     breadcrumb_row.child(div().text_color(rgb(MacTheme::TEXT_TERTIARY)).child(">"));
             }
+        }
+
+        if pane.address_editing {
+            if let Some(addr_inp) = &pane.address_input {
+                breadcrumb_row = breadcrumb_row
+                    .child(div().flex_1().child(addr_inp.clone()))
+                    .child(
+                        div()
+                            .id(if is_left {
+                                "sftp-l-addr-go"
+                            } else {
+                                "sftp-r-addr-go"
+                            })
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(MacTheme::ACCENT_BLUE))
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                let target = {
+                                    let p = if is_left {
+                                        &mut app.sftp_left_pane
+                                    } else {
+                                        &mut app.sftp_right_pane
+                                    };
+                                    p.address_editing = false;
+                                    p.address_input
+                                        .as_ref()
+                                        .map(|i| i.read(cx).value().trim().to_string())
+                                        .unwrap_or_default()
+                                };
+                                if !target.is_empty() {
+                                    app.sftp_navigate_dir(is_left, target, cx);
+                                }
+                                cx.notify();
+                            }))
+                            .child("Go"),
+                    );
+            }
+        } else {
+            breadcrumb_row = breadcrumb_row.child(
+                div()
+                    .id(if is_left {
+                        "sftp-l-addr-edit"
+                    } else {
+                        "sftp-r-addr-edit"
+                    })
+                    .ml_auto()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(rgb(MacTheme::SURFACE))
+                    .text_color(rgb(MacTheme::TEXT_TERTIARY))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let p = if is_left {
+                            &mut app.sftp_left_pane
+                        } else {
+                            &mut app.sftp_right_pane
+                        };
+                        let cur = p.current_path.clone();
+                        p.address_input =
+                            Some(cx.new(|cx| TextInput::new(cx, &cur, "Enter path…")));
+                        p.address_editing = true;
+                        cx.notify();
+                    }))
+                    .child("Edit Path"),
+            );
         }
 
         // Table Header (clickable sort columns)
@@ -539,7 +615,17 @@ impl Shellumi {
             .filter(|c| c.is_left == is_left)
             .map(|c| c.entry_name.clone());
 
+        let filter_query = pane
+            .filter_input
+            .as_ref()
+            .filter(|_| pane.filter_active)
+            .map(|inp| inp.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
+
         for (entry_idx, entry) in pane.entries.iter().enumerate() {
+            if !filter_query.is_empty() && !entry.name.to_lowercase().contains(&filter_query) {
+                continue;
+            }
             let is_dir = entry.kind == FileKind::Directory;
             let entry_name = entry.name.clone();
             let entry_path = entry.path.clone();
@@ -911,6 +997,48 @@ impl Shellumi {
             }))
             .child(header)
             .child(breadcrumb_row)
+            .when_some(
+                pane.filter_input.clone().filter(|_| pane.filter_active),
+                |this, inp| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(rgb(MacTheme::BORDER))
+                            .bg(rgb(MacTheme::SURFACE))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().child(inp))
+                            .child(
+                                div()
+                                    .id(if is_left {
+                                        "sftp-l-filter-clear"
+                                    } else {
+                                        "sftp-r-filter-clear"
+                                    })
+                                    .text_xs()
+                                    .text_color(rgb(MacTheme::TEXT_SECONDARY))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        let p = if is_left {
+                                            &mut app.sftp_left_pane
+                                        } else {
+                                            &mut app.sftp_right_pane
+                                        };
+                                        if let Some(fi) = &p.filter_input {
+                                            fi.update(cx, |i, cx| i.set_value("", cx));
+                                        }
+                                        p.filter.clear();
+                                        p.filter_active = false;
+                                        cx.notify();
+                                    }))
+                                    .child("Clear"),
+                            ),
+                    )
+                },
+            )
             .child(table_header)
             .child(table_body)
             .child(status_bar);

@@ -12,10 +12,8 @@ impl Shellumi {
         } else {
             Some(self.current_vault_scope())
         };
-        self.sftp_connection_manager
-            .enforce_vault_scope(active_scope.as_ref());
-        self.sftp_transfer_manager
-            .cancel_unauthorized_vaults(active_scope.as_ref());
+        self.sftp_controller
+            .revoke_unauthorized(active_scope.as_ref());
 
         for pane in [&mut self.sftp_left_pane, &mut self.sftp_right_pane] {
             if matches!(pane.host, Some(SftpPaneHost::Remote(_))) {
@@ -33,15 +31,22 @@ impl Shellumi {
         }
         self.sftp_context_menu = None;
         self.sftp_modal = None;
-        if locked {
-            // Protect/clear remote editor plaintext on explicit vault lock
-            self.sftp_editors.retain(|ed| ed.meta.endpoint.is_local());
-            if let Some(idx) = self.active_sftp_editor_idx {
-                if idx >= self.sftp_editors.len() {
-                    self.active_sftp_editor_idx = None;
-                }
-            }
-        }
+
+        let active_id = self
+            .active_sftp_editor_idx
+            .and_then(|idx| self.sftp_editors.get(idx))
+            .map(|ed| ed.meta.editor_id);
+        self.sftp_editors.retain(|ed| {
+            ed.meta.endpoint.is_local()
+                && active_scope
+                    .as_ref()
+                    .is_some_and(|s| ed.meta.vault_scope.is_authorized_under(s))
+        });
+        self.active_sftp_editor_idx = active_id.and_then(|id| {
+            self.sftp_editors
+                .iter()
+                .position(|e| e.meta.editor_id == id)
+        });
     }
 
     pub(crate) fn sftp_select_host(
@@ -53,13 +58,18 @@ impl Shellumi {
         let home_dir = shellumi_core::local_home_dir()
             .to_string_lossy()
             .into_owned();
+        let endpoint_id = shellumi_core::EndpointId::new();
+        let scope = self.current_vault_scope();
+        let database = self.database.clone();
+        let active_vault_id = self.active_vault_id.clone();
+        let active_vault_key = self.active_vault_key();
         let pane = if is_left {
             &mut self.sftp_left_pane
         } else {
             &mut self.sftp_right_pane
         };
         pane.host = Some(host.clone());
-        pane.endpoint_id = Some(shellumi_core::EndpointId::new());
+        pane.endpoint_id = Some(endpoint_id);
         pane.is_selecting_host = false;
         pane.actions_open = false;
         pane.selected_file = None;
@@ -74,7 +84,6 @@ impl Shellumi {
                 self.refresh_sftp_pane(is_left, cx);
             }
             SftpPaneHost::Remote(h) => {
-                // Discover real remote home via REALPATH(".") rather than synthesizing /home/<user>.
                 pane.listing_generation = pane.listing_generation.wrapping_add(1);
                 let generation = pane.listing_generation;
                 pane.loading = true;
@@ -102,29 +111,89 @@ impl Shellumi {
                     }
                 }
                 let show_hidden = pane.show_hidden;
-                let database = self.database.clone();
-                let active_vault_id = self.active_vault_id.clone();
-                let active_vault_key = self.active_vault_key();
                 let host_id = h.id;
+                let remote_endpoint = shellumi_core::RemoteEndpoint {
+                    endpoint_id,
+                    vault_scope: scope.clone(),
+                    host_id,
+                    host_uuid: None,
+                    display_name: h.name.clone(),
+                    destination: dest.clone(),
+                    connection_generation: generation,
+                    database_path: database.clone(),
+                };
+                let controller = self.sftp_controller.clone();
+                let Ok((op_id, _ctrl)) = controller.register_op(&scope) else {
+                    pane.loading = false;
+                    pane.error = Some("Vault is locked or inactive.".into());
+                    cx.notify();
+                    return;
+                };
+
+                let scope_worker = scope.clone();
                 let task = cx.background_executor().spawn(async move {
-                    let mut client = connect_saved_sftp(
-                        database,
-                        Some(&active_vault_id),
-                        active_vault_key.as_ref(),
-                        host_id,
-                        &dest,
-                        &opts,
-                    )?;
-                    let real_home = client.realpath(".")?;
-                    let mut entries = client.list_remote_directory(&real_home)?;
-                    if !show_hidden {
-                        entries.retain(|e| !e.is_hidden());
+                    if !controller.is_op_authorized(op_id, &scope_worker) {
+                        return Err(SftpError::Cancelled);
                     }
-                    Ok::<(String, Vec<FileEntry>), SftpError>((real_home, entries))
+                    let resolved_opts = if let Some(ref db) = database {
+                        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+                        let plan = runtime
+                            .block_on(shellumi_storage::desktop::resolve_connection_with_key(
+                                db,
+                                host_id,
+                                Some(&active_vault_id),
+                                active_vault_key.as_ref(),
+                            ))
+                            .map_err(SftpError::ProcessSpawn)?;
+                        let command = askpass::command("ssh", Vec::new(), &plan)
+                            .map_err(SftpError::ProcessSpawn)?;
+                        let base = SftpConnectOptions {
+                            port: Some(plan.destination.port().get()),
+                            identity_file: plan.identity_file,
+                            certificate_file: plan.certificate_file,
+                            extra_ssh_options: plan.authentication_options,
+                            environment: command.env.into_iter().collect(),
+                            ..Default::default()
+                        };
+                        let mut merged = shellumi_core::merge_connect_options(&base, &opts);
+                        if let Some(jump) = plan.jump_host {
+                            if !merged
+                                .extra_ssh_options
+                                .iter()
+                                .any(|(k, _)| k.eq_ignore_ascii_case("ProxyJump"))
+                            {
+                                merged.extra_ssh_options.push(("ProxyJump".into(), jump));
+                            }
+                        }
+                        merged
+                    } else {
+                        opts
+                    };
+                    let sess_arc = controller
+                        .connections
+                        .register_session(remote_endpoint, resolved_opts);
+                    let res = {
+                        let mut sess = sess_arc.lock().map_err(|_| {
+                            SftpError::UnexpectedResponse("session lock poisoned".into())
+                        })?;
+                        let real_home = sess.connect()?.display().to_string();
+                        let mut entries =
+                            sess.with_browse_client(|c| c.list_remote_directory(&real_home))?;
+                        if !show_hidden {
+                            entries.retain(|e| !e.is_hidden());
+                        }
+                        Ok::<(String, Vec<FileEntry>), SftpError>((real_home, entries))
+                    };
+                    controller.complete_op(op_id);
+                    res
                 });
+                let controller_ui = self.sftp_controller.clone();
                 cx.spawn(async move |app, cx| {
                     let res = task.await;
                     let _ = app.update(cx, |app, cx| {
+                        if !controller_ui.auth_gate.is_authorized(&scope) {
+                            return;
+                        }
                         let pane = if is_left {
                             &mut app.sftp_left_pane
                         } else {
@@ -387,6 +456,51 @@ impl Shellumi {
         self.sftp_transfer_files_to_dir(from_left, files, None, cx);
     }
 
+    fn build_endpoint_and_opts(
+        &self,
+        pane: &SftpPaneView,
+        scope: &shellumi_core::VaultScope,
+    ) -> Option<(shellumi_core::EndpointKind, Option<SftpConnectOptions>)> {
+        match &pane.host {
+            Some(SftpPaneHost::Local) => {
+                Some((shellumi_core::EndpointKind::local(scope.clone()), None))
+            }
+            Some(SftpPaneHost::Remote(h)) => {
+                let dest = h.destination.clone();
+                let mut opts = SftpConnectOptions {
+                    port: Some(dest.port().get()),
+                    ..Default::default()
+                };
+                if let Some(jump) = &h.jump_host {
+                    opts.extra_ssh_options
+                        .push(("ProxyJump".to_string(), jump.clone()));
+                }
+                if let Some(ident_id) = &h.identity_id {
+                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
+                        if let Some(kp) = &ident.key_path {
+                            opts.identity_file = Some(kp.clone());
+                        }
+                        if let Some(cp) = &ident.certificate_path {
+                            opts.certificate_file = Some(cp.clone());
+                        }
+                    }
+                }
+                let ep = shellumi_core::EndpointKind::Remote(shellumi_core::RemoteEndpoint {
+                    endpoint_id: pane.endpoint_id.unwrap_or_default(),
+                    vault_scope: scope.clone(),
+                    host_id: h.id,
+                    host_uuid: None,
+                    display_name: h.name.clone(),
+                    destination: dest,
+                    connection_generation: pane.listing_generation,
+                    database_path: self.database.clone(),
+                });
+                Some((ep, Some(opts)))
+            }
+            None => None,
+        }
+    }
+
     pub(crate) fn sftp_transfer_files_to_dir(
         &mut self,
         from_left: bool,
@@ -394,361 +508,237 @@ impl Shellumi {
         explicit_dst_dir: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let (src_pane_host, src_path, dst_pane_host, dst_path) = {
+        let scope = self.current_vault_scope();
+        let (src_info, src_path, dst_info, dst_path, src_entries) = {
             let (src, dst) = if from_left {
-                (&mut self.sftp_left_pane, &mut self.sftp_right_pane)
+                (&self.sftp_left_pane, &self.sftp_right_pane)
             } else {
-                (&mut self.sftp_right_pane, &mut self.sftp_left_pane)
+                (&self.sftp_right_pane, &self.sftp_left_pane)
             };
-            src.actions_open = false;
             (
-                src.host.clone(),
+                self.build_endpoint_and_opts(src, &scope),
                 src.current_path.clone(),
-                dst.host.clone(),
+                self.build_endpoint_and_opts(dst, &scope),
                 explicit_dst_dir.unwrap_or_else(|| dst.current_path.clone()),
+                src.entries.clone(),
             )
         };
+        if from_left {
+            self.sftp_left_pane.actions_open = false;
+        } else {
+            self.sftp_right_pane.actions_open = false;
+        }
         self.sftp_context_menu = None;
         if files.is_empty() {
             self.desktop.message = Some("Select at least one file to transfer.".into());
             cx.notify();
             return;
         }
-
         if !sftp_valid_transfer_names(&files) {
             self.desktop.message = Some("Cannot transfer an unsafe filename.".into());
             cx.notify();
             return;
         }
+        let (Some((src_ep, src_opts)), Some((dst_ep, dst_opts))) = (src_info, dst_info) else {
+            self.desktop.message =
+                Some("Please connect both SFTP panes before transferring files.".into());
+            cx.notify();
+            return;
+        };
+
         for pane in [&mut self.sftp_left_pane, &mut self.sftp_right_pane] {
             pane.selected_file = None;
             pane.selected_files.clear();
         }
-        let src_dir = std::path::PathBuf::from(&src_path);
-        let dst_dir = std::path::PathBuf::from(&dst_path);
 
-        match (src_pane_host, dst_pane_host) {
-            (Some(SftpPaneHost::Local), Some(SftpPaneHost::Local)) => {
-                let mgr = std::sync::Arc::clone(&self.sftp_transfer_manager);
-                let vault_scope = self.current_vault_scope();
-                let batch_id = shellumi_core::BatchId::new();
-                let files_clone = files.clone();
-                let to_is_left = !from_left;
-                self.sftp_transfer_drawer_open = true;
-                self.desktop.message = Some(format!(
-                    "Queued {} local staged copy item(s)…",
-                    files_clone.len()
-                ));
-                cx.notify();
+        let route = shellumi_core::TransferRoute::from_endpoints(&src_ep, &dst_ep);
+        let batch_id = shellumi_core::BatchId::new();
+        let mut intents = Vec::with_capacity(files.len());
 
-                let task = cx.background_executor().spawn(async move {
-                    let mut copied = 0usize;
-                    let mut failed = 0usize;
-                    for file_name in &files_clone {
-                        let Ok(src_file) = shellumi_core::local_join_child(&src_dir, file_name)
-                        else {
-                            failed += 1;
-                            continue;
-                        };
-                        let Ok(dst_file) = shellumi_core::local_join_child(&dst_dir, file_name)
-                        else {
-                            failed += 1;
-                            continue;
-                        };
-                        let job_id = shellumi_core::JobId::new();
-                        let intent = shellumi_core::TransferIntent {
-                            job_id,
-                            batch_id,
-                            vault_scope: vault_scope.clone(),
-                            route: shellumi_core::TransferRoute::LocalToLocal,
-                            source_endpoint: shellumi_core::EndpointKind::local(
-                                vault_scope.clone(),
-                            ),
-                            destination_endpoint: shellumi_core::EndpointKind::local(
-                                vault_scope.clone(),
-                            ),
-                            source_path: shellumi_core::EndpointPath::Local(src_file.clone()),
-                            destination_path: shellumi_core::EndpointPath::Local(dst_file.clone()),
-                            source_options: None,
-                            destination_options: None,
-                            conflict_policy: shellumi_core::ConflictPolicy::Ask,
-                            symlink_policy: shellumi_core::SymlinkPolicy::Skip,
-                            preserve_metadata: true,
-                            delete_source_after_commit: false,
-                            expected_bytes: std::fs::symlink_metadata(&src_file)
-                                .ok()
-                                .map(|m| m.len()),
-                        };
-                        if mgr.enqueue(intent).is_ok() {
-                            for (dispatched, attempt_id, ctrl) in mgr.dispatch_ready(&vault_scope) {
-                                let res =
-                                    mgr.execute_local_to_local(&dispatched, attempt_id, &ctrl);
-                                if res.is_ok() {
-                                    copied += 1;
-                                } else {
-                                    failed += 1;
-                                }
-                                mgr.complete_attempt(dispatched.job_id, attempt_id, res);
-                            }
-                        } else {
-                            failed += 1;
-                        }
-                    }
-                    (copied, failed)
-                });
-                cx.spawn(async move |app, cx| {
-                    let (copied, failed) = task.await;
-                    let _ = app.update(cx, |app, cx| {
-                        app.desktop.message = Some(format!(
-                            "Local copy finished: {copied} succeeded, {failed} failed."
-                        ));
-                        app.refresh_sftp_pane(to_is_left, cx);
-                        app.refresh_sftp_pane(from_left, cx);
+        for name in &files {
+            let src_full = match &src_ep {
+                shellumi_core::EndpointKind::Local { .. } => {
+                    let Ok(p) =
+                        shellumi_core::local_join_child(std::path::Path::new(&src_path), name)
+                    else {
+                        self.desktop.message = Some(format!("Unsafe source filename '{name}'."));
                         cx.notify();
-                    });
-                })
-                .detach();
-            }
-            (Some(SftpPaneHost::Local), Some(SftpPaneHost::Remote(host))) => {
-                let dest = host.destination.clone();
-                let mut opts = SftpConnectOptions {
-                    port: Some(dest.port().get()),
-                    ..Default::default()
-                };
-                if let Some(jump) = &host.jump_host {
-                    opts.extra_ssh_options
-                        .push(("ProxyJump".to_string(), jump.clone()));
+                        return;
+                    };
+                    shellumi_core::EndpointPath::Local(p)
                 }
-                if let Some(ident_id) = &host.identity_id {
-                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
-                        if let Some(kp) = &ident.key_path {
-                            opts.identity_file = Some(kp.clone());
-                        }
-                    }
-                }
-                let count = files.len();
-                let files_to_up = files.clone();
-                let database = self.database.clone();
-                let active_vault_id = self.active_vault_id.clone();
-                let active_vault_key = self.active_vault_key();
-                let host_id = host.id;
-                let to_is_left = !from_left;
-                self.sftp_transfer_drawer_open = true;
-                self.desktop.message = Some(format!("Uploading {count} file(s) to {}…", host.name));
-                cx.notify();
-
-                let task = cx.background_executor().spawn(async move {
-                    let mut client = connect_saved_sftp(
-                        database,
-                        Some(&active_vault_id),
-                        active_vault_key.as_ref(),
-                        host_id,
-                        &dest,
-                        &opts,
-                    )?;
-                    for f in &files_to_up {
-                        let local_p = shellumi_core::local_join_child(&src_dir, f)
-                            .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
-                        let remote_p = format!("{}/{}", dst_dir.display(), f);
-                        client.upload_file(&local_p, &remote_p, None::<fn(u64, u64)>)?;
-                    }
-                    Ok::<(), SftpError>(())
-                });
-
-                cx.spawn(async move |app, cx| {
-                    let res = task.await;
-                    let _ = app.update(cx, |app, cx| {
-                        match res {
-                            Ok(()) => {
-                                app.desktop.message =
-                                    Some(format!("Uploaded {count} file(s) successfully."));
-                            }
-                            Err(err) => {
-                                app.desktop.message =
-                                    Some(format!("Upload finished (status: {err})"));
-                            }
-                        }
-                        app.refresh_sftp_pane(to_is_left, cx);
+                shellumi_core::EndpointKind::Remote(_) => {
+                    let Ok(rp) =
+                        shellumi_core::RemotePath::from_posix_str(&src_path).join_child_str(name)
+                    else {
+                        self.desktop.message = Some(format!("Unsafe source filename '{name}'."));
                         cx.notify();
-                    });
-                })
-                .detach();
-            }
-            (Some(SftpPaneHost::Remote(host)), Some(SftpPaneHost::Local)) => {
-                let dest = host.destination.clone();
-                let mut opts = SftpConnectOptions {
-                    port: Some(dest.port().get()),
-                    ..Default::default()
-                };
-                if let Some(jump) = &host.jump_host {
-                    opts.extra_ssh_options
-                        .push(("ProxyJump".to_string(), jump.clone()));
+                        return;
+                    };
+                    shellumi_core::EndpointPath::Remote(rp)
                 }
-                if let Some(ident_id) = &host.identity_id {
-                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
-                        if let Some(kp) = &ident.key_path {
-                            opts.identity_file = Some(kp.clone());
-                        }
-                    }
-                }
-                let count = files.len();
-                let files_to_down = files.clone();
-                let database = self.database.clone();
-                let active_vault_id = self.active_vault_id.clone();
-                let active_vault_key = self.active_vault_key();
-                let host_id = host.id;
-                let to_is_left = !from_left;
-                self.sftp_transfer_drawer_open = true;
-                self.desktop.message =
-                    Some(format!("Downloading {count} file(s) from {}…", host.name));
-                cx.notify();
-
-                let task = cx.background_executor().spawn(async move {
-                    let mut client = connect_saved_sftp(
-                        database,
-                        Some(&active_vault_id),
-                        active_vault_key.as_ref(),
-                        host_id,
-                        &dest,
-                        &opts,
-                    )?;
-                    for f in &files_to_down {
-                        let remote_p = format!("{}/{}", src_dir.display(), f);
-                        let local_p = shellumi_core::local_join_child(&dst_dir, f)
-                            .map_err(|e| SftpError::UnexpectedResponse(e.to_string()))?;
-                        client.download_file(&remote_p, &local_p, None::<fn(u64, u64)>)?;
-                    }
-                    Ok::<(), SftpError>(())
-                });
-
-                cx.spawn(async move |app, cx| {
-                    let res = task.await;
-                    let _ = app.update(cx, |app, cx| {
-                        match res {
-                            Ok(()) => {
-                                app.desktop.message =
-                                    Some(format!("Downloaded {count} file(s) successfully."));
-                            }
-                            Err(err) => {
-                                app.desktop.message =
-                                    Some(format!("Download finished (status: {err})"));
-                            }
-                        }
-                        app.refresh_sftp_pane(to_is_left, cx);
+            };
+            let dst_full = match &dst_ep {
+                shellumi_core::EndpointKind::Local { .. } => {
+                    let Ok(p) =
+                        shellumi_core::local_join_child(std::path::Path::new(&dst_path), name)
+                    else {
+                        self.desktop.message =
+                            Some(format!("Unsafe destination filename '{name}'."));
                         cx.notify();
-                    });
-                })
-                .detach();
-            }
-            (Some(SftpPaneHost::Remote(src_h)), Some(SftpPaneHost::Remote(dst_h))) => {
-                let count = files.len();
-                let src_dest = src_h.destination.clone();
-                let mut src_opts = SftpConnectOptions {
-                    port: Some(src_dest.port().get()),
-                    ..Default::default()
-                };
-                if let Some(jump) = &src_h.jump_host {
-                    src_opts
-                        .extra_ssh_options
-                        .push(("ProxyJump".to_string(), jump.clone()));
+                        return;
+                    };
+                    shellumi_core::EndpointPath::Local(p)
                 }
-                if let Some(ident_id) = &src_h.identity_id {
-                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
-                        if let Some(kp) = &ident.key_path {
-                            src_opts.identity_file = Some(kp.clone());
-                        }
-                    }
-                }
-                let dst_dest = dst_h.destination.clone();
-                let mut dst_opts = SftpConnectOptions {
-                    port: Some(dst_dest.port().get()),
-                    ..Default::default()
-                };
-                if let Some(jump) = &dst_h.jump_host {
-                    dst_opts
-                        .extra_ssh_options
-                        .push(("ProxyJump".to_string(), jump.clone()));
-                }
-                if let Some(ident_id) = &dst_h.identity_id {
-                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
-                        if let Some(kp) = &ident.key_path {
-                            dst_opts.identity_file = Some(kp.clone());
-                        }
-                    }
-                }
-                let files_to_sync = files.clone();
-                let src_database = self.database.clone();
-                let dst_database = self.database.clone();
-                let active_vault_id = self.active_vault_id.clone();
-                let active_vault_key = self.active_vault_key();
-                let src_id = src_h.id;
-                let dst_id = dst_h.id;
-                let to_is_left = !from_left;
-                self.sftp_transfer_drawer_open = true;
-                self.desktop.message = Some(format!(
-                    "Relaying {count} item(s) ({} ➔ {})…",
-                    src_h.name, dst_h.name
-                ));
-                cx.notify();
-
-                let task = cx.background_executor().spawn(async move {
-                    let mut src_client = connect_saved_sftp(
-                        src_database,
-                        Some(&active_vault_id),
-                        active_vault_key.as_ref(),
-                        src_id,
-                        &src_dest,
-                        &src_opts,
-                    )?;
-                    let mut dst_client = connect_saved_sftp(
-                        dst_database,
-                        Some(&active_vault_id),
-                        active_vault_key.as_ref(),
-                        dst_id,
-                        &dst_dest,
-                        &dst_opts,
-                    )?;
-                    let ctrl = shellumi_core::TransferControl::default();
-                    for f in &files_to_sync {
-                        let remote_src = format!("{}/{}", src_dir.display(), f);
-                        let remote_dst = format!("{}/{}", dst_dir.display(), f);
-                        shellumi_core::relay_remote_to_remote(
-                            &mut src_client,
-                            &remote_src,
-                            &mut dst_client,
-                            &remote_dst,
-                            &ctrl,
-                            None,
-                        )?;
-                    }
-                    Ok::<(), SftpError>(())
-                });
-
-                cx.spawn(async move |app, cx| {
-                    let res = task.await;
-                    let _ = app.update(cx, |app, cx| {
-                        match res {
-                            Ok(()) => {
-                                app.desktop.message =
-                                    Some(format!("Transferred {count} item(s) successfully."));
-                            }
-                            Err(err) => {
-                                app.desktop.message =
-                                    Some(format!("Transfer finished (status: {err})"));
-                            }
-                        }
-                        app.refresh_sftp_pane(to_is_left, cx);
+                shellumi_core::EndpointKind::Remote(_) => {
+                    let Ok(rp) =
+                        shellumi_core::RemotePath::from_posix_str(&dst_path).join_child_str(name)
+                    else {
+                        self.desktop.message =
+                            Some(format!("Unsafe destination filename '{name}'."));
                         cx.notify();
-                    });
-                })
-                .detach();
-            }
-            _ => {
-                self.desktop.message =
-                    Some("Please connect both SFTP panes before transferring files.".into());
-                cx.notify();
-            }
+                        return;
+                    };
+                    shellumi_core::EndpointPath::Remote(rp)
+                }
+            };
+            let expected_bytes = src_entries.iter().find(|e| e.name == *name).map(|e| e.size);
+
+            intents.push(shellumi_core::TransferIntent {
+                job_id: shellumi_core::JobId::new(),
+                batch_id,
+                vault_scope: scope.clone(),
+                route,
+                source_endpoint: src_ep.clone(),
+                destination_endpoint: dst_ep.clone(),
+                source_path: src_full,
+                destination_path: dst_full,
+                source_options: src_opts.clone(),
+                destination_options: dst_opts.clone(),
+                conflict_policy: shellumi_core::ConflictPolicy::Ask,
+                symlink_policy: shellumi_core::SymlinkPolicy::Skip,
+                preserve_metadata: true,
+                delete_source_after_commit: false,
+                expected_bytes,
+            });
         }
+
+        let results = self.sftp_controller.enqueue_batch(intents);
+        let enqueued = results.iter().filter(|r| r.is_ok()).count();
+        let failed = results.len() - enqueued;
+        self.sftp_transfer_drawer_open = true;
+        self.desktop.message = Some(if failed == 0 {
+            format!("Queued {enqueued} {route} transfer(s)…")
+        } else {
+            format!("Queued {enqueued} transfer(s) ({failed} rejected).")
+        });
+        self.sftp_pump_transfers(cx);
+        cx.notify();
+    }
+
+    /// Unified scheduler pump for ALL four transfer routes (`LocalToLocal`, `LocalToRemote`,
+    /// `RemoteToLocal`, `RemoteToRemote`).
+    pub(crate) fn sftp_pump_transfers(&mut self, cx: &mut Context<Self>) {
+        let scope = self.current_vault_scope();
+        let ready = self.sftp_controller.transfers.dispatch_ready(&scope);
+        for (intent, attempt_id, ctrl) in ready {
+            let controller = self.sftp_controller.clone();
+            let job_id = intent.job_id;
+            let src_ep = intent.source_endpoint.clone();
+            let dst_ep = intent.destination_endpoint.clone();
+            let src_disp = intent.source_path.display();
+            let dst_disp = intent.destination_path.display();
+            let scope_clone = scope.clone();
+
+            let task = cx.background_executor().spawn(async move {
+                controller.execute_dispatched_job(&intent, attempt_id, &ctrl)
+            });
+
+            let controller_done = self.sftp_controller.clone();
+            cx.spawn(async move |app, cx| {
+                let res = task.await;
+                let _ = app.update(cx, |app, cx| {
+                    let is_conflict = matches!(
+                        &res,
+                        Err(SftpError::UnexpectedResponse(msg))
+                            if msg.contains("conflict decision required")
+                    );
+                    if is_conflict {
+                        controller_done.transfers.mark_awaiting_conflict(
+                            job_id,
+                            attempt_id,
+                            shellumi_core::ConflictContext {
+                                job_id,
+                                route: shellumi_core::TransferRoute::from_endpoints(
+                                    &src_ep, &dst_ep,
+                                ),
+                                source_display: src_disp.clone(),
+                                destination_display: dst_disp.clone(),
+                                source_size: None,
+                                destination_size: None,
+                                source_modified: None,
+                                destination_modified: None,
+                                source_kind: FileKind::File,
+                                destination_kind: FileKind::File,
+                                is_type_mismatch: false,
+                            },
+                        );
+                        if app.sftp_modal.is_none()
+                            && controller_done.auth_gate.is_authorized(&scope_clone)
+                        {
+                            app.sftp_modal = Some(SftpModalState {
+                                is_left: true,
+                                endpoint_generation: 0,
+                                target_dir: String::new(),
+                                action: SftpModalAction::Conflict {
+                                    job_id,
+                                    source_display: src_disp,
+                                    destination_display: dst_disp,
+                                    apply_to_all: false,
+                                },
+                                error: None,
+                            });
+                        }
+                    } else {
+                        controller_done
+                            .transfers
+                            .complete_attempt(job_id, attempt_id, res);
+                    }
+                    if controller_done.auth_gate.is_authorized(&scope_clone) {
+                        app.refresh_sftp_pane(true, cx);
+                        app.refresh_sftp_pane(false, cx);
+                        app.sftp_pump_transfers(cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    pub(crate) fn sftp_resolve_conflict(
+        &mut self,
+        job_id: shellumi_core::JobId,
+        action: shellumi_core::ConflictAction,
+        apply_to_all: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.sftp_modal = None;
+        let scope = self.current_vault_scope();
+        let decision = shellumi_core::ConflictDecision {
+            action,
+            apply_to_all,
+        };
+        if let Err(err) = self
+            .sftp_controller
+            .transfers
+            .resolve_conflict(job_id, decision, &scope)
+        {
+            self.desktop.message = Some(format!("Conflict resolution failed: {err}"));
+        } else {
+            self.sftp_pump_transfers(cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn sftp_copy_to_target(&mut self, from_left: bool, cx: &mut Context<Self>) {
@@ -774,98 +764,119 @@ impl Shellumi {
     }
 
     pub(crate) fn refresh_sftp_pane(&mut self, is_left: bool, cx: &mut Context<Self>) {
-        let (host, current_path, show_hidden, generation) = {
+        let scope = self.current_vault_scope();
+        let (host, endpoint_id, current_path, show_hidden, generation) = {
             let pane = if is_left {
                 &mut self.sftp_left_pane
             } else {
                 &mut self.sftp_right_pane
             };
             pane.listing_generation += 1;
+            pane.loading = true;
+            pane.error = None;
             (
                 pane.host.clone(),
+                pane.endpoint_id,
                 pane.current_path.clone(),
                 pane.show_hidden,
                 pane.listing_generation,
             )
         };
+        cx.notify();
 
         match host {
             Some(SftpPaneHost::Local) => {
-                let cap = shellumi_core::local_disk_capacity(std::path::Path::new(&current_path));
-                let res = list_local_directory(&current_path, show_hidden);
-                let pane = if is_left {
-                    &mut self.sftp_left_pane
-                } else {
-                    &mut self.sftp_right_pane
-                };
-                if pane.listing_generation != generation {
-                    return;
-                }
-                pane.loading = false;
-                pane.capacity = cap;
-                match res {
-                    Ok(entries) => {
-                        pane.entries = entries;
-                        pane.error = None;
-                    }
-                    Err(err) => {
-                        pane.error = Some(format!("Local directory error: {err}"));
-                        pane.entries.clear();
-                    }
-                }
-                cx.notify();
+                let req_path = current_path.clone();
+                let task = cx.background_executor().spawn(async move {
+                    let cap = shellumi_core::local_disk_capacity(std::path::Path::new(&req_path));
+                    let res = list_local_directory(&req_path, show_hidden);
+                    (cap, res)
+                });
+                cx.spawn(async move |app, cx| {
+                    let (cap, res) = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        let pane = if is_left {
+                            &mut app.sftp_left_pane
+                        } else {
+                            &mut app.sftp_right_pane
+                        };
+                        if pane.listing_generation != generation {
+                            return;
+                        }
+                        pane.loading = false;
+                        pane.capacity = cap;
+                        match res {
+                            Ok(entries) => {
+                                pane.entries = entries;
+                                pane.error = None;
+                            }
+                            Err(err) => {
+                                pane.error = Some(format!("Local directory error: {err}"));
+                                pane.entries.clear();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             Some(SftpPaneHost::Remote(saved_host)) => {
-                let pane = if is_left {
-                    &mut self.sftp_left_pane
-                } else {
-                    &mut self.sftp_right_pane
+                let controller = self.sftp_controller.clone();
+                let Ok((op_id, _ctrl)) = controller.register_op(&scope) else {
+                    let pane = if is_left {
+                        &mut self.sftp_left_pane
+                    } else {
+                        &mut self.sftp_right_pane
+                    };
+                    pane.loading = false;
+                    pane.error = Some("Vault is locked or inactive.".into());
+                    cx.notify();
+                    return;
                 };
-                pane.loading = true;
-                pane.error = None;
-                cx.notify();
-
+                let req_path = current_path.clone();
                 let dest = saved_host.destination.clone();
-                let mut opts = SftpConnectOptions {
-                    port: Some(dest.port().get()),
-                    ..Default::default()
-                };
-                if let Some(jump) = &saved_host.jump_host {
-                    opts.extra_ssh_options
-                        .push(("ProxyJump".to_string(), jump.clone()));
-                }
-                if let Some(ident_id) = &saved_host.identity_id {
-                    if let Some(ident) = self.identities.iter().find(|i| &i.id == ident_id) {
-                        if let Some(kp) = &ident.key_path {
-                            opts.identity_file = Some(kp.clone());
-                        }
-                    }
-                }
-
                 let database = self.database.clone();
                 let active_vault_id = self.active_vault_id.clone();
                 let active_vault_key = self.active_vault_key();
                 let host_id = saved_host.id;
-                let req_path = current_path.clone();
+
+                let scope_worker = scope.clone();
                 let task = cx.background_executor().spawn(async move {
-                    let mut client = connect_saved_sftp(
-                        database,
-                        Some(&active_vault_id),
-                        active_vault_key.as_ref(),
-                        host_id,
-                        &dest,
-                        &opts,
-                    )?;
-                    let mut entries = client.list_remote_directory(&req_path)?;
+                    if !controller.is_op_authorized(op_id, &scope_worker) {
+                        return Err(SftpError::Cancelled);
+                    }
+                    let mut entries = if let Some(sess_arc) =
+                        endpoint_id.and_then(|id| controller.get_session(id))
+                    {
+                        let mut sess = sess_arc.lock().map_err(|_| {
+                            SftpError::UnexpectedResponse("session lock poisoned".into())
+                        })?;
+                        sess.with_browse_client(|c| c.list_remote_directory(&req_path))?
+                    } else {
+                        let mut client = connect_saved_sftp(
+                            database,
+                            Some(&active_vault_id),
+                            active_vault_key.as_ref(),
+                            host_id,
+                            &dest,
+                            &SftpConnectOptions::default(),
+                        )?;
+                        client.list_remote_directory(&req_path)?
+                    };
                     if !show_hidden {
                         entries.retain(|e| !e.is_hidden());
                     }
+                    controller.complete_op(op_id);
                     Ok::<Vec<FileEntry>, SftpError>(entries)
                 });
 
+                let controller_ui = self.sftp_controller.clone();
                 cx.spawn(async move |app, cx| {
                     let res = task.await;
                     let _ = app.update(cx, |app, cx| {
+                        if !controller_ui.auth_gate.is_authorized(&scope) {
+                            return;
+                        }
                         let pane = if is_left {
                             &mut app.sftp_left_pane
                         } else {
@@ -1201,60 +1212,90 @@ impl Shellumi {
                     cx.notify();
                     return;
                 }
+                SftpModalAction::Conflict { job_id, .. } => {
+                    let _ = self.sftp_controller.transfers.resolve_conflict(
+                        *job_id,
+                        shellumi_core::ConflictDecision {
+                            action: shellumi_core::ConflictAction::Cancel,
+                            apply_to_all: false,
+                        },
+                        &self.current_vault_scope(),
+                    );
+                    cx.notify();
+                    return;
+                }
+            };
+            let scope = self.current_vault_scope();
+            let controller = self.sftp_controller.clone();
+            let endpoint_id = if is_left {
+                self.sftp_left_pane.endpoint_id
+            } else {
+                self.sftp_right_pane.endpoint_id
+            };
+            let Ok((op_id, ctrl)) = controller.register_op(&scope) else {
+                self.desktop.message = Some("Vault is locked or inactive.".into());
+                cx.notify();
+                return;
             };
             let dest = host.destination.clone();
-            let mut options = SftpConnectOptions {
-                port: Some(dest.port().get()),
-                ..Default::default()
-            };
-            if let Some(jump) = host.jump_host {
-                options.extra_ssh_options.push(("ProxyJump".into(), jump));
-            }
-            if let Some(identity) = host
-                .identity_id
-                .and_then(|id| self.identities.iter().find(|i| i.id == id))
-            {
-                options.identity_file = identity.key_path.clone();
-                options.certificate_file = identity.certificate_path.clone();
-            }
             self.desktop.message = Some("Applying SFTP operation…".into());
             let database = self.database.clone();
             let active_vault_id = self.active_vault_id.clone();
             let active_vault_key = self.active_vault_key();
             let host_id = host.id;
+            let scope_worker = scope.clone();
             let task = cx.background_executor().spawn(async move {
-                let mut client = connect_saved_sftp(
-                    database,
-                    Some(&active_vault_id),
-                    active_vault_key.as_ref(),
-                    host_id,
-                    &dest,
-                    &options,
-                )?;
-                match operation {
+                if !controller.is_op_authorized(op_id, &scope_worker) {
+                    return Err(SftpError::Cancelled);
+                }
+                let run_op = |client: &mut SftpClient| match &operation {
                     RemoteFileOperation::Rename {
                         source,
                         destination,
-                    } => client.rename(&source, &destination),
+                    } => client.rename(source, destination),
                     RemoteFileOperation::Delete { path, is_dir } => {
-                        if is_dir {
-                            client.rmdir(&path)
+                        if *is_dir {
+                            let rp = shellumi_core::RemotePath::from_posix_str(path);
+                            shellumi_core::delete_remote_recursive(client, &rp, &ctrl).map(|_| ())
                         } else {
-                            client.remove_file(&path)
+                            client.remove_file(path)
                         }
                     }
-                    RemoteFileOperation::Mkdir { path } => client.mkdir(&path),
+                    RemoteFileOperation::Mkdir { path } => client.mkdir(path),
                     RemoteFileOperation::CreateFile { path } => {
-                        client.create_exclusive_file(&path, 0o644)
+                        client.create_exclusive_file(path, 0o644)
                     }
                     RemoteFileOperation::Permissions { path, mode } => {
-                        client.set_permissions(&path, mode)
+                        client.set_permissions(path, *mode)
                     }
-                }
+                };
+                let res =
+                    if let Some(sess_arc) = endpoint_id.and_then(|id| controller.get_session(id)) {
+                        let mut sess = sess_arc.lock().map_err(|_| {
+                            SftpError::UnexpectedResponse("session lock poisoned".into())
+                        })?;
+                        sess.with_browse_client(run_op)
+                    } else {
+                        let mut client = connect_saved_sftp(
+                            database,
+                            Some(&active_vault_id),
+                            active_vault_key.as_ref(),
+                            host_id,
+                            &dest,
+                            &SftpConnectOptions::default(),
+                        )?;
+                        run_op(&mut client)
+                    };
+                controller.complete_op(op_id);
+                res
             });
+            let controller_ui = self.sftp_controller.clone();
             cx.spawn(async move |app, cx| {
                 let result = task.await;
                 let _ = app.update(cx, |app, cx| {
+                    if !controller_ui.auth_gate.is_authorized(&scope) {
+                        return;
+                    }
                     app.desktop.message = Some(match result {
                         Ok(()) => "SFTP operation completed.".into(),
                         Err(err) => format!("SFTP operation failed: {err}"),
@@ -1272,7 +1313,19 @@ impl Shellumi {
             cx.notify();
             return;
         }
-        let result: Result<String, String> = match modal.action {
+        if let SftpModalAction::Conflict { job_id, .. } = &modal.action {
+            let _ = self.sftp_controller.transfers.resolve_conflict(
+                *job_id,
+                shellumi_core::ConflictDecision {
+                    action: shellumi_core::ConflictAction::Cancel,
+                    apply_to_all: false,
+                },
+                &self.current_vault_scope(),
+            );
+            cx.notify();
+            return;
+        }
+        let local_op = match modal.action {
             SftpModalAction::Rename {
                 entry_name,
                 entry_path,
@@ -1280,59 +1333,37 @@ impl Shellumi {
             } => {
                 let name = input.read(cx).value().trim().to_owned();
                 if !PathUtils::is_safe_file_name(&name) {
-                    Err("Enter a valid single filename.".into())
-                } else if name == entry_name {
-                    Ok("Name unchanged.".into())
-                } else {
-                    let src = std::path::PathBuf::from(entry_path);
-                    let dst = src.with_file_name(&name);
-                    if std::fs::symlink_metadata(&dst).is_ok() {
-                        Err("The destination already exists.".into())
-                    } else {
-                        std::fs::rename(src, dst)
-                            .map(|_| format!("Renamed to '{name}'."))
-                            .map_err(|e| e.to_string())
-                    }
+                    self.desktop.message =
+                        Some("File operation failed: Enter a valid single filename.".into());
+                    cx.notify();
+                    return;
                 }
+                Ok(Some(("rename", entry_name, entry_path, name, 0u32)))
             }
             SftpModalAction::Delete {
                 entry_name,
                 entry_path,
                 ..
-            } => {
-                let ctrl = shellumi_core::TransferControl::default();
-                shellumi_core::delete_local_recursive(std::path::Path::new(&entry_path), &ctrl)
-                    .map(|count| format!("Deleted '{entry_name}' ({count} item(s))."))
-                    .map_err(|e| e.to_string())
-            }
+            } => Ok(Some(("delete", entry_name, entry_path, String::new(), 0))),
             SftpModalAction::NewFolder { input } => {
                 let name = input.read(cx).value().trim().to_owned();
                 if !PathUtils::is_safe_file_name(&name) {
-                    Err("Enter a valid single folder name.".into())
-                } else {
-                    match shellumi_core::local_join_child(std::path::Path::new(&curr_dir), &name) {
-                        Ok(target) => std::fs::create_dir(target)
-                            .map(|_| format!("Created folder '{name}'."))
-                            .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    }
+                    self.desktop.message =
+                        Some("File operation failed: Enter a valid single folder name.".into());
+                    cx.notify();
+                    return;
                 }
+                Ok(Some(("mkdir", name.clone(), curr_dir.clone(), name, 0)))
             }
             SftpModalAction::NewFile { input } => {
                 let name = input.read(cx).value().trim().to_owned();
                 if !PathUtils::is_safe_file_name(&name) {
-                    Err("Enter a valid single filename.".into())
-                } else {
-                    match shellumi_core::local_join_child(std::path::Path::new(&curr_dir), &name) {
-                        Ok(target) => std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(target)
-                            .map(|_| format!("Created file '{name}'."))
-                            .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    }
+                    self.desktop.message =
+                        Some("File operation failed: Enter a valid single filename.".into());
+                    cx.notify();
+                    return;
                 }
+                Ok(Some(("mkfile", name.clone(), curr_dir.clone(), name, 0)))
             }
             SftpModalAction::EditPermissions {
                 entry_name,
@@ -1341,31 +1372,105 @@ impl Shellumi {
             } => {
                 let value = input.read(cx).value();
                 if let Some(mode) = parse_sftp_permissions(value) {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(entry_path, std::fs::Permissions::from_mode(mode))
-                            .map(|_| format!("Permissions updated for '{entry_name}'."))
-                            .map_err(|e| e.to_string())
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = (entry_name, entry_path, mode);
-                        Err("Changing Unix permissions is unsupported on this platform.".into())
-                    }
+                    Ok(Some(("chmod", entry_name, entry_path, String::new(), mode)))
                 } else {
-                    Err("Enter octal permissions, for example 0755.".into())
+                    Err("Enter octal permissions, for example 0755.".to_string())
                 }
             }
-            SftpModalAction::Properties { .. } => Ok(String::new()),
+            SftpModalAction::Properties { .. } | SftpModalAction::Conflict { .. } => Ok(None),
         };
-        if !matches!(result, Ok(ref s) if s.is_empty()) {
-            self.desktop.message = Some(match result {
-                Ok(message) => message,
-                Err(error) => format!("File operation failed: {error}"),
-            });
+        match local_op {
+            Err(err) => {
+                self.desktop.message = Some(format!("File operation failed: {err}"));
+                cx.notify();
+            }
+            Ok(None) => {
+                cx.notify();
+            }
+            Ok(Some((kind, entry_name, entry_path, new_name, mode))) => {
+                let task = cx.background_executor().spawn(async move {
+                    match kind {
+                        "rename" => {
+                            if new_name == entry_name {
+                                Ok("Name unchanged.".to_string())
+                            } else {
+                                let src = std::path::PathBuf::from(&entry_path);
+                                let dst = src.with_file_name(&new_name);
+                                if std::fs::symlink_metadata(&dst).is_ok() {
+                                    Err("The destination already exists.".to_string())
+                                } else {
+                                    std::fs::rename(src, dst)
+                                        .map(|_| format!("Renamed to '{new_name}'."))
+                                        .map_err(|e| e.to_string())
+                                }
+                            }
+                        }
+                        "delete" => {
+                            let ctrl = shellumi_core::TransferControl::default();
+                            shellumi_core::delete_local_recursive(
+                                std::path::Path::new(&entry_path),
+                                &ctrl,
+                            )
+                            .map(|count| format!("Deleted '{entry_name}' ({count} item(s))."))
+                            .map_err(|e| e.to_string())
+                        }
+                        "mkdir" => {
+                            let target = shellumi_core::local_join_child(
+                                std::path::Path::new(&entry_path),
+                                &new_name,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            std::fs::create_dir(target)
+                                .map(|_| format!("Created folder '{new_name}'."))
+                                .map_err(|e| e.to_string())
+                        }
+                        "mkfile" => {
+                            let target = shellumi_core::local_join_child(
+                                std::path::Path::new(&entry_path),
+                                &new_name,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(target)
+                                .map(|_| format!("Created file '{new_name}'."))
+                                .map_err(|e| e.to_string())
+                        }
+                        "chmod" => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                std::fs::set_permissions(
+                                    entry_path,
+                                    std::fs::Permissions::from_mode(mode),
+                                )
+                                .map(|_| format!("Permissions updated for '{entry_name}'."))
+                                .map_err(|e| e.to_string())
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                let _ = (entry_name, entry_path, mode);
+                                Err("Changing Unix permissions is unsupported on this platform."
+                                    .to_string())
+                            }
+                        }
+                        _ => Ok(String::new()),
+                    }
+                });
+                cx.spawn(async move |app, cx| {
+                    let result = task.await;
+                    let _ = app.update(cx, |app, cx| {
+                        app.desktop.message = Some(match result {
+                            Ok(msg) => msg,
+                            Err(err) => format!("File operation failed: {err}"),
+                        });
+                        app.refresh_sftp_pane(is_left, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
         }
-        self.refresh_sftp_pane(is_left, cx);
-        cx.notify();
     }
 }
